@@ -1,4 +1,4 @@
-
+set(CMAKE_BUILD_TYPE "Debug")
 
 set (EXTRA_INCLUDE "")
 set (EXTRA_LIBS "")

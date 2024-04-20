@@ -192,6 +192,7 @@ enum OpType : int {
     SeqLen2Spatial = 302,
     SplitGeLU = 303,
     GroupNorm = 304,
+    Rfft = 305,
 
     Extra = 512,
     // quantization
