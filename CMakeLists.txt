@@ -60,7 +60,7 @@ option(MNN_BUILD_OPENCV "Build OpenCV api in MNN." OFF)
 option(MNN_BUILD_LLM "Build llm library based MNN." OFF)
 option(MNN_INTERNAL "Build with MNN internal features, such as model authentication, metrics logging" OFF)
 option(MNN_JNI "Build MNN Jni for java to use" OFF)
-option(MNN_BUILD_WITH_FFTW3 "Build FFTW3 for fft compute" ON)
+
 
 IF (NOT DEFINED MNN_USE_SPARSE_COMPUTE)
    set(MNN_USE_SPARSE_COMPUTE ON)
@@ -182,9 +182,7 @@ if(MNN_GPU_TRACE)
     add_definitions(-DMNN_GPU_FORCE_FINISH)
 endif()
 
-if (MNN_BUILD_WITH_FFTW3)
-    add_definitions(-DMNN_BUILD_WITH_FFTW3)
-endif()
+
 
 # backend options
 option(MNN_METAL "Enable Metal" OFF)
@@ -355,6 +353,7 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/include/
                     ${CMAKE_CURRENT_LIST_DIR}/3rd_party/half
                     ${CMAKE_CURRENT_LIST_DIR}/3rd_party/imageHelper
                     ${CMAKE_CURRENT_LIST_DIR}/3rd_party/OpenCLHeaders/
+                    ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/api
                   )
 
 
@@ -401,7 +400,11 @@ add_library(MNNUtils OBJECT ${MNN_Utils_SRC})
 list(APPEND MNN_OBJECTS_TO_LINK $<TARGET_OBJECTS:MNNUtils>)
 list(APPEND MNN_TARGETS MNNUtils)
 
+
 include(${CMAKE_CURRENT_LIST_DIR}/source/backend/cpu/CMakeLists.txt)
+
+
+
 
 
 SET(MNN_PUB_HDRS "")
