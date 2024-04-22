@@ -13,6 +13,7 @@
 #include "core/Macro.h"
 #include <complex>
 #include <cmath>
+#include "fftw3.h"
 
 namespace MNN
 {
@@ -36,6 +37,10 @@ namespace MNN
         this->_resultDimSize = int(this->_computeDimSize / 2) + 1;
 
         int numberThread = mSupportMultiThread ? ((CPUBackend *)backend())->threadNumber() : 1;
+
+        fftw_complex *out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->_resultDimSize);
+
+        fftw_free(out);
 
         return NO_ERROR;
     }
@@ -70,8 +75,11 @@ namespace MNN
                 return ErrorCode::INPUT_DATA_ERROR;
             }
         }
-        else
+        else if (this->implementMode==1)
         {
+
+            
+        }else {
             return ErrorCode::NOT_SUPPORT;
         }
         return NO_ERROR;

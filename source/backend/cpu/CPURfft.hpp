@@ -16,7 +16,8 @@
 
 namespace MNN
 {
-    void make_euler_weights(int outSize, int signSize, float *realWeights, float *imagWeights);
+    uint64_t reverseBits(uint64_t n, uint64_t bits);
+    void arraryReorder3D(float *input,int n,int c, int hw);
 
     class CPURfft : public Execution
     {
