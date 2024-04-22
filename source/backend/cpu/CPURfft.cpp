@@ -2,7 +2,7 @@
  * @Author: Huan Yang
  * @Date: 2024-04-22 01:26:16
  * @LastEditors: Huan Yang
- * @LastEditTime: 2024-04-22 04:45:41
+ * @LastEditTime: 2024-04-22 09:34:43
  * @FilePath: /MNN/source/backend/cpu/CPURfft.cpp
  * @Description:
  *
@@ -35,7 +35,7 @@ namespace MNN
         this->_computeDimSize = inputs[0]->buffer().dim[this->_computeDim].extent;
         this->_resultDimSize = int(this->_computeDimSize / 2) + 1;
 
-        // 这里要将mem值为零。
+        int numberThread = mSupportMultiThread ? ((CPUBackend *)backend())->threadNumber() : 1;
 
         return NO_ERROR;
     }
@@ -63,29 +63,7 @@ namespace MNN
                     this->_computeDimSize = inputs[0]->buffer().dim[this->_computeDim].extent;
                     this->_resultDimSize = int(this->_computeDimSize / 2) + 1;
                 }
-                for (int i = 0; i < batch; i++)
-                {
-                    for (int j = 0; j < frameLen; j++)
-                    {
-
-                        for (int k = 0; k < this->_resultDimSize; k++)
-                        {
-                            int index = i * frameLen * this->_resultDimSize + j * this->_resultDimSize + k;
-                            realPtr[index] = 0.0;
-                            imagPtr[index] = 0.0;
-                            for (int n = 0; n < signalLen; n++)
-                            {
-                                int inputIdx = i * frameLen * signalLen + j * signalLen + n;
-                                double angle = -2.0 * M_PI * k * n / signalLen;
-                                double realWeight = cos(angle);
-                                double imagWeight = sin(angle);
-                                // outputs?
-                                realPtr[index] += inputPtr[inputIdx] * realWeight;
-                                imagPtr[index] += inputPtr[inputIdx] * imagWeight;
-                            }
-                        }
-                    }
-                }
+                executeRfft3d(0, this->_resultDimSize, batch, frameLen, this->_resultDimSize, signalLen, inputPtr, realPtr, imagPtr);
             }
             else
             {
@@ -97,6 +75,33 @@ namespace MNN
             return ErrorCode::NOT_SUPPORT;
         }
         return NO_ERROR;
+    }
+
+    void CPURfft::executeRfft3d(int startIdx, int endIdx, int batch, int frameLen, int resSize, int signalSize, float *inputPtr, float *realPtr, float *imagPtr)
+    {
+        for (int i = 0; i < batch; i++)
+        {
+            for (int j = 0; j < frameLen; j++)
+            {
+
+                for (int k = startIdx; k < endIdx; k++)
+                {
+                    int index = i * frameLen * resSize + j * resSize + k;
+                    realPtr[index] = 0.0;
+                    imagPtr[index] = 0.0;
+                    for (int n = 0; n < signalSize; n++)
+                    {
+                        int inputIdx = i * frameLen * signalSize + j * signalSize + n;
+                        double angle = -2.0 * M_PI * k * n / signalSize;
+                        double realWeight = cos(angle);
+                        double imagWeight = sin(angle);
+                        // outputs?
+                        realPtr[index] += inputPtr[inputIdx] * realWeight;
+                        imagPtr[index] += inputPtr[inputIdx] * imagWeight;
+                    }
+                }
+            }
+        }
     }
 
     class CPURfftCreator : public CPUBackend::Creator
