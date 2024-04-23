@@ -118,7 +118,6 @@ endif ()
 if (Threads_FOUND)
   if(CMAKE_USE_PTHREADS_INIT)
     set (USING_POSIX_THREADS 1)
-    add_definitions(-DUSING_POSIX_THREADS)
   endif ()
   set (HAVE_THREADS TRUE)
 endif ()
@@ -407,29 +406,29 @@ if (BUILD_TESTS)
 endif ()
 
 # pkgconfig file
-set (prefix ${CMAKE_INSTALL_PREFIX})
-set (exec_prefix ${CMAKE_INSTALL_PREFIX})
-set (libdir ${CMAKE_INSTALL_FULL_LIBDIR})
-set (includedir ${CMAKE_INSTALL_FULL_INCLUDEDIR})
-set (VERSION ${FFTW_VERSION})
-configure_file (fftw.pc.in fftw3${PREC_SUFFIX}.pc @ONLY)
-install (FILES
-          ${CMAKE_CURRENT_BINARY_DIR}/fftw3${PREC_SUFFIX}.pc
-         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
-         COMPONENT Development)
+# set (prefix ${CMAKE_INSTALL_PREFIX})
+# set (exec_prefix ${CMAKE_INSTALL_PREFIX})
+# set (libdir ${CMAKE_INSTALL_FULL_LIBDIR})
+# set (includedir ${CMAKE_INSTALL_FULL_INCLUDEDIR})
+# set (VERSION ${FFTW_VERSION})
+# configure_file (fftw.pc.in fftw3${PREC_SUFFIX}.pc @ONLY)
+# install (FILES
+#           ${CMAKE_CURRENT_BINARY_DIR}/fftw3${PREC_SUFFIX}.pc
+#          DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+#          COMPONENT Development)
 
 # cmake file
-set (FFTW3_LIBRARIES "FFTW3::${fftw3_lib}")
-configure_file (FFTW3Config.cmake.in FFTW3${PREC_SUFFIX}Config.cmake @ONLY)
-configure_file (FFTW3ConfigVersion.cmake.in FFTW3${PREC_SUFFIX}ConfigVersion.cmake @ONLY)
-install (FILES
-          ${CMAKE_CURRENT_BINARY_DIR}/FFTW3${PREC_SUFFIX}Config.cmake
-          ${CMAKE_CURRENT_BINARY_DIR}/FFTW3${PREC_SUFFIX}ConfigVersion.cmake
-	  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fftw3${PREC_SUFFIX}
-         COMPONENT Development)
+# set (FFTW3_LIBRARIES "FFTW3::${fftw3_lib}")
+# configure_file (FFTW3Config.cmake.in FFTW3${PREC_SUFFIX}Config.cmake @ONLY)
+# configure_file (FFTW3ConfigVersion.cmake.in FFTW3${PREC_SUFFIX}ConfigVersion.cmake @ONLY)
+# install (FILES
+#           ${CMAKE_CURRENT_BINARY_DIR}/FFTW3${PREC_SUFFIX}Config.cmake
+#           ${CMAKE_CURRENT_BINARY_DIR}/FFTW3${PREC_SUFFIX}ConfigVersion.cmake
+# 	  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fftw3${PREC_SUFFIX}
+#          COMPONENT Development)
 
-export (TARGETS ${fftw3_lib} NAMESPACE FFTW3:: FILE ${PROJECT_BINARY_DIR}/FFTW3LibraryDepends.cmake)
-install(EXPORT FFTW3LibraryDepends
-        NAMESPACE FFTW3::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fftw3${PREC_SUFFIX}
-        COMPONENT Development)
+# export (TARGETS ${fftw3_lib} NAMESPACE FFTW3:: FILE ${PROJECT_BINARY_DIR}/FFTW3LibraryDepends.cmake)
+# install(EXPORT FFTW3LibraryDepends
+#         NAMESPACE FFTW3::
+#         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fftw3${PREC_SUFFIX}
+#         COMPONENT Development)

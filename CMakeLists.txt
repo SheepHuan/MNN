@@ -730,10 +730,17 @@ IF(WIN32 AND MNN_BUILD_CONVERTER AND MNN_BUILD_SHARED_LIBS)
 ENDIF()
 
 if (MNN_SUPPORT_FFTW3)
-    # add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw)
+    # set(FFTW_LIB_PATH /root/code/fftw/android/lib)
+    # set(FFTW_INC_PATH /root/code/fftw/android/include)
+    set(FFTW_LIB_PATH /root/code/MNN/3rd_party/fftw/build/install/lib)
+    set(FFTW_INC_PATH /root/code/MNN/3rd_party/fftw/build/install/include)
+
     add_definitions(-DMNN_SUPPORT_FFTW3)
-    find_library(FFTW_LIBRARY NAMES fftw3f PATHS ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/build/install/lib )
-    target_include_directories(MNN PUBLIC ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/build/install/include)
+    # set(FFTW_LIBRARY "${FFTW_LIB_PATH}/libfftw3f.so")
+
+    find_library(FFTW_LIBRARY NAMES fftw3f PATHS ${FFTW_LIB_PATH})
+    
+    target_include_directories(MNN PUBLIC ${FFTW_INC_PATH})
     target_link_libraries(MNN PUBLIC ${FFTW_LIBRARY})
 
 endif()
