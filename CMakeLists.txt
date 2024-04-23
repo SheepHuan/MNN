@@ -60,6 +60,7 @@ option(MNN_BUILD_OPENCV "Build OpenCV api in MNN." OFF)
 option(MNN_BUILD_LLM "Build llm library based MNN." OFF)
 option(MNN_INTERNAL "Build with MNN internal features, such as model authentication, metrics logging" OFF)
 option(MNN_JNI "Build MNN Jni for java to use" OFF)
+option(MNN_SUPPORT_FFTW3 "Build FFTW3 for fft compute" ON)
 
 
 IF (NOT DEFINED MNN_USE_SPARSE_COMPUTE)
@@ -727,6 +728,16 @@ IF(WIN32 AND MNN_BUILD_CONVERTER AND MNN_BUILD_SHARED_LIBS)
 # Because of dllimport/dllexport, we merge MNN and MNNConvertDeps together, which depend protobuf
   target_link_libraries(MNN PUBLIC ${Protobuf_LIBRARIES})
 ENDIF()
+
+if (MNN_SUPPORT_FFTW3)
+    # add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw)
+    
+    find_library(FFTW_LIBRARY NAMES fftw3f PATHS ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/build/install/lib )
+    target_include_directories(MNN PUBLIC ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/build/install/include)
+    target_link_libraries(MNN PUBLIC ${FFTW_LIBRARY})
+endif()
+
+
 # Merge MNN/MNNExpress/MNNOpenCV and other backends into one .lib/.dll on Windows
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/tools/cv)
 IF(MNN_BUILD_OPENCV AND NOT MNN_SEP_BUILD)

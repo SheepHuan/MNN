@@ -53,6 +53,7 @@ add_executable(fuseTest ${CMAKE_CURRENT_LIST_DIR}/fuseTest.cpp)
 list(APPEND MNN_CPP_TOOLS fuseTest)
 
 foreach(TARGET ${MNN_CPP_TOOLS})
+    # message(${MNN_DEPS})
     target_link_libraries(${TARGET} ${MNN_DEPS})
     if (MSVC)
         target_compile_definitions(${TARGET} PRIVATE "_CRT_SECURE_NO_WARNINGS")

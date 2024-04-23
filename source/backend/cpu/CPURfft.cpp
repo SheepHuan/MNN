@@ -2,7 +2,7 @@
  * @Author: Huan Yang
  * @Date: 2024-04-22 01:26:16
  * @LastEditors: Huan Yang
- * @LastEditTime: 2024-04-22 09:34:43
+ * @LastEditTime: 2024-04-23 05:59:16
  * @FilePath: /MNN/source/backend/cpu/CPURfft.cpp
  * @Description:
  *
@@ -13,19 +13,24 @@
 #include "core/Macro.h"
 #include <complex>
 #include <cmath>
-#include "fftw3.h"
 
 namespace MNN
 {
-    void make_euler_weights(int outSize, int signSize, float *realWeights, float *imagWeights)
-    {
-        return;
-    }
 
     CPURfft::CPURfft(Backend *b) : Execution(b)
     {
     }
-    ErrorCode CPURfft::onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs)
+
+    CPURfft::~CPURfft()
+    {
+        // if (this->cache_out1d != nullptr)
+        // {
+        //     fftwf_free(this->cache_out1d);
+        // }
+    }
+
+    ErrorCode
+    CPURfft::onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs)
     {
         // 确定参数
         int *slPtr = inputs[1]->host<int>();
@@ -38,10 +43,21 @@ namespace MNN
 
         int numberThread = mSupportMultiThread ? ((CPUBackend *)backend())->threadNumber() : 1;
 
-        fftw_complex *out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * this->_resultDimSize);
+        // 3D处理
+        int batch = inputs[0]->buffer().dim[0].extent;
+        int frameLen = inputs[0]->buffer().dim[1].extent;
+        int signalLen = inputs[0]->buffer().dim[2].extent;
+        int flag =
+            0 | FFTW_PRESERVE_INPUT | FFTW_ESTIMATE;
+        _cache_in = fftwf_alloc_real(inputs[0]->size());
+        _cache_out = fftwf_alloc_complex(inputs[0]->size() / signalLen * (signalLen / 2 + 1));
 
-        fftw_free(out);
-
+        _fft_plan = fftwf_plan_dft_r2c_3d(batch, frameLen, signalLen, _cache_in, _cache_out, flag);
+        // const std::vector<int> shape = {batch,
+        //                                 frameLen,
+        //                                 int(signalLen / 2 + 1),
+        //                                 2};
+        // _cache_out_tensor = Tensor::create(shape, inputs[0]->getType(), (void *)_cache_out, inputs[0]->getDimensionType());
         return NO_ERROR;
     }
 
@@ -55,8 +71,7 @@ namespace MNN
                 int batch = inputs[0]->buffer().dim[0].extent;
                 int frameLen = inputs[0]->buffer().dim[1].extent;
                 int signalLen = inputs[0]->buffer().dim[2].extent;
-                float *realPtr = outputs[0]->host<float>();
-                float *imagPtr = outputs[1]->host<float>();
+                float *outputPtr = outputs[0]->host<float>();
                 float *inputPtr = inputs[0]->host<float>();
                 if (this->_resultDimSize == -1)
                 {
@@ -68,24 +83,47 @@ namespace MNN
                     this->_computeDimSize = inputs[0]->buffer().dim[this->_computeDim].extent;
                     this->_resultDimSize = int(this->_computeDimSize / 2) + 1;
                 }
-                executeRfft3d(0, this->_resultDimSize, batch, frameLen, this->_resultDimSize, signalLen, inputPtr, realPtr, imagPtr);
+                executeRfft3d(0, this->_resultDimSize, batch, frameLen, this->_resultDimSize, signalLen, inputPtr, outputPtr);
             }
             else
             {
                 return ErrorCode::INPUT_DATA_ERROR;
             }
         }
-        else if (this->implementMode==1)
+        else if (this->implementMode == 1)
         {
+            if (inputs[0]->buffer().dimensions == 3)
+            {
+                // int batch = inputs[0]->buffer().dim[0].extent;
+                // int frameLen = inputs[0]->buffer().dim[1].extent;
+                // int signalLen = inputs[0]->buffer().dim[2].extent;
+                // float *outputPtr = outputs[0]->host<float>();
+                // float *inputPtr = inputs[0]->host<float>();
+                // int max_iter = batch * frameLen;
 
-            
-        }else {
+                // // 拷贝
+                // // memcpy(_cache_in, inputs[0]->host<float>(), inputs[0]->size());
+                // for (int i = 100; i < 105; i++)
+                // {
+                //     printf("%f\n", _cache_in[i]);
+                // }
+                // // fftwf_execute(_fft_plan);
+                // fftwf_execute_dft_r2c(_fft_plan, inputPtr, (fftw_complex *));
+                // // 张量合并 3个257x2的合并成
+                // for (int i = 100; i < 105; i++)
+                // {
+                //     printf("%f\n", _cache_out[i]);
+                // }
+            }
+        }
+        else
+        {
             return ErrorCode::NOT_SUPPORT;
         }
         return NO_ERROR;
     }
 
-    void CPURfft::executeRfft3d(int startIdx, int endIdx, int batch, int frameLen, int resSize, int signalSize, float *inputPtr, float *realPtr, float *imagPtr)
+    void CPURfft::executeRfft3d(int startIdx, int endIdx, int batch, int frameLen, int resSize, int signalSize, float *inputPtr, float *outputPtr)
     {
         for (int i = 0; i < batch; i++)
         {
@@ -94,9 +132,9 @@ namespace MNN
 
                 for (int k = startIdx; k < endIdx; k++)
                 {
-                    int index = i * frameLen * resSize + j * resSize + k;
-                    realPtr[index] = 0.0;
-                    imagPtr[index] = 0.0;
+                    int index = i * frameLen * resSize * 2 + j * resSize * 2 + k * 2;
+                    outputPtr[index] = 0.0;
+                    outputPtr[index + 1] = 0.0;
                     for (int n = 0; n < signalSize; n++)
                     {
                         int inputIdx = i * frameLen * signalSize + j * signalSize + n;
@@ -104,8 +142,8 @@ namespace MNN
                         double realWeight = cos(angle);
                         double imagWeight = sin(angle);
                         // outputs?
-                        realPtr[index] += inputPtr[inputIdx] * realWeight;
-                        imagPtr[index] += inputPtr[inputIdx] * imagWeight;
+                        outputPtr[index] += inputPtr[inputIdx] * realWeight;
+                        outputPtr[index + 1] += inputPtr[inputIdx] * imagWeight;
                     }
                 }
             }
