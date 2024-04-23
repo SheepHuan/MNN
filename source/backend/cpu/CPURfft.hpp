@@ -2,7 +2,7 @@
  * @Author: Huan Yang
  * @Date: 2024-04-22 01:26:16
  * @LastEditors: Huan Yang
- * @LastEditTime: 2024-04-23 05:54:11
+ * @LastEditTime: 2024-04-23 06:19:27
  * @FilePath: /MNN/source/backend/cpu/CPURfft.hpp
  * @Description:
  *
@@ -32,7 +32,7 @@ namespace MNN
 
     protected:
         bool mSupportMultiThread = false;
-        int implementMode = 0;
+        int implementMode = 1;
 
     private:
         std::vector<std::pair<std::function<void(int, int, const float *, const float *, const float *)>, int>> mPreFunctions;
@@ -42,10 +42,9 @@ namespace MNN
         int _computeDimSize = -1; // 处理输入张量的计算维度的大小
         int _resultDimSize = -1;  // 输出张量计算维度的大小
 
-        float *_cache_in;
-        fftwf_complex *_cache_out;
-        fftwf_plan _fft_plan;
-        Tensor *_cache_out_tensor;
+        float *_cache_in = nullptr;
+        fftwf_complex *_cache_out = nullptr;
+        fftwf_plan _fft_plan = nullptr;
     };
 }
 #endif

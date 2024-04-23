@@ -2,7 +2,7 @@
  * @Author: Huan Yang
  * @Date: 2024-04-22 01:26:16
  * @LastEditors: Huan Yang
- * @LastEditTime: 2024-04-23 05:59:16
+ * @LastEditTime: 2024-04-23 07:24:49
  * @FilePath: /MNN/source/backend/cpu/CPURfft.cpp
  * @Description:
  *
@@ -23,10 +23,18 @@ namespace MNN
 
     CPURfft::~CPURfft()
     {
-        // if (this->cache_out1d != nullptr)
-        // {
-        //     fftwf_free(this->cache_out1d);
-        // }
+        if (_cache_in != nullptr)
+        {
+            fftwf_free(_cache_in);
+        }
+        if (_cache_out != nullptr)
+        {
+            fftwf_free(_cache_out);
+        }
+        if (_fft_plan != nullptr)
+        {
+            fftwf_destroy_plan(_fft_plan);
+        }
     }
 
     ErrorCode
@@ -43,21 +51,20 @@ namespace MNN
 
         int numberThread = mSupportMultiThread ? ((CPUBackend *)backend())->threadNumber() : 1;
 
+        // #ifdef MNN_SUPPORT_FFTW3
         // 3D处理
+        fftwf_cleanup();
         int batch = inputs[0]->buffer().dim[0].extent;
         int frameLen = inputs[0]->buffer().dim[1].extent;
         int signalLen = inputs[0]->buffer().dim[2].extent;
         int flag =
-            0 | FFTW_PRESERVE_INPUT | FFTW_ESTIMATE;
+            0 | FFTW_MEASURE;
         _cache_in = fftwf_alloc_real(inputs[0]->size());
-        _cache_out = fftwf_alloc_complex(inputs[0]->size() / signalLen * (signalLen / 2 + 1));
-
-        _fft_plan = fftwf_plan_dft_r2c_3d(batch, frameLen, signalLen, _cache_in, _cache_out, flag);
-        // const std::vector<int> shape = {batch,
-        //                                 frameLen,
-        //                                 int(signalLen / 2 + 1),
-        //                                 2};
-        // _cache_out_tensor = Tensor::create(shape, inputs[0]->getType(), (void *)_cache_out, inputs[0]->getDimensionType());
+        _cache_out = fftwf_alloc_complex(inputs[0]->size() * 2 / signalLen * (signalLen / 2 + 1));
+        // _fft_plan = fftwf_plan_dft_r2c_3d(batch, frameLen, signalLen, _cache_in, _cache_out, flag);
+        _fft_plan = fftwf_plan_dft_r2c_1d(signalLen, _cache_in, _cache_out, flag);
+        fftwf_execute(_fft_plan);
+        // #endif
         return NO_ERROR;
     }
 
@@ -92,29 +99,21 @@ namespace MNN
         }
         else if (this->implementMode == 1)
         {
-            if (inputs[0]->buffer().dimensions == 3)
-            {
-                // int batch = inputs[0]->buffer().dim[0].extent;
-                // int frameLen = inputs[0]->buffer().dim[1].extent;
-                // int signalLen = inputs[0]->buffer().dim[2].extent;
-                // float *outputPtr = outputs[0]->host<float>();
-                // float *inputPtr = inputs[0]->host<float>();
-                // int max_iter = batch * frameLen;
+            // if (inputs[0]->buffer().dimensions == 3)
+            // {
+            int batch = inputs[0]->buffer().dim[0].extent;
+            int frameLen = inputs[0]->buffer().dim[1].extent;
+            int signalLen = inputs[0]->buffer().dim[2].extent;
+            float *outputPtr = outputs[0]->host<float>();
+            float *inputPtr = inputs[0]->host<float>();
 
-                // // 拷贝
-                // // memcpy(_cache_in, inputs[0]->host<float>(), inputs[0]->size());
-                // for (int i = 100; i < 105; i++)
-                // {
-                //     printf("%f\n", _cache_in[i]);
-                // }
-                // // fftwf_execute(_fft_plan);
-                // fftwf_execute_dft_r2c(_fft_plan, inputPtr, (fftw_complex *));
-                // // 张量合并 3个257x2的合并成
-                // for (int i = 100; i < 105; i++)
-                // {
-                //     printf("%f\n", _cache_out[i]);
-                // }
+            int max_iter = batch * frameLen;
+            int stride = (signalLen / 2 + 1) * 2;
+            for (int i = 0; i < max_iter; i++)
+            {
+                fftwf_execute_dft_r2c(_fft_plan, inputPtr + i * signalLen, (fftwf_complex *)(outputPtr + i * stride));
             }
+            // }
         }
         else
         {

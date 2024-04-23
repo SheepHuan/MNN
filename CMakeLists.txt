@@ -731,10 +731,11 @@ ENDIF()
 
 if (MNN_SUPPORT_FFTW3)
     # add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw)
-    
+    add_definitions(-DMNN_SUPPORT_FFTW3)
     find_library(FFTW_LIBRARY NAMES fftw3f PATHS ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/build/install/lib )
     target_include_directories(MNN PUBLIC ${CMAKE_CURRENT_LIST_DIR}/3rd_party/fftw/build/install/include)
     target_link_libraries(MNN PUBLIC ${FFTW_LIBRARY})
+
 endif()
 
 
