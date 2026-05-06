@@ -9,6 +9,7 @@
 #include "VulkanBackend.hpp"
 #include <algorithm>
 #include "core/Execution.hpp"
+#include "core/ExecutionClassLogger.hpp"
 #include "core/Macro.h"
 #include <MNN/Tensor.hpp>
 #include "core/TensorUtils.hpp"
@@ -283,15 +284,20 @@ Execution* VulkanBackend::onCreate(const std::vector<Tensor*>& inputs, const std
 #endif
         return nullptr;
     }
-
 #ifdef ENABLE_VULKAN_TIME_PROFILE
     originExecution->setName(EnumNameOpType(op->type()));
 #endif
 
+    Execution* exe = nullptr;
     if (mDirect) {
-        return new VulkanBasicExecutionDirect(originExecution);
+        exe = new VulkanBasicExecutionDirect(originExecution);
+    } else {
+        exe = new VulkanBasicExecutionInDirect(originExecution);
     }
-    return new VulkanBasicExecutionInDirect(originExecution);
+#ifdef MNN_EXECUTION_CLASS_LOG
+    printExecutionClass("Vulkan", op, op->type(), exe);
+#endif
+    return exe;
 }
 
 void VulkanBackend::onExecuteBegin() const {

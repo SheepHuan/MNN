@@ -21,7 +21,7 @@
 #include "CUDATools.hpp"
 #include "execution/FuseExecutionV2.hpp"
 // #define MNN_CUDA_COPY_DEBUG
-#ifdef MNN_CUDA_EXECUTION_CLASS_LOG
+#if defined(MNN_EXECUTION_CLASS_LOG) || defined(MNN_CUDA_EXECUTION_CLASS_LOG)
 #include <string>
 #if defined(__GXX_RTTI) || defined(__cpp_rtti) || defined(_CPPRTTI)
 #include <typeinfo>
@@ -35,7 +35,7 @@
 namespace MNN {
 namespace CUDA {
 
-#ifdef MNN_CUDA_EXECUTION_CLASS_LOG
+#if defined(MNN_EXECUTION_CLASS_LOG) || defined(MNN_CUDA_EXECUTION_CLASS_LOG)
 static std::string _cudaExecutionClassName(const Execution* execution) {
     if (nullptr == execution) {
         return "nullptr";
@@ -366,7 +366,7 @@ Execution* CUDABackend::onCreate(const std::vector<Tensor*>& inputs, const std::
         }
         return NULL;
     }
-#ifdef MNN_CUDA_EXECUTION_CLASS_LOG
+#if defined(MNN_EXECUTION_CLASS_LOG) || defined(MNN_CUDA_EXECUTION_CLASS_LOG)
     _cudaPrintExecutionClass(op, opType, exe);
 #endif
 #ifdef LOG_VERBOSE

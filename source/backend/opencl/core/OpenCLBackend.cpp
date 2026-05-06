@@ -11,6 +11,7 @@
 
 #include "core/BufferAllocator.hpp"
 #include "core/TensorUtils.hpp"
+#include "core/ExecutionClassLogger.hpp"
 #include "shape/SizeComputer.hpp"
 #include <map>
 #include <mutex>
@@ -693,6 +694,9 @@ Execution* OpenCLBackend::onCreate(const std::vector<Tensor*>& inputs, const std
         }
         return NULL;
     }
+#ifdef MNN_EXECUTION_CLASS_LOG
+    printExecutionClass("OpenCL", op, op->type(), exe);
+#endif
 #ifdef LOG_VERBOSE
     MNN_PRINT("End OpenCLBackend::onCreate \n");
 #endif

@@ -82,6 +82,12 @@ option(MNN_BUILD_AUDIO "Build audio api in MNN." OFF)
 option(MNN_SME2 "Use Arm sme2 instructions" ON)
 option(MNN_METAL_TENSOR "Use Metal4 tensor instructions" ON)
 option(MNN_ENABLE_RTTI "Build MNN with C++ RTTI enabled." ON)
+option(MNN_EXECUTION_CLASS_LOG "Print backend op to Execution class mapping during onCreate." OFF)
+
+if (MNN_EXECUTION_CLASS_LOG)
+    add_definitions(-DMNN_EXECUTION_CLASS_LOG)
+    set(MNN_ENABLE_RTTI ON CACHE BOOL "Build MNN with C++ RTTI enabled." FORCE)
+endif()
 
 if (MNN_BUILD_MINI)
     set(MNN_SKIPBUILD_GEOMETRY ON CACHE BOOL "<docstring>" FORCE)

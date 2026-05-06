@@ -20,6 +20,7 @@
 #include "CPUCast.hpp"
 #include "core/OpCommonUtils.hpp"
 #include "core/WrapExecution.hpp"
+#include "core/ExecutionClassLogger.hpp"
 #include "core/MNNFileUtils.h"
 #include "core/WorkerThread.hpp"
 #ifdef _OPENMP
@@ -749,6 +750,9 @@ Execution* CPUBackend::onCreate(const std::vector<Tensor*>& inputs, const std::v
     if (exe == nullptr) {
         exe = iter->second->onCreate(inputs, outputs, op, this);
     }
+#ifdef MNN_EXECUTION_CLASS_LOG
+    printExecutionClass("CPU", op, opType, exe);
+#endif
     return exe;
 }
 const Runtime* CPUBackend::getRuntime() {
