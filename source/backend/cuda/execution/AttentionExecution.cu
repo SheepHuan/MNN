@@ -14,6 +14,105 @@ static inline T* getTensorDevicePtr(const Tensor* tensor) {
     return reinterpret_cast<T*>(tensor->deviceId());
 }
 
+template <typename T>
+__global__ void ATTENTION_SOFTMAX_WARP_32(const T *input, T *output,
+    const int inside,
+    const int axis,
+    const int outside,
+    const int count
+) {
+    int idx_outside = blockIdx.x / inside;
+    int idx_inside = blockIdx.x - idx_outside * inside;
+
+    auto src = input + idx_outside * axis * inside + idx_inside;
+    float local_src = -FLT_MAX;
+    __shared__ float maxValue;
+    __shared__ float sumValue;
+    int tid = threadIdx.x;
+    if (tid < axis) {
+        local_src = (float)(src[tid * inside]);
+    }
+    float maxRes = warpReduceMax<float>(local_src);
+    if (tid == 0) {
+        maxValue = maxRes;
+    }
+    __syncthreads();
+
+    float local_exp = 0.0f;
+    if (tid < axis) {
+        float tmpSub = local_src - maxValue;
+        tmpSub = ((tmpSub < -87.0) ? -87.0 : tmpSub);
+        local_exp = exp(tmpSub);
+    }
+
+    float sumRes = warpReduceSum<float>(local_exp);
+    if (tid == 0) {
+        sumValue = sumRes;
+    }
+    __syncthreads();
+
+    float divSumValue = 1.0 / sumValue;
+    if (tid < axis) {
+        output[(idx_outside * axis + tid) * inside + idx_inside] = (T)(local_exp * divSumValue);
+    }
+}
+
+template <typename T>
+__global__ void ATTENTION_SOFTMAX_AXIS_REDUCE(const T *input, T *output,
+    const int inside,
+    const int axis,
+    const int per_block_size,
+    const int calc_multi_num,
+    const int outside,
+    const int count
+) {
+    int idx_outside = blockIdx.x / inside;
+    int idx_inside = blockIdx.x - idx_outside * inside;
+
+    auto src = input + idx_outside * axis * inside + idx_inside;
+    auto dst = output + idx_outside * axis * inside + idx_inside;
+
+    float local_src = -FLT_MAX;
+    __shared__ float maxValue;
+    __shared__ float sumValue;
+    int tid = threadIdx.x;
+    for (int i = 0; i < calc_multi_num; i++) {
+        if (tid + i * per_block_size < axis) {
+            local_src = max(local_src, (float)(src[(tid + i * per_block_size) * inside]));
+        }
+    }
+    float maxRes = blockReduceMax<float>(local_src);
+    if (tid == 0) {
+        maxValue = maxRes;
+    }
+    __syncthreads();
+
+    float local_exp = 0.0f;
+    for (int i = 0; i < calc_multi_num; i++) {
+        if (tid + i * per_block_size < axis) {
+            float tmpSub = (float)(src[(tid + i * per_block_size) * inside]) - maxValue;
+            tmpSub = ((tmpSub < -87.0) ? -87.0 : tmpSub);
+            local_exp += exp(tmpSub);
+        }
+    }
+
+    float sumRes = blockReduceSum<float>(local_exp);
+    if (tid == 0) {
+        sumValue = sumRes;
+    }
+    __syncthreads();
+
+    float divSumValue = 1.0 / sumValue;
+    for (int i = 0; i < calc_multi_num; i++) {
+        if (tid + i * per_block_size < axis) {
+            float tmpSub = (float)(src[(tid + i * per_block_size) * inside]) - maxValue;
+            tmpSub = ((tmpSub < -87.0) ? -87.0 : tmpSub);
+            float tmp_exp = exp(tmpSub);
+            dst[(tid + i * per_block_size) * inside] = (T)(tmp_exp * divSumValue);
+        }
+    }
+}
+
 // 根据 reserve 列表紧凑化 KV Cache
 __global__ void compact_kv_cache_kernel(
     const void* src_key_cache,
@@ -1441,21 +1540,21 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             const auto* input_ptr = static_cast<const float*>(qk_scores_ptr);
             auto* output_ptr = static_cast<float*>(softmax_result_ptr);
             if (axis <= 32) {
-                SOFTMAX_WARP_32<float><<<count, 32, 0, stream>>>(input_ptr, output_ptr, inside, axis, outside, count);
+                ATTENTION_SOFTMAX_WARP_32<float><<<count, 32, 0, stream>>>(input_ptr, output_ptr, inside, axis, outside, count);
             } else {
                 constexpr int threads_per_block = 256;
                 const int calc_multi_num = UP_DIV(axis, threads_per_block);
-                SOFTMAX_AXIS_REDUCE<float><<<count, threads_per_block, 0, stream>>>(input_ptr, output_ptr, inside, axis, threads_per_block, calc_multi_num, outside, count);
+                ATTENTION_SOFTMAX_AXIS_REDUCE<float><<<count, threads_per_block, 0, stream>>>(input_ptr, output_ptr, inside, axis, threads_per_block, calc_multi_num, outside, count);
             }
         } else {
             const auto* input_ptr = static_cast<const __half*>(qk_scores_ptr);
             auto* output_ptr = static_cast<__half*>(softmax_result_ptr);
             if (axis <= 32) {
-                SOFTMAX_WARP_32<__half><<<count, 32, 0, stream>>>(input_ptr, output_ptr, inside, axis, outside, count);
+                ATTENTION_SOFTMAX_WARP_32<__half><<<count, 32, 0, stream>>>(input_ptr, output_ptr, inside, axis, outside, count);
             } else {
                 constexpr int threads_per_block = 256;
                 const int calc_multi_num = UP_DIV(axis, threads_per_block);
-                SOFTMAX_AXIS_REDUCE<__half><<<count, threads_per_block, 0, stream>>>(input_ptr, output_ptr, inside, axis, threads_per_block, calc_multi_num, outside, count);
+                ATTENTION_SOFTMAX_AXIS_REDUCE<__half><<<count, threads_per_block, 0, stream>>>(input_ptr, output_ptr, inside, axis, threads_per_block, calc_multi_num, outside, count);
             }
         }
         checkKernelErrors;
