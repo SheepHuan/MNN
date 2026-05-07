@@ -323,7 +323,7 @@ public:
     }
 
     std::string prefix_cache_path() const {
-        return config_.value("prefix_cache_path", "prefixcache");
+        return config_.value("prefix_cache_path", ".cache/prefixcache");
     }
 
     std::string system_prompt() const {

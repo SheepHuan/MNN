@@ -11,6 +11,8 @@
 #include "CPUKVCacheManager.hpp"
 #include "core/Concurrency.h"
 
+#include <cmath>
+
 namespace MNN {
 
 /*
@@ -298,6 +300,111 @@ void CPUKVCacheManager::onResize(int kv_num_head, int head_dim) {
 void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
     mMeta = meta;
 
+    // direct_segments: 多个文档 prefix 已经分别保存为独立 KV 文件。
+    // 这里按 segment token_count 读取真实 token，拼成一个连续运行时 KV cache，
+    // 后续 onUpdateKV 会继续把当前 prompt 的 KV 追加到这段 prefix 后面。
+    if (mMeta != nullptr && mMeta->file_flag == KVMeta::PendingReadSegments && !mMeta->prefix_segments.empty()) {
+        if (mKeyQuantMode != KVQuantMode::None || mValueQuantMode != KVQuantMode::None || !mUseFlashAttention) {
+            MNN_ERROR("[Error]: direct segment prefix cache only supports CPU flash attention without KV quantization\n");
+        }
+        int segmentTotalTokens = mMeta->segment_total_tokens;
+        if (segmentTotalTokens <= 0) {
+            for (const auto& segment : mMeta->prefix_segments) {
+                segmentTotalTokens += segment.token_count;
+            }
+            mMeta->segment_total_tokens = segmentTotalTokens;
+        }
+
+        int layerIndex = mMeta->layer_index;
+        mMeta->layer_index = (mMeta->layer_index + 1) % mMeta->layer_nums;
+
+        // kv_seq_len 是本次运行时需要容纳的有效长度：多文档 prefix 真实长度 + 当前 prompt 长度。
+        // mMaxLength 是实际分配容量，会额外扩一段 chunk；attention 只看 mPastLength/kvLength，不会看容量 padding。
+        int kv_seq_len = meta->add + segmentTotalTokens;
+        mMaxLength = kv_seq_len + mConfig.mExpandChunk;
+        setFlashAttentionUpperKv(MNN_FLASH_ATTENTION_BLOCK_SIZE);
+
+        mCurrentKeySizePerHead = ROUND_UP(mMaxLength, hP) * ROUND_UP(mHeadDim, lP) * mBytes;
+        mCurrentValueSizePerHead = UP_DIV(mMaxLength, mFlashAttentionUpperKv) *
+            (ROUND_UP(mHeadDim, hP) * ROUND_UP(mFlashAttentionUpperKv, lP) * mBytes);
+        size_t keySize = (size_t)mKvNumHead * mCurrentKeySizePerHead;
+        size_t valueSize = (size_t)mKvNumHead * mCurrentValueSizePerHead;
+
+        createKVCacheFile();
+        resetKVCacheFileSize(keySize, valueSize);
+        mmapKVCache(keySize, valueSize);
+        if (mMapKeyAddr != nullptr) {
+            ::memset(mMapKeyAddr, 0, keySize);
+        }
+        if (mMapValueAddr != nullptr) {
+            ::memset(mMapValueAddr, 0, valueSize);
+        }
+        mKVCacheInDisk = true;
+
+        int dstStart = 0;
+        for (const auto& segment : mMeta->prefix_segments) {
+            if (segment.token_count <= 0) {
+                continue;
+            }
+            std::string pathk = MNNFilePathConcat(mConfig.mPrefixCacheDir, segment.cache_name) + "_" + std::to_string(layerIndex) + ".k";
+            std::string pathv = MNNFilePathConcat(mConfig.mPrefixCacheDir, segment.cache_name) + "_" + std::to_string(layerIndex) + ".v";
+            auto srcKeyFD = MNNOpenFile(pathk.c_str(), MNN_FILE_READ);
+            auto srcValueFD = MNNOpenFile(pathv.c_str(), MNN_FILE_READ);
+            if (srcKeyFD == INVALID_FILE || srcValueFD == INVALID_FILE) {
+                MNN_ERROR("[Error]: Failed to open segment prefix cache files: %s / %s\n", pathk.c_str(), pathv.c_str());
+                if (srcKeyFD != INVALID_FILE) {
+                    MNNCloseFile(srcKeyFD);
+                }
+                if (srcValueFD != INVALID_FILE) {
+                    MNNCloseFile(srcValueFD);
+                }
+                continue;
+            }
+            auto srcKeySize = MNNGetFileSize(srcKeyFD);
+            auto srcValueSize = MNNGetFileSize(srcValueFD);
+            size_t srcKeyCapacity = srcKeySize / ((size_t)mKvNumHead * ROUND_UP(mHeadDim, lP) * mBytes);
+            size_t srcValueCapacity = srcValueSize / ((size_t)mKvNumHead * ROUND_UP(mHeadDim, hP) * mBytes);
+            size_t srcCapacity = ALIMIN(srcKeyCapacity, srcValueCapacity);
+            if ((size_t)segment.token_count > srcCapacity) {
+                MNN_ERROR("[Error]: Segment prefix token_count %d exceeds KV file capacity %zu for cache %s layer %d\n",
+                          segment.token_count, srcCapacity, segment.cache_name.c_str(), layerIndex);
+            }
+            auto srcKeyAddr = (const int8_t*)MNNMmapFile(srcKeyFD, srcKeySize, true);
+            auto srcValueAddr = (const int8_t*)MNNMmapFile(srcValueFD, srcValueSize, true);
+            if (srcKeyAddr != nullptr && srcValueAddr != nullptr && (size_t)segment.token_count <= srcCapacity) {
+                // 每个 head 在文件中是一个连续 packed buffer；只拷贝真实 token，跳过源文件容量 padding。
+                copyPrefixSegmentKV(srcKeyAddr, srcKeySize / mKvNumHead, srcValueAddr, srcValueSize / mKvNumHead,
+                                    segment.token_count, dstStart);
+                if (segment.key_rope_state == KVMeta::KeyRopeCanonicalNoRope) {
+                    // 磁盘 Key 已经是 canonical_no_rope，这里按拼接后的全局位置重新做 forward RoPE。
+                    if (mBytes == 2) {
+                        applyPackedKeyRoPE<FLOAT16_T>(dstStart, segment.token_count, dstStart, segment.rope_dim,
+                                                       segment.rope_theta, segment.rope_pairing, false);
+                    } else {
+                        applyPackedKeyRoPE<float>(dstStart, segment.token_count, dstStart, segment.rope_dim,
+                                                  segment.rope_theta, segment.rope_pairing, false);
+                    }
+                } else {
+                    MNN_ERROR("[Error]: direct segment prefix cache requires canonical_no_rope key: %s\n", segment.cache_name.c_str());
+                }
+                dstStart += segment.token_count;
+            }
+            if (srcKeyAddr != nullptr) {
+                MNNUnmapFile((void*)srcKeyAddr, srcKeySize);
+            }
+            if (srcValueAddr != nullptr) {
+                MNNUnmapFile((void*)srcValueAddr, srcValueSize);
+            }
+            MNNCloseFile(srcKeyFD);
+            MNNCloseFile(srcValueFD);
+        }
+        mPastLength = dstStart;
+        if (mPastLength != segmentTotalTokens) {
+            MNN_ERROR("[Error]: direct segment prefix copied length %d does not match expected length %d\n", mPastLength, segmentTotalTokens);
+        }
+        return;
+    }
+
     // load disk prefix kvcache
     if(mMeta != nullptr && mMeta->file_name.size() > 0 && mMeta->file_flag == KVMeta::PendingRead) {
         // create new files
@@ -371,6 +478,14 @@ void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
         expandKVCacheInDisk(oldMaxLength, oldKeySize, oldValueSize, keySize, valueSize, old_key_fd, old_value_fd);
         mPastLength = meta->seqlen_in_disk;
         mKVCacheInDisk = true;
+        if (mMeta->key_rope_state == KVMeta::KeyRopeCanonicalNoRope) {
+            // 单 prefix cache 若保存为 canonical_no_rope，加载后也按原始 prefix 位置重新编码。
+            if (mBytes == 2) {
+                applyPackedKeyRoPE<FLOAT16_T>(0, mPastLength, 0, mMeta->rope_dim, mMeta->rope_theta, mMeta->rope_pairing, false);
+            } else {
+                applyPackedKeyRoPE<float>(0, mPastLength, 0, mMeta->rope_dim, mMeta->rope_theta, mMeta->rope_pairing, false);
+            }
+        }
 
         return;
     }
@@ -676,14 +791,16 @@ void CPUKVCacheManager::saveKVCacheInDisk() {
 
 void CPUKVCacheManager::onClear() {
     if (mKVCacheInDisk) {
-        // mSaveShareKvPrefix also need unmap file
+        // mSaveShareKvPrefix 表示这份 mmap 文件就是可复用 prefix cache。
+        // 清理运行时状态时只能解除 mmap，不能删除 .cache/prefixcache 下的正式文件。
         unmapKVCache(mCurrentKeySizePerHead * (size_t)mKvNumHead, mCurrentValueSizePerHead * (size_t)mKvNumHead);
         if(!mSaveShareKvPrefix) {
-            // delete temp kvcache file
+            // 普通推理/读取 prefix 时创建的是临时运行时 KV 文件，可以随 cache 一起删除。
             removeKVCacheFile();
         }
         mKVCacheInDisk = false;
     }
+    mSaveShareKvPrefix = false;
     mPastKey.reset();
     mPastValue.reset();
     mKeySum.reset();
@@ -812,6 +929,98 @@ size_t CPUKVCacheManager::valueIndex(int seq, int dim) const {
            (seq % lP);
 }
 
+size_t CPUKVCacheManager::flashValueIndex(int seq, int dim) const {
+    auto weightStride2 = lP * hP;
+    auto weightStride1 = UP_DIV((int32_t)mFlashAttentionUpperKv, lP) * weightStride2;
+    auto weightStride0 = weightStride1 * UP_DIV(mHeadDim, hP);
+    auto idxInner = (seq / (int32_t)mFlashAttentionUpperKv) * weightStride0 +
+                    (seq % (int32_t)mFlashAttentionUpperKv) / lP * weightStride2 +
+                    (seq % (int32_t)mFlashAttentionUpperKv) % lP;
+    auto idxBase = (dim / hP) * weightStride1 + (dim % hP) * lP;
+    return idxBase + idxInner;
+}
+
+size_t CPUKVCacheManager::packedKeyIndex(int seq, int dim) const {
+    return keyIndex(seq, dim);
+}
+
+size_t CPUKVCacheManager::packedFlashValueIndex(int seq, int dim) const {
+    return flashValueIndex(seq, dim);
+}
+
+template <typename T>
+void CPUKVCacheManager::applyPackedKeyRoPE(int start, int len, int positionBase, int ropeDim, float ropeTheta,
+                                           int ropePairing, bool inverse) {
+    if (len <= 0) {
+        return;
+    }
+    if (mKeyQuantMode != KVQuantMode::None) {
+        MNN_ERROR("[Error]: prefix key RoPE canonicalization does not support KV quantization\n");
+        return;
+    }
+    if (ropePairing != KVMeta::RopePairingHalf) {
+        MNN_ERROR("[Error]: prefix key RoPE canonicalization only supports half-split pairing now\n");
+        return;
+    }
+    if (ropeDim <= 0) {
+        ropeDim = mHeadDim;
+    }
+    ropeDim = ALIMIN(ropeDim, mHeadDim);
+    if (ropeDim <= 0 || (ropeDim % 2) != 0 || ropeTheta <= 0.0f) {
+        MNN_ERROR("[Error]: invalid RoPE params, rope_dim=%d, head_dim=%d, theta=%f\n", ropeDim, mHeadDim, ropeTheta);
+        return;
+    }
+
+    // MNN 导出的 Llama 类 RoPE 使用 rotate_half：前半维和后半维成对旋转。
+    // inverse=true 时把 sin 取反，即可从 RoPE(position) * K_raw 恢复 canonical K_raw。
+    int half = ropeDim / 2;
+    for (int h = 0; h < mKvNumHead; ++h) {
+        auto keyPtr = reinterpret_cast<T*>(addrOfKey(h));
+        for (int i = 0; i < len; ++i) {
+            int seq = start + i;
+            int position = positionBase + i;
+            for (int d = 0; d < half; ++d) {
+                double invFreq = 1.0 / std::pow(static_cast<double>(ropeTheta), static_cast<double>(2 * d) / ropeDim);
+                double angle = static_cast<double>(position) * invFreq;
+                float cosValue = static_cast<float>(std::cos(angle));
+                float sinValue = static_cast<float>(std::sin(angle));
+                if (inverse) {
+                    sinValue = -sinValue;
+                }
+                size_t leftIndex = keyIndex(seq, d);
+                size_t rightIndex = keyIndex(seq, d + half);
+                float left = static_cast<float>(keyPtr[leftIndex]);
+                float right = static_cast<float>(keyPtr[rightIndex]);
+                keyPtr[leftIndex] = static_cast<T>(left * cosValue - right * sinValue);
+                keyPtr[rightIndex] = static_cast<T>(right * cosValue + left * sinValue);
+            }
+        }
+    }
+}
+
+void CPUKVCacheManager::copyPrefixSegmentKV(const int8_t* srcKey, size_t srcKeySizePerHead, const int8_t* srcValue,
+                                            size_t srcValueSizePerHead, int srcLen, int dstStart) {
+    // direct_segments 需要把多个独立 prefix 文件按真实 token 数紧密拼接。
+    // 文件本身按 hP/lP/blockKV 做了容量 padding，因此这里逐 token / dim 复制，避免把 padding 放进运行时 KV。
+    for (int h = 0; h < mKvNumHead; ++h) {
+        auto srcKeyHead = srcKey + h * srcKeySizePerHead;
+        auto srcValueHead = srcValue + h * srcValueSizePerHead;
+        auto dstKeyHead = addrOfKey(h);
+        auto dstValueHead = addrOfValue(h);
+        for (int s = 0; s < srcLen; ++s) {
+            int dstSeq = dstStart + s;
+            for (int d = 0; d < mHeadDim; ++d) {
+                ::memcpy(dstKeyHead + packedKeyIndex(dstSeq, d) * mBytes,
+                         srcKeyHead + packedKeyIndex(s, d) * mBytes,
+                         mBytes);
+                ::memcpy(dstValueHead + packedFlashValueIndex(dstSeq, d) * mBytes,
+                         srcValueHead + packedFlashValueIndex(s, d) * mBytes,
+                         mBytes);
+            }
+        }
+    }
+}
+
 template <typename T>
 void CPUKVCacheManager::moveKV(int src, int dst, int size) {
     for (int h = 0; h < mKvNumHead; ++h) {
@@ -847,6 +1056,19 @@ void CPUKVCacheManager::onUpdateKV(const Tensor * key, const Tensor * value, int
             }
         }
     } MNN_CONCURRENCY_END();
+    if (mMeta != nullptr && mMeta->file_flag == KVMeta::PendingWrite &&
+        mMeta->key_rope_state == KVMeta::KeyRopeCanonicalNoRope) {
+        // 保存可复用文档 prefix 时，图里的 key 已经带 local position RoPE。
+        // 在写入磁盘前对本次新增区间逆 RoPE，磁盘上只保留无位置信息的 canonical key。
+        int positionBase = mMeta->source_position_base + mPastLength;
+        if (mBytes == 2) {
+            applyPackedKeyRoPE<FLOAT16_T>(mPastLength, seq_len, positionBase, mMeta->rope_dim,
+                                          mMeta->rope_theta, mMeta->rope_pairing, true);
+        } else {
+            applyPackedKeyRoPE<float>(mPastLength, seq_len, positionBase, mMeta->rope_dim,
+                                      mMeta->rope_theta, mMeta->rope_pairing, true);
+        }
+    }
     mPastLength += seq_len;
 }
 

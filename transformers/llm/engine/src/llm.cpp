@@ -87,9 +87,86 @@ void Llm::setChatTemplate() {
     }
 }
 
+void Llm::configureRopeMeta() {
+    if (mMeta == nullptr || mConfig == nullptr) {
+        return;
+    }
+    auto& config = mConfig->config_;
+    auto headDim = config.value("head_dim", 0);
+    if (headDim <= 0) {
+        auto kvShape = mConfig->key_value_shape();
+        if (!kvShape.empty()) {
+            headDim = kvShape.back();
+        }
+    }
+    auto ropeDim = config.value("rotary_dim", headDim);
+    if (ropeDim <= 0) {
+        ropeDim = headDim;
+    }
+
+    auto ropeTheta = config.value("rope_theta", 10000.0f);
+    auto ropeRatio = config.value("rope_ratio", 0.0f);
+    if (ropeRatio > 0.0f) {
+        ropeTheta *= ropeRatio;
+    }
+    if (config.contains("rope_parameters") && config["rope_parameters"].is_object()) {
+        auto ropeParameters = config["rope_parameters"];
+        bool perLayerType = false;
+        for (auto iter = ropeParameters.begin(); iter != ropeParameters.end(); ++iter) {
+            if ((*iter).is_object()) {
+                perLayerType = true;
+                break;
+            }
+        }
+        if (!perLayerType) {
+            ropeTheta = ropeParameters.value("rope_theta", ropeTheta);
+            auto partialRotaryFactor = ropeParameters.value("partial_rotary_factor", 1.0f);
+            if (partialRotaryFactor > 0.0f && ropeDim > 0) {
+                ropeDim = static_cast<int>(ropeDim * partialRotaryFactor);
+            }
+        }
+    }
+
+    // 这里仅注入 Llama/Phi/Qwen 风格 half-split RoPE 的基础参数。
+    // mrope / interleaved RoPE 由 kvshare server 在 direct_segments 入口拒绝。
+    mMeta->rope_dim = ropeDim;
+    mMeta->rope_theta = ropeTheta;
+    mMeta->rope_pairing = KVMeta::RopePairingHalf;
+    mMeta->source_position_base = 0;
+    mMeta->key_rope_state = KVMeta::KeyRopePositionEncoded;
+}
+
 bool Llm::set_config(const std::string& content) {
-    mConfig->config_.merge(ujson::json::parse(content));
+    auto newConfig = ujson::json::parse(content);
+    auto hasSamplerField = [&](const char* key) {
+        return newConfig.contains(key);
+    };
+    bool samplerConfigChanged =
+        hasSamplerField("sampler_type") ||
+        hasSamplerField("mixed_samplers") ||
+        hasSamplerField("temperature") ||
+        hasSamplerField("top_k") ||
+        hasSamplerField("topK") ||
+        hasSamplerField("top_p") ||
+        hasSamplerField("topP") ||
+        hasSamplerField("min_p") ||
+        hasSamplerField("minP") ||
+        hasSamplerField("tfs_z") ||
+        hasSamplerField("tfsZ") ||
+        hasSamplerField("typical") ||
+        hasSamplerField("repetition_penalty") ||
+        hasSamplerField("penalty") ||
+        hasSamplerField("presence_penalty") ||
+        hasSamplerField("frequency_penalty") ||
+        hasSamplerField("penalty_window") ||
+        hasSamplerField("n_gram") ||
+        hasSamplerField("ngram_factor") ||
+        hasSamplerField("penalty_sampler") ||
+        hasSamplerField("logit_bias") ||
+        hasSamplerField("banned_tokens");
+    mConfig->config_.merge(newConfig);
     setChatTemplate();
+    configureRopeMeta();
     mAsync = mConfig->config_.value("async", true);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();
     mValidBlockSize.clear();
@@ -112,6 +189,9 @@ bool Llm::set_config(const std::string& content) {
             std::sort(mValidBlockSize.begin(), mValidBlockSize.end());
             mBlockSize = mValidBlockSize[mValidBlockSize.size()-1];
         } while (false);
+    }
+    if (samplerConfigChanged && mSampler != nullptr) {
+        mSampler.reset(Sampler::createSampler(mContext, mConfig));
     }
     return true;
 }
@@ -754,6 +834,7 @@ void Llm::reset() {
     mContext->audio_us = 0;
     mContext->audio_input_s = 0.0f;
     mMeta->remove = mMeta->previous;
+    clearPrefixCacheSegments();
     mCachedPromptText.clear();
 }
 
@@ -846,6 +927,11 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
                 // save prefix kvcache file
                 mMeta->file_name = mPrefixCacheFileName;
                 mMeta->file_flag = KVMeta::PendingWrite; // write
+                // document prefix cache 可以选择把 Key 保存为无位置信息的 canonical 形态。
+                // 普通 prefix cache 不传 flag 时仍保存图中已经 RoPE 过的 Key，保持旧行为。
+                mMeta->key_rope_state = (mPrefixCacheFlag == PrefixCacheFlagCanonicalNoRopeKey)
+                    ? KVMeta::KeyRopeCanonicalNoRope : KVMeta::KeyRopePositionEncoded;
+                mMeta->source_position_base = 0;
             } else {
                 // first time and cachefile exist, pass this time
             }
@@ -858,6 +944,9 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
                 mMeta->file_name = mPrefixCacheFileName;
                 mMeta->file_flag = KVMeta::PendingRead; // read
                 mMeta->seqlen_in_disk = mPrefixLength; // set_length
+                mMeta->key_rope_state = (mPrefixCacheFlag == PrefixCacheFlagCanonicalNoRopeKey)
+                    ? KVMeta::KeyRopeCanonicalNoRope : KVMeta::KeyRopePositionEncoded;
+                mMeta->source_position_base = 0;
             }
         }
     }
@@ -960,6 +1049,13 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
         mMeta->layer_index = 0;
         // recover normal mode
         mPrefixCacheMode = false;
+    }
+    if (mPrefixSegmentsMode) {
+        // PendingReadSegments 在本次 prompt prefill 中已把多个文档 KV 拼入运行时 cache。
+        // forwardRaw 里的 mMeta->sync() 只会累计 prompt 的 add，这里补上磁盘 prefix 的真实长度，
+        // 保证后续 decode 的 mMeta->previous 与 CPUKVCacheManager::kvLength() 一致。
+        mMeta->previous += mMeta->segment_total_tokens;
+        clearPrefixCacheSegments();
     }
 
 
@@ -1166,6 +1262,7 @@ Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     mMeta.reset(new KVMeta);
     mMeta->layer_nums = mConfig->layer_nums();
     mMeta->attn_scale = mConfig->attn_scale();
+    configureRopeMeta();
     mGenerateParam.reset(new GenerationParams);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();
 }
@@ -1200,6 +1297,7 @@ std::vector<Express::VARP> Llm::getOutputs() const {
 
 bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     mPrefixCacheFileName = filename;
+    mPrefixCacheFlag = flag;
     mCallIndex = 0;
     mPrefixCacheMode = true;
 
@@ -1219,6 +1317,78 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
         }
     }
     return mIsPrefixFileExist;
+}
+
+void Llm::clearPrefixCacheFile() {
+    mPrefixCacheMode = false;
+    mPrefixCacheFileName.clear();
+    mPrefixCacheFlag = PrefixCacheFlagDefault;
+    mCallIndex = 0;
+    mPrefixLength = 0;
+    mIsPrefixFileExist = false;
+    clearPrefixCacheSegments();
+    mMeta->seqlen_in_disk = 0;
+    mMeta->file_name = "";
+    mMeta->file_flag = KVMeta::NoChange;
+    mMeta->key_rope_state = KVMeta::KeyRopePositionEncoded;
+    mMeta->source_position_base = 0;
+    mMeta->layer_index = 0;
+}
+
+bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments) {
+    if (segments.empty()) {
+        return false;
+    }
+    mMeta->prefix_segments.clear();
+    mMeta->segment_total_tokens = 0;
+    mContext->history_tokens.clear();
+    for (const auto& segment : segments) {
+        if (segment.cache_name.empty() || segment.token_count <= 0) {
+            mMeta->prefix_segments.clear();
+            mMeta->segment_total_tokens = 0;
+            return false;
+        }
+        if (segment.key_rope_state != "canonical_no_rope" || segment.rope_pairing != "half") {
+            mMeta->prefix_segments.clear();
+            mMeta->segment_total_tokens = 0;
+            return false;
+        }
+        KVMeta::PrefixSegment metaSegment;
+        metaSegment.cache_name = segment.cache_name;
+        metaSegment.token_count = segment.token_count;
+        metaSegment.token_ids = segment.token_ids;
+        metaSegment.key_rope_state = KVMeta::KeyRopeCanonicalNoRope;
+        metaSegment.rope_dim = segment.rope_dim;
+        metaSegment.rope_theta = segment.rope_theta;
+        metaSegment.rope_pairing = KVMeta::RopePairingHalf;
+        metaSegment.source_position_base = segment.source_position_base;
+        mMeta->prefix_segments.emplace_back(std::move(metaSegment));
+        mMeta->segment_total_tokens += segment.token_count;
+        mContext->history_tokens.insert(mContext->history_tokens.end(), segment.token_ids.begin(), segment.token_ids.end());
+    }
+    // direct_segments 不执行 prefix token 的图计算；这里提前设置上下文长度，
+    // 让 prompt prefill 生成正确的 causal mask 和 position_ids。
+    mContext->all_seq_len = mMeta->segment_total_tokens;
+    mMeta->file_name = "";
+    mMeta->seqlen_in_disk = 0;
+    mMeta->file_flag = KVMeta::PendingReadSegments;
+    mMeta->key_rope_state = KVMeta::KeyRopeCanonicalNoRope;
+    mMeta->source_position_base = 0;
+    mMeta->layer_index = 0;
+    mPrefixSegmentsMode = true;
+    return true;
+}
+
+void Llm::clearPrefixCacheSegments() {
+    mPrefixSegmentsMode = false;
+    mMeta->prefix_segments.clear();
+    mMeta->segment_total_tokens = 0;
+    if (mMeta->file_flag == KVMeta::PendingReadSegments) {
+        mMeta->file_flag = KVMeta::NoChange;
+    }
+    mMeta->key_rope_state = KVMeta::KeyRopePositionEncoded;
+    mMeta->source_position_base = 0;
+    mMeta->layer_index = 0;
 }
 
 void Llm::completePrefixWrite() {

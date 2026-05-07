@@ -37,6 +37,21 @@ using MNN::KVMeta;
 //   second = full JSON object string, e.g. {"role":"assistant","content":"","tool_calls":[...]}
 using ChatMessage = std::pair<std::string, std::string>;
 using ChatMessages = std::vector<ChatMessage>;
+enum PrefixCacheFlag {
+    PrefixCacheFlagDefault = 0,
+    // 保存 prefix cache 时将 Key 逆 RoPE 成 canonical_no_rope，供 direct_segments 重新按全局位置编码。
+    PrefixCacheFlagCanonicalNoRopeKey = 1,
+};
+struct PrefixCacheSegment {
+    std::string cache_name;
+    int token_count = 0;
+    std::vector<int> token_ids;
+    std::string key_rope_state = "position_encoded";
+    int rope_dim = 0;
+    float rope_theta = 10000.0f;
+    std::string rope_pairing = "half";
+    int source_position_base = 0;
+};
 class Tokenizer;
 class Pipeline;
 class LlmConfig;
@@ -153,6 +168,9 @@ public:
     size_t getCurrentHistory() const;
     void eraseHistory(size_t begin, size_t end);
     bool setPrefixCacheFile(const std::string& filename, int flag = 0);
+    void clearPrefixCacheFile();
+    bool setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments);
+    void clearPrefixCacheSegments();
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::string& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const ChatMessages& chat_prompts, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
@@ -193,6 +211,7 @@ public:
     virtual void generateWavform() {}
 protected:
     void setChatTemplate();
+    void configureRopeMeta();
     void initRuntime();
     void setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg);
     std::shared_ptr<LlmContext> mContext;
@@ -239,9 +258,11 @@ private:
     std::vector<int> mValidBlockSize;
     bool mPrefixCacheMode = false;
     std::string mPrefixCacheFileName;
-    int mCallIndex;
-    int mPrefixLength;
+    int mPrefixCacheFlag = PrefixCacheFlagDefault;
+    int mCallIndex = 0;
+    int mPrefixLength = 0;
     bool mIsPrefixFileExist = false;
+    bool mPrefixSegmentsMode = false;
     void completePrefixWrite();
     // Prompt cache state
     std::string mCachedPromptText;

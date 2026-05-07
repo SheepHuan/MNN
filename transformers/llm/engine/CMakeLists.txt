@@ -158,5 +158,15 @@ set_property(TARGET mls PROPERTY CXX_STANDARD 17)
 set_property(TARGET mls PROPERTY CXX_STANDARD_REQUIRED ON)
 # target_compile_options(mls PRIVATE -std=c++17)
 target_link_libraries(mls PRIVATE ${LLM_DEPS})
-target_compile_definitions(mls PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+target_compile_definitions(mls PRIVATE CPPHTTPLIB_NO_EXCEPTIONS CPPHTTPLIB_OPENSSL_SUPPORT)
+
+add_executable(kvshare_server
+        ${CMAKE_CURRENT_LIST_DIR}/app/kvshare_server.cpp
+)
+target_include_directories(kvshare_server PRIVATE ${MNN_INCLUDES} ${CMAKE_CURRENT_LIST_DIR}/src/)
+set_property(TARGET kvshare_server PROPERTY CXX_STANDARD 17)
+set_property(TARGET kvshare_server PROPERTY CXX_STANDARD_REQUIRED ON)
+target_link_libraries(kvshare_server PRIVATE ${LLM_DEPS})
+target_compile_definitions(kvshare_server PRIVATE CPPHTTPLIB_NO_EXCEPTIONS)
+install(TARGETS kvshare_server RUNTIME DESTINATION bin)
 endif()

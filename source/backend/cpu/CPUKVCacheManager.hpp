@@ -47,6 +47,11 @@ private:
     template <typename T> void moveKV(int src, int dst, int size);
     size_t keyIndex(int seq, int dim) const;
     size_t valueIndex(int seq, int dim) const;
+    size_t flashValueIndex(int seq, int dim) const;
+    size_t packedKeyIndex(int seq, int dim) const;
+    size_t packedFlashValueIndex(int seq, int dim) const;
+    void copyPrefixSegmentKV(const int8_t* srcKey, size_t srcKeySizePerHead, const int8_t* srcValue, size_t srcValueSizePerHead, int srcLen, int dstStart);
+    template <typename T> void applyPackedKeyRoPE(int start, int len, int positionBase, int ropeDim, float ropeTheta, int ropePairing, bool inverse);
     void saveKVCacheInDisk();
 
     // The key/value size must be updated on every alloc or realloc call.

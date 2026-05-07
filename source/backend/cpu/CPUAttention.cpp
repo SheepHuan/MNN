@@ -388,9 +388,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     if (!mIsKVShared) {
         if (mKVCache && mMeta != nullptr) {
             if (mMeta->previous == mMeta->remove) {
+                // 新请求或历史已全部删除：onAlloc 建立运行时 KV。
+                // 单 prefix / direct_segments 的磁盘读取也在 onAlloc 内完成。
                 mKVCacheManager->onClear();
                 mKVCacheManager->onAlloc(mMeta, seqLen);
             } else {
+                // 复用已有历史 KV：只根据 remove/reserve/add 调整现有 cache 容量和长度。
                 MNN_ASSERT(mMeta->previous == mKVCacheManager->kvLength());
                 mKVCacheManager->onRealloc(mMeta);
             }
@@ -399,7 +402,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             mKVCacheManager->onClear();
             mKVCacheManager->onAlloc(mMeta, seqLen);
         }
-        // Add the new kv to the kvcache
+        // 无论 prefix 是否来自磁盘，本次 prompt/decode 新产生的 K/V 都追加到运行时 cache 末尾。
         mKVCacheManager->onUpdateKV(key, value, (int)insertLen);
     } else {
         // Shared layer: KV cache is shared via onClone, skip KV update
@@ -1105,4 +1108,3 @@ REGISTER_CPU_OP_CREATOR_TRANSFORMER(CPUAttentionCreator, OpType_Attention);
 } // namespace MNN
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE
-
