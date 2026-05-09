@@ -167,6 +167,7 @@ bool Llm::set_config(const std::string& content) {
     mConfig->config_.merge(newConfig);
     setChatTemplate();
     configureRopeMeta();
+    mMeta->prefix_cache_dir = mConfig->prefix_cache_path();
     mAsync = mConfig->config_.value("async", true);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();
     mValidBlockSize.clear();
@@ -1262,6 +1263,7 @@ Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     mMeta.reset(new KVMeta);
     mMeta->layer_nums = mConfig->layer_nums();
     mMeta->attn_scale = mConfig->attn_scale();
+    mMeta->prefix_cache_dir = mConfig->prefix_cache_path();
     configureRopeMeta();
     mGenerateParam.reset(new GenerationParams);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();

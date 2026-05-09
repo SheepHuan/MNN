@@ -32,6 +32,9 @@ public:
     int pastKvLength() {
         return mPastLength;
     }
+    void setPastKvLength(int length) {
+        mPastLength = length;
+    }
     void addKvLength(int seq_len){
         mPastLength += seq_len;
     }
@@ -47,6 +50,16 @@ public:
     const cl::Buffer * value() {
         return mPastValue.get();
     }
+    cl::Buffer * mutableKey() {
+        return mPastKey.get();
+    }
+    cl::Buffer * mutableValue() {
+        return mPastValue.get();
+    }
+    int byte() const {
+        return mByte;
+    }
+    bool ensureCapacity(int requiredTotal, bool isExecute = true);
 
 private:
     bool mKVCache;
@@ -73,20 +86,33 @@ public:
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override;
 
-private:
-    
+protected:
+    virtual int onResizePrefixKVLength(const std::vector<Tensor *> &inputs, int seqlen) {
+        return 0;
+    }
+    virtual ErrorCode onPrepareKVCacheBeforeAppend(const std::vector<Tensor *> &inputs, bool& prepared,
+                                                   int& appendKvSeqLen) {
+        prepared = false;
+        auto key = inputs[1];
+        appendKvSeqLen = key->shape()[1];
+        return NO_ERROR;
+    }
+
     KVMeta* mMeta;
-    int getLocalSize(int size, int maxGroupSize);
-    bool mIsDecode = false;
-    void handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
+    OpenCLBackend *mOpenCLBackend;
+    std::shared_ptr<KVCacheCLManager> mKVCacheCLManager;
     int mPastKvSeqlen = 0;
     int mKvSeqlen = 0;
     int mKeyValueMaxlen = 0;
     int mDecodeTmpMaxlen = 0;
 
+private:
+    int getLocalSize(int size, int maxGroupSize);
+    bool mIsDecode = false;
+    void handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
+
 
     uint32_t mMaxWorkGroupSize;
-    OpenCLBackend *mOpenCLBackend;
     RecordUpdateInfo mRgUpdateInfo;
     RecordUpdateInfo mRgQUpdateInfo;
     RecordUpdateInfo mRgMUpdateInfo;
@@ -98,7 +124,6 @@ private:
     size_t mQkGlobal_size[2];
     size_t mQkPrefillGlobal_size[3];
     std::vector<RecordUpdateInfo*> mOpRecordUpdateInfo;
-    std::shared_ptr<KVCacheCLManager> mKVCacheCLManager;
     std::shared_ptr<Tensor> mTempQK, mTempSoftMax;
 private:
     int mAlignQ, mAlignKV, mAlignHDK, mAlignHDN;

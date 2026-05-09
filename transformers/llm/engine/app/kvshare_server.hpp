@@ -96,10 +96,13 @@ private:
     void resetSessionLocked();
     bool buildDocumentCacheLocked(const json& requestJson, json& responseJson, std::string& error);
     bool composePrefixCacheLocked(const json& requestJson, json& responseJson, std::string& error);
-    bool resolvePrefixSegmentsLocked(const json& segmentsJson, bool requireCanonicalNoRopeKey,
+    bool resolvePrefixSegmentsLocked(const json& segmentsJson, bool requireCanonicalNoRopeKey, bool requirePrefixCacheFiles,
                                      std::vector<int>& mergedTokens,
                                      std::vector<MNN::Transformer::PrefixCacheSegment>& prefixSegments,
                                      json& resolvedSegments, std::string& error);
+    bool runMergedTokenPrefixLocked(const std::vector<int>& prefixTokens, const MNN::Transformer::ChatMessages& messages,
+                                    std::ostream* output, const char* endWith, int maxTokens,
+                                    int& promptTokenCount, std::string& error);
     bool applyKvPrefixLocked(const json& kvPrefix, const MNN::Transformer::ChatMessages& messages, std::ostream* output, const char* endWith, int maxTokens, json& prefixInfo, std::string& error);
 
 private:

@@ -39,7 +39,7 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
     // latest length larger than maxLen
     if(kvSeqlen > mMaxLength){
         int copylen = mPastLength - meta->remove + meta->computeReverseSize();
-        bool needCopy = copylen > 0;
+        bool needCopy = copylen > 0 && mPastKey != nullptr && mPastValue != nullptr && mMaxLength > 0;
 
         size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
         size_t oldMaxlen = ROUND_UP(mMaxLength, 4);
@@ -132,6 +132,67 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
     return true;
 }
 
+bool KVCacheCLManager::ensureCapacity(int requiredTotal, bool isExecute) {
+    (void)isExecute;
+    if (!mKVCache) {
+        return false;
+    }
+    if (mOpenCLBackend->getPrecision() != BackendConfig::Precision_High) {
+        mByte = 2;
+    }
+    if (requiredTotal <= mMaxLength) {
+        return true;
+    }
+
+    cl_int res = CL_SUCCESS;
+    int copylen = mPastLength;
+    bool needCopy = copylen > 0 && mPastKey != nullptr && mPastValue != nullptr;
+    size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
+    size_t oldMaxlen = ROUND_UP(mMaxLength, 4);
+    mMaxLength = requiredTotal + mExpandChunk;
+    size_t newMaxlen = ROUND_UP(mMaxLength, 4);
+    size_t bufferSize = UP_DIV(mMaxLength, 4) * mKvNumHead * mHeadDim * 4 * mByte;
+    auto newKey = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
+    auto newValue = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
+
+    if (needCopy) {
+        size_t oldMaxlenSize = oldMaxlen * mByte;
+        size_t newMaxlenSize = newMaxlen * mByte;
+        char* newKeyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newKey, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
+        char* keyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
+        if (newKeyPtr != nullptr && keyPtr != nullptr && res == CL_SUCCESS) {
+            for (int i = 0; i < mKvNumHead * mHeadDim; ++i) {
+                ::memcpy(newKeyPtr + i * newMaxlenSize, keyPtr + i * oldMaxlenSize, copylen * mByte);
+            }
+        } else {
+            MNN_ERROR("Map error key_ptr == nullptr in KVCacheCLManager::ensureCapacity\n");
+            MNN_ASSERT(false);
+        }
+        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newKey, newKeyPtr);
+        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+
+        char* newValuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newValue, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
+        char* valuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
+        if (newValuePtr != nullptr && valuePtr != nullptr && res == CL_SUCCESS) {
+            for (int i = 0; i < mKvNumHead; ++i) {
+                for (int j = 0; j < copylen; ++j) {
+                    ::memcpy(newValuePtr + (i * newMaxlen + j) * mHeadDim * mByte,
+                             valuePtr + (i * oldMaxlen + j) * mHeadDim * mByte, mHeadDim * mByte);
+                }
+            }
+        } else {
+            MNN_ERROR("Map error value_ptr == nullptr in KVCacheCLManager::ensureCapacity\n");
+            MNN_ASSERT(false);
+        }
+        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newValue, newValuePtr);
+        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+    }
+
+    mPastKey.reset(newKey);
+    mPastValue.reset(newValue);
+    return true;
+}
+
 void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
     if(mHasMask) {
         auto mask = inputs[3];
@@ -157,6 +218,11 @@ void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, c
     }
     mKVCacheCLManager->setArgs(numHead, kvNumHead, headDim);
     mKVCacheCLManager->allocKVCache(mMeta, seqlen);
+    int prefixKvLength = onResizePrefixKVLength(inputs, seqlen);
+    if (prefixKvLength > 0) {
+        mKVCacheCLManager->ensureCapacity(prefixKvLength + seqlen, false);
+        mKVCacheCLManager->setPastKvLength(prefixKvLength);
+    }
     mKeyValueMaxlen = ROUND_UP(mKVCacheCLManager->maxLength(), 4);
     mDecodeTmpMaxlen = mKeyValueMaxlen;
     mPastKvSeqlen = mKVCacheCLManager->pastKvLength();
@@ -1679,6 +1745,14 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
         auto shape = inputs[0]->shape();
         int seqlen = shape[1];
         mKVCacheCLManager->reallocKVCache(mMeta, seqlen);
+        bool cachePreparedBySubclass = false;
+        int appendKvSeqLen = seqlen;
+        auto prepareErr = onPrepareKVCacheBeforeAppend(inputs, cachePreparedBySubclass, appendKvSeqLen);
+        (void)cachePreparedBySubclass;
+        (void)appendKvSeqLen;
+        if (prepareErr != NO_ERROR) {
+            return prepareErr;
+        }
     }
     UpdateArgs(inputs, outputs);
 #ifdef ENABLE_OPENCL_TIME_PROFILER

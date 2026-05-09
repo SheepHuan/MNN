@@ -572,7 +572,8 @@ Session* Session::clone(RuntimeInfo&& runtime, std::shared_ptr<Schedule::Schedul
         // First pass: collect source Attention executions by layer_index
         for (int i = 0; i < oplists.size(); ++i) {
             for (auto& iter : oplists[i].executionCache) {
-                if (iter.first->type() == OpType_Attention && iter.first->main_type() == OpParameter_AttentionParam) {
+                if ((iter.first->type() == OpType_Attention || iter.first->type() == OpType_PrefixAttention) &&
+                    iter.first->main_type() == OpParameter_AttentionParam) {
                     auto param = iter.first->main_as_AttentionParam();
                     int layerIndex = param ? param->layer_index() : -1;
                     if (layerIndex >= 0 && param->kv_shared_layer_index() < 0) {
@@ -585,7 +586,7 @@ Session* Session::clone(RuntimeInfo&& runtime, std::shared_ptr<Schedule::Schedul
         if (!kvAttentionRegistry.empty()) {
             for (int i = 0; i < oplists.size(); ++i) {
                 for (auto& iter : oplists[i].executionCache) {
-                    if (iter.first->type() == OpType_Attention &&
+                    if ((iter.first->type() == OpType_Attention || iter.first->type() == OpType_PrefixAttention) &&
                         iter.first->main_type() == OpParameter_AttentionParam) {
                         auto param = iter.first->main_as_AttentionParam();
                         int kvSharedIdx = param ? param->kv_shared_layer_index() : -1;

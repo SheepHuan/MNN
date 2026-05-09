@@ -1248,6 +1248,7 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
     param_cpu.head_dim = mHeadDim;
     param_cpu.scale = mScale;
     param_cpu.current_kv_seq_len_new = mNewKvSeqLen;
+    int append_kv_seq_len = mNewKvSeqLen;
 
     const void* effective_key_cache_ptr;
     const void* effective_value_cache_ptr;
@@ -1266,34 +1267,51 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             param_cpu.key_seq_len = current_total_kv_len_for_qk;
             param_cpu.max_kv_len = mCache->mMaxLength;
         } else {
-            int required_total_kv_len = (mMeta->previous - mMeta->remove + mMeta->computeReverseSize()) + mMeta->add;
-            ErrorCode err = reallocKVCache_gpu(required_total_kv_len, mMeta, stream);
-            if (err != MNN::NO_ERROR) return err;
+            bool cachePreparedBySubclass = false;
+            ErrorCode prepareErr = onPrepareKVCacheBeforeAppend(inputs, stream, cachePreparedBySubclass, append_kv_seq_len);
+            if (prepareErr != MNN::NO_ERROR) {
+                return prepareErr;
+            }
+            if (append_kv_seq_len <= 0) {
+                append_kv_seq_len = mNewKvSeqLen;
+            }
+            if (cachePreparedBySubclass) {
+                param_cpu.past_kv_len = mCache->mPastLength;
+                param_cpu.key_seq_len = mCache->mPastLength + append_kv_seq_len;
+                param_cpu.max_kv_len = mCache->mMaxLength;
+                param_cpu.current_kv_seq_len_new = append_kv_seq_len;
+                allocated_kv_len_for_value_stride = mCache->mMaxLength;
+                current_total_kv_len_for_qk = param_cpu.key_seq_len;
+            } else {
+                int required_total_kv_len = (mMeta->previous - mMeta->remove + mMeta->computeReverseSize()) + mMeta->add;
+                ErrorCode err = reallocKVCache_gpu(required_total_kv_len, mMeta, stream);
+                if (err != MNN::NO_ERROR) return err;
 
-            param_cpu.past_kv_len = mCache->mPastLength;
-            param_cpu.key_seq_len = mCache->mPastLength + mNewKvSeqLen;
-            param_cpu.max_kv_len = mCache->mMaxLength;
-            param_cpu.current_kv_seq_len_new = mNewKvSeqLen;
-            allocated_kv_len_for_value_stride = mCache->mMaxLength;
+                param_cpu.past_kv_len = mCache->mPastLength;
+                param_cpu.key_seq_len = mCache->mPastLength + append_kv_seq_len;
+                param_cpu.max_kv_len = mCache->mMaxLength;
+                param_cpu.current_kv_seq_len_new = append_kv_seq_len;
+                allocated_kv_len_for_value_stride = mCache->mMaxLength;
 
-            current_total_kv_len_for_qk = param_cpu.key_seq_len;
+                current_total_kv_len_for_qk = param_cpu.key_seq_len;
+            }
         }
 
         // Copy new K, V to cache
         dim3 copy_blockDim(32, 8, 1);
         dim3 copy_gridDim(UP_DIV(mHeadDim, copy_blockDim.x),
-                            UP_DIV(mNewKvSeqLen, copy_blockDim.y),
+                            UP_DIV(append_kv_seq_len, copy_blockDim.y),
                             UP_DIV(mBatch * mKvNumHead, copy_blockDim.z));
         if (mPrecision == 4) {
              copy_kv_to_cache_kernel<float><<<copy_gridDim, copy_blockDim, 0, stream>>>(
                 getTensorDevicePtr<float>(key_input_tensor), getTensorDevicePtr<float>(value_input_tensor),
                 getTensorDevicePtr<float>(mCache->mPastKey.get()), getTensorDevicePtr<float>(mCache->mPastValue.get()),
-                mBatch, mNewKvSeqLen, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mMaxLength);
+                mBatch, append_kv_seq_len, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mMaxLength);
         } else if (mPrecision == 2) {
              copy_kv_to_cache_kernel<__half><<<copy_gridDim, copy_blockDim, 0, stream>>>(
                 getTensorDevicePtr<__half>(key_input_tensor), getTensorDevicePtr<__half>(value_input_tensor),
                 getTensorDevicePtr<__half>(mCache->mPastKey.get()), getTensorDevicePtr<__half>(mCache->mPastValue.get()),
-                mBatch, mNewKvSeqLen, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mMaxLength);
+                mBatch, append_kv_seq_len, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mMaxLength);
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
 
@@ -1442,7 +1460,7 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
         }
         checkKernelErrors;
 
-        mCache->mPastLength += mNewKvSeqLen;
+        mCache->mPastLength += append_kv_seq_len;
         return MNN::NO_ERROR;
     }
 
@@ -1483,7 +1501,7 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
 
-        mCache->mPastLength += mNewKvSeqLen;
+        mCache->mPastLength += append_kv_seq_len;
         return MNN::NO_ERROR;
     }
 
@@ -1577,7 +1595,7 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
     }
 
     if (mIsKVCacheEnabled) {
-        mCache->mPastLength += mNewKvSeqLen;
+        mCache->mPastLength += append_kv_seq_len;
     }
 
     return MNN::NO_ERROR;

@@ -566,7 +566,8 @@ static ErrorCode _createExecutions(Schedule::PipelineInfo& mInfo, const std::str
             std::shared_ptr<BufferStorage> tmpStorage;
             if (nullptr == iter.execution) {
                 // KV Cache sharing: clone from source Attention's execution instead of creating new
-                if (iter.op->type() == OpType_Attention && iter.op->main_type() == OpParameter_AttentionParam) {
+                if ((iter.op->type() == OpType_Attention || iter.op->type() == OpType_PrefixAttention) &&
+                    iter.op->main_type() == OpParameter_AttentionParam) {
                     auto param = iter.op->main_as_AttentionParam();
                     int kvSharedIdx = param ? param->kv_shared_layer_index() : -1;
                     if (kvSharedIdx >= 0) {
@@ -604,7 +605,8 @@ static ErrorCode _createExecutions(Schedule::PipelineInfo& mInfo, const std::str
                 return OUT_OF_MEMORY;
             }
             // Register Attention execution for KV Cache sharing
-            if (iter.op->type() == OpType_Attention && iter.op->main_type() == OpParameter_AttentionParam) {
+            if ((iter.op->type() == OpType_Attention || iter.op->type() == OpType_PrefixAttention) &&
+                iter.op->main_type() == OpParameter_AttentionParam) {
                 auto param = iter.op->main_as_AttentionParam();
                 int layerIndex = param ? param->layer_index() : -1;
                 if (layerIndex >= 0) {

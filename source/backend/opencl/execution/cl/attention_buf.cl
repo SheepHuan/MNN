@@ -50,6 +50,112 @@
     }
 
 
+static int prefix_round_up_int(const int value, const int unit) {
+    return ((value + unit - 1) / unit) * unit;
+}
+
+static ulong prefix_packed_key_index(const int seq, const int dim, const int headDim, const int hP, const int lP) {
+    return (ulong)(seq / hP) * prefix_round_up_int(headDim, lP) * hP +
+           (ulong)(dim / lP) * hP * lP +
+           (ulong)(seq % hP) * lP +
+           (ulong)(dim % lP);
+}
+
+static ulong prefix_packed_flash_value_index(const int seq, const int dim, const int headDim, const int hP, const int lP) {
+    const int blockKv = 64;
+    const int weightStride2 = lP * hP;
+    const int weightStride1 = ((blockKv + lP - 1) / lP) * weightStride2;
+    const int weightStride0 = weightStride1 * ((headDim + hP - 1) / hP);
+    const int idxInner = (seq / blockKv) * weightStride0 +
+                         ((seq % blockKv) / lP) * weightStride2 +
+                         (seq % blockKv) % lP;
+    const int idxBase = (dim / hP) * weightStride1 + (dim % hP) * lP;
+    return (ulong)(idxBase + idxInner);
+}
+
+static float prefix_half_to_float(const ushort h) {
+    const uint sign = ((uint)h & 0x8000u) << 16;
+    uint exp = ((uint)h >> 10) & 0x1fu;
+    uint mant = (uint)h & 0x03ffu;
+    uint bits;
+    if (exp == 0u) {
+        if (mant == 0u) {
+            bits = sign;
+        } else {
+            exp = 1u;
+            while ((mant & 0x0400u) == 0u) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x03ffu;
+            bits = sign | ((exp + 112u) << 23) | (mant << 13);
+        }
+    } else if (exp == 31u) {
+        bits = sign | 0x7f800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (mant << 13);
+    }
+    return as_float(bits);
+}
+
+static float prefix_read_disk_scalar(__global const uchar* base, const ulong index, const int bytes) {
+    if (bytes == 2) {
+        const ulong offset = index * 2ul;
+        const ushort h = (ushort)base[offset] | ((ushort)base[offset + 1] << 8);
+        return prefix_half_to_float(h);
+    }
+    return *((__global const float*)(base + index * 4ul));
+}
+
+__kernel void prefix_copy_rope(GLOBAL_SIZE_3_DIMS
+                              __global const uchar* key_file,
+                              __global const uchar* value_file,
+                              __global FLOAT* past_k,
+                              __global FLOAT* past_v,
+                              __private const int srcLen,
+                              __private const int dstStart,
+                              __private const int maxLen,
+                              __private const int headDim,
+                              __private const int hP,
+                              __private const int lP,
+                              __private const int diskBytes,
+                              __private const int keySizePerHead,
+                              __private const int valueSizePerHead,
+                              __private const int ropeDim,
+                              __private const float ropeTheta
+) {
+    const int dim = get_global_id(0);
+    const int token = get_global_id(1);
+    const int head = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(dim, token, head);
+
+    const int dstSeq = dstStart + token;
+    __global const uchar* keyHead = key_file + (ulong)head * (ulong)keySizePerHead;
+    __global const uchar* valueHead = value_file + (ulong)head * (ulong)valueSizePerHead;
+    const ulong keyIndex = prefix_packed_key_index(token, dim, headDim, hP, lP);
+    const ulong valueIndex = prefix_packed_flash_value_index(token, dim, headDim, hP, lP);
+    float keyValue = prefix_read_disk_scalar(keyHead, keyIndex, diskBytes);
+    const float value = prefix_read_disk_scalar(valueHead, valueIndex, diskBytes);
+
+    if (dim < ropeDim) {
+        const int halfDim = ropeDim / 2;
+        const int pairDim = dim < halfDim ? dim + halfDim : dim - halfDim;
+        const int freqDim = dim < halfDim ? dim : dim - halfDim;
+        const ulong pairIndex = prefix_packed_key_index(token, pairDim, headDim, hP, lP);
+        const float pairValue = prefix_read_disk_scalar(keyHead, pairIndex, diskBytes);
+        const float left = dim < halfDim ? keyValue : pairValue;
+        const float right = dim < halfDim ? pairValue : keyValue;
+        const float invFreq = 1.0f / pow(ropeTheta, (float)(2 * freqDim) / (float)ropeDim);
+        const float angle = (float)dstSeq * invFreq;
+        const float cosValue = cos(angle);
+        const float sinValue = sin(angle);
+        keyValue = dim < halfDim ? left * cosValue - right * sinValue : right * cosValue + left * sinValue;
+    }
+
+    past_k[((ulong)head * (ulong)headDim + (ulong)dim) * (ulong)maxLen + (ulong)dstSeq] = (FLOAT)keyValue;
+    past_v[((ulong)head * (ulong)maxLen + (ulong)dstSeq) * (ulong)headDim + (ulong)dim] = (FLOAT)value;
+}
+
 
 __kernel void rearrange_qkv(GLOBAL_SIZE_3_DIMS
                               __global const FLOAT *input_q, //[batch, seqLenQ/4, headNum, headDim, seqLenQ_4]
@@ -865,4 +971,3 @@ __kernel void matmul_qkv_decode_b4(GLOBAL_SIZE_2_DIMS
     const int output_offset = y * head_dim + x4;
     vstore4(CONVERT_FLOAT4(out0), 0, output + output_offset);
 }
-

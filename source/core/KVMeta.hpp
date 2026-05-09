@@ -49,6 +49,9 @@ struct KVMeta {
     size_t add = 0;
     // file_name/file_flag 用于单 prefix cache 的磁盘读写状态。
     std::string file_name = "";
+    // Prefix cache directory is runtime metadata for backends that materialize
+    // direct_segments themselves, e.g. CUDA PrefixAttention.
+    std::string prefix_cache_dir = ".cache/prefixcache";
     int file_flag = NoChange;
     // 磁盘 prefix cache 的真实 token 长度，不等于 .k/.v 文件按 pack 对齐后的容量。
     int seqlen_in_disk = 0;

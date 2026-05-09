@@ -15,6 +15,7 @@
 #include "backend/cpu/CPUBackend.hpp"
 #include "backend/cpu/compute/CommonOptFunction.h"
 #include "backend/cpu/compute/TurboQuant.hpp"
+#include "MNN/ErrorCode.hpp"
 
 // KV cache quantization mode enum
 enum class KVQuantMode : int { None = 0, Int8 = 1, TQ3 = 2, TQ4 = 3 };
@@ -139,6 +140,7 @@ public:
     virtual void onResize(int kv_num_head, int head_dim);
     virtual void onClear();
     virtual void onAlloc(KVMeta* meta, int seq_len);
+    ErrorCode onAllocPrefixSegments(KVMeta* meta, int seq_len, int layer_index);
     virtual void onRealloc(KVMeta* meta);
 
 };

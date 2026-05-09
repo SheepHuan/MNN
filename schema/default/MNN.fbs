@@ -208,6 +208,7 @@ enum OpType : int {
     If    = 601,
     LayerNorm = 603,
     GridSample = 604,
+    PrefixAttention = 605,
 }
 
 table Plugin {

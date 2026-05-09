@@ -348,12 +348,40 @@ ErrorCode CPUAttention::onResize(const std::vector<Tensor*>& inputs, const std::
     return NO_ERROR;
 }
 
+ErrorCode CPUAttention::onPrepareKVCache(const std::vector<Tensor*>& inputs, int seqLen, int& insertLen) {
+    auto key = inputs[1];
+    auto value = inputs[2];
+    insertLen = seqLen;
+    if (!mIsKVShared) {
+        if (mKVCache && mMeta != nullptr) {
+            if (mMeta->previous == mMeta->remove) {
+                if (mMeta->file_flag == KVMeta::PendingReadSegments && !mMeta->prefix_segments.empty()) {
+                    MNN_ERROR("[Error]: direct segment prefix cache requires PrefixAttention on CPU\n");
+                    return NOT_SUPPORT;
+                }
+                // New request or fully removed history: allocate a fresh runtime KV cache.
+                mKVCacheManager->onClear();
+                mKVCacheManager->onAlloc(mMeta, seqLen);
+            } else {
+                MNN_ASSERT(mMeta->previous == mKVCacheManager->kvLength());
+                mKVCacheManager->onRealloc(mMeta);
+            }
+            insertLen = (int)mMeta->add;
+        } else {
+            mKVCacheManager->onClear();
+            mKVCacheManager->onAlloc(mMeta, seqLen);
+        }
+        mKVCacheManager->onUpdateKV(key, value, (int)insertLen);
+    } else {
+        insertLen = mMeta ? (int)mMeta->add : seqLen;
+    }
+    return NO_ERROR;
+}
+
 ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
     auto gcore  = static_cast<CPUBackend *>(backend())->functions();
     auto core   = static_cast<CPUBackend*>(backend())->int8Functions();
     auto query = inputs[0];
-    auto key   = inputs[1];
-    auto value = inputs[2];
     int seqLen = query->length(1);
     const Tensor* mask = nullptr;
     if (inputs.size() > 3) {
@@ -385,28 +413,9 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     }
     int insertLen = seqLen;
 
-    if (!mIsKVShared) {
-        if (mKVCache && mMeta != nullptr) {
-            if (mMeta->previous == mMeta->remove) {
-                // 新请求或历史已全部删除：onAlloc 建立运行时 KV。
-                // 单 prefix / direct_segments 的磁盘读取也在 onAlloc 内完成。
-                mKVCacheManager->onClear();
-                mKVCacheManager->onAlloc(mMeta, seqLen);
-            } else {
-                // 复用已有历史 KV：只根据 remove/reserve/add 调整现有 cache 容量和长度。
-                MNN_ASSERT(mMeta->previous == mKVCacheManager->kvLength());
-                mKVCacheManager->onRealloc(mMeta);
-            }
-            insertLen = (int)mMeta->add;
-        } else {
-            mKVCacheManager->onClear();
-            mKVCacheManager->onAlloc(mMeta, seqLen);
-        }
-        // 无论 prefix 是否来自磁盘，本次 prompt/decode 新产生的 K/V 都追加到运行时 cache 末尾。
-        mKVCacheManager->onUpdateKV(key, value, (int)insertLen);
-    } else {
-        // Shared layer: KV cache is shared via onClone, skip KV update
-        insertLen = (int)mMeta->add;
+    auto prepareCode = onPrepareKVCache(inputs, seqLen, insertLen);
+    if (prepareCode != NO_ERROR) {
+        return prepareCode;
     }
 
     if (mUseFlashAttention) {
@@ -1055,7 +1064,7 @@ bool CPUAttention::onClone(Backend* bn, const Op* op, Execution** dst) {
     if (nullptr == dst) {
         return true;
     }
-    auto tmp = new CPUAttention(bn, mKVCache);
+    auto tmp = onCreateClone(bn);
     // Share KV cache when cloning within the same session (same meta pointer)
     if (bn->getMetaPtr() == mMeta) {
         tmp->mKVCacheManager = mKVCacheManager;
@@ -1067,6 +1076,10 @@ bool CPUAttention::onClone(Backend* bn, const Op* op, Execution** dst) {
     }
     *dst = tmp;
     return true;
+}
+
+CPUAttention* CPUAttention::onCreateClone(Backend* bn) const {
+    return new CPUAttention(bn, mKVCache);
 }
 
 CPUAttention::CPUAttention(Backend* backend, bool kv_cache) : Execution(backend), mKVCache(kv_cache) {

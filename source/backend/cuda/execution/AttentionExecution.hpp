@@ -43,7 +43,14 @@ public:
     virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
 
-private:
+protected:
+    virtual ErrorCode onPrepareKVCacheBeforeAppend(const std::vector<Tensor*>& inputs, cudaStream_t stream,
+                                                   bool& prepared, int& appendKvSeqLen) {
+        prepared = false;
+        appendKvSeqLen = mNewKvSeqLen;
+        return MNN::NO_ERROR;
+    }
+
     ErrorCode init_cache_tensors(); // 如果需要，初始化 mPastKey/mPastValue为空Tensor
     ErrorCode reallocKVCache_gpu(int required_total_kv_len, int batch_size, int kv_num_head, int head_dim, cudaStream_t stream);
     ErrorCode reallocKVCache_gpu(int required_total_kv_len, const KVMeta* meta, cudaStream_t stream);
