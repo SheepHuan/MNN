@@ -321,4 +321,3 @@ void MetalKVCacheManager::onClear() {
 } // namespace MNN
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE
-

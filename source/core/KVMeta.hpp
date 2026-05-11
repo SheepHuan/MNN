@@ -9,6 +9,7 @@
 #ifndef KVMeta_hpp
 #define KVMeta_hpp
 
+#include <cstdint>
 #include <vector>
 #include <string>
 
@@ -39,6 +40,12 @@ struct KVMeta {
         float rope_theta = 10000.0f;
         int rope_pairing = RopePairingHalf;
         int source_position_base = 0;
+        // Backend-native document cache format. GPU direct_segments must not
+        // silently parse another backend's packed KV layout.
+        std::string backend;
+        std::string layout;
+        std::string dtype;
+        int page_size = 0;
     };
     size_t block = 4096;
     // previous/remove/add 描述运行时 KV 历史：已有长度、待删除长度、本次新增 token 数。
@@ -51,7 +58,7 @@ struct KVMeta {
     std::string file_name = "";
     // Prefix cache directory is runtime metadata for backends that materialize
     // direct_segments themselves, e.g. CUDA PrefixAttention.
-    std::string prefix_cache_dir = ".cache/prefixcache";
+    std::string prefix_cache_dir = ".cache/kvshare/prefixcache";
     int file_flag = NoChange;
     // 磁盘 prefix cache 的真实 token 长度，不等于 .k/.v 文件按 pack 对齐后的容量。
     int seqlen_in_disk = 0;
@@ -61,6 +68,13 @@ struct KVMeta {
     // 多文档直读 prefix：按 segment 顺序读取真实 token_count 并拼成连续运行时 KV。
     std::vector<PrefixSegment> prefix_segments;
     int segment_total_tokens = 0;
+    // direct_segments request-controlled prefetch:
+    // false keeps the path where each PrefixAttention layer loads KV just
+    // before its attention compute; true submits host file prefetch for all
+    // backends. CUDA and OpenCL additionally enqueue layer KV uploads on a
+    // backend copy stream/queue and wait by event per layer when available.
+    bool prefix_device_prefetch = false;
+    uint64_t prefix_request_id = 0;
     // RoPE 元信息由 Llm 从模型 config 注入，CPUKVCacheManager 只按这些参数处理 packed key。
     int key_rope_state = KeyRopePositionEncoded;
     int rope_dim = 0;

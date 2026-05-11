@@ -1,10 +1,13 @@
 #include "kvshare_server.hpp"
 
 #include <MNN/AutoTime.hpp>
+#include "core/PrefixCachePath.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -68,20 +71,37 @@ std::string compositeCacheName(const json& segments) {
     return name;
 }
 
-std::filesystem::path metaDir(const std::string& cacheDir) {
-    return std::filesystem::path(cacheDir) / "meta";
+constexpr const char* kDocumentTokenizerPrefixPolicy = "strip-empty-encode-prefix-v1";
+
+int stripTokenizerPrefixTokens(std::vector<int>& tokens, const std::vector<int>& prefixTokens) {
+    if (tokens.empty() || prefixTokens.empty() || tokens.size() <= prefixTokens.size()) {
+        return 0;
+    }
+    if (!std::equal(prefixTokens.begin(), prefixTokens.end(), tokens.begin())) {
+        return 0;
+    }
+    tokens.erase(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(prefixTokens.size()));
+    return static_cast<int>(prefixTokens.size());
 }
 
-std::filesystem::path metaPathForCache(const std::string& cacheDir, const std::string& cacheName) {
-    return metaDir(cacheDir) / (cacheName + ".json");
+std::filesystem::path cacheObjectDir(const std::string& cacheDir, const std::string& backend,
+                                     const std::string& cacheName) {
+    return std::filesystem::path(MNN::prefixCacheObjectDir(cacheDir, backend, cacheName));
 }
 
-std::filesystem::path tokensPathForCache(const std::string& cacheDir, const std::string& cacheName) {
-    return metaDir(cacheDir) / (cacheName + ".tokens.json");
+std::filesystem::path metaPathForCache(const std::string& cacheDir, const std::string& backend,
+                                       const std::string& cacheName) {
+    return std::filesystem::path(MNN::prefixCacheMetaPath(cacheDir, backend, cacheName));
 }
 
-std::filesystem::path cacheBasePath(const std::string& cacheDir, const std::string& cacheName, int layer) {
-    return std::filesystem::path(cacheDir) / (cacheName + "_" + std::to_string(layer));
+std::filesystem::path tokensPathForCache(const std::string& cacheDir, const std::string& backend,
+                                         const std::string& cacheName) {
+    return std::filesystem::path(MNN::prefixCacheTokensPath(cacheDir, backend, cacheName));
+}
+
+std::filesystem::path cacheBasePath(const std::string& cacheDir, const std::string& backend,
+                                    const std::string& cacheName, int layer) {
+    return std::filesystem::path(MNN::prefixCacheLayerBase(cacheDir, backend, cacheName, layer));
 }
 
 bool writeTextFile(const std::filesystem::path& path, const std::string& content, std::string& error) {
@@ -138,7 +158,7 @@ int intFromJson(const json& object, const std::string& key, int defaultValue) {
     return defaultValue;
 }
 
-json ropeLayoutFromConfig(Llm* llm, std::string& error) {
+json ropeLayoutFromConfig(Llm* llm, const std::string& backend, std::string& error) {
     json config = json::object();
     if (llm != nullptr) {
         config = json::parse(llm->dump_config(), nullptr, false);
@@ -156,11 +176,25 @@ json ropeLayoutFromConfig(Llm* llm, std::string& error) {
     }
 
     int headDim = intFromJson(config, "head_dim", 0);
+    int kvHeads = intFromJson(config, "kv_heads", 0);
     if (headDim <= 0 && config.contains("key_value_shape") && config["key_value_shape"].is_array() &&
         !config["key_value_shape"].empty()) {
         const auto& shape = config["key_value_shape"];
         if (shape.back().is_number_integer()) {
             headDim = shape.back().get<int>();
+        }
+        if (shape.size() >= 2 && shape[shape.size() - 2].is_number_integer()) {
+            kvHeads = shape[shape.size() - 2].get<int>();
+        }
+    }
+    if (headDim <= 0) {
+        double attnScale = numberFromJson(config, "attn_scale", 0.0);
+        if (attnScale > 0.0) {
+            double inferred = 1.0 / (attnScale * attnScale);
+            int rounded = static_cast<int>(std::lround(inferred));
+            if (rounded > 0 && std::abs(inferred - static_cast<double>(rounded)) < 1e-3) {
+                headDim = rounded;
+            }
         }
     }
     int ropeDim = intFromJson(config, "rotary_dim", headDim);
@@ -191,55 +225,105 @@ json ropeLayoutFromConfig(Llm* llm, std::string& error) {
         }
     }
 
-    return {
-        {"format", "mnn-cpu-flash-prefix-kv-v1"},
+    std::string format = "mnn-cpu-flash-prefix-kv-v1";
+    std::string layout = "cpu-flash-packed-canonical-no-rope-v1";
+    int pageSize = 0;
+    if (backend == "cuda") {
+        format = "mnn-cuda-paged-prefix-kv-v1";
+        layout = "cuda-paged-canonical-no-rope-v1";
+        pageSize = 64;
+    } else if (backend == "opencl") {
+        format = "mnn-opencl-prefix-kv-v1";
+        layout = "opencl-buffer-canonical-no-rope-v1";
+    }
+
+    json result = {
+        {"format", format},
+        {"format_version", "v1"},
+        {"backend", backend},
+        {"layout", layout},
         {"key_rope_state", "canonical_no_rope"},
+        {"rope_state", "canonical_no_rope"},
         {"rope_pairing", "half"},
+        {"head_dim", headDim},
         {"rope_dim", ropeDim},
         {"rope_theta", ropeTheta},
         {"source_position_base", 0},
+        {"dtype", "runtime"},
         {"valid_token_count_field", "token_count"},
         {"note", "Key is saved without position RoPE; direct_segments applies RoPE again with concatenated global positions."}
     };
+    if (pageSize > 0) {
+        result["page_size"] = pageSize;
+    }
+    if (kvHeads > 0) {
+        result["kv_heads"] = kvHeads;
+    }
+    return result;
 }
 
-json kvFilesForCache(const std::string& cacheDir, const std::string& cacheName, int layers) {
+bool kvLayoutMatchesBackend(const json& kvLayout, const json& segmentMeta, const std::string& backend) {
+    if (!kvLayout.is_object()) {
+        return false;
+    }
+    auto layoutBackend = kvLayout.value("backend", segmentMeta.value("backend", std::string("")));
+    auto format = kvLayout.value("format", std::string(""));
+    auto layout = kvLayout.value("layout", std::string(""));
+    if (backend == "cpu") {
+        return (layoutBackend.empty() || layoutBackend == "cpu") &&
+               format == "mnn-cpu-flash-prefix-kv-v1";
+    }
+    if (backend == "cuda") {
+        return layoutBackend == "cuda" &&
+               format == "mnn-cuda-paged-prefix-kv-v1" &&
+               layout == "cuda-paged-canonical-no-rope-v1" &&
+               kvLayout.value("page_size", 0) == 64;
+    }
+    if (backend == "opencl") {
+        return layoutBackend == "opencl" &&
+               format == "mnn-opencl-prefix-kv-v1" &&
+               layout == "opencl-buffer-canonical-no-rope-v1";
+    }
+    return false;
+}
+
+json kvFilesForCache(const std::string& cacheDir, const std::string& backend,
+                     const std::string& cacheName, int layers) {
     json files = json::array();
     for (int i = 0; i < layers; ++i) {
-        auto base = cacheBasePath(cacheDir, cacheName, i);
+        auto base = cacheBasePath(cacheDir, backend, cacheName, i);
         files.push_back({
             {"layer", i},
             {"key_path", absolutePath(base.string() + ".k")},
-            {"value_path", absolutePath(base.string() + ".v")},
-            {"key_sync_path", absolutePath(base.string() + "_sync.k")},
-            {"value_sync_path", absolutePath(base.string() + "_sync.v")}
+            {"value_path", absolutePath(base.string() + ".v")}
         });
     }
     return files;
 }
 
-bool prefixCacheReady(const std::string& cacheDir, const std::string& cacheName, int layers) {
+bool prefixCacheReady(const std::string& cacheDir, const std::string& backend,
+                      const std::string& cacheName, int layers) {
     for (int i = 0; i < layers; ++i) {
-        auto base = cacheBasePath(cacheDir, cacheName, i);
-        if (!std::filesystem::exists(base.string() + "_sync.k") ||
-            !std::filesystem::exists(base.string() + "_sync.v")) {
+        auto base = cacheBasePath(cacheDir, backend, cacheName, i);
+        if (!std::filesystem::exists(base.string() + ".k") ||
+            !std::filesystem::exists(base.string() + ".v")) {
             return false;
         }
     }
     return true;
 }
 
-void removePrefixCacheFiles(const std::string& cacheDir, const std::string& cacheName, int layers) {
+void removePrefixCacheFiles(const std::string& cacheDir, const std::string& backend,
+                            const std::string& cacheName, int layers) {
     std::error_code ec;
     for (int i = 0; i < layers; ++i) {
-        auto base = cacheBasePath(cacheDir, cacheName, i);
+        auto base = cacheBasePath(cacheDir, backend, cacheName, i);
         std::filesystem::remove(base.string() + ".k", ec);
         std::filesystem::remove(base.string() + ".v", ec);
-        std::filesystem::remove(base.string() + "_sync.k", ec);
-        std::filesystem::remove(base.string() + "_sync.v", ec);
     }
-    std::filesystem::remove(metaPathForCache(cacheDir, cacheName), ec);
-    std::filesystem::remove(tokensPathForCache(cacheDir, cacheName), ec);
+    std::filesystem::remove(metaPathForCache(cacheDir, backend, cacheName), ec);
+    std::filesystem::remove(tokensPathForCache(cacheDir, backend, cacheName), ec);
+    std::filesystem::remove_all(cacheObjectDir(cacheDir, backend, cacheName), ec);
 }
 
 bool loadJsonFile(const std::filesystem::path& path, json& result, std::string& error) {
@@ -389,7 +473,8 @@ bool KvShareServer::init() {
         {"backend_type", options_.backend},
         {"tmp_path", tmpPath.string()},
         {"kvcache_mmap", true},
-        {"prefix_cache_path", options_.prefixCacheDir}
+        {"prefix_cache_path", options_.prefixCacheDir},
+        {"reuse_kv", options_.reuseKv}
     };
     setSuccess &= llm_->set_config(runtimeConfig.dump());
     setSuccess &= llm_->set_config(std::string("{\"thread_num\":") + std::to_string(options_.threads) + "}");
@@ -411,6 +496,7 @@ bool KvShareServer::init() {
               << " port=" << options_.port
               << " threads=" << options_.threads
               << " attention_mode=" << options_.attentionMode
+              << " reuse_kv=" << (options_.reuseKv ? "true" : "false")
               << " prefix_cache_dir=" << options_.prefixCacheDir
               << std::endl;
     {
@@ -620,8 +706,9 @@ bool KvShareServer::handlePrefixCacheRequest(const httplib::Request& req, httpli
 }
 
 bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& responseJson, std::string& error) {
-    if (options_.backend != "cpu" || options_.attentionMode != 8) {
-        error = "Document KV cache currently requires backend=cpu and attention_mode=8";
+    if ((options_.backend != "cpu" && options_.backend != "cuda" && options_.backend != "opencl") ||
+        options_.attentionMode != 8) {
+        error = "Document KV cache currently requires backend=cpu, backend=cuda or backend=opencl, and attention_mode=8";
         return false;
     }
     if (!requestJson.is_object()) {
@@ -666,42 +753,45 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
     cacheName = sanitizeCachePart(cacheName);
     bool force = requestJson.value("force", false);
     int layers = layerCountFromConfig(llm_.get());
-    json kvLayout = ropeLayoutFromConfig(llm_.get(), error);
+    json kvLayout = ropeLayoutFromConfig(llm_.get(), options_.backend, error);
     if (!error.empty()) {
         return false;
     }
     std::error_code ec;
-    std::filesystem::create_directories(options_.prefixCacheDir, ec);
-    std::filesystem::create_directories(metaDir(options_.prefixCacheDir), ec);
+    std::filesystem::create_directories(cacheObjectDir(options_.prefixCacheDir, options_.backend, cacheName) / "layers", ec);
     if (ec) {
         error = "Failed to create prefix cache directory: " + options_.prefixCacheDir;
         return false;
     }
 
     std::vector<int> tokens = llm_->tokenizer_encode(content);
+    const auto tokenizerPrefixTokens = llm_->tokenizer_encode("");
+    const int strippedTokenizerPrefixTokens = stripTokenizerPrefixTokens(tokens, tokenizerPrefixTokens);
     if (tokens.empty()) {
         error = "Document tokenization produced no tokens";
         return false;
     }
 
     if (force) {
-        removePrefixCacheFiles(options_.prefixCacheDir, cacheName, layers);
+        removePrefixCacheFiles(options_.prefixCacheDir, options_.backend, cacheName, layers);
     }
-    if (!force && prefixCacheReady(options_.prefixCacheDir, cacheName, layers)) {
+    if (!force && prefixCacheReady(options_.prefixCacheDir, options_.backend, cacheName, layers)) {
         json existingMeta;
         std::string metaError;
-        auto existingMetaPath = metaPathForCache(options_.prefixCacheDir, cacheName);
+        auto existingMetaPath = metaPathForCache(options_.prefixCacheDir, options_.backend, cacheName);
         if (!loadJsonFile(existingMetaPath, existingMeta, metaError) ||
             !existingMeta.contains("kv_layout") || !existingMeta["kv_layout"].is_object() ||
-            existingMeta["kv_layout"].value("key_rope_state", std::string("")) != "canonical_no_rope") {
-            // 老版本文档缓存的 Key 带本地 position RoPE，不能冒充 canonical key 参与 direct_segments。
-            removePrefixCacheFiles(options_.prefixCacheDir, cacheName, layers);
+            existingMeta["kv_layout"].value("key_rope_state", std::string("")) != "canonical_no_rope" ||
+            existingMeta.value("tokenizer_prefix_policy", std::string("")) != kDocumentTokenizerPrefixPolicy ||
+            !kvLayoutMatchesBackend(existingMeta["kv_layout"], existingMeta, options_.backend)) {
+            // 老版本或其他 backend 的缓存不能冒充当前 backend-native canonical key。
+            removePrefixCacheFiles(options_.prefixCacheDir, options_.backend, cacheName, layers);
         }
     }
-    if (!prefixCacheReady(options_.prefixCacheDir, cacheName, layers)) {
+    if (!prefixCacheReady(options_.prefixCacheDir, options_.backend, cacheName, layers)) {
         llm_->reset();
         llm_->clearPrefixCacheFile();
-        llm_->setPrefixCacheFile(cacheName, MNN::Transformer::PrefixCacheFlagCanonicalNoRopeKey);
+        llm_->setPrefixCacheWriteFile(cacheName, MNN::Transformer::PrefixCacheFlagCanonicalNoRopeKey);
         llm_->generate_init(nullptr, "\n");
         llm_->generate(tokens, 0);
         auto* context = llm_->getContext();
@@ -714,16 +804,18 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
         llm_->reset();
     }
 
-    if (!prefixCacheReady(options_.prefixCacheDir, cacheName, layers)) {
+    if (!prefixCacheReady(options_.prefixCacheDir, options_.backend, cacheName, layers)) {
         error = "Prefix cache files were not created for document: " + id;
         return false;
     }
 
-    auto tokensPath = tokensPathForCache(options_.prefixCacheDir, cacheName);
+    auto tokensPath = tokensPathForCache(options_.prefixCacheDir, options_.backend, cacheName);
     json tokensJson = {
         {"format", "mnn-prefix-cache-tokens-v1"},
         {"id", id},
         {"cache_name", cacheName},
+        {"tokenizer_prefix_policy", kDocumentTokenizerPrefixPolicy},
+        {"stripped_tokenizer_prefix_tokens", strippedTokenizerPrefixTokens},
         {"token_count", tokens.size()},
         {"token_ids", tokens}
     };
@@ -731,7 +823,7 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
         return false;
     }
 
-    auto metaPath = metaPathForCache(options_.prefixCacheDir, cacheName);
+    auto metaPath = metaPathForCache(options_.prefixCacheDir, options_.backend, cacheName);
     responseJson = {
         {"format", "mnn-prefix-cache-meta-v1"},
         {"type", "document"},
@@ -740,6 +832,8 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
         {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
         {"meta_path", absolutePath(metaPath)},
         {"token_ids_path", absolutePath(tokensPath)},
+        {"tokenizer_prefix_policy", kDocumentTokenizerPrefixPolicy},
+        {"stripped_tokenizer_prefix_tokens", strippedTokenizerPrefixTokens},
         {"token_count", tokens.size()},
         {"token_ids", tokens},
         {"source", source},
@@ -747,7 +841,7 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
         {"attention_mode", options_.attentionMode},
         {"layer_count", layers},
         {"kv_layout", kvLayout},
-        {"kv", kvFilesForCache(options_.prefixCacheDir, cacheName, layers)}
+        {"kv", kvFilesForCache(options_.prefixCacheDir, options_.backend, cacheName, layers)}
     };
     if (!writeJsonFile(metaPath, responseJson, error)) {
         return false;
@@ -776,56 +870,8 @@ bool KvShareServer::resolvePrefixSegmentsLocked(const json& segmentsJson, bool r
         json segmentMeta;
         std::string resolvedMetaPath;
         if (segment.contains("content") || segment.contains("path")) {
-            if (requirePrefixCacheFiles) {
-                if (!buildDocumentCacheLocked(segment, segmentMeta, error)) {
-                    return false;
-                }
-                resolvedMetaPath = segmentMeta.value("meta_path", "");
-            } else {
-                std::string content;
-                json source = json::object();
-                if (segment.contains("content")) {
-                    if (!segment["content"].is_string()) {
-                        error = "Segment field content must be a string";
-                        return false;
-                    }
-                    content = segment["content"].get<std::string>();
-                    source["kind"] = "inline";
-                } else {
-                    if (!segment["path"].is_string()) {
-                        error = "Segment field path must be a string";
-                        return false;
-                    }
-                    auto path = std::filesystem::path(segment["path"].get<std::string>());
-                    if (!readTextFile(path, content, error)) {
-                        return false;
-                    }
-                    source["kind"] = "path";
-                    source["path"] = absolutePath(path);
-                }
-                if (content.empty()) {
-                    error = "Segment content must not be empty";
-                    return false;
-                }
-                std::string fallbackId = "segment_" + std::to_string(resolvedSegments.size());
-                std::string id = segment.value("id", segment.value("cache_name", fallbackId));
-                std::string cacheName = segment.value("cache_name", documentCacheName(id));
-                cacheName = sanitizeCachePart(cacheName);
-                auto tokenIds = llm_->tokenizer_encode(content);
-                if (tokenIds.empty()) {
-                    error = "Segment tokenization produced no tokens: " + id;
-                    return false;
-                }
-                segmentMeta = {
-                    {"format", "mnn-prefix-cache-token-only-v1"},
-                    {"type", segment.value("type", "document")},
-                    {"id", id},
-                    {"cache_name", cacheName},
-                    {"token_count", tokenIds.size()},
-                    {"token_ids", tokenIds},
-                    {"source", source}
-                };
-            }
+            error = "direct_segments segments must reference an existing backend-native document cache; build content/path with /v1/kv/documents first";
+            return false;
         } else {
             std::filesystem::path metaPath;
             if (segment.contains("meta_path")) {
@@ -842,7 +888,7 @@ bool KvShareServer::resolvePrefixSegmentsLocked(const json& segmentsJson, bool r
                     return false;
                 }
                 std::string segmentCacheName = segment.value("cache_name", type == "document" ? documentCacheName(segmentId) : segmentId);
-                metaPath = metaPathForCache(options_.prefixCacheDir, sanitizeCachePart(segmentCacheName));
+                metaPath = metaPathForCache(options_.prefixCacheDir, options_.backend, sanitizeCachePart(segmentCacheName));
             }
             if (!loadJsonFile(metaPath, segmentMeta, error)) {
                 return false;
@@ -854,7 +900,21 @@ bool KvShareServer::resolvePrefixSegmentsLocked(const json& segmentsJson, bool r
             return false;
         }
         auto cacheName = sanitizeCachePart(segmentMeta["cache_name"].get<std::string>());
-        if (requirePrefixCacheFiles && !prefixCacheReady(options_.prefixCacheDir, cacheName, layers)) {
+        json kvLayout = segmentMeta.value("kv_layout", json::object());
+        if (requireCanonicalNoRopeKey) {
+            if (!kvLayout.is_object() ||
+                kvLayout.value("key_rope_state", std::string("")) != "canonical_no_rope" ||
+                kvLayout.value("rope_pairing", std::string("")) != "half") {
+                error = "Segment prefix cache is not canonical_no_rope; rebuild it with force=true: " + cacheName;
+                return false;
+            }
+            if (!kvLayoutMatchesBackend(kvLayout, segmentMeta, options_.backend)) {
+                error = "Segment prefix cache layout does not match backend=" + options_.backend +
+                        "; rebuild or convert it for this backend: " + cacheName;
+                return false;
+            }
+        }
+        if (requirePrefixCacheFiles && !prefixCacheReady(options_.prefixCacheDir, options_.backend, cacheName, layers)) {
             error = "Segment prefix cache files are not ready: " + cacheName;
             return false;
         }
@@ -873,15 +933,6 @@ bool KvShareServer::resolvePrefixSegmentsLocked(const json& segmentsJson, bool r
             error = "Segment token_count does not match token_ids length: " + cacheName;
             return false;
         }
-        json kvLayout = segmentMeta.value("kv_layout", json::object());
-        if (requireCanonicalNoRopeKey) {
-            if (!kvLayout.is_object() ||
-                kvLayout.value("key_rope_state", std::string("")) != "canonical_no_rope" ||
-                kvLayout.value("rope_pairing", std::string("")) != "half") {
-                error = "Segment prefix cache is not canonical_no_rope; rebuild it with force=true: " + cacheName;
-                return false;
-            }
-        }
 
         MNN::Transformer::PrefixCacheSegment prefixSegment;
         prefixSegment.cache_name = cacheName;
@@ -893,6 +944,10 @@ bool KvShareServer::resolvePrefixSegmentsLocked(const json& segmentsJson, bool r
             prefixSegment.rope_theta = static_cast<float>(kvLayout.value("rope_theta", 10000.0));
             prefixSegment.rope_pairing = kvLayout.value("rope_pairing", std::string("half"));
             prefixSegment.source_position_base = kvLayout.value("source_position_base", 0);
+            prefixSegment.backend = kvLayout.value("backend", segmentMeta.value("backend", std::string("")));
+            prefixSegment.layout = kvLayout.value("layout", kvLayout.value("format", std::string("")));
+            prefixSegment.dtype = kvLayout.value("dtype", std::string("runtime"));
+            prefixSegment.page_size = kvLayout.value("page_size", 0);
         }
         prefixSegments.emplace_back(std::move(prefixSegment));
         mergedTokens.insert(mergedTokens.end(), segmentTokens.begin(), segmentTokens.end());
@@ -915,9 +970,9 @@ bool KvShareServer::resolvePrefixSegmentsLocked(const json& segmentsJson, bool r
 }
 
 bool KvShareServer::composePrefixCacheLocked(const json& requestJson, json& responseJson, std::string& error) {
-    if ((options_.backend != "cpu" || options_.attentionMode != 8) &&
-        options_.backend != "cuda" && options_.backend != "opencl") {
-        error = "Prefix cache composition currently requires backend=cpu and attention_mode=8, or backend=cuda/opencl token-refill fallback";
+    if ((options_.backend != "cpu" && options_.backend != "cuda" && options_.backend != "opencl") ||
+        options_.attentionMode != 8) {
+        error = "direct_segments prefix cache metadata requires backend=cpu, backend=cuda or backend=opencl, and attention_mode=8";
         return false;
     }
     if (!requestJson.is_object()) {
@@ -928,176 +983,48 @@ bool KvShareServer::composePrefixCacheLocked(const json& requestJson, json& resp
         error = "Prefix cache request needs a non-empty segments array";
         return false;
     }
+    if (!requestJson.contains("merge_mode") || requestJson.value("merge_mode", std::string("")) != "direct_segments") {
+        error = "/v1/kv/prefix_caches only supports merge_mode=direct_segments";
+        return false;
+    }
 
     int layers = layerCountFromConfig(llm_.get());
     const auto& segmentsJson = requestJson["segments"];
     std::string id = requestJson.value("id", compositeCacheName(segmentsJson));
     std::string cacheName = requestJson.value("cache_name", "cmp_" + sanitizeCachePart(id));
     cacheName = sanitizeCachePart(cacheName);
-    bool force = requestJson.value("force", true);
-
-    if (force && options_.backend == "cpu") {
-        removePrefixCacheFiles(options_.prefixCacheDir, cacheName, layers);
-    }
-    std::error_code ec;
-    std::filesystem::create_directories(options_.prefixCacheDir, ec);
-    std::filesystem::create_directories(metaDir(options_.prefixCacheDir), ec);
-    if (ec) {
-        error = "Failed to create prefix cache directory: " + options_.prefixCacheDir;
-        return false;
-    }
 
     std::vector<int> mergedTokens;
     std::vector<MNN::Transformer::PrefixCacheSegment> prefixSegments;
     json resolvedSegments = json::array();
-    bool directSegments = requestJson.value("merge_mode", std::string("")) == "direct_segments";
-    if ((options_.backend == "cuda" || options_.backend == "opencl") && directSegments) {
-        json directKvLayout = ropeLayoutFromConfig(llm_.get(), error);
-        if (!error.empty()) {
-            return false;
-        }
-        if (!resolvePrefixSegmentsLocked(segmentsJson, true, true, mergedTokens, prefixSegments, resolvedSegments, error)) {
-            return false;
-        }
-        if (mergedTokens.empty()) {
-            error = "Merged prefix cache has no tokens";
-            return false;
-        }
-        responseJson = {
-            {"format", "mnn-prefix-cache-meta-v1"},
-            {"type", "direct_segments"},
-            {"id", id},
-            {"cache_name", cacheName},
-            {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
-            {"token_count", mergedTokens.size()},
-            {"token_ids", mergedTokens},
-            {"segments", resolvedSegments},
-            {"merge_mode", "direct_segments"},
-            {"backend", options_.backend},
-            {"attention_mode", options_.attentionMode},
-            {"layer_count", layers},
-            {"kv_layout", directKvLayout},
-            {"note", options_.backend + " direct_segments requires existing canonical_no_rope prefix KV files; materialization happens inside PrefixAttention."}
-        };
-        return true;
-    }
-    if (options_.backend == "cuda" || options_.backend == "opencl") {
-        if (!resolvePrefixSegmentsLocked(segmentsJson, false, false, mergedTokens, prefixSegments, resolvedSegments, error)) {
-            return false;
-        }
-        if (mergedTokens.empty()) {
-            error = "Merged prefix cache has no tokens";
-            return false;
-        }
-        responseJson = {
-            {"format", "mnn-prefix-cache-meta-v1"},
-            {"type", "token_refill"},
-            {"id", id},
-            {"cache_name", cacheName},
-            {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
-            {"token_count", mergedTokens.size()},
-            {"token_ids", mergedTokens},
-            {"segments", resolvedSegments},
-            {"requested_merge_mode", requestJson.value("merge_mode", std::string("re_prefill_merged_tokens"))},
-            {"merge_mode", "re_prefill_merged_tokens"},
-            {"backend", options_.backend},
-            {"attention_mode", options_.attentionMode},
-            {"layer_count", layers},
-            {"note", options_.backend + " non-direct prefix_caches returns token-only metadata; direct_segments uses PrefixAttention."}
-        };
-        return true;
-    }
-
-    json directKvLayout = json::object();
-    if (directSegments) {
-        directKvLayout = ropeLayoutFromConfig(llm_.get(), error);
-        if (!error.empty()) {
-            return false;
-        }
-    }
-
-    if (!resolvePrefixSegmentsLocked(segmentsJson, directSegments, true, mergedTokens, prefixSegments, resolvedSegments, error)) {
+    json directKvLayout = ropeLayoutFromConfig(llm_.get(), options_.backend, error);
+    if (!error.empty()) {
         return false;
     }
-
+    if (!resolvePrefixSegmentsLocked(segmentsJson, true, true, mergedTokens, prefixSegments, resolvedSegments, error)) {
+        return false;
+    }
     if (mergedTokens.empty()) {
         error = "Merged prefix cache has no tokens";
         return false;
     }
 
-    if (directSegments) {
-        responseJson = {
-            {"format", "mnn-prefix-cache-meta-v1"},
-            {"type", "direct_segments"},
-            {"id", id},
-            {"cache_name", cacheName},
-            {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
-            {"token_count", mergedTokens.size()},
-            {"token_ids", mergedTokens},
-            {"segments", resolvedSegments},
-            {"merge_mode", "direct_segments"},
-            {"backend", options_.backend},
-            {"attention_mode", options_.attentionMode},
-            {"layer_count", layers},
-            {"kv_layout", directKvLayout}
-        };
-        return true;
-    }
-
-    if (!prefixCacheReady(options_.prefixCacheDir, cacheName, layers)) {
-        llm_->reset();
-        llm_->clearPrefixCacheFile();
-        llm_->setPrefixCacheFile(cacheName);
-        llm_->generate_init(nullptr, "\n");
-        llm_->generate(mergedTokens, 0);
-        auto* context = llm_->getContext();
-        if (context != nullptr && context->status == LlmStatus::INTERNAL_ERROR) {
-            llm_->clearPrefixCacheFile();
-            error = "LLM internal error while building composite prefix cache";
-            return false;
-        }
-        llm_->clearPrefixCacheFile();
-        llm_->reset();
-    }
-
-    if (!prefixCacheReady(options_.prefixCacheDir, cacheName, layers)) {
-        error = "Prefix cache files were not created for composite cache: " + id;
-        return false;
-    }
-
-    auto tokensPath = tokensPathForCache(options_.prefixCacheDir, cacheName);
-    json tokensJson = {
-        {"format", "mnn-prefix-cache-tokens-v1"},
-        {"id", id},
-        {"cache_name", cacheName},
-        {"token_count", mergedTokens.size()},
-        {"token_ids", mergedTokens}
-    };
-    if (!writeJsonFile(tokensPath, tokensJson, error)) {
-        return false;
-    }
-
-    auto metaPath = metaPathForCache(options_.prefixCacheDir, cacheName);
     responseJson = {
         {"format", "mnn-prefix-cache-meta-v1"},
-        {"type", "composite"},
+        {"type", "direct_segments"},
         {"id", id},
         {"cache_name", cacheName},
         {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
-        {"meta_path", absolutePath(metaPath)},
-        {"token_ids_path", absolutePath(tokensPath)},
         {"token_count", mergedTokens.size()},
         {"token_ids", mergedTokens},
         {"segments", resolvedSegments},
-        {"merge_mode", "re_prefill_merged_tokens"},
+        {"merge_mode", "direct_segments"},
         {"backend", options_.backend},
         {"attention_mode", options_.attentionMode},
         {"layer_count", layers},
-        {"kv", kvFilesForCache(options_.prefixCacheDir, cacheName, layers)}
+        {"kv_layout", directKvLayout},
+        {"note", options_.backend + " direct_segments requires existing backend-native canonical_no_rope prefix KV files; materialization happens inside PrefixAttention."}
     };
-    if (!writeJsonFile(metaPath, responseJson, error)) {
-        return false;
-    }
     return true;
 }
 
@@ -1146,39 +1073,6 @@ bool KvShareServer::applySamplingConfigLocked(const ChatRequest& request, std::s
         return false;
     }
     std::cout << "sampling config applied: " << samplingConfig.dump() << std::endl;
-    return true;
-}
-
-bool KvShareServer::runMergedTokenPrefixLocked(const std::vector<int>& prefixTokens, const ChatMessages& messages,
-                                               std::ostream* output, const char* endWith, int maxTokens,
-                                               int& promptTokenCount, std::string& error) {
-    if (prefixTokens.empty()) {
-        error = "kv_prefix resolved to an empty token cache";
-        return false;
-    }
-    auto prompt = llm_->apply_chat_template(messages);
-    if (prompt.empty()) {
-        error = "Failed to apply chat template";
-        return false;
-    }
-    auto promptTokens = llm_->tokenizer_encode(prompt);
-    if (promptTokens.empty()) {
-        error = "Prompt tokenization produced no tokens";
-        return false;
-    }
-
-    llm_->reset();
-    llm_->clearPrefixCacheFile();
-    llm_->generate_init(output, endWith);
-    llm_->generate(prefixTokens, 0);
-    auto* context = llm_->getContext();
-    if (context != nullptr && context->status == LlmStatus::INTERNAL_ERROR) {
-        error = "LLM internal error while pre-filling merged prefix tokens";
-        return false;
-    }
-    llm_->generate(promptTokens, maxTokens);
-
-    promptTokenCount = static_cast<int>(promptTokens.size());
     return true;
 }
 
@@ -1276,124 +1170,34 @@ bool KvShareServer::applyKvPrefixLocked(const json& kvPrefix, const ChatMessages
         error = "kv_prefix requires a non-empty segments array";
         return false;
     }
-    std::string mergeMode = kvPrefix.value("merge_mode", "re_prefill_merged_tokens");
-    if (mergeMode == "direct_segments") {
-        if ((options_.backend != "cpu" && options_.backend != "cuda" && options_.backend != "opencl") || options_.attentionMode != 8) {
-            error = "direct_segments currently requires backend=cpu, backend=cuda or backend=opencl, and attention_mode=8";
-            return false;
-        }
-        std::string directCacheName = kvPrefix.value("cache_name", "direct_" + sanitizeCachePart(kvPrefix.value("id", compositeCacheName(kvPrefix["segments"]))));
-        directCacheName = sanitizeCachePart(directCacheName);
-        json directKvLayout = ropeLayoutFromConfig(llm_.get(), error);
-        if (!error.empty()) {
-            return false;
-        }
-        std::vector<int> prefixTokens;
-        std::vector<MNN::Transformer::PrefixCacheSegment> prefixSegments;
-        json resolvedSegments = json::array();
-        if (!resolvePrefixSegmentsLocked(kvPrefix["segments"], true, true, prefixTokens, prefixSegments, resolvedSegments, error)) {
-            return false;
-        }
-        if (prefixTokens.empty()) {
-            error = "kv_prefix resolved to an empty token cache";
-            return false;
-        }
-
-        auto prompt = llm_->apply_chat_template(messages);
-        if (prompt.empty()) {
-            error = "Failed to apply chat template";
-            return false;
-        }
-        auto promptTokens = llm_->tokenizer_encode(prompt);
-        if (promptTokens.empty()) {
-            error = "Prompt tokenization produced no tokens";
-            return false;
-        }
-
-        llm_->reset();
-        llm_->clearPrefixCacheFile();
-        llm_->generate_init(output, endWith);
-        if (!llm_->setPrefixCacheSegments(prefixSegments)) {
-            llm_->clearPrefixCacheSegments();
-            error = "Failed to set direct segment prefix cache";
-            return false;
-        }
-        llm_->generate(promptTokens, maxTokens);
-        llm_->clearPrefixCacheSegments();
-
-        prefixInfo = {
-            {"format", "mnn-prefix-cache-meta-v1"},
-            {"type", "direct_segments"},
-            {"id", kvPrefix.value("id", compositeCacheName(kvPrefix["segments"]))},
-            {"cache_name", directCacheName},
-            {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
-            {"token_count", prefixTokens.size()},
-            {"token_ids", prefixTokens},
-            {"prompt_token_count", promptTokens.size()},
-            {"segments", resolvedSegments},
-            {"merge_mode", "direct_segments"},
-            {"kv_layout", directKvLayout},
-            {"backend", options_.backend},
-            {"attention_mode", options_.attentionMode},
-            {"layer_count", layerCountFromConfig(llm_.get())}
-        };
-        if (options_.backend == "cuda" || options_.backend == "opencl") {
-            prefixInfo["note"] = options_.backend + " PrefixAttention materialized prefix KV and RoPE inside onExecute.";
-        }
-        return true;
-    }
-
-    if (options_.backend == "cuda" || options_.backend == "opencl") {
-        std::vector<int> prefixTokens;
-        std::vector<MNN::Transformer::PrefixCacheSegment> prefixSegments;
-        json resolvedSegments = json::array();
-        if (!resolvePrefixSegmentsLocked(kvPrefix["segments"], false, false, prefixTokens, prefixSegments, resolvedSegments, error)) {
-            return false;
-        }
-        int promptTokenCount = 0;
-        if (!runMergedTokenPrefixLocked(prefixTokens, messages, output, endWith, maxTokens, promptTokenCount, error)) {
-            return false;
-        }
-        std::string id = kvPrefix.value("id", compositeCacheName(kvPrefix["segments"]));
-        std::string cacheName = kvPrefix.value("cache_name", "refill_" + sanitizeCachePart(id));
-        prefixInfo = {
-            {"format", "mnn-prefix-cache-meta-v1"},
-            {"type", "token_refill"},
-            {"id", id},
-            {"cache_name", sanitizeCachePart(cacheName)},
-            {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
-            {"token_count", prefixTokens.size()},
-            {"token_ids", prefixTokens},
-            {"prompt_token_count", promptTokenCount},
-            {"segments", resolvedSegments},
-            {"requested_merge_mode", mergeMode},
-            {"merge_mode", mergeMode == "direct_segments" ? "direct_segments_reprefill_fallback" : "re_prefill_merged_tokens"},
-            {"backend", options_.backend},
-            {"attention_mode", options_.attentionMode},
-            {"layer_count", layerCountFromConfig(llm_.get())},
-            {"note", options_.backend + " non-direct prefix requests re-fill merged prefix tokens; direct_segments uses PrefixAttention materialization."}
-        };
-        return true;
-    }
-
-    json composeRequest = kvPrefix;
-    if (!composeRequest.contains("id")) {
-        composeRequest["id"] = compositeCacheName(composeRequest["segments"]);
-    }
-    if (!composeRequest.contains("cache_name")) {
-        composeRequest["cache_name"] = "cmp_" + sanitizeCachePart(composeRequest["id"].get<std::string>());
-    }
-    if (!composeRequest.contains("force")) {
-        composeRequest["force"] = kvPrefix.value("force_compose", true);
-    }
-
-    if (!composePrefixCacheLocked(composeRequest, prefixInfo, error)) {
+    if (!kvPrefix.contains("merge_mode") || kvPrefix.value("merge_mode", std::string("")) != "direct_segments") {
+        error = "kv_prefix only supports merge_mode=direct_segments";
         return false;
     }
-    auto prefixTokens = tokensFromMeta(prefixInfo, options_.prefixCacheDir, error);
+    if (kvPrefix.contains("device_prefetch") && !kvPrefix["device_prefetch"].is_boolean()) {
+        error = "kv_prefix.device_prefetch must be boolean when provided";
+        return false;
+    }
+    const bool devicePrefetch = kvPrefix.value("device_prefetch", false);
+    if ((options_.backend != "cpu" && options_.backend != "cuda" && options_.backend != "opencl") || options_.attentionMode != 8) {
+        error = "direct_segments currently requires backend=cpu, backend=cuda or backend=opencl, and attention_mode=8";
+        return false;
+    }
+
+    std::string directCacheName = kvPrefix.value("cache_name", "direct_" + sanitizeCachePart(kvPrefix.value("id", compositeCacheName(kvPrefix["segments"]))));
+    directCacheName = sanitizeCachePart(directCacheName);
+    json directKvLayout = ropeLayoutFromConfig(llm_.get(), options_.backend, error);
     if (!error.empty()) {
         return false;
     }
+    std::vector<int> prefixTokens;
+    std::vector<MNN::Transformer::PrefixCacheSegment> prefixSegments;
+    json resolvedSegments = json::array();
+    auto resolveStart = std::chrono::steady_clock::now();
+    if (!resolvePrefixSegmentsLocked(kvPrefix["segments"], true, true, prefixTokens, prefixSegments, resolvedSegments, error)) {
+        return false;
+    }
+    double resolveMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - resolveStart).count();
     if (prefixTokens.empty()) {
         error = "kv_prefix resolved to an empty token cache";
         return false;
@@ -1410,15 +1214,38 @@ bool KvShareServer::applyKvPrefixLocked(const json& kvPrefix, const ChatMessages
         return false;
     }
 
-    llm_->reset();
     llm_->clearPrefixCacheFile();
-    llm_->setPrefixCacheFile(prefixInfo["cache_name"].get<std::string>());
     llm_->generate_init(output, endWith);
-    llm_->generate(prefixTokens, 0);
+    auto prefetchSubmitStart = std::chrono::steady_clock::now();
+    if (!llm_->setPrefixCacheSegments(prefixSegments, devicePrefetch)) {
+        llm_->clearPrefixCacheSegments();
+        error = "Failed to set direct segment prefix cache";
+        return false;
+    }
+    double prefetchSubmitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prefetchSubmitStart).count();
     llm_->generate(promptTokens, maxTokens);
-    llm_->clearPrefixCacheFile();
+    llm_->clearPrefixCacheSegments();
 
-    prefixInfo["prompt_token_count"] = promptTokens.size();
+    prefixInfo = {
+        {"format", "mnn-prefix-cache-meta-v1"},
+        {"type", "direct_segments"},
+        {"id", kvPrefix.value("id", compositeCacheName(kvPrefix["segments"]))},
+        {"cache_name", directCacheName},
+        {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
+        {"token_count", prefixTokens.size()},
+        {"token_ids", prefixTokens},
+        {"prompt_token_count", promptTokens.size()},
+        {"segments", resolvedSegments},
+        {"merge_mode", "direct_segments"},
+        {"device_prefetch", devicePrefetch},
+        {"kv_layout", directKvLayout},
+        {"backend", options_.backend},
+        {"attention_mode", options_.attentionMode},
+        {"layer_count", layerCountFromConfig(llm_.get())},
+        {"resolve_ms", resolveMs},
+        {"prefetch_submit_ms", prefetchSubmitMs},
+        {"note", options_.backend + " PrefixAttention consumed backend-native prefix KV via direct_segments."}
+    };
     return true;
 }
 
@@ -1573,6 +1400,21 @@ int main(int argc, char** argv) {
                 return 1;
             }
             options.prefixCacheDir = argv[i];
+        } else if (arg == "--reuse-kv") {
+            if (++i >= argc) {
+                std::cerr << "Missing value for --reuse-kv" << std::endl;
+                return 1;
+            }
+            std::string value = argv[i];
+            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+            if (value == "1" || value == "true" || value == "yes" || value == "on") {
+                options.reuseKv = true;
+            } else if (value == "0" || value == "false" || value == "no" || value == "off") {
+                options.reuseKv = false;
+            } else {
+                std::cerr << "Invalid value for --reuse-kv: " << argv[i] << std::endl;
+                return 1;
+            }
         } else {
             std::cerr << "Unknown argument: " << arg << std::endl;
             return 1;
@@ -1580,7 +1422,7 @@ int main(int argc, char** argv) {
     }
 
     if (options.configPath.empty()) {
-        std::cerr << "Usage: kvshare_server -c <config.json> [--host 127.0.0.1] [--port 9091] [--threads 4] [--attention-mode 8] [--backend cpu] [--prefix-cache-dir .cache/prefixcache]" << std::endl;
+        std::cerr << "Usage: kvshare_server -c <config.json> [--host 127.0.0.1] [--port 9091] [--threads 4] [--attention-mode 8] [--backend cpu] [--prefix-cache-dir .cache/kvshare/prefixcache] [--reuse-kv false]" << std::endl;
         return 1;
     }
     std::string lowerModelName = options.configPath;

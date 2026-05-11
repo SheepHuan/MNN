@@ -34,9 +34,15 @@ public:
     }
     void setPastKvLength(int length) {
         mPastLength = length;
+        if (mPagedActive) {
+            mPagedLogicalLength = length;
+        }
     }
     void addKvLength(int seq_len){
         mPastLength += seq_len;
+        if (mPagedActive) {
+            mPagedLogicalLength = mPastLength;
+        }
     }
     int maxLength() {
         return mMaxLength;
@@ -50,24 +56,69 @@ public:
     const cl::Buffer * value() {
         return mPastValue.get();
     }
+    const cl::Buffer * tokenTable() {
+        return mPagedTokenTable.get();
+    }
+    const cl::Buffer * ropeTable() {
+        return mPagedRopeTable.get();
+    }
     cl::Buffer * mutableKey() {
         return mPastKey.get();
     }
     cl::Buffer * mutableValue() {
         return mPastValue.get();
     }
+    cl::Buffer * mutableTokenTable() {
+        return mPagedTokenTable.get();
+    }
+    cl::Buffer * mutableRopeTable() {
+        return mPagedRopeTable.get();
+    }
     int byte() const {
         return mByte;
     }
     bool ensureCapacity(int requiredTotal, bool isExecute = true);
+    bool ensurePagedCapacity(int requiredPhysicalTotal, int logicalTableLength);
+    bool pagedActive() const {
+        return mPagedActive;
+    }
+    void setPagedActive(bool active) {
+        mPagedActive = active;
+    }
+    void setPagedState(int logicalLength, int physicalLength, int pageSize, int ropeDim, float ropeTheta);
+    bool ensurePagedStateForExistingHistory(int logicalLength, int physicalLength, int pageSize,
+                                            int ropeDim, float ropeTheta);
+    int pagedPhysicalLength() const {
+        return mPagedPhysicalLength;
+    }
+    int pagedPageSize() const {
+        return mPagedPageSize;
+    }
+    int pagedRopeDim() const {
+        return mPagedRopeDim;
+    }
+    float pagedRopeTheta() const {
+        return mPagedRopeTheta;
+    }
+    bool ensurePagedAppendTable(int logicalStart, int tokenCount, bool isolateSourceStart);
+    bool ensurePagedDecodeAppendTable(int logicalStart, int tokenCount);
 
 private:
     bool mKVCache;
     const int mExpandChunk = 64;
     std::shared_ptr<cl::Buffer> mPastKey, mPastValue;
+    std::shared_ptr<cl::Buffer> mPagedTokenTable, mPagedRopeTable;
     int mPastLength = 0, mMaxLength = 0, mNumHead = 0, mKvNumHead = 0, mHeadDim = 0;
     OpenCLBackend *mOpenCLBackend;
     int mByte = 4;
+    bool mPagedActive = false;
+    bool mPagedDecodeStarted = false;
+    int mPagedPageSize = 64;
+    int mPagedLogicalLength = 0;
+    int mPagedPhysicalLength = 0;
+    int mPagedTableCapacity = 0;
+    int mPagedRopeDim = 0;
+    float mPagedRopeTheta = 10000.0f;
 };
 
 class AttentionBufExecution : public CommonExecution {
@@ -108,6 +159,7 @@ protected:
 
 private:
     int getLocalSize(int size, int maxGroupSize);
+    ErrorCode saveOpenCLNativePrefixCache(const std::vector<Tensor *> &inputs, int totalKvLen);
     bool mIsDecode = false;
     void handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs);
 
@@ -133,6 +185,8 @@ private:
     bool mIsAddMask = false;
     bool mNeedKvCache = true;
     bool mHasMask = false;
+    bool mKernelUsePagedKV = false;
+    bool mKernelIsDecode = false;
 private:
     std::vector<std::shared_ptr<KernelWrap>> mKernel_rearrange_vec;
     std::vector<std::shared_ptr<KernelWrap>> mKernel_mask_vec;

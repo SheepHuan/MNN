@@ -15,6 +15,7 @@
 #include "CPULinearAttention.hpp"
 #include "CPUBackend.hpp"
 #include "core/MNNFileUtils.h"
+#include "core/PrefixCachePath.hpp"
 #include "compute/CommonOptFunction.h"
 #include "core/Macro.h"
 #include "core/Concurrency.h"
@@ -309,7 +310,7 @@ ErrorCode CPULinearAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     // Load prefix cache from disk (PendingRead)
     if (mMeta != nullptr && mMeta->file_name.size() > 0 && mMeta->file_flag == KVMeta::PendingRead) {
         int layer_index = mMeta->layer_index;
-        std::string basePath = MNNFilePathConcat(mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(layer_index);
+        std::string basePath = prefixCacheLayerBase(mPrefixCacheDir, "cpu", mMeta->file_name, layer_index);
         std::string pathk = basePath + ".k";
         std::string pathv = basePath + ".v";
         // Load conv state (.k file)
@@ -354,9 +355,9 @@ ErrorCode CPULinearAttention::onExecute(const std::vector<Tensor*>& inputs, cons
 
     // Save prefix cache to disk (PendingWrite)
     if (mMeta != nullptr && mMeta->file_name.size() > 0 && mMeta->file_flag == KVMeta::PendingWrite) {
-        MNNCreateDir(mPrefixCacheDir.c_str());
+        ensurePrefixCacheObjectDirs(mPrefixCacheDir, "cpu", mMeta->file_name);
         int layer_index = mMeta->layer_index;
-        std::string basePath = MNNFilePathConcat(mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(layer_index);
+        std::string basePath = prefixCacheLayerBase(mPrefixCacheDir, "cpu", mMeta->file_name, layer_index);
         std::string pathk = basePath + ".k";
         std::string pathv = basePath + ".v";
         // Save conv state (.k file)

@@ -25,6 +25,8 @@
 #include "omni.hpp"
 #include "speculative_decoding/generate.hpp"
 #include "core/MNNFileUtils.h"
+#include "core/PrefixCachePath.hpp"
+#include "core/PrefixKVHostCache.hpp"
 
 // 0: no debug, 1: test op time, 2: print tensor info, 3: print tensor in output
 #define DEBUG_MODE 0
@@ -1297,22 +1299,32 @@ std::vector<Express::VARP> Llm::getOutputs() const {
     return mGenerateParam->outputs;
 }
 
+bool Llm::setPrefixCacheWriteFile(const std::string& filename, int flag) {
+    mPrefixCacheFileName = filename;
+    mPrefixCacheFlag = flag;
+    mCallIndex = 0;
+    mPrefixCacheMode = true;
+    mIsPrefixFileExist = false;
+    return true;
+}
+
 bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     mPrefixCacheFileName = filename;
     mPrefixCacheFlag = flag;
     mCallIndex = 0;
     mPrefixCacheMode = true;
 
-
     mIsPrefixFileExist = true;
     // check kvcache, validate file existence
     for(int i = 0; i < mConfig->layer_nums(); i++) {
-        auto k_file = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i) + "_sync.k";
+        auto base = MNN::prefixCacheLayerBase(mConfig->prefix_cache_path(), mConfig->backend_type(),
+                                              mPrefixCacheFileName, i);
+        auto k_file = base + ".k";
         if(!MNNFileExist(k_file.c_str())) {
             mIsPrefixFileExist = false;
             break;
         }
-        auto v_file = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i) + "_sync.v";
+        auto v_file = base + ".v";
         if(!MNNFileExist(v_file.c_str())) {
             mIsPrefixFileExist = false;
             break;
@@ -1337,22 +1349,27 @@ void Llm::clearPrefixCacheFile() {
     mMeta->layer_index = 0;
 }
 
-bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments) {
+bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments, bool device_prefetch) {
     if (segments.empty()) {
         return false;
     }
+    static uint64_t sPrefixRequestId = 0;
     mMeta->prefix_segments.clear();
     mMeta->segment_total_tokens = 0;
-    mContext->history_tokens.clear();
+    mMeta->prefix_device_prefetch = device_prefetch;
+    mMeta->prefix_request_id = ++sPrefixRequestId;
+    const auto historyBefore = mContext->history_tokens.size();
     for (const auto& segment : segments) {
         if (segment.cache_name.empty() || segment.token_count <= 0) {
             mMeta->prefix_segments.clear();
             mMeta->segment_total_tokens = 0;
+            mContext->history_tokens.resize(historyBefore);
             return false;
         }
         if (segment.key_rope_state != "canonical_no_rope" || segment.rope_pairing != "half") {
             mMeta->prefix_segments.clear();
             mMeta->segment_total_tokens = 0;
+            mContext->history_tokens.resize(historyBefore);
             return false;
         }
         KVMeta::PrefixSegment metaSegment;
@@ -1364,13 +1381,17 @@ bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments
         metaSegment.rope_theta = segment.rope_theta;
         metaSegment.rope_pairing = KVMeta::RopePairingHalf;
         metaSegment.source_position_base = segment.source_position_base;
+        metaSegment.backend = segment.backend;
+        metaSegment.layout = segment.layout;
+        metaSegment.dtype = segment.dtype;
+        metaSegment.page_size = segment.page_size;
         mMeta->prefix_segments.emplace_back(std::move(metaSegment));
         mMeta->segment_total_tokens += segment.token_count;
         mContext->history_tokens.insert(mContext->history_tokens.end(), segment.token_ids.begin(), segment.token_ids.end());
     }
     // direct_segments 不执行 prefix token 的图计算；这里提前设置上下文长度，
     // 让 prompt prefill 生成正确的 causal mask 和 position_ids。
-    mContext->all_seq_len = mMeta->segment_total_tokens;
+    mContext->all_seq_len += mMeta->segment_total_tokens;
     mMeta->file_name = "";
     mMeta->seqlen_in_disk = 0;
     mMeta->file_flag = KVMeta::PendingReadSegments;
@@ -1378,6 +1399,9 @@ bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments
     mMeta->source_position_base = 0;
     mMeta->layer_index = 0;
     mPrefixSegmentsMode = true;
+    if (device_prefetch) {
+        prefetchPrefixKVHostCacheFiles(mMeta->prefix_cache_dir, mMeta->layer_nums, mMeta->prefix_segments);
+    }
     return true;
 }
 
@@ -1385,6 +1409,8 @@ void Llm::clearPrefixCacheSegments() {
     mPrefixSegmentsMode = false;
     mMeta->prefix_segments.clear();
     mMeta->segment_total_tokens = 0;
+    mMeta->prefix_device_prefetch = false;
+    mMeta->prefix_request_id = 0;
     if (mMeta->file_flag == KVMeta::PendingReadSegments) {
         mMeta->file_flag = KVMeta::NoChange;
     }
@@ -1400,23 +1426,6 @@ void Llm::completePrefixWrite() {
     mMeta->file_flag = KVMeta::NoChange;
     mMeta->file_name = "";
     mMeta->layer_index = 0;
-    // Create sync files to mark prefix cache as valid
-    auto prefixDir = mConfig->prefix_cache_path();
-    for (int i = 0; i < mConfig->layer_nums(); i++) {
-        auto base = MNNFilePathConcat(prefixDir, mPrefixCacheFileName) + "_" + std::to_string(i);
-        auto k_file = base + ".k";
-        if (MNNFileExist(k_file.c_str())) {
-            auto k_sync = base + "_sync.k";
-            auto fd = MNNCreateFile(k_sync.c_str());
-            if (fd != INVALID_FILE) { MNNCloseFile(fd); }
-        }
-        auto v_file = base + ".v";
-        if (MNNFileExist(v_file.c_str())) {
-            auto v_sync = base + "_sync.v";
-            auto fd = MNNCreateFile(v_sync.c_str());
-            if (fd != INVALID_FILE) { MNNCloseFile(fd); }
-        }
-    }
 }
 
 bool Llm::reuse_kv() { return mConfig->reuse_kv(); }

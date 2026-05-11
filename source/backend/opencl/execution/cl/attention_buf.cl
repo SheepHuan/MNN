@@ -49,111 +49,37 @@
         temp_3.y = (FLOAT)0;\
     }
 
-
-static int prefix_round_up_int(const int value, const int unit) {
-    return ((value + unit - 1) / unit) * unit;
-}
-
-static ulong prefix_packed_key_index(const int seq, const int dim, const int headDim, const int hP, const int lP) {
-    return (ulong)(seq / hP) * prefix_round_up_int(headDim, lP) * hP +
-           (ulong)(dim / lP) * hP * lP +
-           (ulong)(seq % hP) * lP +
-           (ulong)(dim % lP);
-}
-
-static ulong prefix_packed_flash_value_index(const int seq, const int dim, const int headDim, const int hP, const int lP) {
-    const int blockKv = 64;
-    const int weightStride2 = lP * hP;
-    const int weightStride1 = ((blockKv + lP - 1) / lP) * weightStride2;
-    const int weightStride0 = weightStride1 * ((headDim + hP - 1) / hP);
-    const int idxInner = (seq / blockKv) * weightStride0 +
-                         ((seq % blockKv) / lP) * weightStride2 +
-                         (seq % blockKv) % lP;
-    const int idxBase = (dim / hP) * weightStride1 + (dim % hP) * lP;
-    return (ulong)(idxBase + idxInner);
-}
-
-static float prefix_half_to_float(const ushort h) {
-    const uint sign = ((uint)h & 0x8000u) << 16;
-    uint exp = ((uint)h >> 10) & 0x1fu;
-    uint mant = (uint)h & 0x03ffu;
-    uint bits;
-    if (exp == 0u) {
-        if (mant == 0u) {
-            bits = sign;
-        } else {
-            exp = 1u;
-            while ((mant & 0x0400u) == 0u) {
-                mant <<= 1;
-                exp--;
-            }
-            mant &= 0x03ffu;
-            bits = sign | ((exp + 112u) << 23) | (mant << 13);
-        }
-    } else if (exp == 31u) {
-        bits = sign | 0x7f800000u | (mant << 13);
-    } else {
-        bits = sign | ((exp + 112u) << 23) | (mant << 13);
-    }
-    return as_float(bits);
-}
-
-static float prefix_read_disk_scalar(__global const uchar* base, const ulong index, const int bytes) {
-    if (bytes == 2) {
-        const ulong offset = index * 2ul;
-        const ushort h = (ushort)base[offset] | ((ushort)base[offset + 1] << 8);
-        return prefix_half_to_float(h);
-    }
-    return *((__global const float*)(base + index * 4ul));
-}
-
-__kernel void prefix_copy_rope(GLOBAL_SIZE_3_DIMS
-                              __global const uchar* key_file,
-                              __global const uchar* value_file,
+__kernel void prefix_rope_inplace(GLOBAL_SIZE_3_DIMS
                               __global FLOAT* past_k,
-                              __global FLOAT* past_v,
                               __private const int srcLen,
                               __private const int dstStart,
                               __private const int maxLen,
                               __private const int headDim,
-                              __private const int hP,
-                              __private const int lP,
-                              __private const int diskBytes,
-                              __private const int keySizePerHead,
-                              __private const int valueSizePerHead,
                               __private const int ropeDim,
                               __private const float ropeTheta
 ) {
-    const int dim = get_global_id(0);
+    const int freqDim = get_global_id(0);
     const int token = get_global_id(1);
     const int head = get_global_id(2);
-    DEAL_NON_UNIFORM_DIM3(dim, token, head);
+    DEAL_NON_UNIFORM_DIM3(freqDim, token, head);
 
-    const int dstSeq = dstStart + token;
-    __global const uchar* keyHead = key_file + (ulong)head * (ulong)keySizePerHead;
-    __global const uchar* valueHead = value_file + (ulong)head * (ulong)valueSizePerHead;
-    const ulong keyIndex = prefix_packed_key_index(token, dim, headDim, hP, lP);
-    const ulong valueIndex = prefix_packed_flash_value_index(token, dim, headDim, hP, lP);
-    float keyValue = prefix_read_disk_scalar(keyHead, keyIndex, diskBytes);
-    const float value = prefix_read_disk_scalar(valueHead, valueIndex, diskBytes);
-
-    if (dim < ropeDim) {
-        const int halfDim = ropeDim / 2;
-        const int pairDim = dim < halfDim ? dim + halfDim : dim - halfDim;
-        const int freqDim = dim < halfDim ? dim : dim - halfDim;
-        const ulong pairIndex = prefix_packed_key_index(token, pairDim, headDim, hP, lP);
-        const float pairValue = prefix_read_disk_scalar(keyHead, pairIndex, diskBytes);
-        const float left = dim < halfDim ? keyValue : pairValue;
-        const float right = dim < halfDim ? pairValue : keyValue;
-        const float invFreq = 1.0f / pow(ropeTheta, (float)(2 * freqDim) / (float)ropeDim);
-        const float angle = (float)dstSeq * invFreq;
-        const float cosValue = cos(angle);
-        const float sinValue = sin(angle);
-        keyValue = dim < halfDim ? left * cosValue - right * sinValue : right * cosValue + left * sinValue;
+    const int halfDim = ropeDim / 2;
+    if (freqDim >= halfDim) {
+        return;
     }
-
-    past_k[((ulong)head * (ulong)headDim + (ulong)dim) * (ulong)maxLen + (ulong)dstSeq] = (FLOAT)keyValue;
-    past_v[((ulong)head * (ulong)maxLen + (ulong)dstSeq) * (ulong)headDim + (ulong)dim] = (FLOAT)value;
+    const int dstSeq = dstStart + token;
+    const int leftDim = freqDim;
+    const int rightDim = freqDim + halfDim;
+    const ulong leftIndex = ((ulong)head * (ulong)headDim + (ulong)leftDim) * (ulong)maxLen + (ulong)dstSeq;
+    const ulong rightIndex = ((ulong)head * (ulong)headDim + (ulong)rightDim) * (ulong)maxLen + (ulong)dstSeq;
+    const float left = (float)past_k[leftIndex];
+    const float right = (float)past_k[rightIndex];
+    const float invFreq = 1.0f / pow(ropeTheta, (float)(2 * freqDim) / (float)ropeDim);
+    const float angle = (float)dstSeq * invFreq;
+    const float cosValue = cos(angle);
+    const float sinValue = sin(angle);
+    past_k[leftIndex] = (FLOAT)(left * cosValue - right * sinValue);
+    past_k[rightIndex] = (FLOAT)(right * cosValue + left * sinValue);
 }
 
 
@@ -410,6 +336,49 @@ __kernel void qkv_transpose_output(GLOBAL_SIZE_3_DIMS
 #define NUMHEAD_GROUP_SIZE 1
 #endif
 
+static inline float read_paged_key_scalar(__global const FLOAT* past_key,
+                                          __global const int* token_table,
+                                          __global const int* rope_table,
+                                          const int logical_token,
+                                          const int kv_head,
+                                          const int dim,
+                                          const int max_len,
+                                          const int head_dim,
+                                          const int rope_dim,
+                                          const float rope_theta) {
+    const int physical = token_table[logical_token];
+    const ulong index = ((ulong)kv_head * (ulong)head_dim + (ulong)dim) * (ulong)max_len + (ulong)physical;
+    float value = (float)past_key[index];
+    if (rope_table[logical_token] == 0 || dim >= rope_dim || rope_dim <= 0) {
+        return value;
+    }
+    const int half_dim = rope_dim / 2;
+    const int pair_dim = dim < half_dim ? dim + half_dim : dim - half_dim;
+    const int freq_dim = dim < half_dim ? dim : dim - half_dim;
+    const ulong pair_index = ((ulong)kv_head * (ulong)head_dim + (ulong)pair_dim) * (ulong)max_len + (ulong)physical;
+    const float pair_value = (float)past_key[pair_index];
+    const float left = dim < half_dim ? value : pair_value;
+    const float right = dim < half_dim ? pair_value : value;
+    const float inv_freq = 1.0f / pow(rope_theta, (float)(2 * freq_dim) / (float)rope_dim);
+    const float angle = (float)logical_token * inv_freq;
+    const float cos_value = cos(angle);
+    const float sin_value = sin(angle);
+    return dim < half_dim ? left * cos_value - right * sin_value
+                          : right * cos_value + left * sin_value;
+}
+
+static inline float read_paged_value_scalar(__global const FLOAT* past_value,
+                                            __global const int* token_table,
+                                            const int logical_token,
+                                            const int kv_head,
+                                            const int dim,
+                                            const int max_len,
+                                            const int head_dim) {
+    const int physical = token_table[logical_token];
+    const ulong index = ((ulong)kv_head * (ulong)max_len + (ulong)physical) * (ulong)head_dim + (ulong)dim;
+    return (float)past_value[index];
+}
+
 __kernel void rearrange_q(GLOBAL_SIZE_3_DIMS
                               __global const FLOAT *query, // [batch query_seq_len head_num head_dim]
                               __global FLOAT *query_tmp, // [batch head_num head_dim_4 query_seq_len_4]
@@ -486,6 +455,81 @@ __kernel void rearrange_k(GLOBAL_SIZE_3_DIMS
 #endif
 }
 
+__kernel void rearrange_k_paged(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *key, // [batch key_seq_len kv_head_num head_dim]
+                              __global FLOAT *past_key, // [batch kv_head_num head_dim physical_max_length]
+                              __global const int *token_table, // logical token -> physical token slot
+                              __global int *rope_table, // prompt/decode tokens are already RoPE'd
+                              __private const int past_len,
+                              __private const int max_len,
+                              __private const int seq_len,
+                              __private const int kv_head_num,
+                              __private const int head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int b = z / kv_head_num;
+    z = z % kv_head_num;
+    const int y4 = y << 2;
+
+#ifdef OPENCL_PREFILL_ATTENTION
+    const int x4 = x << 2;
+    const int stride = kv_head_num * head_dim;
+    int key_offset = ((b * seq_len + x4) * kv_head_num + z) * head_dim + y4;
+    FLOAT4 key_vec0 = vload4(0, key + key_offset); key_offset += stride;
+    FLOAT4 key_vec1 = (x4 + 1 >= seq_len) ? (FLOAT4)0 : vload4(0, key + key_offset); key_offset += stride;
+    FLOAT4 key_vec2 = (x4 + 2 >= seq_len) ? (FLOAT4)0 : vload4(0, key + key_offset); key_offset += stride;
+    FLOAT4 key_vec3 = (x4 + 3 >= seq_len) ? (FLOAT4)0 : vload4(0, key + key_offset);
+    const int logical0 = past_len + x4;
+    if (x4 < seq_len) {
+        const int physical = token_table[logical0];
+        past_key[((b * kv_head_num + z) * head_dim + y4) * max_len + physical] = key_vec0.s0;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 1) * max_len + physical] = key_vec0.s1;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 2) * max_len + physical] = key_vec0.s2;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 3) * max_len + physical] = key_vec0.s3;
+        if (y == 0 && z == 0) rope_table[logical0] = 0;
+    }
+    if (x4 + 1 < seq_len) {
+        const int logical = past_len + x4 + 1;
+        const int physical = token_table[logical];
+        past_key[((b * kv_head_num + z) * head_dim + y4) * max_len + physical] = key_vec1.s0;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 1) * max_len + physical] = key_vec1.s1;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 2) * max_len + physical] = key_vec1.s2;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 3) * max_len + physical] = key_vec1.s3;
+        if (y == 0 && z == 0) rope_table[logical] = 0;
+    }
+    if (x4 + 2 < seq_len) {
+        const int logical = past_len + x4 + 2;
+        const int physical = token_table[logical];
+        past_key[((b * kv_head_num + z) * head_dim + y4) * max_len + physical] = key_vec2.s0;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 1) * max_len + physical] = key_vec2.s1;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 2) * max_len + physical] = key_vec2.s2;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 3) * max_len + physical] = key_vec2.s3;
+        if (y == 0 && z == 0) rope_table[logical] = 0;
+    }
+    if (x4 + 3 < seq_len) {
+        const int logical = past_len + x4 + 3;
+        const int physical = token_table[logical];
+        past_key[((b * kv_head_num + z) * head_dim + y4) * max_len + physical] = key_vec3.s0;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 1) * max_len + physical] = key_vec3.s1;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 2) * max_len + physical] = key_vec3.s2;
+        past_key[((b * kv_head_num + z) * head_dim + y4 + 3) * max_len + physical] = key_vec3.s3;
+        if (y == 0 && z == 0) rope_table[logical] = 0;
+    }
+#else
+    FLOAT4 key_vec = vload4(0, key + (b * kv_head_num + z) * head_dim + y4);
+    const int physical = token_table[past_len];
+    past_key[((b * kv_head_num + z) * head_dim + y4) * max_len + physical] = key_vec.s0;
+    past_key[((b * kv_head_num + z) * head_dim + y4 + 1) * max_len + physical] = key_vec.s1;
+    past_key[((b * kv_head_num + z) * head_dim + y4 + 2) * max_len + physical] = key_vec.s2;
+    past_key[((b * kv_head_num + z) * head_dim + y4 + 3) * max_len + physical] = key_vec.s3;
+    if (y == 0 && z == 0) rope_table[past_len] = 0;
+#endif
+}
+
 __kernel void rearrange_v(GLOBAL_SIZE_3_DIMS
                               __global const FLOAT *value, // [batch value_seq_len kv_head_num head_dim]
                               __global FLOAT *past_value, // [batch kv_head_num max_length head_dim]
@@ -521,6 +565,55 @@ __kernel void rearrange_v(GLOBAL_SIZE_3_DIMS
     FLOAT4 value_vec = vload4(0, value + (b * kv_head_num + z) * head_dim + x4);
     const int output_offset = ((b * kv_head_num + z) * max_len + past_len) * head_dim + x4;
     vstore4(value_vec, 0, past_value + output_offset);
+#endif
+}
+
+__kernel void rearrange_v_paged(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *value, // [batch value_seq_len kv_head_num head_dim]
+                              __global FLOAT *past_value, // [batch kv_head_num physical_max_length head_dim]
+                              __global const int *token_table,
+                              __private const int past_len,
+                              __private const int max_len,
+                              __private const int seq_len,
+                              __private const int kv_head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int b = z / kv_head_num;
+    z = z % kv_head_num;
+    const int x4 = x << 2;
+
+#ifdef OPENCL_PREFILL_ATTENTION
+    const int y4 = y << 2;
+    const int stride = kv_head_num * head_dim;
+    int value_offset = ((b * seq_len + y4) * kv_head_num + z) * head_dim + x4;
+    FLOAT4 value_vec0 = vload4(0, value + value_offset); value_offset += stride;
+    FLOAT4 value_vec1 = (y4 + 1 >= seq_len) ? (FLOAT4)0 : vload4(0, value + value_offset); value_offset += stride;
+    FLOAT4 value_vec2 = (y4 + 2 >= seq_len) ? (FLOAT4)0 : vload4(0, value + value_offset); value_offset += stride;
+    FLOAT4 value_vec3 = (y4 + 3 >= seq_len) ? (FLOAT4)0 : vload4(0, value + value_offset);
+    if (y4 < seq_len) {
+        const int physical = token_table[past_len + y4];
+        vstore4(value_vec0, 0, past_value + ((b * kv_head_num + z) * max_len + physical) * head_dim + x4);
+    }
+    if (y4 + 1 < seq_len) {
+        const int physical = token_table[past_len + y4 + 1];
+        vstore4(value_vec1, 0, past_value + ((b * kv_head_num + z) * max_len + physical) * head_dim + x4);
+    }
+    if (y4 + 2 < seq_len) {
+        const int physical = token_table[past_len + y4 + 2];
+        vstore4(value_vec2, 0, past_value + ((b * kv_head_num + z) * max_len + physical) * head_dim + x4);
+    }
+    if (y4 + 3 < seq_len) {
+        const int physical = token_table[past_len + y4 + 3];
+        vstore4(value_vec3, 0, past_value + ((b * kv_head_num + z) * max_len + physical) * head_dim + x4);
+    }
+#else
+    FLOAT4 value_vec = vload4(0, value + (b * kv_head_num + z) * head_dim + x4);
+    const int physical = token_table[past_len];
+    vstore4(value_vec, 0, past_value + ((b * kv_head_num + z) * max_len + physical) * head_dim + x4);
 #endif
 }
 
@@ -741,6 +834,181 @@ __kernel void matmul_qk_decode(GLOBAL_SIZE_2_DIMS
     }
 }
 
+__kernel void matmul_qk_div_mask_prefill_paged(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *query, // [batch head_num head_dim_4 query_seq_len_4]
+                              __global const FLOAT *past_key, // [batch kv_head_num head_dim_4 physical_max_length]
+                              #ifdef ADD_MASK
+                              __global const FLOAT* mask,
+                              #elif defined(SET_MASK)
+                              __global const int* mask,
+                              #endif
+                              __global FLOAT *qk,
+                              __private const float scale,
+                              __private const int query_seq_len,
+                              __private const int mask_key_seq_len,
+                              __private const int key_seq_len,
+                              __private const int max_len,
+                              __private const int head_num,
+                              __private const int head_dim,
+                              __global const int* token_table,
+                              __global const int* rope_table,
+                              __private const int rope_dim,
+                              __private const float rope_theta) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    const int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int x4 = x << 2;
+    const int y4 = y << 2;
+    const int query_seq_len4 = (query_seq_len + 3) / 4 * 4;
+    const int query_offset = z * head_dim * query_seq_len4 + x4;
+    const int kv_head = z / NUMHEAD_GROUP_SIZE;
+    float4 out0 = 0, out1 = 0, out2 = 0, out3 = 0;
+
+    for (int i = 0; i < head_dim / 4; ++i) {
+        int i4 = i << 2;
+        float4 query_vec0 = convert_float4(vload4(0, query + query_offset + i4 * query_seq_len4));
+        float4 query_vec1 = convert_float4(vload4(0, query + query_offset + (i4 + 1) * query_seq_len4));
+        float4 query_vec2 = convert_float4(vload4(0, query + query_offset + (i4 + 2) * query_seq_len4));
+        float4 query_vec3 = convert_float4(vload4(0, query + query_offset + (i4 + 3) * query_seq_len4));
+
+        float4 past_vec0 = (float4)(
+            y4 + 0 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 0, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 1 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 1, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 2 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 2, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 3 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 3, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        float4 past_vec1 = (float4)(
+            y4 + 0 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 0, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 1 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 1, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 2 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 2, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 3 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 3, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        float4 past_vec2 = (float4)(
+            y4 + 0 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 0, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 1 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 1, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 2 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 2, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 3 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 3, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        float4 past_vec3 = (float4)(
+            y4 + 0 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 0, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 1 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 1, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 2 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 2, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            y4 + 3 < key_seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, y4 + 3, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+
+        out0 = mad((float4)past_vec0.s0, query_vec0, out0);
+        out0 = mad((float4)past_vec1.s0, query_vec1, out0);
+        out0 = mad((float4)past_vec2.s0, query_vec2, out0);
+        out0 = mad((float4)past_vec3.s0, query_vec3, out0);
+        out1 = mad((float4)past_vec0.s1, query_vec0, out1);
+        out1 = mad((float4)past_vec1.s1, query_vec1, out1);
+        out1 = mad((float4)past_vec2.s1, query_vec2, out1);
+        out1 = mad((float4)past_vec3.s1, query_vec3, out1);
+        out2 = mad((float4)past_vec0.s2, query_vec0, out2);
+        out2 = mad((float4)past_vec1.s2, query_vec1, out2);
+        out2 = mad((float4)past_vec2.s2, query_vec2, out2);
+        out2 = mad((float4)past_vec3.s2, query_vec3, out2);
+        out3 = mad((float4)past_vec0.s3, query_vec0, out3);
+        out3 = mad((float4)past_vec1.s3, query_vec1, out3);
+        out3 = mad((float4)past_vec2.s3, query_vec2, out3);
+        out3 = mad((float4)past_vec3.s3, query_vec3, out3);
+    }
+    out0 *= (float4)scale;
+    out1 *= (float4)scale;
+    out2 *= (float4)scale;
+    out3 *= (float4)scale;
+    {
+        #if defined(ADD_MASK) || defined(SET_MASK)
+        int mask_clp = y4 + mask_key_seq_len - key_seq_len;
+        int mask_offset = mask_clp * query_seq_len4 + x4;
+        float4 mask0 = mask_clp >= 0 && mask_clp < mask_key_seq_len ? convert_float4(vload4(0, mask + mask_offset)) : 0; mask_offset += query_seq_len4;
+        float4 mask1 = mask_clp + 1 >= 0 && mask_clp + 1 < mask_key_seq_len ? convert_float4(vload4(0, mask + mask_offset)) : 0; mask_offset += query_seq_len4;
+        float4 mask2 = mask_clp + 2 >= 0 && mask_clp + 2 < mask_key_seq_len ? convert_float4(vload4(0, mask + mask_offset)) : 0; mask_offset += query_seq_len4;
+        float4 mask3 = mask_clp + 3 >= 0 && mask_clp + 3 < mask_key_seq_len ? convert_float4(vload4(0, mask + mask_offset)) : 0;
+        #endif
+        #ifdef ADD_MASK
+        out0 += mask0; out1 += mask1; out2 += mask2; out3 += mask3;
+        #elif defined(SET_MASK)
+        out0 = (mask0 == (float4)0) ? (float4)(-FLT_MAX) : out0;
+        out1 = (mask1 == (float4)0) ? (float4)(-FLT_MAX) : out1;
+        out2 = (mask2 == (float4)0) ? (float4)(-FLT_MAX) : out2;
+        out3 = (mask3 == (float4)0) ? (float4)(-FLT_MAX) : out3;
+        #endif
+    }
+
+    const int qk_offset = (z * key_seq_len + y4) * query_seq_len4 + x4;
+    vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
+    if (y4 + 1 >= key_seq_len) return;
+    vstore4(CONVERT_FLOAT4(out1), 0, qk + qk_offset + query_seq_len4);
+    if (y4 + 2 >= key_seq_len) return;
+    vstore4(CONVERT_FLOAT4(out2), 0, qk + qk_offset + query_seq_len4 + query_seq_len4);
+    if (y4 + 3 >= key_seq_len) return;
+    vstore4(CONVERT_FLOAT4(out3), 0, qk + qk_offset + query_seq_len4 + query_seq_len4 + query_seq_len4);
+}
+
+__kernel void matmul_qk_decode_paged(GLOBAL_SIZE_2_DIMS
+                              __global const FLOAT *query,
+                              __global const FLOAT *past_key,
+                              __global FLOAT *qk,
+                              __private const float scale,
+                              __private const int seq_len,
+                              __private const int max_len,
+                              __private const int head_num,
+                              __private const int head_dim,
+                              __global const int* token_table,
+                              __global const int* rope_table,
+                              __private const int rope_dim,
+                              __private const float rope_theta) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    DEAL_NON_UNIFORM_DIM2(x, y);
+    const int x4 = x << 2;
+
+    const int query_offset = y * head_dim;
+    const int kv_head = y / NUMHEAD_GROUP_SIZE;
+    float4 out0 = 0;
+    for (int i = 0; i < head_dim / 4; ++i) {
+        int i4 = i << 2;
+        float4 query_vec = convert_float4(vload4(0, query + query_offset + i4));
+        float4 past_vec0 = (float4)(
+            x4 + 0 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 0, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 1 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 1, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 2 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 2, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 3 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 3, kv_head, i4 + 0, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        float4 past_vec1 = (float4)(
+            x4 + 0 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 0, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 1 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 1, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 2 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 2, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 3 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 3, kv_head, i4 + 1, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        float4 past_vec2 = (float4)(
+            x4 + 0 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 0, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 1 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 1, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 2 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 2, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 3 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 3, kv_head, i4 + 2, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        float4 past_vec3 = (float4)(
+            x4 + 0 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 0, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 1 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 1, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 2 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 2, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f,
+            x4 + 3 < seq_len ? read_paged_key_scalar(past_key, token_table, rope_table, x4 + 3, kv_head, i4 + 3, max_len, head_dim, rope_dim, rope_theta) : 0.0f);
+        out0 = mad((float4)query_vec.s0, past_vec0, out0);
+        out0 = mad((float4)query_vec.s1, past_vec1, out0);
+        out0 = mad((float4)query_vec.s2, past_vec2, out0);
+        out0 = mad((float4)query_vec.s3, past_vec3, out0);
+    }
+    out0 *= (float4)scale;
+    const int qk_offset = y * seq_len + x4;
+    if (x4 + 3 < seq_len) {
+        vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
+    } else {
+        int remain = seq_len - x4;
+        if (remain == 3) {
+            vstore3(CONVERT_FLOAT3((float3)(out0.s012)), 0, qk + qk_offset);
+        } else if (remain == 2) {
+            vstore2(CONVERT_FLOAT2((float2)(out0.s01)), 0, qk + qk_offset);
+        } else if (remain == 1) {
+            qk[qk_offset] = out0.s0;
+        }
+    }
+}
+
 __kernel void matmul_qkv_prefill(GLOBAL_SIZE_3_DIMS
                               __global const FLOAT *qk, // qk prefill [batch head_num kv_seq_length query_seq_len]
                               __global const FLOAT *past_value, // [batch kv_head_num max_len head_dim]
@@ -818,6 +1086,121 @@ __kernel void matmul_qkv_prefill(GLOBAL_SIZE_3_DIMS
     if(y4 + 2 >= query_seq_len) return;
     vstore8(CONVERT_FLOAT8(out2), 0, output + output_offset + stride + stride);
     if(y4 + 3 >= query_seq_len) return;
+    vstore8(CONVERT_FLOAT8(out3), 0, output + output_offset + stride + stride + stride);
+}
+
+__kernel void matmul_qkv_prefill_paged(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *qk,
+                              __global const FLOAT *past_value,
+                              __global FLOAT *output,
+                              __private const int query_seq_len,
+                              __private const int kv_seq_len,
+                              __private const int max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim,
+                              __global const int* token_table) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+    const int b = z / head_num;
+    z = z % head_num;
+    const int kv_head = z / NUMHEAD_GROUP_SIZE;
+    const int x8 = x << 3;
+    const int y4 = y << 2;
+
+    const int query_seq_len4 = (query_seq_len + 3) / 4 * 4;
+    const int qk_offset = (b * head_num + z) * kv_seq_len * query_seq_len4 + y4;
+    const int loop_end = max(kv_seq_len / 4 - 1, 0);
+    COMPUTE_FLOAT8 out0 = 0, out1 = 0, out2 = 0, out3 = 0;
+
+    for (int i = 0; i < loop_end; ++i) {
+        int i4 = i << 2;
+        COMPUTE_FLOAT4 qk_vec0 = CONVERT_COMPUTE_FLOAT4(vload4(0, qk + qk_offset + i4 * query_seq_len4));
+        COMPUTE_FLOAT4 qk_vec1 = CONVERT_COMPUTE_FLOAT4(vload4(0, qk + qk_offset + (i4 + 1) * query_seq_len4));
+        COMPUTE_FLOAT4 qk_vec2 = CONVERT_COMPUTE_FLOAT4(vload4(0, qk + qk_offset + (i4 + 2) * query_seq_len4));
+        COMPUTE_FLOAT4 qk_vec3 = CONVERT_COMPUTE_FLOAT4(vload4(0, qk + qk_offset + (i4 + 3) * query_seq_len4));
+
+        COMPUTE_FLOAT8 past_vec0 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 7, max_len, head_dim));
+        COMPUTE_FLOAT8 past_vec1 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 7, max_len, head_dim));
+        COMPUTE_FLOAT8 past_vec2 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 7, max_len, head_dim));
+        COMPUTE_FLOAT8 past_vec3 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 7, max_len, head_dim));
+
+        out0 = mad((COMPUTE_FLOAT8)qk_vec0.s0, past_vec0, out0);
+        out0 = mad((COMPUTE_FLOAT8)qk_vec1.s0, past_vec1, out0);
+        out0 = mad((COMPUTE_FLOAT8)qk_vec2.s0, past_vec2, out0);
+        out0 = mad((COMPUTE_FLOAT8)qk_vec3.s0, past_vec3, out0);
+        out1 = mad((COMPUTE_FLOAT8)qk_vec0.s1, past_vec0, out1);
+        out1 = mad((COMPUTE_FLOAT8)qk_vec1.s1, past_vec1, out1);
+        out1 = mad((COMPUTE_FLOAT8)qk_vec2.s1, past_vec2, out1);
+        out1 = mad((COMPUTE_FLOAT8)qk_vec3.s1, past_vec3, out1);
+        out2 = mad((COMPUTE_FLOAT8)qk_vec0.s2, past_vec0, out2);
+        out2 = mad((COMPUTE_FLOAT8)qk_vec1.s2, past_vec1, out2);
+        out2 = mad((COMPUTE_FLOAT8)qk_vec2.s2, past_vec2, out2);
+        out2 = mad((COMPUTE_FLOAT8)qk_vec3.s2, past_vec3, out2);
+        out3 = mad((COMPUTE_FLOAT8)qk_vec0.s3, past_vec0, out3);
+        out3 = mad((COMPUTE_FLOAT8)qk_vec1.s3, past_vec1, out3);
+        out3 = mad((COMPUTE_FLOAT8)qk_vec2.s3, past_vec2, out3);
+        out3 = mad((COMPUTE_FLOAT8)qk_vec3.s3, past_vec3, out3);
+    }
+    for (int i = (loop_end << 2); i < kv_seq_len; ++i) {
+        COMPUTE_FLOAT4 qk_vec = CONVERT_COMPUTE_FLOAT4(vload4(0, qk + qk_offset + i * query_seq_len4));
+        COMPUTE_FLOAT8 past_vec = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 7, max_len, head_dim));
+        out0 = mad((COMPUTE_FLOAT8)qk_vec.s0, past_vec, out0);
+        out1 = mad((COMPUTE_FLOAT8)qk_vec.s1, past_vec, out1);
+        out2 = mad((COMPUTE_FLOAT8)qk_vec.s2, past_vec, out2);
+        out3 = mad((COMPUTE_FLOAT8)qk_vec.s3, past_vec, out3);
+    }
+
+    const int output_offset = ((b * query_seq_len + y4) * head_num + z) * head_dim + x8;
+    const int stride = head_num * head_dim;
+    vstore8(CONVERT_FLOAT8(out0), 0, output + output_offset);
+    if (y4 + 1 >= query_seq_len) return;
+    vstore8(CONVERT_FLOAT8(out1), 0, output + output_offset + stride);
+    if (y4 + 2 >= query_seq_len) return;
+    vstore8(CONVERT_FLOAT8(out2), 0, output + output_offset + stride + stride);
+    if (y4 + 3 >= query_seq_len) return;
     vstore8(CONVERT_FLOAT8(out3), 0, output + output_offset + stride + stride + stride);
 }
 
@@ -968,6 +1351,131 @@ __kernel void matmul_qkv_decode_b4(GLOBAL_SIZE_2_DIMS
     }
     #endif
     
+    const int output_offset = y * head_dim + x4;
+    vstore4(CONVERT_FLOAT4(out0), 0, output + output_offset);
+}
+
+__kernel void matmul_qkv_decode_b8_paged(GLOBAL_SIZE_2_DIMS
+                              __global const FLOAT *qk,
+                              __global const FLOAT *past_value,
+                              __global FLOAT *output,
+                              __private const int qk_seq_len,
+                              __private const int max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim,
+                              __global const int* token_table) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    DEAL_NON_UNIFORM_DIM2(x, y);
+    const int x8 = x << 3;
+    const int qk_offset = y * qk_seq_len;
+    const int kv_head = y / NUMHEAD_GROUP_SIZE;
+    COMPUTE_FLOAT8 out0 = 0;
+#ifdef LOOP_UNROLL_4
+    const int loop_end = max((qk_seq_len + 3) / 4 - 1, 0);
+    for (int i = 0; i < loop_end; ++i) {
+        int i4 = i << 2;
+        COMPUTE_FLOAT4 qk_vec = CONVERT_COMPUTE_FLOAT4(vload4(0, qk + qk_offset + i4));
+        COMPUTE_FLOAT8 past_vec0 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 0, kv_head, x8 + 7, max_len, head_dim));
+        COMPUTE_FLOAT8 past_vec1 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 1, kv_head, x8 + 7, max_len, head_dim));
+        COMPUTE_FLOAT8 past_vec2 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 2, kv_head, x8 + 7, max_len, head_dim));
+        COMPUTE_FLOAT8 past_vec3 = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i4 + 3, kv_head, x8 + 7, max_len, head_dim));
+        out0 = mad((COMPUTE_FLOAT8)qk_vec.s0, past_vec0, out0);
+        out0 = mad((COMPUTE_FLOAT8)qk_vec.s1, past_vec1, out0);
+        out0 = mad((COMPUTE_FLOAT8)qk_vec.s2, past_vec2, out0);
+        out0 = mad((COMPUTE_FLOAT8)qk_vec.s3, past_vec3, out0);
+    }
+    for (int i = (loop_end << 2); i < qk_seq_len; ++i) {
+        COMPUTE_FLOAT qk_vec = qk[qk_offset + i];
+        COMPUTE_FLOAT8 past_vec = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 7, max_len, head_dim));
+        out0 = mad((COMPUTE_FLOAT8)qk_vec, past_vec, out0);
+    }
+#else
+    for (int i = 0; i < qk_seq_len; ++i) {
+        COMPUTE_FLOAT qk_vec = qk[qk_offset + i];
+        COMPUTE_FLOAT8 past_vec = (COMPUTE_FLOAT8)(
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 3, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 4, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 5, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 6, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x8 + 7, max_len, head_dim));
+        out0 = mad((COMPUTE_FLOAT8)qk_vec, past_vec, out0);
+    }
+#endif
+    const int output_offset = y * head_dim + x8;
+    vstore8(CONVERT_FLOAT8(out0), 0, output + output_offset);
+}
+
+__kernel void matmul_qkv_decode_b4_paged(GLOBAL_SIZE_2_DIMS
+                              __global const FLOAT *qk,
+                              __global const FLOAT *past_value,
+                              __global FLOAT *output,
+                              __private const int qk_seq_len,
+                              __private const int max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim,
+                              __global const int* token_table) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    DEAL_NON_UNIFORM_DIM2(x, y);
+    const int x4 = x << 2;
+    const int qk_offset = y * qk_seq_len;
+    const int kv_head = y / NUMHEAD_GROUP_SIZE;
+    COMPUTE_FLOAT4 out0 = 0;
+    for (int i = 0; i < qk_seq_len; ++i) {
+        COMPUTE_FLOAT qk_vec = qk[qk_offset + i];
+        COMPUTE_FLOAT4 past_vec = (COMPUTE_FLOAT4)(
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x4 + 0, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x4 + 1, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x4 + 2, max_len, head_dim),
+            read_paged_value_scalar(past_value, token_table, i, kv_head, x4 + 3, max_len, head_dim));
+        out0 = mad((COMPUTE_FLOAT4)qk_vec, past_vec, out0);
+    }
     const int output_offset = y * head_dim + x4;
     vstore4(CONVERT_FLOAT4(out0), 0, output + output_offset);
 }

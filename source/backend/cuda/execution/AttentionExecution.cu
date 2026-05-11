@@ -1,6 +1,10 @@
 #include "AttentionExecution.hpp"
 #include "core/TensorUtils.hpp"
 #include "SoftmaxExecution.hpp"
+#include "core/PrefixCachePath.hpp"
+
+#include <fstream>
+#include <vector>
 
 namespace MNN {
 namespace CUDA {
@@ -218,6 +222,200 @@ __global__ void copy_kv_to_cache_kernel(
     value_cache_output[value_cache_idx] = val_to_copy_v;
 }
 
+__global__ void fill_paged_block_table_kernel(int* block_table, int slot_count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < slot_count) {
+        block_table[idx] = idx;
+    }
+}
+
+__global__ void fill_paged_slot_table_range_kernel(int* block_table, int logical_start,
+                                                   int physical_start, int token_count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < token_count) {
+        block_table[logical_start + idx] = physical_start + idx;
+    }
+}
+
+__global__ void fill_int_table_range_kernel(int* table, int logical_start, int value, int token_count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < token_count) {
+        table[logical_start + idx] = value;
+    }
+}
+
+template<typename T>
+__global__ void copy_kv_to_paged_cache_kernel(
+    const T* key_input,       // [B, L_k_new, H_kv, D]
+    const T* value_input,     // [B, L_k_new, H_kv, D]
+    T* key_pages,             // [blocks, page_size, B, H_kv, D]
+    T* value_pages,           // [blocks, B, H_kv, page_size, D]
+    const int* block_table,
+    int batch_size,
+    int new_kv_seq_len,
+    int kv_num_head,
+    int head_dim,
+    int past_kv_len,
+    int page_size
+) {
+    int d_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int l_idx_new = blockIdx.y * blockDim.y + threadIdx.y;
+    int bh_kv_idx = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (d_idx >= head_dim || l_idx_new >= new_kv_seq_len || bh_kv_idx >= batch_size * kv_num_head) {
+        return;
+    }
+
+    int b_idx = bh_kv_idx / kv_num_head;
+    int h_kv_idx = bh_kv_idx % kv_num_head;
+    int input_offset = b_idx * new_kv_seq_len * kv_num_head * head_dim +
+                       l_idx_new * kv_num_head * head_dim +
+                       h_kv_idx * head_dim + d_idx;
+    int dst_seq = past_kv_len + l_idx_new;
+    int physical_slot = block_table[dst_seq];
+    int physical_block = physical_slot / page_size;
+    int page_offset = physical_slot - physical_block * page_size;
+
+    size_t key_idx = (((size_t)physical_block * page_size + page_offset) *
+                      batch_size * kv_num_head + b_idx * kv_num_head + h_kv_idx) *
+                     head_dim + d_idx;
+    size_t value_idx = ((((size_t)physical_block * batch_size + b_idx) *
+                         kv_num_head + h_kv_idx) * page_size + page_offset) *
+                       head_dim + d_idx;
+    key_pages[key_idx] = key_input[input_offset];
+    value_pages[value_idx] = value_input[input_offset];
+}
+
+template <typename T>
+__device__ static T castCudaPrefixScalar(float value) {
+    return static_cast<T>(value);
+}
+
+template <>
+__device__ __half castCudaPrefixScalar<__half>(float value) {
+    return __float2half(value);
+}
+
+template<typename T>
+__global__ void save_cuda_paged_prefix_kernel(
+    const T* key_pages,
+    const T* value_pages,
+    const int* block_table,
+    T* raw_key_pages,
+    T* raw_value_pages,
+    int token_count,
+    int page_size,
+    int batch,
+    int kv_head_num,
+    int head_dim,
+    int rope_dim,
+    float rope_theta
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int blocks = (token_count + page_size - 1) / page_size;
+    int total = blocks * page_size * kv_head_num * head_dim;
+    if (idx >= total) {
+        return;
+    }
+
+    int dim = idx % head_dim;
+    int head = (idx / head_dim) % kv_head_num;
+    int token = (idx / (head_dim * kv_head_num)) % (blocks * page_size);
+    int disk_block = token / page_size;
+    int page_offset = token - disk_block * page_size;
+
+    size_t dst_key_idx = ((static_cast<size_t>(disk_block) * page_size + page_offset) *
+                          kv_head_num + head) * head_dim + dim;
+    size_t dst_value_idx = ((static_cast<size_t>(disk_block) * kv_head_num + head) *
+                            page_size + page_offset) * head_dim + dim;
+    if (token >= token_count) {
+        raw_key_pages[dst_key_idx] = static_cast<T>(0);
+        raw_value_pages[dst_value_idx] = static_cast<T>(0);
+        return;
+    }
+
+    int physical_slot = block_table[token];
+    int physical_block = physical_slot / page_size;
+    int physical_page_offset = physical_slot - physical_block * page_size;
+    size_t src_key_idx = ((((static_cast<size_t>(physical_block) * page_size + physical_page_offset) *
+                            batch) * kv_head_num + head) * head_dim + dim);
+    size_t src_value_idx = ((((static_cast<size_t>(physical_block) * batch) *
+                              kv_head_num + head) * page_size + physical_page_offset) * head_dim + dim);
+    float key_value = static_cast<float>(key_pages[src_key_idx]);
+    float value = static_cast<float>(value_pages[src_value_idx]);
+
+    if (dim < rope_dim) {
+        int half = rope_dim / 2;
+        int pair_dim = dim < half ? dim + half : dim - half;
+        int freq_dim = dim < half ? dim : dim - half;
+        size_t pair_idx = ((((static_cast<size_t>(physical_block) * page_size + physical_page_offset) *
+                             batch) * kv_head_num + head) * head_dim + pair_dim);
+        float pair_value = static_cast<float>(key_pages[pair_idx]);
+        float left = dim < half ? key_value : pair_value;
+        float right = dim < half ? pair_value : key_value;
+        float inv_freq = 1.0f / powf(rope_theta, static_cast<float>(2 * freq_dim) / static_cast<float>(rope_dim));
+        float angle = static_cast<float>(token) * inv_freq;
+        float cos_value = cosf(angle);
+        float sin_value = -sinf(angle);
+        key_value = dim < half ? left * cos_value - right * sin_value : right * cos_value + left * sin_value;
+    }
+
+    raw_key_pages[dst_key_idx] = castCudaPrefixScalar<T>(key_value);
+    raw_value_pages[dst_value_idx] = castCudaPrefixScalar<T>(value);
+}
+
+template<typename T>
+__device__ inline const T* paged_key_ptr(const T* key_pages, const int* block_table,
+                                         int logical_token, int batch_idx, int kv_head_idx,
+                                         int batch, int kv_head_num, int head_dim,
+                                         int page_size) {
+    int physical_slot = block_table[logical_token];
+    int physical_block = physical_slot / page_size;
+    int page_offset = physical_slot - physical_block * page_size;
+    return key_pages + ((((size_t)physical_block * page_size + page_offset) *
+                         batch + batch_idx) * kv_head_num + kv_head_idx) * head_dim;
+}
+
+template<typename T>
+__device__ inline float paged_key_value(const T* key_pages, const int* block_table, const int* rope_table,
+                                        int logical_token, int batch_idx, int kv_head_idx, int dim,
+                                        int batch, int kv_head_num, int head_dim, int page_size,
+                                        int rope_dim, float rope_theta) {
+    int physical_slot = block_table[logical_token];
+    int physical_block = physical_slot / page_size;
+    int page_offset = physical_slot - physical_block * page_size;
+    size_t base = ((((size_t)physical_block * page_size + page_offset) *
+                    batch + batch_idx) * kv_head_num + kv_head_idx) * head_dim;
+    float key_value = static_cast<float>(key_pages[base + dim]);
+    if (rope_table != nullptr && rope_table[logical_token] != 0 &&
+        rope_dim > 0 && dim < rope_dim) {
+        int half = rope_dim / 2;
+        int pair_dim = dim < half ? dim + half : dim - half;
+        int freq_dim = dim < half ? dim : dim - half;
+        float pair_value = static_cast<float>(key_pages[base + pair_dim]);
+        float left = dim < half ? key_value : pair_value;
+        float right = dim < half ? pair_value : key_value;
+        float inv_freq = 1.0f / powf(rope_theta, static_cast<float>(2 * freq_dim) / static_cast<float>(rope_dim));
+        float angle = static_cast<float>(logical_token) * inv_freq;
+        float cos_value = cosf(angle);
+        float sin_value = sinf(angle);
+        key_value = dim < half ? left * cos_value - right * sin_value : right * cos_value + left * sin_value;
+    }
+    return key_value;
+}
+
+template<typename T>
+__device__ inline const T* paged_value_ptr(const T* value_pages, const int* block_table,
+                                           int logical_token, int batch_idx, int kv_head_idx,
+                                           int batch, int kv_head_num, int head_dim,
+                                           int page_size) {
+    int physical_slot = block_table[logical_token];
+    int physical_block = physical_slot / page_size;
+    int page_offset = physical_slot - physical_block * page_size;
+    return value_pages + ((((size_t)physical_block * batch + batch_idx) *
+                           kv_head_num + kv_head_idx) * page_size + page_offset) * head_dim;
+}
+
 // =====================================================================
 // P0: Flash Decoding Kernel for decode stage (seq_len=1)
 // - Each block handles one (batch, q_head) pair
@@ -351,6 +549,113 @@ __global__ void flash_decode_kernel(
     float inv_sum = (thread_sum > 0.0f) ? (1.0f / thread_sum) : 0.0f;
 
     // Write output: [B, 1, H_q, D]
+    T* out_ptr = output + b_idx * head_num * head_dim + h_q_idx * head_dim;
+    for (int i = 0; i < d_per_thread && i < 8; i++) {
+        int d = tid + i * blockDim.x;
+        if (d < head_dim) {
+            out_ptr[d] = (T)(thread_out[i] * inv_sum);
+        }
+    }
+}
+
+template<typename T>
+__global__ void flash_decode_kernel_paged(
+    const T* __restrict__ query_input,    // [B, 1, H_q, D]
+    const T* __restrict__ key_pages,      // [blocks, page_size, B, H_kv, D]
+    const T* __restrict__ value_pages,    // [blocks, B, H_kv, page_size, D]
+    const int* __restrict__ block_table,
+    const int* __restrict__ rope_table,
+    T* __restrict__ output,               // [B, 1, H_q, D]
+    const int batch,
+    const int head_num,
+    const int kv_head_num,
+    const int head_dim,
+    const int key_seq_len,
+    const int page_size,
+    const float scale,
+    const int rope_dim,
+    const float rope_theta
+) {
+    const int bh_idx = blockIdx.x;
+    const int b_idx = bh_idx / head_num;
+    const int h_q_idx = bh_idx % head_num;
+    const int h_kv_idx = h_q_idx / (head_num / kv_head_num);
+    const int tid = threadIdx.x;
+    const int WARP_SIZE = 32;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    const int num_warps = blockDim.x / WARP_SIZE;
+
+    if (b_idx >= batch) return;
+
+    const T* q_ptr = query_input + b_idx * head_num * head_dim + h_q_idx * head_dim;
+
+    extern __shared__ char smem_raw[];
+    float* smem_max = reinterpret_cast<float*>(smem_raw);
+    float* smem_sum = smem_max + num_warps;
+    float* smem_out = smem_sum + num_warps;
+    (void)smem_out;
+
+    float thread_max = -1e20f;
+    float thread_sum = 0.0f;
+    float thread_out[8];
+    const int d_per_thread = (head_dim + blockDim.x - 1) / blockDim.x;
+    for (int i = 0; i < d_per_thread && i < 8; i++) thread_out[i] = 0.0f;
+
+    const int KV_TILE = 16;
+    for (int kv_start = 0; kv_start < key_seq_len; kv_start += KV_TILE) {
+        int kv_end = min(kv_start + KV_TILE, key_seq_len);
+        for (int k = kv_start; k < kv_end; k++) {
+            float qk_partial = 0.0f;
+            for (int d = tid; d < head_dim; d += blockDim.x) {
+                float key_value = paged_key_value(key_pages, block_table, rope_table, k, b_idx, h_kv_idx, d,
+                                                  batch, kv_head_num, head_dim, page_size,
+                                                  rope_dim, rope_theta);
+                qk_partial += (float)q_ptr[d] * key_value;
+            }
+
+            for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+                qk_partial += __shfl_xor_sync(0xffffffff, qk_partial, offset);
+            }
+            if (lane_id == 0) {
+                smem_max[warp_id] = qk_partial;
+            }
+            __syncthreads();
+
+            float qk_score = 0.0f;
+            if (tid == 0) {
+                for (int w = 0; w < num_warps; w++) {
+                    qk_score += smem_max[w];
+                }
+                qk_score *= scale;
+                smem_max[0] = qk_score;
+            }
+            __syncthreads();
+            qk_score = smem_max[0];
+
+            float old_max = thread_max;
+            float new_max = fmaxf(old_max, qk_score);
+            float exp_diff = expf(old_max - new_max);
+            float exp_score = expf(qk_score - new_max);
+
+            for (int i = 0; i < d_per_thread && i < 8; i++) {
+                thread_out[i] *= exp_diff;
+            }
+            thread_sum = thread_sum * exp_diff + exp_score;
+            thread_max = new_max;
+
+            const T* v_ptr = paged_value_ptr(value_pages, block_table, k, b_idx, h_kv_idx,
+                                             batch, kv_head_num, head_dim, page_size);
+            for (int i = 0; i < d_per_thread && i < 8; i++) {
+                int d = tid + i * blockDim.x;
+                if (d < head_dim) {
+                    thread_out[i] += exp_score * (float)v_ptr[d];
+                }
+            }
+        }
+    }
+
+    float inv_sum = (thread_sum > 0.0f) ? (1.0f / thread_sum) : 0.0f;
     T* out_ptr = output + b_idx * head_num * head_dim + h_q_idx * head_dim;
     for (int i = 0; i < d_per_thread && i < 8; i++) {
         int d = tid + i * blockDim.x;
@@ -501,6 +806,117 @@ __global__ void flash_decode_kernel_with_mask(
     }
 }
 
+template<typename T>
+__global__ void flash_decode_kernel_with_mask_paged(
+    const T* __restrict__ query_input,    // [B, L_q, H_q, D]
+    const T* __restrict__ key_pages,      // [blocks, page_size, B, H_kv, D]
+    const T* __restrict__ value_pages,    // [blocks, B, H_kv, page_size, D]
+    const int* __restrict__ block_table,
+    const int* __restrict__ rope_table,
+    T* __restrict__ output,               // [B, L_q, H_q, D]
+    const T* __restrict__ mask,
+    const int batch,
+    const int head_num,
+    const int kv_head_num,
+    const int head_dim,
+    const int key_seq_len,
+    const int page_size,
+    const int query_seq_len,
+    const float scale,
+    const int rope_dim,
+    const float rope_theta
+) {
+    const int idx = blockIdx.x;
+    const int q_idx = idx % query_seq_len;
+    const int bh_idx = idx / query_seq_len;
+    const int b_idx = bh_idx / head_num;
+    const int h_q_idx = bh_idx % head_num;
+    const int h_kv_idx = h_q_idx / (head_num / kv_head_num);
+    const int tid = threadIdx.x;
+    const int WARP_SIZE = 32;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    const int num_warps = blockDim.x / WARP_SIZE;
+
+    if (b_idx >= batch) return;
+
+    const T* q_ptr = query_input + b_idx * query_seq_len * head_num * head_dim
+                    + q_idx * head_num * head_dim + h_q_idx * head_dim;
+    const int past_kv_len = key_seq_len - query_seq_len;
+
+    extern __shared__ char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+
+    float thread_max = -1e20f;
+    float thread_sum = 0.0f;
+    float thread_out[8];
+    const int d_per_thread = (head_dim + blockDim.x - 1) / blockDim.x;
+    for (int i = 0; i < d_per_thread && i < 8; i++) thread_out[i] = 0.0f;
+
+    for (int k = 0; k < key_seq_len; k++) {
+        float qk_partial = 0.0f;
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            float key_value = paged_key_value(key_pages, block_table, rope_table, k, b_idx, h_kv_idx, d,
+                                              batch, kv_head_num, head_dim, page_size,
+                                              rope_dim, rope_theta);
+            qk_partial += (float)q_ptr[d] * key_value;
+        }
+
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+            qk_partial += __shfl_xor_sync(0xffffffff, qk_partial, offset);
+        }
+        if (lane_id == 0) {
+            smem[warp_id] = qk_partial;
+        }
+        __syncthreads();
+
+        float qk_score = 0.0f;
+        if (tid == 0) {
+            for (int w = 0; w < num_warps; w++) {
+                qk_score += smem[w];
+            }
+            qk_score *= scale;
+            if (k >= past_kv_len) {
+                int new_k_idx = k - past_kv_len;
+                qk_score += (float)mask[q_idx * query_seq_len + new_k_idx];
+            }
+            smem[0] = qk_score;
+        }
+        __syncthreads();
+        qk_score = smem[0];
+
+        float old_max = thread_max;
+        float new_max = fmaxf(old_max, qk_score);
+        float exp_diff = expf(old_max - new_max);
+        float exp_score = expf(qk_score - new_max);
+
+        for (int i = 0; i < d_per_thread && i < 8; i++) {
+            thread_out[i] *= exp_diff;
+        }
+        thread_sum = thread_sum * exp_diff + exp_score;
+        thread_max = new_max;
+
+        const T* v_ptr = paged_value_ptr(value_pages, block_table, k, b_idx, h_kv_idx,
+                                         batch, kv_head_num, head_dim, page_size);
+        for (int i = 0; i < d_per_thread && i < 8; i++) {
+            int d = tid + i * blockDim.x;
+            if (d < head_dim) {
+                thread_out[i] += exp_score * (float)v_ptr[d];
+            }
+        }
+    }
+
+    float inv_sum = (thread_sum > 0.0f) ? (1.0f / thread_sum) : 0.0f;
+    T* out_ptr = output + b_idx * query_seq_len * head_num * head_dim
+                + q_idx * head_num * head_dim + h_q_idx * head_dim;
+    for (int i = 0; i < d_per_thread && i < 8; i++) {
+        int d = tid + i * blockDim.x;
+        if (d < head_dim) {
+            out_ptr[d] = (T)(thread_out[i] * inv_sum);
+        }
+    }
+}
+
 // =====================================================================
 // OPT-2: Split-K Flash Decode Kernel
 // Multiple blocks cooperate on a single (batch, head) pair,
@@ -625,6 +1041,123 @@ __global__ void flash_decode_kernel_splitk(
         int d = tid + i * blockDim.x;
         if (d < head_dim) {
             out_ptr[d] = thread_out[i]; // unnormalized: sum(exp(qk - local_max) * v)
+        }
+    }
+    if (tid == 0) {
+        partial_meta[(split_idx * batch * head_num + bh_idx) * 2 + 0] = thread_max;
+        partial_meta[(split_idx * batch * head_num + bh_idx) * 2 + 1] = thread_sum;
+    }
+}
+
+template<typename T>
+__global__ void flash_decode_kernel_splitk_paged(
+    const T* __restrict__ query_input,    // [B, 1, H_q, D]
+    const T* __restrict__ key_pages,      // [blocks, page_size, B, H_kv, D]
+    const T* __restrict__ value_pages,    // [blocks, B, H_kv, page_size, D]
+    const int* __restrict__ block_table,
+    const int* __restrict__ rope_table,
+    float* __restrict__ partial_output,
+    float* __restrict__ partial_meta,
+    const int batch,
+    const int head_num,
+    const int kv_head_num,
+    const int head_dim,
+    const int key_seq_len,
+    const int page_size,
+    const float scale_factor,
+    const int parallel_blocks,
+    const int rope_dim,
+    const float rope_theta
+) {
+    const int bh_idx = blockIdx.x;
+    const int split_idx = blockIdx.y;
+    const int b_idx = bh_idx / head_num;
+    const int h_q_idx = bh_idx % head_num;
+    const int h_kv_idx = h_q_idx / (head_num / kv_head_num);
+    const int tid = threadIdx.x;
+
+    if (b_idx >= batch) return;
+
+    const int kv_per_block = (key_seq_len + parallel_blocks - 1) / parallel_blocks;
+    const int kv_start = split_idx * kv_per_block;
+    const int kv_end = min(kv_start + kv_per_block, key_seq_len);
+    if (kv_start >= key_seq_len) {
+        if (tid == 0) {
+            partial_meta[(split_idx * batch * head_num + bh_idx) * 2 + 0] = -1e20f;
+            partial_meta[(split_idx * batch * head_num + bh_idx) * 2 + 1] = 0.0f;
+        }
+        const int d_per_thread = (head_dim + blockDim.x - 1) / blockDim.x;
+        float* out_ptr = partial_output + (split_idx * batch * head_num + bh_idx) * head_dim;
+        for (int i = 0; i < d_per_thread && i < 8; i++) {
+            int d = tid + i * blockDim.x;
+            if (d < head_dim) out_ptr[d] = 0.0f;
+        }
+        return;
+    }
+
+    const T* q_ptr = query_input + b_idx * head_num * head_dim + h_q_idx * head_dim;
+    const int WARP_SIZE_LOCAL = 32;
+    const int warp_id = tid / WARP_SIZE_LOCAL;
+    const int lane_id = tid % WARP_SIZE_LOCAL;
+    const int num_warps = blockDim.x / WARP_SIZE_LOCAL;
+
+    extern __shared__ char smem_raw_splitk[];
+    float* smem_qk = reinterpret_cast<float*>(smem_raw_splitk);
+
+    float thread_max = -1e20f;
+    float thread_sum = 0.0f;
+    const int d_per_thread = (head_dim + blockDim.x - 1) / blockDim.x;
+    float thread_out[8];
+    for (int i = 0; i < d_per_thread && i < 8; i++) thread_out[i] = 0.0f;
+
+    for (int k = kv_start; k < kv_end; k++) {
+        float qk_partial = 0.0f;
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            float key_value = paged_key_value(key_pages, block_table, rope_table, k, b_idx, h_kv_idx, d,
+                                              batch, kv_head_num, head_dim, page_size,
+                                              rope_dim, rope_theta);
+            qk_partial += (float)q_ptr[d] * key_value;
+        }
+
+        for (int offset = WARP_SIZE_LOCAL / 2; offset > 0; offset >>= 1) {
+            qk_partial += __shfl_xor_sync(0xffffffff, qk_partial, offset);
+        }
+        if (lane_id == 0) smem_qk[warp_id] = qk_partial;
+        __syncthreads();
+
+        float qk_score = 0.0f;
+        if (tid == 0) {
+            for (int w = 0; w < num_warps; w++) qk_score += smem_qk[w];
+            qk_score *= scale_factor;
+            smem_qk[0] = qk_score;
+        }
+        __syncthreads();
+        qk_score = smem_qk[0];
+
+        float old_max = thread_max;
+        float new_max = fmaxf(old_max, qk_score);
+        float exp_diff = expf(old_max - new_max);
+        float exp_score = expf(qk_score - new_max);
+
+        for (int i = 0; i < d_per_thread && i < 8; i++) thread_out[i] *= exp_diff;
+        thread_sum = thread_sum * exp_diff + exp_score;
+        thread_max = new_max;
+
+        const T* v_ptr = paged_value_ptr(value_pages, block_table, k, b_idx, h_kv_idx,
+                                         batch, kv_head_num, head_dim, page_size);
+        for (int i = 0; i < d_per_thread && i < 8; i++) {
+            int d = tid + i * blockDim.x;
+            if (d < head_dim) {
+                thread_out[i] += exp_score * (float)v_ptr[d];
+            }
+        }
+    }
+
+    float* out_ptr = partial_output + (split_idx * batch * head_num + bh_idx) * head_dim;
+    for (int i = 0; i < d_per_thread && i < 8; i++) {
+        int d = tid + i * blockDim.x;
+        if (d < head_dim) {
+            out_ptr[d] = thread_out[i];
         }
     }
     if (tid == 0) {
@@ -794,6 +1327,117 @@ __global__ void qk_kernel_tiled(
     qk_scores_output[out_idx] = static_cast<T>(score_sum);
 }
 
+template<typename T, typename AccT = float>
+__global__ void qk_kernel_tiled_paged(
+    const T* __restrict__ query_input,    // [B, L_q_full, H_q, D]
+    const T* __restrict__ key_pages,      // [blocks, page_size, B, H_kv, D]
+    const int* __restrict__ block_table,
+    const int* __restrict__ rope_table,
+    T* __restrict__ qk_scores_output,     // [B, H_q, L_q_piece, L_k_total]
+    const void* mask_tensor_data,
+    const AttentionKernelParam* param,
+    int q_seq_piece_offset,
+    bool has_mask_flag,
+    bool is_add_mask_flag,
+    int page_size,
+    int rope_dim,
+    float rope_theta
+) {
+    const int QK_TILE = 16;
+    __shared__ AccT q_tile[QK_TILE][128 + 1];
+    __shared__ AccT k_tile[QK_TILE][128 + 1];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int bh_q_idx = blockIdx.z;
+
+    if (bh_q_idx >= param->batch * param->head_num) return;
+
+    const int b_idx = bh_q_idx / param->head_num;
+    const int h_q_idx = bh_q_idx % param->head_num;
+    const int h_kv_idx = h_q_idx / param->group;
+
+    const int q_idx_in_piece = blockIdx.y * QK_TILE + ty;
+    const int k_idx = blockIdx.x * QK_TILE + tx;
+    const int current_full_q_idx = q_seq_piece_offset + q_idx_in_piece;
+
+    AccT score_sum = 0.0f;
+
+    const int D_TILE = 32;
+    for (int d_start = 0; d_start < param->head_dim; d_start += D_TILE) {
+        if (current_full_q_idx < param->query_seq_len && q_idx_in_piece < param->q_seq_piece_len) {
+            for (int dd = tx; dd < D_TILE && (d_start + dd) < param->head_dim; dd += QK_TILE) {
+                int q_offset = b_idx * param->query_seq_len * param->head_num * param->head_dim
+                             + current_full_q_idx * param->head_num * param->head_dim
+                             + h_q_idx * param->head_dim + d_start + dd;
+                q_tile[ty][dd] = (AccT)query_input[q_offset];
+            }
+        } else {
+            for (int dd = tx; dd < D_TILE; dd += QK_TILE) {
+                q_tile[ty][dd] = AccT(0.0f);
+            }
+        }
+
+        if (k_idx < param->key_seq_len) {
+            for (int dd = ty; dd < D_TILE && (d_start + dd) < param->head_dim; dd += QK_TILE) {
+                k_tile[tx][dd] = (AccT)paged_key_value(key_pages, block_table, rope_table, k_idx,
+                                                       b_idx, h_kv_idx, d_start + dd,
+                                                       param->batch, param->kv_head_num,
+                                                       param->head_dim, page_size,
+                                                       rope_dim, rope_theta);
+            }
+        } else {
+            for (int dd = ty; dd < D_TILE; dd += QK_TILE) {
+                k_tile[tx][dd] = AccT(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        int d_end = min(D_TILE, param->head_dim - d_start);
+        #pragma unroll 8
+        for (int dd = 0; dd < d_end; dd++) {
+            score_sum += q_tile[ty][dd] * k_tile[tx][dd];
+        }
+
+        __syncthreads();
+    }
+
+    if (k_idx >= param->key_seq_len || q_idx_in_piece >= param->q_seq_piece_len || current_full_q_idx >= param->query_seq_len) {
+        return;
+    }
+
+    score_sum *= param->scale;
+
+    if (has_mask_flag && mask_tensor_data) {
+        if (is_add_mask_flag) {
+            int mask_idx = current_full_q_idx * param->query_seq_len + k_idx - param->key_seq_len + param->query_seq_len;
+            if (k_idx >= param->key_seq_len - param->query_seq_len) {
+                if (sizeof(T) == sizeof(__half)) {
+                    score_sum += __half2float(((const __half*)mask_tensor_data)[mask_idx]);
+                } else {
+                    score_sum += static_cast<const AccT*>(mask_tensor_data)[mask_idx];
+                }
+            }
+        } else {
+            int mask_idx = current_full_q_idx * param->key_seq_len + k_idx;
+            if (static_cast<const int*>(mask_tensor_data)[mask_idx] == 0) {
+                score_sum = (sizeof(T) == sizeof(__half)) ? AccT(-65504.0f) : AccT(-1e9f);
+            }
+        }
+    }
+
+    if (sizeof(T) == sizeof(__half)) {
+        const AccT max_half_val = AccT(65504.0f);
+        score_sum = fminf(fmaxf(score_sum, -max_half_val), max_half_val);
+    }
+
+    int out_idx = b_idx * param->head_num * param->q_seq_piece_len * param->key_seq_len +
+                  h_q_idx * param->q_seq_piece_len * param->key_seq_len +
+                  q_idx_in_piece * param->key_seq_len + k_idx;
+    qk_scores_output[out_idx] = static_cast<T>(score_sum);
+}
+
 
 // =====================================================================
 // Optimized QKV Kernel: shared memory tiling for V accumulation
@@ -851,6 +1495,65 @@ __global__ void qkv_kernel_tiled(
     attention_output[out_idx] = static_cast<T>(weighted_sum);
 }
 
+template<typename T, typename AccT = float>
+__global__ void qkv_kernel_tiled_paged(
+    const T* __restrict__ softmax_probs,  // [B, H_q, L_q_piece, L_k_total]
+    const T* __restrict__ value_pages,    // [blocks, B, H_kv, page_size, D]
+    const int* __restrict__ block_table,
+    T* __restrict__ attention_output,     // [B, L_q_full, H_q, D]
+    const AttentionKernelParam* param,
+    int q_seq_piece_offset,
+    int page_size
+) {
+    const int d_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int q_idx_in_piece = blockIdx.y * blockDim.y + threadIdx.y;
+    const int bh_q_idx = blockIdx.z;
+
+    if (d_idx >= param->head_dim || q_idx_in_piece >= param->q_seq_piece_len || bh_q_idx >= param->batch * param->head_num) {
+        return;
+    }
+
+    const int b_idx = bh_q_idx / param->head_num;
+    const int h_q_idx = bh_q_idx % param->head_num;
+    const int current_full_q_idx = q_seq_piece_offset + q_idx_in_piece;
+
+    if (current_full_q_idx >= param->query_seq_len) return;
+
+    const int h_kv_idx = h_q_idx / param->group;
+    AccT weighted_sum = 0.0f;
+
+    const T* prob_ptr = softmax_probs + b_idx * param->head_num * param->q_seq_piece_len * param->key_seq_len +
+                        h_q_idx * param->q_seq_piece_len * param->key_seq_len +
+                        q_idx_in_piece * param->key_seq_len;
+
+    const int hd = param->head_dim;
+    int k_s = 0;
+    for (; k_s + 3 < param->key_seq_len; k_s += 4) {
+        const T* v0 = paged_value_ptr(value_pages, block_table, k_s, b_idx, h_kv_idx,
+                                      param->batch, param->kv_head_num, param->head_dim, page_size);
+        const T* v1 = paged_value_ptr(value_pages, block_table, k_s + 1, b_idx, h_kv_idx,
+                                      param->batch, param->kv_head_num, param->head_dim, page_size);
+        const T* v2 = paged_value_ptr(value_pages, block_table, k_s + 2, b_idx, h_kv_idx,
+                                      param->batch, param->kv_head_num, param->head_dim, page_size);
+        const T* v3 = paged_value_ptr(value_pages, block_table, k_s + 3, b_idx, h_kv_idx,
+                                      param->batch, param->kv_head_num, param->head_dim, page_size);
+        weighted_sum += (AccT)prob_ptr[k_s]     * (AccT)v0[d_idx];
+        weighted_sum += (AccT)prob_ptr[k_s + 1] * (AccT)v1[d_idx];
+        weighted_sum += (AccT)prob_ptr[k_s + 2] * (AccT)v2[d_idx];
+        weighted_sum += (AccT)prob_ptr[k_s + 3] * (AccT)v3[d_idx];
+    }
+    for (; k_s < param->key_seq_len; k_s++) {
+        const T* v = paged_value_ptr(value_pages, block_table, k_s, b_idx, h_kv_idx,
+                                     param->batch, param->kv_head_num, hd, page_size);
+        weighted_sum += (AccT)prob_ptr[k_s] * (AccT)v[d_idx];
+    }
+
+    int out_idx = b_idx * param->query_seq_len * param->head_num * param->head_dim +
+                  current_full_q_idx * param->head_num * param->head_dim +
+                  h_q_idx * param->head_dim + d_idx;
+    attention_output[out_idx] = static_cast<T>(weighted_sum);
+}
+
 
 // ======= AttentionExecution 类实现 =======
 
@@ -878,6 +1581,7 @@ AttentionExecution::~AttentionExecution() {
         cudaFree(mSplitKMetaPtr);
         mSplitKMetaPtr = nullptr;
     }
+    releasePrefixSaveStaging();
 }
 
 // 初始化一个大小为 1 的占位 KVCache
@@ -969,6 +1673,275 @@ ErrorCode AttentionExecution::reallocKVCache_gpu(int required_total_kv_len, int 
         mCache->mMaxLength = new_allocated_max_len;
     }
     return MNN::NO_ERROR;
+}
+
+ErrorCode AttentionExecution::ensurePagedKVCache_gpu(int required_total_kv_len, int batch_size, int kv_num_head,
+                                                     int head_dim, cudaStream_t stream) {
+    if (!mIsKVCacheEnabled || !mCache) {
+        return MNN::NO_ERROR;
+    }
+    if (required_total_kv_len <= 0 || batch_size <= 0 || kv_num_head <= 0 || head_dim <= 0) {
+        return MNN::INVALID_VALUE;
+    }
+
+    const int page_size = mCache->mPagedPageSize > 0 ? mCache->mPagedPageSize : 64;
+    int required_physical_len = required_total_kv_len;
+    if (mCache->mPagedTokenTableCustom && mCache->mPagedPhysicalLength > required_physical_len) {
+        required_physical_len = mCache->mPagedPhysicalLength;
+    }
+    const int required_blocks = UP_DIV(required_physical_len, page_size);
+    if (required_blocks <= 0) {
+        return MNN::INVALID_VALUE;
+    }
+
+    bool need_realloc = required_blocks > mCache->mPagedMaxBlocks ||
+                        !mCache->mPagedKey || !mCache->mPagedValue ||
+                        !mCache->mPagedBlockTable ||
+                        !mCache->mPagedRopeTable ||
+                        mCache->mPagedKey->deviceId() == 0 ||
+                        mCache->mPagedValue->deviceId() == 0 ||
+                        mCache->mPagedBlockTable->deviceId() == 0 ||
+                        mCache->mPagedRopeTable->deviceId() == 0;
+    if (need_realloc) {
+        int old_blocks = mCache->mPagedMaxBlocks;
+        int new_blocks = ROUND_UP(required_blocks, 16);
+        if (old_blocks > 0 && new_blocks < old_blocks * 2) {
+            new_blocks = std::max(new_blocks, old_blocks * 2);
+        }
+
+        auto new_key = mPrecision == 4
+            ? Tensor::createDevice<float>({new_blocks, page_size, batch_size, kv_num_head, head_dim})
+            : Tensor::createDevice<uint16_t>({new_blocks, page_size, batch_size, kv_num_head, head_dim});
+        auto new_value = mPrecision == 4
+            ? Tensor::createDevice<float>({new_blocks, batch_size, kv_num_head, page_size, head_dim})
+            : Tensor::createDevice<uint16_t>({new_blocks, batch_size, kv_num_head, page_size, head_dim});
+        auto new_table = Tensor::createDevice<int>({new_blocks * page_size});
+        auto new_rope_table = Tensor::createDevice<int>({new_blocks * page_size});
+        if (!new_key || !new_value || !new_table || !new_rope_table) {
+            return MNN::OUT_OF_MEMORY;
+        }
+
+        bool resK = mCudaBackend->onAcquireBuffer(new_key, Backend::STATIC);
+        bool resV = mCudaBackend->onAcquireBuffer(new_value, Backend::STATIC);
+        bool resT = mCudaBackend->onAcquireBuffer(new_table, Backend::STATIC);
+        bool resR = mCudaBackend->onAcquireBuffer(new_rope_table, Backend::STATIC);
+        if (!resK || !resV || !resT || !resR) {
+            return MNN::OUT_OF_MEMORY;
+        }
+
+        if (mCache->mPagedActive && old_blocks > 0 &&
+            mCache->mPagedKey && mCache->mPagedValue && mCache->mPagedBlockTable &&
+            mCache->mPagedRopeTable &&
+            mCache->mPagedKey->deviceId() != 0 && mCache->mPagedValue->deviceId() != 0 &&
+            mCache->mPagedBlockTable->deviceId() != 0 && mCache->mPagedRopeTable->deviceId() != 0) {
+            size_t element_size = mPrecision;
+            size_t key_bytes = (size_t)old_blocks * page_size * batch_size * kv_num_head * head_dim * element_size;
+            size_t value_bytes = (size_t)old_blocks * batch_size * kv_num_head * page_size * head_dim * element_size;
+            size_t table_bytes = (size_t)old_blocks * page_size * sizeof(int);
+            cudaMemcpyAsync(getTensorDevicePtr(new_key), getTensorDevicePtr(mCache->mPagedKey.get()),
+                            key_bytes, cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(getTensorDevicePtr(new_value), getTensorDevicePtr(mCache->mPagedValue.get()),
+                            value_bytes, cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(getTensorDevicePtr(new_table), getTensorDevicePtr(mCache->mPagedBlockTable.get()),
+                            table_bytes, cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(getTensorDevicePtr(new_rope_table), getTensorDevicePtr(mCache->mPagedRopeTable.get()),
+                            table_bytes, cudaMemcpyDeviceToDevice, stream);
+            checkKernelErrors;
+        }
+
+        if (mCache->mPagedKey && mCache->mPagedKey->deviceId() != 0) {
+            mCudaBackend->onReleaseBuffer(mCache->mPagedKey.get(), Backend::STATIC);
+        }
+        if (mCache->mPagedValue && mCache->mPagedValue->deviceId() != 0) {
+            mCudaBackend->onReleaseBuffer(mCache->mPagedValue.get(), Backend::STATIC);
+        }
+        if (mCache->mPagedBlockTable && mCache->mPagedBlockTable->deviceId() != 0) {
+            mCudaBackend->onReleaseBuffer(mCache->mPagedBlockTable.get(), Backend::STATIC);
+        }
+        if (mCache->mPagedRopeTable && mCache->mPagedRopeTable->deviceId() != 0) {
+            mCudaBackend->onReleaseBuffer(mCache->mPagedRopeTable.get(), Backend::STATIC);
+        }
+
+        mCache->mPagedKey.reset(new_key);
+        mCache->mPagedValue.reset(new_value);
+        mCache->mPagedBlockTable.reset(new_table);
+        mCache->mPagedRopeTable.reset(new_rope_table);
+        mCache->mPagedMaxBlocks = new_blocks;
+        mCache->mPagedPageSize = page_size;
+    }
+
+    if (!mCache->mPagedTokenTableCustom) {
+        int threads = 256;
+        int slotCount = mCache->mPagedMaxBlocks * page_size;
+        int blocks = UP_DIV(slotCount, threads);
+        fill_paged_block_table_kernel<<<blocks, threads, 0, stream>>>(
+            getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()), slotCount);
+        fill_int_table_range_kernel<<<blocks, threads, 0, stream>>>(
+            getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()), 0, 0, slotCount);
+        checkKernelErrors;
+        mCache->mPagedPhysicalLength = required_total_kv_len;
+    }
+    mCache->mPagedActive = true;
+    return MNN::NO_ERROR;
+}
+
+void AttentionExecution::resetPagedKVCacheState(int length) {
+    if (!mCache) {
+        return;
+    }
+    mCache->mPagedLength = length;
+    if (!mCache->mPagedTokenTableCustom) {
+        mCache->mPagedPhysicalLength = length;
+    }
+    mCache->mPagedActive = true;
+}
+
+ErrorCode AttentionExecution::ensurePrefixSaveStaging(size_t keySize, size_t valueSize) {
+    if (keySize > mPrefixSaveKeyCapacity) {
+        if (mPrefixSaveKeyDevice != nullptr) {
+            cudaFree(mPrefixSaveKeyDevice);
+            mPrefixSaveKeyDevice = nullptr;
+            mPrefixSaveKeyCapacity = 0;
+        }
+        auto status = cudaMalloc(reinterpret_cast<void**>(&mPrefixSaveKeyDevice), keySize);
+        if (status != cudaSuccess) {
+            MNN_ERROR("[Error]: CUDA Attention failed to allocate prefix key save staging: %s\n",
+                      cudaGetErrorString(status));
+            return OUT_OF_MEMORY;
+        }
+        mPrefixSaveKeyCapacity = keySize;
+    }
+    if (valueSize > mPrefixSaveValueCapacity) {
+        if (mPrefixSaveValueDevice != nullptr) {
+            cudaFree(mPrefixSaveValueDevice);
+            mPrefixSaveValueDevice = nullptr;
+            mPrefixSaveValueCapacity = 0;
+        }
+        auto status = cudaMalloc(reinterpret_cast<void**>(&mPrefixSaveValueDevice), valueSize);
+        if (status != cudaSuccess) {
+            MNN_ERROR("[Error]: CUDA Attention failed to allocate prefix value save staging: %s\n",
+                      cudaGetErrorString(status));
+            return OUT_OF_MEMORY;
+        }
+        mPrefixSaveValueCapacity = valueSize;
+    }
+    return NO_ERROR;
+}
+
+void AttentionExecution::releasePrefixSaveStaging() {
+    if (mPrefixSaveKeyDevice != nullptr) {
+        cudaFree(mPrefixSaveKeyDevice);
+        mPrefixSaveKeyDevice = nullptr;
+        mPrefixSaveKeyCapacity = 0;
+    }
+    if (mPrefixSaveValueDevice != nullptr) {
+        cudaFree(mPrefixSaveValueDevice);
+        mPrefixSaveValueDevice = nullptr;
+        mPrefixSaveValueCapacity = 0;
+    }
+}
+
+ErrorCode AttentionExecution::saveCudaNativePrefixCache(cudaStream_t stream, int totalKvLen) {
+    if (!mIsKVCacheEnabled || !mCache || mMeta == nullptr ||
+        mMeta->file_flag != KVMeta::PendingWrite || mMeta->file_name.empty()) {
+        return NO_ERROR;
+    }
+    if (mBatch != 1) {
+        MNN_ERROR("[Error]: CUDA prefix cache save only supports batch=1\n");
+        return NOT_SUPPORT;
+    }
+    if (mMeta->key_rope_state != KVMeta::KeyRopeCanonicalNoRope) {
+        MNN_ERROR("[Error]: CUDA native prefix cache save requires canonical_no_rope key\n");
+        return NOT_SUPPORT;
+    }
+    if (!mCache->mPagedActive || !mCache->mPagedKey || !mCache->mPagedValue || !mCache->mPagedBlockTable ||
+        mCache->mPagedKey->deviceId() == 0 || mCache->mPagedValue->deviceId() == 0 ||
+        mCache->mPagedBlockTable->deviceId() == 0) {
+        MNN_ERROR("[Error]: CUDA native prefix cache save requires active paged runtime KV cache\n");
+        return INVALID_VALUE;
+    }
+    int ropeDim = mMeta->rope_dim > 0 ? mMeta->rope_dim : mHeadDim;
+    ropeDim = std::min(ropeDim, mHeadDim);
+    if (ropeDim <= 0 || (ropeDim % 2) != 0 || mMeta->rope_theta <= 0.0f ||
+        mMeta->rope_pairing != KVMeta::RopePairingHalf) {
+        MNN_ERROR("[Error]: CUDA native prefix cache save got invalid RoPE metadata\n");
+        return INVALID_VALUE;
+    }
+
+    const int pageSize = mCache->mPagedPageSize > 0 ? mCache->mPagedPageSize : 64;
+    const int blocks = UP_DIV(totalKvLen, pageSize);
+    const size_t bytes = static_cast<size_t>(blocks) * pageSize * mKvNumHead * mHeadDim * mPrecision;
+    auto stagingErr = ensurePrefixSaveStaging(bytes, bytes);
+    if (stagingErr != NO_ERROR) {
+        return stagingErr;
+    }
+
+    int total = blocks * pageSize * mKvNumHead * mHeadDim;
+    int threads = 256;
+    int grid = UP_DIV(total, threads);
+    if (mPrecision == 4) {
+        save_cuda_paged_prefix_kernel<float><<<grid, threads, 0, stream>>>(
+            getTensorDevicePtr<float>(mCache->mPagedKey.get()),
+            getTensorDevicePtr<float>(mCache->mPagedValue.get()),
+            getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+            reinterpret_cast<float*>(mPrefixSaveKeyDevice),
+            reinterpret_cast<float*>(mPrefixSaveValueDevice),
+            totalKvLen, pageSize, mBatch, mKvNumHead, mHeadDim, ropeDim, mMeta->rope_theta);
+    } else if (mPrecision == 2) {
+        save_cuda_paged_prefix_kernel<__half><<<grid, threads, 0, stream>>>(
+            getTensorDevicePtr<__half>(mCache->mPagedKey.get()),
+            getTensorDevicePtr<__half>(mCache->mPagedValue.get()),
+            getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+            reinterpret_cast<__half*>(mPrefixSaveKeyDevice),
+            reinterpret_cast<__half*>(mPrefixSaveValueDevice),
+            totalKvLen, pageSize, mBatch, mKvNumHead, mHeadDim, ropeDim, mMeta->rope_theta);
+    } else {
+        return NOT_SUPPORT;
+    }
+    checkKernelErrors;
+
+    std::vector<uint8_t> keyHost(bytes);
+    std::vector<uint8_t> valueHost(bytes);
+    auto keyCopy = cudaMemcpyAsync(keyHost.data(), mPrefixSaveKeyDevice, bytes, cudaMemcpyDeviceToHost, stream);
+    auto valueCopy = cudaMemcpyAsync(valueHost.data(), mPrefixSaveValueDevice, bytes, cudaMemcpyDeviceToHost, stream);
+    if (keyCopy != cudaSuccess || valueCopy != cudaSuccess) {
+        MNN_ERROR("[Error]: CUDA native prefix cache D2H failed: %s / %s\n",
+                  cudaGetErrorString(keyCopy), cudaGetErrorString(valueCopy));
+        return INVALID_VALUE;
+    }
+    auto sync = cudaStreamSynchronize(stream);
+    if (sync != cudaSuccess) {
+        MNN_ERROR("[Error]: CUDA native prefix cache save sync failed: %s\n", cudaGetErrorString(sync));
+        return INVALID_VALUE;
+    }
+
+    if (!ensurePrefixCacheObjectDirs(mMeta->prefix_cache_dir, "cuda", mMeta->file_name)) {
+        MNN_ERROR("[Error]: failed to create CUDA prefix cache object dirs: %s\n", mMeta->prefix_cache_dir.c_str());
+        return FILE_OPEN_FAILED;
+    }
+    int layerIndex = mMeta->layer_index;
+    auto base = prefixCacheLayerBase(mMeta->prefix_cache_dir, "cuda", mMeta->file_name, layerIndex);
+    {
+        std::ofstream out(base + ".k", std::ios::binary | std::ios::trunc);
+        if (!out) {
+            MNN_ERROR("[Error]: failed to write CUDA prefix key cache: %s\n", (base + ".k").c_str());
+            return FILE_OPEN_FAILED;
+        }
+        out.write(reinterpret_cast<const char*>(keyHost.data()), static_cast<std::streamsize>(keyHost.size()));
+    }
+    {
+        std::ofstream out(base + ".v", std::ios::binary | std::ios::trunc);
+        if (!out) {
+            MNN_ERROR("[Error]: failed to write CUDA prefix value cache: %s\n", (base + ".v").c_str());
+            return FILE_OPEN_FAILED;
+        }
+        out.write(reinterpret_cast<const char*>(valueHost.data()), static_cast<std::streamsize>(valueHost.size()));
+    }
+    mMeta->layer_index++;
+    if (mMeta->layer_nums > 0) {
+        mMeta->layer_index %= mMeta->layer_nums;
+    }
+    return NO_ERROR;
 }
 
 // P2: Optimized KV Cache realloc with mMeta version
@@ -1254,6 +2227,9 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
     const void* effective_value_cache_ptr;
     int current_total_kv_len_for_qk;
     int allocated_kv_len_for_value_stride;
+    bool usePagedKV = false;
+    bool cachePreparedBySubclassForThisRun = false;
+    bool savePrefixKV = false;
 
     if (mIsKVCacheEnabled) {
         if (!mMeta) {
@@ -1267,15 +2243,14 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             param_cpu.key_seq_len = current_total_kv_len_for_qk;
             param_cpu.max_kv_len = mCache->mMaxLength;
         } else {
-            bool cachePreparedBySubclass = false;
-            ErrorCode prepareErr = onPrepareKVCacheBeforeAppend(inputs, stream, cachePreparedBySubclass, append_kv_seq_len);
+            ErrorCode prepareErr = onPrepareKVCacheBeforeAppend(inputs, stream, cachePreparedBySubclassForThisRun, append_kv_seq_len);
             if (prepareErr != MNN::NO_ERROR) {
                 return prepareErr;
             }
             if (append_kv_seq_len <= 0) {
                 append_kv_seq_len = mNewKvSeqLen;
             }
-            if (cachePreparedBySubclass) {
+            if (cachePreparedBySubclassForThisRun) {
                 param_cpu.past_kv_len = mCache->mPastLength;
                 param_cpu.key_seq_len = mCache->mPastLength + append_kv_seq_len;
                 param_cpu.max_kv_len = mCache->mMaxLength;
@@ -1297,6 +2272,58 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             }
         }
 
+        savePrefixKV = mMeta != nullptr && mMeta->file_flag == KVMeta::PendingWrite &&
+                       !mMeta->file_name.empty();
+        if (savePrefixKV && mBatch != 1) {
+            MNN_ERROR("[Error]: CUDA prefix cache save only supports batch=1\n");
+            return NOT_SUPPORT;
+        }
+
+        if (!cachePreparedBySubclassForThisRun && mCache->mPagedActive && mMeta != nullptr &&
+            (mMeta->remove > 0 || mMeta->n_reserve > 0)) {
+            // Continuous cache already supports remove/reserve compaction. Keep
+            // paged cache on the simple append path until paged compaction lands.
+            mCache->mPagedActive = false;
+            mCache->mPagedTokenTableCustom = false;
+            mCache->mPagedPhysicalLength = 0;
+        }
+
+        int customAppendLogicalStart = -1;
+        int customAppendPhysicalStart = -1;
+        int customAppendCount = 0;
+        int pagedCapacityRequired = current_total_kv_len_for_qk;
+        if (mCache->mPagedActive && mCache->mPagedTokenTableCustom &&
+            !cachePreparedBySubclassForThisRun && append_kv_seq_len > 0) {
+            customAppendLogicalStart = param_cpu.past_kv_len;
+            customAppendPhysicalStart = mCache->mPagedPhysicalLength;
+            customAppendCount = append_kv_seq_len;
+            pagedCapacityRequired = std::max(pagedCapacityRequired, customAppendPhysicalStart + customAppendCount);
+        }
+
+        if (mCache->mPagedActive || savePrefixKV) {
+            auto pagedErr = ensurePagedKVCache_gpu(pagedCapacityRequired, mBatch, mKvNumHead, mHeadDim, stream);
+            if (pagedErr != MNN::NO_ERROR) {
+                return pagedErr;
+            }
+            usePagedKV = mCache->mPagedKey && mCache->mPagedValue && mCache->mPagedBlockTable &&
+                         mCache->mPagedRopeTable &&
+                         mCache->mPagedKey->deviceId() != 0 && mCache->mPagedValue->deviceId() != 0 &&
+                         mCache->mPagedBlockTable->deviceId() != 0 &&
+                         mCache->mPagedRopeTable->deviceId() != 0;
+            if (usePagedKV && customAppendCount > 0) {
+                int threads = 256;
+                int blocks = UP_DIV(customAppendCount, threads);
+                fill_paged_slot_table_range_kernel<<<blocks, threads, 0, stream>>>(
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    customAppendLogicalStart, customAppendPhysicalStart, customAppendCount);
+                fill_int_table_range_kernel<<<blocks, threads, 0, stream>>>(
+                    getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                    customAppendLogicalStart, 0, customAppendCount);
+                checkKernelErrors;
+                mCache->mPagedPhysicalLength = customAppendPhysicalStart + customAppendCount;
+            }
+        }
+
         // Copy new K, V to cache
         dim3 copy_blockDim(32, 8, 1);
         dim3 copy_gridDim(UP_DIV(mHeadDim, copy_blockDim.x),
@@ -1314,6 +2341,25 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
                 mBatch, append_kv_seq_len, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mMaxLength);
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
+
+        if (usePagedKV) {
+            if (mPrecision == 4) {
+                copy_kv_to_paged_cache_kernel<float><<<copy_gridDim, copy_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<float>(key_input_tensor), getTensorDevicePtr<float>(value_input_tensor),
+                    getTensorDevicePtr<float>(mCache->mPagedKey.get()), getTensorDevicePtr<float>(mCache->mPagedValue.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    mBatch, append_kv_seq_len, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mPagedPageSize);
+            } else if (mPrecision == 2) {
+                copy_kv_to_paged_cache_kernel<__half><<<copy_gridDim, copy_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<__half>(key_input_tensor), getTensorDevicePtr<__half>(value_input_tensor),
+                    getTensorDevicePtr<__half>(mCache->mPagedKey.get()), getTensorDevicePtr<__half>(mCache->mPagedValue.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    mBatch, append_kv_seq_len, mKvNumHead, mHeadDim, param_cpu.past_kv_len, mCache->mPagedPageSize);
+            } else {
+                return MNN::NOT_SUPPORT;
+            }
+            checkKernelErrors;
+        }
 
         effective_key_cache_ptr = getTensorDevicePtr(mCache->mPastKey.get());
         effective_value_cache_ptr = getTensorDevicePtr(mCache->mPastValue.get());
@@ -1397,21 +2443,47 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             dim3 block(num_threads);
 
             if (mPrecision == 4) {
-                flash_decode_kernel<float><<<grid, block, smem_size_orig, stream>>>(
-                    getTensorDevicePtr<float>(query_input_tensor),
-                    static_cast<const float*>(effective_key_cache_ptr),
-                    static_cast<const float*>(effective_value_cache_ptr),
-                    getTensorDevicePtr<float>(final_output_tensor),
-                    mBatch, mNumHead, mKvNumHead, mHeadDim,
-                    current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale);
+                if (usePagedKV) {
+                    flash_decode_kernel_paged<float><<<grid, block, smem_size_orig, stream>>>(
+                        getTensorDevicePtr<float>(query_input_tensor),
+                        getTensorDevicePtr<float>(mCache->mPagedKey.get()),
+                        getTensorDevicePtr<float>(mCache->mPagedValue.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                        getTensorDevicePtr<float>(final_output_tensor),
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, mCache->mPagedPageSize, mScale,
+                        mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+                } else {
+                    flash_decode_kernel<float><<<grid, block, smem_size_orig, stream>>>(
+                        getTensorDevicePtr<float>(query_input_tensor),
+                        static_cast<const float*>(effective_key_cache_ptr),
+                        static_cast<const float*>(effective_value_cache_ptr),
+                        getTensorDevicePtr<float>(final_output_tensor),
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale);
+                }
             } else if (mPrecision == 2) {
-                flash_decode_kernel<__half><<<grid, block, smem_size_orig, stream>>>(
-                    getTensorDevicePtr<__half>(query_input_tensor),
-                    static_cast<const __half*>(effective_key_cache_ptr),
-                    static_cast<const __half*>(effective_value_cache_ptr),
-                    getTensorDevicePtr<__half>(final_output_tensor),
-                    mBatch, mNumHead, mKvNumHead, mHeadDim,
-                    current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale);
+                if (usePagedKV) {
+                    flash_decode_kernel_paged<__half><<<grid, block, smem_size_orig, stream>>>(
+                        getTensorDevicePtr<__half>(query_input_tensor),
+                        getTensorDevicePtr<__half>(mCache->mPagedKey.get()),
+                        getTensorDevicePtr<__half>(mCache->mPagedValue.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                        getTensorDevicePtr<__half>(final_output_tensor),
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, mCache->mPagedPageSize, mScale,
+                        mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+                } else {
+                    flash_decode_kernel<__half><<<grid, block, smem_size_orig, stream>>>(
+                        getTensorDevicePtr<__half>(query_input_tensor),
+                        static_cast<const __half*>(effective_key_cache_ptr),
+                        static_cast<const __half*>(effective_value_cache_ptr),
+                        getTensorDevicePtr<__half>(final_output_tensor),
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale);
+                }
             } else { return MNN::NOT_SUPPORT; }
         } else {
             // Split-K flash decode
@@ -1422,23 +2494,49 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             dim3 block_splitk(num_threads);
 
             if (mPrecision == 4) {
-                flash_decode_kernel_splitk<float><<<grid_splitk, block_splitk, smem_size, stream>>>(
-                    getTensorDevicePtr<float>(query_input_tensor),
-                    static_cast<const float*>(effective_key_cache_ptr),
-                    static_cast<const float*>(effective_value_cache_ptr),
-                    partial_out, partial_meta,
-                    mBatch, mNumHead, mKvNumHead, mHeadDim,
-                    current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale,
-                    parallel_blocks);
+                if (usePagedKV) {
+                    flash_decode_kernel_splitk_paged<float><<<grid_splitk, block_splitk, smem_size, stream>>>(
+                        getTensorDevicePtr<float>(query_input_tensor),
+                        getTensorDevicePtr<float>(mCache->mPagedKey.get()),
+                        getTensorDevicePtr<float>(mCache->mPagedValue.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                        partial_out, partial_meta,
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, mCache->mPagedPageSize, mScale,
+                        parallel_blocks, mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+                } else {
+                    flash_decode_kernel_splitk<float><<<grid_splitk, block_splitk, smem_size, stream>>>(
+                        getTensorDevicePtr<float>(query_input_tensor),
+                        static_cast<const float*>(effective_key_cache_ptr),
+                        static_cast<const float*>(effective_value_cache_ptr),
+                        partial_out, partial_meta,
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale,
+                        parallel_blocks);
+                }
             } else if (mPrecision == 2) {
-                flash_decode_kernel_splitk<__half><<<grid_splitk, block_splitk, smem_size, stream>>>(
-                    getTensorDevicePtr<__half>(query_input_tensor),
-                    static_cast<const __half*>(effective_key_cache_ptr),
-                    static_cast<const __half*>(effective_value_cache_ptr),
-                    partial_out, partial_meta,
-                    mBatch, mNumHead, mKvNumHead, mHeadDim,
-                    current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale,
-                    parallel_blocks);
+                if (usePagedKV) {
+                    flash_decode_kernel_splitk_paged<__half><<<grid_splitk, block_splitk, smem_size, stream>>>(
+                        getTensorDevicePtr<__half>(query_input_tensor),
+                        getTensorDevicePtr<__half>(mCache->mPagedKey.get()),
+                        getTensorDevicePtr<__half>(mCache->mPagedValue.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                        getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                        partial_out, partial_meta,
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, mCache->mPagedPageSize, mScale,
+                        parallel_blocks, mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+                } else {
+                    flash_decode_kernel_splitk<__half><<<grid_splitk, block_splitk, smem_size, stream>>>(
+                        getTensorDevicePtr<__half>(query_input_tensor),
+                        static_cast<const __half*>(effective_key_cache_ptr),
+                        static_cast<const __half*>(effective_value_cache_ptr),
+                        partial_out, partial_meta,
+                        mBatch, mNumHead, mKvNumHead, mHeadDim,
+                        current_total_kv_len_for_qk, allocated_kv_len_for_value_stride, mScale,
+                        parallel_blocks);
+                }
             } else { return MNN::NOT_SUPPORT; }
             checkKernelErrors;
 
@@ -1460,7 +2558,16 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
         }
         checkKernelErrors;
 
+        if (usePagedKV) {
+            mCache->mPagedLength = current_total_kv_len_for_qk;
+        }
         mCache->mPastLength += append_kv_seq_len;
+        if (savePrefixKV) {
+            auto saveErr = saveCudaNativePrefixCache(stream, current_total_kv_len_for_qk);
+            if (saveErr != NO_ERROR) {
+                return saveErr;
+            }
+        }
         return MNN::NO_ERROR;
     }
 
@@ -1479,29 +2586,66 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
         dim3 block(num_threads);
 
         if (mPrecision == 4) {
-            flash_decode_kernel_with_mask<float><<<grid, block, smem_size, stream>>>(
-                getTensorDevicePtr<float>(query_input_tensor),
-                static_cast<const float*>(effective_key_cache_ptr),
-                static_cast<const float*>(effective_value_cache_ptr),
-                getTensorDevicePtr<float>(final_output_tensor),
-                static_cast<const float*>(getTensorDevicePtr(mask_input_tensor)),
-                mBatch, mNumHead, mKvNumHead, mHeadDim,
-                current_total_kv_len_for_qk, allocated_kv_len_for_value_stride,
-                mQuerySeqLen, mScale);
+            if (usePagedKV) {
+                flash_decode_kernel_with_mask_paged<float><<<grid, block, smem_size, stream>>>(
+                    getTensorDevicePtr<float>(query_input_tensor),
+                    getTensorDevicePtr<float>(mCache->mPagedKey.get()),
+                    getTensorDevicePtr<float>(mCache->mPagedValue.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                    getTensorDevicePtr<float>(final_output_tensor),
+                    static_cast<const float*>(getTensorDevicePtr(mask_input_tensor)),
+                    mBatch, mNumHead, mKvNumHead, mHeadDim,
+                    current_total_kv_len_for_qk, mCache->mPagedPageSize,
+                    mQuerySeqLen, mScale, mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+            } else {
+                flash_decode_kernel_with_mask<float><<<grid, block, smem_size, stream>>>(
+                    getTensorDevicePtr<float>(query_input_tensor),
+                    static_cast<const float*>(effective_key_cache_ptr),
+                    static_cast<const float*>(effective_value_cache_ptr),
+                    getTensorDevicePtr<float>(final_output_tensor),
+                    static_cast<const float*>(getTensorDevicePtr(mask_input_tensor)),
+                    mBatch, mNumHead, mKvNumHead, mHeadDim,
+                    current_total_kv_len_for_qk, allocated_kv_len_for_value_stride,
+                    mQuerySeqLen, mScale);
+            }
         } else if (mPrecision == 2) {
-            flash_decode_kernel_with_mask<__half><<<grid, block, smem_size, stream>>>(
-                getTensorDevicePtr<__half>(query_input_tensor),
-                static_cast<const __half*>(effective_key_cache_ptr),
-                static_cast<const __half*>(effective_value_cache_ptr),
-                getTensorDevicePtr<__half>(final_output_tensor),
-                static_cast<const __half*>(getTensorDevicePtr(mask_input_tensor)),
-                mBatch, mNumHead, mKvNumHead, mHeadDim,
-                current_total_kv_len_for_qk, allocated_kv_len_for_value_stride,
-                mQuerySeqLen, mScale);
+            if (usePagedKV) {
+                flash_decode_kernel_with_mask_paged<__half><<<grid, block, smem_size, stream>>>(
+                    getTensorDevicePtr<__half>(query_input_tensor),
+                    getTensorDevicePtr<__half>(mCache->mPagedKey.get()),
+                    getTensorDevicePtr<__half>(mCache->mPagedValue.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                    getTensorDevicePtr<__half>(final_output_tensor),
+                    static_cast<const __half*>(getTensorDevicePtr(mask_input_tensor)),
+                    mBatch, mNumHead, mKvNumHead, mHeadDim,
+                    current_total_kv_len_for_qk, mCache->mPagedPageSize,
+                    mQuerySeqLen, mScale, mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+            } else {
+                flash_decode_kernel_with_mask<__half><<<grid, block, smem_size, stream>>>(
+                    getTensorDevicePtr<__half>(query_input_tensor),
+                    static_cast<const __half*>(effective_key_cache_ptr),
+                    static_cast<const __half*>(effective_value_cache_ptr),
+                    getTensorDevicePtr<__half>(final_output_tensor),
+                    static_cast<const __half*>(getTensorDevicePtr(mask_input_tensor)),
+                    mBatch, mNumHead, mKvNumHead, mHeadDim,
+                    current_total_kv_len_for_qk, allocated_kv_len_for_value_stride,
+                    mQuerySeqLen, mScale);
+            }
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
 
+        if (usePagedKV) {
+            mCache->mPagedLength = current_total_kv_len_for_qk;
+        }
         mCache->mPastLength += append_kv_seq_len;
+        if (savePrefixKV) {
+            auto saveErr = saveCudaNativePrefixCache(stream, current_total_kv_len_for_qk);
+            if (saveErr != NO_ERROR) {
+                return saveErr;
+            }
+        }
         return MNN::NO_ERROR;
     }
 
@@ -1533,15 +2677,37 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
                           mBatch * mNumHead);
 
         if (mPrecision == 4) {
-            qk_kernel_tiled<float><<<qk_gridDim, qk_blockDim, 0, stream>>>(
-                getTensorDevicePtr<float>(query_input_tensor), static_cast<const float*>(effective_key_cache_ptr),
-                getTensorDevicePtr<float>(mTempQK.get()), mask_ptr_device,
-                mParam_gpu, q_seq_offset, mHasMask, mIsAddMask);
+            if (usePagedKV) {
+                qk_kernel_tiled_paged<float><<<qk_gridDim, qk_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<float>(query_input_tensor),
+                    getTensorDevicePtr<float>(mCache->mPagedKey.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                    getTensorDevicePtr<float>(mTempQK.get()), mask_ptr_device,
+                    mParam_gpu, q_seq_offset, mHasMask, mIsAddMask, mCache->mPagedPageSize,
+                    mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+            } else {
+                qk_kernel_tiled<float><<<qk_gridDim, qk_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<float>(query_input_tensor), static_cast<const float*>(effective_key_cache_ptr),
+                    getTensorDevicePtr<float>(mTempQK.get()), mask_ptr_device,
+                    mParam_gpu, q_seq_offset, mHasMask, mIsAddMask);
+            }
         } else if (mPrecision == 2) {
-             qk_kernel_tiled<__half><<<qk_gridDim, qk_blockDim, 0, stream>>>(
-                getTensorDevicePtr<__half>(query_input_tensor), static_cast<const __half*>(effective_key_cache_ptr),
-                getTensorDevicePtr<__half>(mTempQK.get()), mask_ptr_device,
-                mParam_gpu, q_seq_offset, mHasMask, mIsAddMask);
+            if (usePagedKV) {
+                qk_kernel_tiled_paged<__half><<<qk_gridDim, qk_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<__half>(query_input_tensor),
+                    getTensorDevicePtr<__half>(mCache->mPagedKey.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedRopeTable.get()),
+                    getTensorDevicePtr<__half>(mTempQK.get()), mask_ptr_device,
+                    mParam_gpu, q_seq_offset, mHasMask, mIsAddMask, mCache->mPagedPageSize,
+                    mCache->mPagedRopeDim, mCache->mPagedRopeTheta);
+            } else {
+                qk_kernel_tiled<__half><<<qk_gridDim, qk_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<__half>(query_input_tensor), static_cast<const __half*>(effective_key_cache_ptr),
+                    getTensorDevicePtr<__half>(mTempQK.get()), mask_ptr_device,
+                    mParam_gpu, q_seq_offset, mHasMask, mIsAddMask);
+            }
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
 
@@ -1583,19 +2749,44 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
                          UP_DIV(current_piece_actual_len, qkv_blockDim.y),
                          mBatch * mNumHead);
         if (mPrecision == 4) {
-            qkv_kernel_tiled<float><<<qkv_gridDim, qkv_blockDim, 0, stream>>>(
-                getTensorDevicePtr<float>(mTempSoftmax.get()), static_cast<const float*>(effective_value_cache_ptr),
-                getTensorDevicePtr<float>(final_output_tensor), mParam_gpu, q_seq_offset);
+            if (usePagedKV) {
+                qkv_kernel_tiled_paged<float><<<qkv_gridDim, qkv_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<float>(mTempSoftmax.get()),
+                    getTensorDevicePtr<float>(mCache->mPagedValue.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    getTensorDevicePtr<float>(final_output_tensor), mParam_gpu, q_seq_offset, mCache->mPagedPageSize);
+            } else {
+                qkv_kernel_tiled<float><<<qkv_gridDim, qkv_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<float>(mTempSoftmax.get()), static_cast<const float*>(effective_value_cache_ptr),
+                    getTensorDevicePtr<float>(final_output_tensor), mParam_gpu, q_seq_offset);
+            }
         } else if (mPrecision == 2) {
-            qkv_kernel_tiled<__half><<<qkv_gridDim, qkv_blockDim, 0, stream>>>(
-                getTensorDevicePtr<__half>(mTempSoftmax.get()), static_cast<const __half*>(effective_value_cache_ptr),
-                getTensorDevicePtr<__half>(final_output_tensor), mParam_gpu, q_seq_offset);
+            if (usePagedKV) {
+                qkv_kernel_tiled_paged<__half><<<qkv_gridDim, qkv_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<__half>(mTempSoftmax.get()),
+                    getTensorDevicePtr<__half>(mCache->mPagedValue.get()),
+                    getTensorDevicePtr<int>(mCache->mPagedBlockTable.get()),
+                    getTensorDevicePtr<__half>(final_output_tensor), mParam_gpu, q_seq_offset, mCache->mPagedPageSize);
+            } else {
+                qkv_kernel_tiled<__half><<<qkv_gridDim, qkv_blockDim, 0, stream>>>(
+                    getTensorDevicePtr<__half>(mTempSoftmax.get()), static_cast<const __half*>(effective_value_cache_ptr),
+                    getTensorDevicePtr<__half>(final_output_tensor), mParam_gpu, q_seq_offset);
+            }
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
     }
 
     if (mIsKVCacheEnabled) {
+        if (usePagedKV) {
+            mCache->mPagedLength = current_total_kv_len_for_qk;
+        }
         mCache->mPastLength += append_kv_seq_len;
+        if (savePrefixKV) {
+            auto saveErr = saveCudaNativePrefixCache(stream, current_total_kv_len_for_qk);
+            if (saveErr != NO_ERROR) {
+                return saveErr;
+            }
+        }
     }
 
     return MNN::NO_ERROR;

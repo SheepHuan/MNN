@@ -404,7 +404,7 @@ const std::map<std::string, std::string> OpenCLProgramMd5Map =
   { "buffer_convert_quant", "ce4ac18b78e746f7ed338f35e5237dbd" },
   { "interp", "e549db5550b01a0bf984151d306cab9a" },
   { "winogradTransformSource2_5_1", "f0ee12556faf4fe0222e2a4e64c53c5c" },
-  { "attention_buf", "9792b3b94290d62591293a06de10e154" },
+  { "attention_buf", "71c0a6051d7b3a073be9e1e24c30e8cf" },
   { "interp_buf", "2e5ff1b5184be705580ab6a221864a0c" },
   { "input_transe_buf", "c80482cd531add8582edc242bcbfa947" },
   { "unary", "e122f5aca36a2e46e4b6d180c0754a34" },

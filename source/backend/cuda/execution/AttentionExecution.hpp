@@ -34,6 +34,22 @@ public:
         std::shared_ptr<Tensor> mPastValue; // 存储 V Cache, GPU Tensor. 布局: [B, H_kv, D, L_kv_max]
         int mPastLength = 0;                // Cache中当前实际的token数量 (L_k_past)
         int mMaxLength = 0;                 // Cache的已分配容量 (L_kv_max)
+        std::shared_ptr<Tensor> mPagedKey;   // Paged K Cache: [blocks, page_size, B, H_kv, D]
+        std::shared_ptr<Tensor> mPagedValue; // Paged V Cache: [blocks, B, H_kv, page_size, D]
+        // logical token -> physical token slot. physical_block = slot / page_size,
+        // page_offset = slot % page_size.
+        std::shared_ptr<Tensor> mPagedBlockTable;
+        // logical token -> whether K is stored as canonical_no_rope and must be
+        // RoPE'd by the paged QK read path. Prompt/decode tokens are 0.
+        std::shared_ptr<Tensor> mPagedRopeTable;
+        int mPagedPageSize = 64;
+        int mPagedMaxBlocks = 0;
+        int mPagedLength = 0;
+        int mPagedPhysicalLength = 0;
+        int mPagedRopeDim = 0;
+        float mPagedRopeTheta = 10000.0f;
+        bool mPagedTokenTableCustom = false;
+        bool mPagedActive = false;
     };
 
     AttentionExecution(Backend *backend, bool kv_cache_op_param); // kv_cache_op_param 来自 Op 定义
@@ -54,7 +70,12 @@ protected:
     ErrorCode init_cache_tensors(); // 如果需要，初始化 mPastKey/mPastValue为空Tensor
     ErrorCode reallocKVCache_gpu(int required_total_kv_len, int batch_size, int kv_num_head, int head_dim, cudaStream_t stream);
     ErrorCode reallocKVCache_gpu(int required_total_kv_len, const KVMeta* meta, cudaStream_t stream);
+    ErrorCode ensurePagedKVCache_gpu(int required_total_kv_len, int batch_size, int kv_num_head, int head_dim, cudaStream_t stream);
+    void resetPagedKVCacheState(int length = 0);
     ErrorCode ensureTempBuffers_gpu(int batch, int num_head, int q_seq_piece_len_max, int current_max_total_kv_len, int head_dim);
+    ErrorCode saveCudaNativePrefixCache(cudaStream_t stream, int totalKvLen);
+    ErrorCode ensurePrefixSaveStaging(size_t keySize, size_t valueSize);
+    void releasePrefixSaveStaging();
 
     CUDABackend* mCudaBackend;
     bool mIsKVCacheEnabled; // 基于 Op 参数
@@ -93,6 +114,10 @@ protected:
     float* mSplitKOutputPtr = nullptr;   // [parallel_blocks, batch*num_head, head_dim]
     float* mSplitKMetaPtr = nullptr;     // [parallel_blocks, batch*num_head, 2] (max, sum)
     int mMaxParallelBlocks = 0;
+    uint8_t* mPrefixSaveKeyDevice = nullptr;
+    uint8_t* mPrefixSaveValueDevice = nullptr;
+    size_t mPrefixSaveKeyCapacity = 0;
+    size_t mPrefixSaveValueCapacity = 0;
 };
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE
 

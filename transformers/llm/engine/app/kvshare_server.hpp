@@ -58,9 +58,10 @@ public:
         int attentionMode = 8;
         int threads = 4;
         bool isR1 = false;
+        bool reuseKv = false;
         std::string backend = "cpu";
         std::string configPath;
-        std::string prefixCacheDir = ".cache/prefixcache";
+        std::string prefixCacheDir = ".cache/kvshare/prefixcache";
     };
 
     explicit KvShareServer(Options options);
@@ -100,9 +101,6 @@ private:
                                      std::vector<int>& mergedTokens,
                                      std::vector<MNN::Transformer::PrefixCacheSegment>& prefixSegments,
                                      json& resolvedSegments, std::string& error);
-    bool runMergedTokenPrefixLocked(const std::vector<int>& prefixTokens, const MNN::Transformer::ChatMessages& messages,
-                                    std::ostream* output, const char* endWith, int maxTokens,
-                                    int& promptTokenCount, std::string& error);
     bool applyKvPrefixLocked(const json& kvPrefix, const MNN::Transformer::ChatMessages& messages, std::ostream* output, const char* endWith, int maxTokens, json& prefixInfo, std::string& error);
 
 private:

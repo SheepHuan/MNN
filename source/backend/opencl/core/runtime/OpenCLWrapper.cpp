@@ -266,6 +266,7 @@ bool OpenCLSymbols::LoadLibraryFromPath(const std::string &library_path) {
     MNN_LOAD_FUNCTION_PTR(clEnqueueWriteBuffer);
     MNN_LOAD_FUNCTION_PTR(clEnqueueCopyBuffer);
     MNN_LOAD_FUNCTION_PTR(clWaitForEvents);
+    MNN_LOAD_FUNCTION_PTR(clEnqueueWaitForEvents);
     MNN_LOAD_FUNCTION_PTR(clReleaseEvent);
     MNN_LOAD_FUNCTION_PTR(clCreateContext);
     MNN_LOAD_FUNCTION_PTR(clCreateContextFromType);
@@ -633,6 +634,12 @@ cl_int CL_API_CALL clWaitForEvents(cl_uint num_events, const cl_event *event_lis
     auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clWaitForEvents;
     MNN_CHECK_NOTNULL(func);
     return func(num_events, event_list);
+}
+
+cl_int CL_API_CALL clEnqueueWaitForEvents(cl_command_queue command_queue, cl_uint num_events, const cl_event *event_list) {
+    auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clEnqueueWaitForEvents;
+    MNN_CHECK_NOTNULL(func);
+    return func(command_queue, num_events, event_list);
 }
 
 cl_int CL_API_CALL clRetainEvent(cl_event event) {

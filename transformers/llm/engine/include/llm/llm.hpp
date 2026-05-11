@@ -51,6 +51,10 @@ struct PrefixCacheSegment {
     float rope_theta = 10000.0f;
     std::string rope_pairing = "half";
     int source_position_base = 0;
+    std::string backend;
+    std::string layout;
+    std::string dtype;
+    int page_size = 0;
 };
 class Tokenizer;
 class Pipeline;
@@ -167,9 +171,10 @@ public:
     void setKVCacheInfo(size_t add, size_t remove, int* reserve = nullptr, int n_reserve = 0);
     size_t getCurrentHistory() const;
     void eraseHistory(size_t begin, size_t end);
+    bool setPrefixCacheWriteFile(const std::string& filename, int flag = 0);
     bool setPrefixCacheFile(const std::string& filename, int flag = 0);
     void clearPrefixCacheFile();
-    bool setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments);
+    bool setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments, bool device_prefetch = false);
     void clearPrefixCacheSegments();
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::string& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);

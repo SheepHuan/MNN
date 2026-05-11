@@ -10,6 +10,7 @@
 
 #include "CPUAttention.hpp"
 #include "CPUBackend.hpp"
+#include "core/PagedKVCachePlan.hpp"
 
 namespace MNN {
 
@@ -28,16 +29,20 @@ protected:
 
         if (mKVCache && mMeta != nullptr && mMeta->previous == mMeta->remove &&
             mMeta->file_flag == KVMeta::PendingReadSegments && !mMeta->prefix_segments.empty()) {
+            int promptAppendLen = (int)mMeta->add;
+            if (promptAppendLen <= 0) {
+                promptAppendLen = seqLen;
+            }
+            if (!buildPrefixRuntimeKVBlockTablePlan(mPagedKVPlan, mMeta, promptAppendLen)) {
+                return INVALID_VALUE;
+            }
             mKVCacheManager->onClear();
             auto code = mKVCacheManager->onAllocPrefixSegments(mMeta, seqLen, mLayerIndex);
             if (code != NO_ERROR) {
                 mKVCacheManager->onClear();
                 return code;
             }
-            insertLen = (int)mMeta->add;
-            if (insertLen <= 0) {
-                insertLen = seqLen;
-            }
+            insertLen = promptAppendLen;
             mKVCacheManager->onUpdateKV(inputs[1], inputs[2], insertLen);
             return NO_ERROR;
         }
@@ -51,6 +56,7 @@ protected:
 
 private:
     int mLayerIndex = -1;
+    RuntimeKVBlockTablePlan mPagedKVPlan;
 };
 
 class CPUPrefixAttentionCreator : public CPUBackend::Creator {

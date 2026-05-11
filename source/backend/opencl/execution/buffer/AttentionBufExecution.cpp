@@ -9,9 +9,46 @@
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
+#include "core/PrefixCachePath.hpp"
+#include "half.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <vector>
+
 namespace MNN {
 namespace OpenCL {
+
+namespace {
+
+static float readOpenCLNativeScalar(const uint8_t* base, size_t index, int bytes) {
+    if (bytes == 2) {
+        uint16_t raw = 0;
+        ::memcpy(&raw, base + index * 2, sizeof(raw));
+        half_float::half value;
+        ::memcpy(&value, &raw, sizeof(raw));
+        return static_cast<float>(value);
+    }
+    float value = 0.0f;
+    ::memcpy(&value, base + index * 4, sizeof(value));
+    return value;
+}
+
+static void writeOpenCLNativeScalar(uint8_t* base, size_t index, int bytes, float value) {
+    if (bytes == 2) {
+        half_float::half halfValue(value);
+        uint16_t raw = 0;
+        ::memcpy(&raw, &halfValue, sizeof(raw));
+        ::memcpy(base + index * 2, &raw, sizeof(raw));
+        return;
+    }
+    ::memcpy(base + index * 4, &value, sizeof(value));
+}
+
+} // namespace
 
 KVCacheCLManager::KVCacheCLManager(Backend *backend, bool kv_cahce) : mKVCache(kv_cahce){
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
@@ -32,13 +69,20 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
     if (!mKVCache) {
         return false;
     }
+    if (isExecute && mPagedActive && meta != nullptr && meta->remove > 0) {
+        mPagedActive = false;
+        mPagedDecodeStarted = false;
+        mPagedLogicalLength = 0;
+        mPagedPhysicalLength = 0;
+    }
     int kvSeqlen = meta->previous + seqlen - meta->remove + meta->computeReverseSize();
     int start = mPastLength - meta->remove;
     cl_int res;
 
     // latest length larger than maxLen
     if(kvSeqlen > mMaxLength){
-        int copylen = mPastLength - meta->remove + meta->computeReverseSize();
+        int copylen = mPagedActive ? mPagedPhysicalLength :
+            (mPastLength - meta->remove + meta->computeReverseSize());
         bool needCopy = copylen > 0 && mPastKey != nullptr && mPastValue != nullptr && mMaxLength > 0;
 
         size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
@@ -145,7 +189,7 @@ bool KVCacheCLManager::ensureCapacity(int requiredTotal, bool isExecute) {
     }
 
     cl_int res = CL_SUCCESS;
-    int copylen = mPastLength;
+    int copylen = mPagedActive ? mPagedPhysicalLength : mPastLength;
     bool needCopy = copylen > 0 && mPastKey != nullptr && mPastValue != nullptr;
     size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
     size_t oldMaxlen = ROUND_UP(mMaxLength, 4);
@@ -191,6 +235,280 @@ bool KVCacheCLManager::ensureCapacity(int requiredTotal, bool isExecute) {
     mPastKey.reset(newKey);
     mPastValue.reset(newValue);
     return true;
+}
+
+bool KVCacheCLManager::ensurePagedCapacity(int requiredPhysicalTotal, int logicalTableLength) {
+    if (!mKVCache) {
+        return false;
+    }
+    if (requiredPhysicalTotal <= 0 || logicalTableLength <= 0) {
+        return false;
+    }
+    if (!ensureCapacity(requiredPhysicalTotal, true)) {
+        return false;
+    }
+    if (logicalTableLength > mPagedTableCapacity) {
+        cl_int res = CL_SUCCESS;
+        auto oldTokenTable = mPagedTokenTable;
+        auto oldRopeTable = mPagedRopeTable;
+        int oldCapacity = mPagedTableCapacity;
+        auto tokenTable = std::shared_ptr<cl::Buffer>(new cl::Buffer(
+            mOpenCLBackend->getOpenCLRuntime()->context(),
+            CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+            static_cast<size_t>(logicalTableLength) * sizeof(int), nullptr, &res));
+        if (res != CL_SUCCESS || tokenTable == nullptr) {
+            MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL paged token table: %d\n", res);
+            return false;
+        }
+        auto ropeTable = std::shared_ptr<cl::Buffer>(new cl::Buffer(
+            mOpenCLBackend->getOpenCLRuntime()->context(),
+            CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+            static_cast<size_t>(logicalTableLength) * sizeof(int), nullptr, &res));
+        if (res != CL_SUCCESS || ropeTable == nullptr) {
+            MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL paged rope table: %d\n", res);
+            return false;
+        }
+        mPagedTokenTable = tokenTable;
+        mPagedRopeTable = ropeTable;
+        if (oldTokenTable != nullptr && oldRopeTable != nullptr && oldCapacity > 0) {
+            size_t copyBytes = static_cast<size_t>(std::min(oldCapacity, logicalTableLength)) * sizeof(int);
+            auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+            res |= queue.enqueueCopyBuffer(*oldTokenTable, *mPagedTokenTable, 0, 0, copyBytes);
+            res |= queue.enqueueCopyBuffer(*oldRopeTable, *mPagedRopeTable, 0, 0, copyBytes);
+            if (res != CL_SUCCESS) {
+                MNN_ERROR("[Error]: KVCacheCLManager failed to copy OpenCL paged tables: %d\n", res);
+                return false;
+            }
+        }
+        mPagedTableCapacity = logicalTableLength;
+    }
+    return true;
+}
+
+void KVCacheCLManager::setPagedState(int logicalLength, int physicalLength, int pageSize,
+                                     int ropeDim, float ropeTheta) {
+    mPagedActive = true;
+    mPagedLogicalLength = logicalLength;
+    mPagedPhysicalLength = physicalLength;
+    mPagedPageSize = pageSize > 0 ? pageSize : mPagedPageSize;
+    mPagedRopeDim = ropeDim;
+    mPagedRopeTheta = ropeTheta;
+    mPagedDecodeStarted = false;
+}
+
+bool KVCacheCLManager::ensurePagedStateForExistingHistory(int logicalLength, int physicalLength,
+                                                          int pageSize, int ropeDim,
+                                                          float ropeTheta) {
+    if (mPagedActive) {
+        return true;
+    }
+    if (mPastKey == nullptr || mPastValue == nullptr ||
+        mPagedTokenTable == nullptr || mPagedRopeTable == nullptr) {
+        return false;
+    }
+    int safePageSize = pageSize > 0 ? pageSize : mPagedPageSize;
+    if (safePageSize <= 0) {
+        safePageSize = 64;
+    }
+    int safePhysicalLength = std::max({
+        mPagedPhysicalLength,
+        physicalLength,
+        ROUND_UP(mMaxLength, safePageSize)
+    });
+    setPagedState(logicalLength, safePhysicalLength, safePageSize,
+                  ropeDim, ropeTheta > 0.0f ? ropeTheta : 10000.0f);
+    return true;
+}
+
+bool KVCacheCLManager::ensurePagedAppendTable(int logicalStart, int tokenCount, bool isolateSourceStart) {
+    if (!mPagedActive || tokenCount <= 0) {
+        return true;
+    }
+    int physicalStart = mPagedPhysicalLength;
+    if (isolateSourceStart && physicalStart > 0 && mPagedPageSize > 0) {
+        physicalStart = ROUND_UP(physicalStart, mPagedPageSize);
+    }
+    int requiredPhysical = physicalStart + tokenCount;
+    int requiredLogical = logicalStart + tokenCount;
+    if (!ensurePagedCapacity(requiredPhysical, requiredLogical)) {
+        return false;
+    }
+
+    std::vector<int> tokenTable(tokenCount);
+    std::vector<int> ropeTable(tokenCount, 0);
+    for (int i = 0; i < tokenCount; ++i) {
+        tokenTable[i] = physicalStart + i;
+    }
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+    cl_int res = CL_SUCCESS;
+    res |= queue.enqueueWriteBuffer(*mPagedTokenTable, CL_TRUE,
+                                    static_cast<size_t>(logicalStart) * sizeof(int),
+                                    static_cast<size_t>(tokenCount) * sizeof(int),
+                                    tokenTable.data());
+    res |= queue.enqueueWriteBuffer(*mPagedRopeTable, CL_TRUE,
+                                    static_cast<size_t>(logicalStart) * sizeof(int),
+                                    static_cast<size_t>(tokenCount) * sizeof(int),
+                                    ropeTable.data());
+    if (res != CL_SUCCESS) {
+        MNN_ERROR("[Error]: KVCacheCLManager failed to upload OpenCL paged append table: %d\n", res);
+        return false;
+    }
+    mPagedPhysicalLength = requiredPhysical;
+    mPagedLogicalLength = requiredLogical;
+    return true;
+}
+
+bool KVCacheCLManager::ensurePagedDecodeAppendTable(int logicalStart, int tokenCount) {
+    bool isolateSourceStart = !mPagedDecodeStarted;
+    if (!ensurePagedAppendTable(logicalStart, tokenCount, isolateSourceStart)) {
+        return false;
+    }
+    mPagedDecodeStarted = true;
+    return true;
+}
+
+ErrorCode AttentionBufExecution::saveOpenCLNativePrefixCache(const std::vector<Tensor *> &inputs, int totalKvLen) {
+    if (mMeta == nullptr || mMeta->file_flag != KVMeta::PendingWrite || mMeta->file_name.empty()) {
+        return NO_ERROR;
+    }
+    if (inputs.size() < 2 || inputs[1] == nullptr) {
+        return INVALID_VALUE;
+    }
+    auto key = inputs[1];
+    if (key->dimensions() < 4) {
+        return INVALID_VALUE;
+    }
+    int batch = key->shape()[0];
+    int kvHeads = key->shape()[2];
+    int headDim = key->shape()[3];
+    if (batch != 1) {
+        MNN_ERROR("[Error]: OpenCL prefix cache save only supports batch=1\n");
+        return NOT_SUPPORT;
+    }
+    if (kvHeads <= 0 || headDim <= 0 || totalKvLen <= 0) {
+        return INVALID_VALUE;
+    }
+    if (mMeta->key_rope_state != KVMeta::KeyRopeCanonicalNoRope) {
+        MNN_ERROR("[Error]: OpenCL native prefix cache save requires canonical_no_rope key\n");
+        return NOT_SUPPORT;
+    }
+    int ropeDim = mMeta->rope_dim > 0 ? mMeta->rope_dim : headDim;
+    ropeDim = std::min(ropeDim, headDim);
+    if (ropeDim <= 0 || (ropeDim % 2) != 0 || mMeta->rope_theta <= 0.0f ||
+        mMeta->rope_pairing != KVMeta::RopePairingHalf) {
+        MNN_ERROR("[Error]: OpenCL native prefix cache save got invalid RoPE metadata\n");
+        return INVALID_VALUE;
+    }
+    auto* keyBuffer = mKVCacheCLManager->mutableKey();
+    auto* valueBuffer = mKVCacheCLManager->mutableValue();
+    if (keyBuffer == nullptr || valueBuffer == nullptr) {
+        MNN_ERROR("[Error]: OpenCL native prefix cache save requires active runtime KV cache\n");
+        return INVALID_VALUE;
+    }
+
+    int bytes = mKVCacheCLManager->byte();
+    if (bytes != 2 && bytes != 4) {
+        MNN_ERROR("[Error]: OpenCL native prefix cache save only supports fp16/fp32 KV\n");
+        return NOT_SUPPORT;
+    }
+    int runtimeMaxLen = ROUND_UP(mKVCacheCLManager->maxLength(), 4);
+    int diskMaxLen = ROUND_UP(totalKvLen, 4);
+    if (runtimeMaxLen < totalKvLen || diskMaxLen <= 0) {
+        return INVALID_VALUE;
+    }
+    size_t runtimeBytes = static_cast<size_t>(kvHeads) * headDim * runtimeMaxLen * bytes;
+    size_t diskBytes = static_cast<size_t>(kvHeads) * headDim * diskMaxLen * bytes;
+
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    cl_int keyMapStatus = CL_SUCCESS;
+    cl_int valueMapStatus = CL_SUCCESS;
+    auto& queue = runtime->commandQueue();
+    auto* mappedKey = static_cast<uint8_t*>(queue.enqueueMapBuffer(
+        *keyBuffer, CL_TRUE, CL_MAP_READ, 0, runtimeBytes, nullptr, nullptr, &keyMapStatus));
+    auto* mappedValue = static_cast<uint8_t*>(queue.enqueueMapBuffer(
+        *valueBuffer, CL_TRUE, CL_MAP_READ, 0, runtimeBytes, nullptr, nullptr, &valueMapStatus));
+    if (mappedKey == nullptr || mappedValue == nullptr ||
+        keyMapStatus != CL_SUCCESS || valueMapStatus != CL_SUCCESS) {
+        MNN_ERROR("[Error]: OpenCL native prefix cache failed to map runtime KV buffers\n");
+        if (mappedKey != nullptr) {
+            queue.enqueueUnmapMemObject(*keyBuffer, mappedKey);
+        }
+        if (mappedValue != nullptr) {
+            queue.enqueueUnmapMemObject(*valueBuffer, mappedValue);
+        }
+        return INVALID_VALUE;
+    }
+
+    std::vector<uint8_t> keyHost(diskBytes, 0);
+    std::vector<uint8_t> valueHost(diskBytes, 0);
+    for (int head = 0; head < kvHeads; ++head) {
+        for (int token = 0; token < diskMaxLen; ++token) {
+            for (int dim = 0; dim < headDim; ++dim) {
+                size_t dstKeyIndex = (static_cast<size_t>(head) * headDim + dim) * diskMaxLen + token;
+                size_t dstValueIndex = (static_cast<size_t>(head) * diskMaxLen + token) * headDim + dim;
+                if (token >= totalKvLen) {
+                    writeOpenCLNativeScalar(keyHost.data(), dstKeyIndex, bytes, 0.0f);
+                    writeOpenCLNativeScalar(valueHost.data(), dstValueIndex, bytes, 0.0f);
+                    continue;
+                }
+
+                size_t srcKeyIndex = (static_cast<size_t>(head) * headDim + dim) * runtimeMaxLen + token;
+                size_t srcValueIndex = (static_cast<size_t>(head) * runtimeMaxLen + token) * headDim + dim;
+                float keyValue = readOpenCLNativeScalar(mappedKey, srcKeyIndex, bytes);
+                float value = readOpenCLNativeScalar(mappedValue, srcValueIndex, bytes);
+                if (dim < ropeDim) {
+                    int halfDim = ropeDim / 2;
+                    int pairDim = dim < halfDim ? dim + halfDim : dim - halfDim;
+                    int freqDim = dim < halfDim ? dim : dim - halfDim;
+                    size_t pairIndex = (static_cast<size_t>(head) * headDim + pairDim) * runtimeMaxLen + token;
+                    float pairValue = readOpenCLNativeScalar(mappedKey, pairIndex, bytes);
+                    float left = dim < halfDim ? keyValue : pairValue;
+                    float right = dim < halfDim ? pairValue : keyValue;
+                    float invFreq = 1.0f / std::pow(mMeta->rope_theta, static_cast<float>(2 * freqDim) / static_cast<float>(ropeDim));
+                    float angle = static_cast<float>(token) * invFreq;
+                    float cosValue = std::cos(angle);
+                    float sinValue = -std::sin(angle);
+                    keyValue = dim < halfDim ? left * cosValue - right * sinValue : right * cosValue + left * sinValue;
+                }
+                writeOpenCLNativeScalar(keyHost.data(), dstKeyIndex, bytes, keyValue);
+                writeOpenCLNativeScalar(valueHost.data(), dstValueIndex, bytes, value);
+            }
+        }
+    }
+
+    queue.enqueueUnmapMemObject(*keyBuffer, mappedKey);
+    queue.enqueueUnmapMemObject(*valueBuffer, mappedValue);
+    queue.finish();
+
+    if (!ensurePrefixCacheObjectDirs(mMeta->prefix_cache_dir, "opencl", mMeta->file_name)) {
+        MNN_ERROR("[Error]: failed to create OpenCL prefix cache object dirs: %s\n",
+                  mMeta->prefix_cache_dir.c_str());
+        return FILE_OPEN_FAILED;
+    }
+    int layerIndex = mMeta->layer_index;
+    auto base = prefixCacheLayerBase(mMeta->prefix_cache_dir, "opencl", mMeta->file_name, layerIndex);
+    {
+        std::ofstream out(base + ".k", std::ios::binary | std::ios::trunc);
+        if (!out) {
+            MNN_ERROR("[Error]: failed to write OpenCL prefix key cache: %s\n", (base + ".k").c_str());
+            return FILE_OPEN_FAILED;
+        }
+        out.write(reinterpret_cast<const char*>(keyHost.data()), static_cast<std::streamsize>(keyHost.size()));
+    }
+    {
+        std::ofstream out(base + ".v", std::ios::binary | std::ios::trunc);
+        if (!out) {
+            MNN_ERROR("[Error]: failed to write OpenCL prefix value cache: %s\n", (base + ".v").c_str());
+            return FILE_OPEN_FAILED;
+        }
+        out.write(reinterpret_cast<const char*>(valueHost.data()), static_cast<std::streamsize>(valueHost.size()));
+    }
+
+    mMeta->layer_index++;
+    if (mMeta->layer_nums > 0) {
+        mMeta->layer_index %= mMeta->layer_nums;
+    }
+    return NO_ERROR;
 }
 
 void AttentionBufExecution::handleKVCache(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
@@ -278,6 +596,7 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
     int headDim = shape[3];
     int group_size = numHead / kvNumHead;
     float scale = 1.0 / sqrt(headDim);
+    bool usePagedKV = mKVCacheCLManager != nullptr && mKVCacheCLManager->pagedActive();
     auto mask_shape = mask->shape();
     int dim = mask->dimensions();
     MNN_ASSERT(dim >= 2);
@@ -366,8 +685,15 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
                     // rearrange key
                     cl_int ret = CL_SUCCESS;
                     ret |= mKernel_rearrange->get().setArg(4, *mKVCacheCLManager->key());
-                    ret |= mKernel_rearrange->get().setArg(5, mPastKvSeqlen);
-                    ret |= mKernel_rearrange->get().setArg(6, mKeyValueMaxlen);
+                    if (usePagedKV) {
+                        ret |= mKernel_rearrange->get().setArg(5, *mKVCacheCLManager->tokenTable());
+                        ret |= mKernel_rearrange->get().setArg(6, *mKVCacheCLManager->ropeTable());
+                        ret |= mKernel_rearrange->get().setArg(7, mPastKvSeqlen);
+                        ret |= mKernel_rearrange->get().setArg(8, mKeyValueMaxlen);
+                    } else {
+                        ret |= mKernel_rearrange->get().setArg(5, mPastKvSeqlen);
+                        ret |= mKernel_rearrange->get().setArg(6, mKeyValueMaxlen);
+                    }
                     MNN_CHECK_CL_SUCCESS(ret, "reSetArg rearrange_k");
                 }
                 if(mHasMask){
@@ -383,12 +709,28 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
                     ret |= mKernel_qk->get().setArg(1, mGlobalWorkSizeQk0);
                     ret |= mKernel_qk->get().setArg(3, openCLDeferBuffer(mTempQ.get()));
                     ret |= mKernel_qk->get().setArg(4, *mKVCacheCLManager->key());
-                    if(mHasMask) {
+                    if (mHasMask) {
                         ret |= mKernel_qk->get().setArg(5, openCLDeferBuffer(mTempMask.get()));
+                        ret |= mKernel_qk->get().setArg(6, openCLDeferBuffer(mTempQK.get()));
+                        ret |= mKernel_qk->get().setArg(10, mKvSeqlen);
+                        ret |= mKernel_qk->get().setArg(11, mKeyValueMaxlen);
+                        if (usePagedKV) {
+                            ret |= mKernel_qk->get().setArg(14, *mKVCacheCLManager->tokenTable());
+                            ret |= mKernel_qk->get().setArg(15, *mKVCacheCLManager->ropeTable());
+                            ret |= mKernel_qk->get().setArg(16, mKVCacheCLManager->pagedRopeDim());
+                            ret |= mKernel_qk->get().setArg(17, mKVCacheCLManager->pagedRopeTheta());
+                        }
+                    } else {
+                        ret |= mKernel_qk->get().setArg(5, openCLDeferBuffer(mTempQK.get()));
+                        ret |= mKernel_qk->get().setArg(9, mKvSeqlen);
+                        ret |= mKernel_qk->get().setArg(10, mKeyValueMaxlen);
+                        if (usePagedKV) {
+                            ret |= mKernel_qk->get().setArg(13, *mKVCacheCLManager->tokenTable());
+                            ret |= mKernel_qk->get().setArg(14, *mKVCacheCLManager->ropeTable());
+                            ret |= mKernel_qk->get().setArg(15, mKVCacheCLManager->pagedRopeDim());
+                            ret |= mKernel_qk->get().setArg(16, mKVCacheCLManager->pagedRopeTheta());
+                        }
                     }
-                    ret |= mKernel_qk->get().setArg(6, openCLDeferBuffer(mTempQK.get()));
-                    ret |= mKernel_qk->get().setArg(10, mKvSeqlen);
-                    ret |= mKernel_qk->get().setArg(11, mKeyValueMaxlen);
                     MNN_CHECK_CL_SUCCESS(ret, "reSetArg matmul_qk_decode");
                     mGlobalWorkSizeQk[0] = ROUND_UP(mGlobalWorkSizeQk[0], std::max((uint32_t)1, mLocalWorkSizeQk[0]));
                     mGlobalWorkSizeQk[1] = ROUND_UP(mGlobalWorkSizeQk[1], std::max((uint32_t)1, mLocalWorkSizeQk[1]));
@@ -406,8 +748,14 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
                     // rearrange value
                     cl_int ret = CL_SUCCESS;
                     ret |= mKernel_rearrangeV->get().setArg(4, *mKVCacheCLManager->value());
-                    ret |= mKernel_rearrangeV->get().setArg(5, mPastKvSeqlen);
-                    ret |= mKernel_rearrangeV->get().setArg(6, mKeyValueMaxlen);
+                    if (usePagedKV) {
+                        ret |= mKernel_rearrangeV->get().setArg(5, *mKVCacheCLManager->tokenTable());
+                        ret |= mKernel_rearrangeV->get().setArg(6, mPastKvSeqlen);
+                        ret |= mKernel_rearrangeV->get().setArg(7, mKeyValueMaxlen);
+                    } else {
+                        ret |= mKernel_rearrangeV->get().setArg(5, mPastKvSeqlen);
+                        ret |= mKernel_rearrangeV->get().setArg(6, mKeyValueMaxlen);
+                    }
                     MNN_CHECK_CL_SUCCESS(ret, "reSetArg rearrange_v");
                 }
                 {
@@ -417,6 +765,9 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
                     ret |= mKernel_qkv->get().setArg(4, *mKVCacheCLManager->value());
                     ret |= mKernel_qkv->get().setArg(7, mKvSeqlen);
                     ret |= mKernel_qkv->get().setArg(8, mKeyValueMaxlen);
+                    if (usePagedKV) {
+                        ret |= mKernel_qkv->get().setArg(12, *mKVCacheCLManager->tokenTable());
+                    }
                     MNN_CHECK_CL_SUCCESS(ret, "reSetArg matmul_qkv_decode");
                 }
             }
@@ -457,11 +808,17 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
         // not use record, need update args by using setArg
         {
             // rearrange key
-            uint32_t index = 4;
             cl_int ret = CL_SUCCESS;
-            ret |= mKernel_rearrange->get().setArg(index++, *mKVCacheCLManager->key());
-            ret |= mKernel_rearrange->get().setArg(index++, mPastKvSeqlen);
-            ret |= mKernel_rearrange->get().setArg(index++, mKeyValueMaxlen);
+            ret |= mKernel_rearrange->get().setArg(4, *mKVCacheCLManager->key());
+            if (usePagedKV) {
+                ret |= mKernel_rearrange->get().setArg(5, *mKVCacheCLManager->tokenTable());
+                ret |= mKernel_rearrange->get().setArg(6, *mKVCacheCLManager->ropeTable());
+                ret |= mKernel_rearrange->get().setArg(7, mPastKvSeqlen);
+                ret |= mKernel_rearrange->get().setArg(8, mKeyValueMaxlen);
+            } else {
+                ret |= mKernel_rearrange->get().setArg(5, mPastKvSeqlen);
+                ret |= mKernel_rearrange->get().setArg(6, mKeyValueMaxlen);
+            }
             MNN_CHECK_CL_SUCCESS(ret, "reSetArg rearrange_k");
         }
         {
@@ -476,6 +833,12 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
             index++;
             ret |= mKernel_qk->get().setArg(index++, mKvSeqlen);
             ret |= mKernel_qk->get().setArg(index++, mKeyValueMaxlen);
+            if (usePagedKV) {
+                ret |= mKernel_qk->get().setArg(10, *mKVCacheCLManager->tokenTable());
+                ret |= mKernel_qk->get().setArg(11, *mKVCacheCLManager->ropeTable());
+                ret |= mKernel_qk->get().setArg(12, mKVCacheCLManager->pagedRopeDim());
+                ret |= mKernel_qk->get().setArg(13, mKVCacheCLManager->pagedRopeTheta());
+            }
             mGlobalWorkSizeQk[0] = ROUND_UP(mGlobalWorkSizeQk[0], std::max((uint32_t)1, mLocalWorkSizeQk[0]));
             mGlobalWorkSizeQk[1] = ROUND_UP(mGlobalWorkSizeQk[1], std::max((uint32_t)1, mLocalWorkSizeQk[1]));
             MNN_CHECK_CL_SUCCESS(ret, "reSetArg matmul_qk_decode");
@@ -492,11 +855,16 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
             MNN_CHECK_CL_SUCCESS(ret, "reSetArg softmax");
         }
         {
-            uint32_t index = 4;
             cl_int ret = CL_SUCCESS;
-            ret |= mKernel_rearrangeV->get().setArg(index++, *mKVCacheCLManager->value());
-            ret |= mKernel_rearrangeV->get().setArg(index++, mPastKvSeqlen);
-            ret |= mKernel_rearrangeV->get().setArg(index++, mKeyValueMaxlen);
+            ret |= mKernel_rearrangeV->get().setArg(4, *mKVCacheCLManager->value());
+            if (usePagedKV) {
+                ret |= mKernel_rearrangeV->get().setArg(5, *mKVCacheCLManager->tokenTable());
+                ret |= mKernel_rearrangeV->get().setArg(6, mPastKvSeqlen);
+                ret |= mKernel_rearrangeV->get().setArg(7, mKeyValueMaxlen);
+            } else {
+                ret |= mKernel_rearrangeV->get().setArg(5, mPastKvSeqlen);
+                ret |= mKernel_rearrangeV->get().setArg(6, mKeyValueMaxlen);
+            }
 
             MNN_CHECK_CL_SUCCESS(ret, "reSetArg rearrange_v");
         }
@@ -509,6 +877,9 @@ ErrorCode AttentionBufExecution::UpdateArgs(const std::vector<Tensor *> &inputs,
             index++;
             ret |= mKernel_qkv->get().setArg(index++, mKvSeqlen);
             ret |= mKernel_qkv->get().setArg(index++, mKeyValueMaxlen);
+            if (usePagedKV) {
+                ret |= mKernel_qkv->get().setArg(10, *mKVCacheCLManager->tokenTable());
+            }
             MNN_CHECK_CL_SUCCESS(ret, "reSetArg matmul_qkv_decode");
         }
 #ifndef ENABLE_OPENCL_TIME_PROFILER
@@ -540,6 +911,8 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
     int headDim = shape[3];
     int group_size = numHead / kvNumHead;
     float scale = 1.0 / sqrt(headDim);
+    mKernelUsePagedKV = false;
+    mKernelIsDecode = false;
 
     mAlignQ = 32;
     mAlignKV = 32;
@@ -1019,6 +1392,9 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
     int headDim = shape[3];
     int groupSize = numHead / kvNumHead;
     float scale = 1.0 / sqrt(headDim);
+    bool usePagedKV = mKVCacheCLManager != nullptr && mKVCacheCLManager->pagedActive();
+    mKernelUsePagedKV = usePagedKV;
+    mKernelIsDecode = false;
 
     int maskKvlen = mKvSeqlen;
     int maskQlen = seqlen;
@@ -1105,7 +1481,8 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         std::set<std::string> buildOption;
 
         buildOption.emplace("-DOPENCL_PREFILL_ATTENTION");
-        mKernel_rearrange = runtime->buildKernel("attention_buf", "rearrange_k", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_rearrange = runtime->buildKernel("attention_buf", usePagedKV ? "rearrange_k_paged" : "rearrange_k",
+                                                 buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_rearrange));
 
         mGlobalWorkSizeRearrg = {static_cast<uint32_t>(UP_DIV(seqlen, 4)), \
@@ -1119,6 +1496,10 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         ret |= mKernel_rearrange->get().setArg(index++, mGlobalWorkSizeRearrg[2]);
         ret |= mKernel_rearrange->get().setArg(index++, openCLBuffer(key));
         ret |= mKernel_rearrange->get().setArg(index++, keyBuffer);
+        if (usePagedKV) {
+            ret |= mKernel_rearrange->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+            ret |= mKernel_rearrange->get().setArg(index++, *mKVCacheCLManager->ropeTable());
+        }
         ret |= mKernel_rearrange->get().setArg(index++, mPastKvSeqlen);
         ret |= mKernel_rearrange->get().setArg(index++, mKeyValueMaxlen);
         ret |= mKernel_rearrange->get().setArg(index++, seqlen);
@@ -1133,9 +1514,13 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         mGlobalWorkSizeRearrg[2] = ROUND_UP(mGlobalWorkSizeRearrg[2], std::max((uint32_t)1, mLocalWorkSizeRearrg[2]));
         if(nullptr != mMeta) {
             mRgUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->key()))()});
+            if (usePagedKV) {
+                mRgUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+                mRgUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(cl_mem), &(*(mKVCacheCLManager->ropeTable()))()});
+            }
         }
-        mRgUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mPastKvSeqlen), &mPastKvSeqlen});
-        mRgUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+        mRgUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 7 : 5), sizeof(mPastKvSeqlen), &mPastKvSeqlen});
+        mRgUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 8 : 6), sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
         mOpRecordUpdateInfo.emplace_back(&mRgUpdateInfo);
         mOpenCLBackend->recordKernel3d(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, &mRgUpdateInfo);
     }
@@ -1176,7 +1561,8 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
             buildOption.emplace("-DSET_MASK");
         }
         buildOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize));
-        mKernel_qk = runtime->buildKernel("attention_buf", "matmul_qk_div_mask_prefill", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_qk = runtime->buildKernel("attention_buf", usePagedKV ? "matmul_qk_div_mask_prefill_paged" : "matmul_qk_div_mask_prefill",
+                                          buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         mGlobalWorkSizeQk =  {static_cast<uint32_t>(UP_DIV(seqlen, 4)), static_cast<uint32_t>(UP_DIV(mKvSeqlen, 4)), static_cast<uint32_t>(numHead*batch)};
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_qk));
 
@@ -1198,6 +1584,12 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         ret |= mKernel_qk->get().setArg(index++, mKeyValueMaxlen);
         ret |= mKernel_qk->get().setArg(index++, numHead);
         ret |= mKernel_qk->get().setArg(index++, headDim);
+        if (usePagedKV) {
+            ret |= mKernel_qk->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+            ret |= mKernel_qk->get().setArg(index++, *mKVCacheCLManager->ropeTable());
+            ret |= mKernel_qk->get().setArg(index++, mKVCacheCLManager->pagedRopeDim());
+            ret |= mKernel_qk->get().setArg(index++, mKVCacheCLManager->pagedRopeTheta());
+        }
         MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qk_div_mask_prefill");
 
         mLocalWorkSizeQk = localWS3DDefault(mGlobalWorkSizeQk, maxWorkGroupSize, runtime, "matmul_qk_div_mask_prefill", mKernel_qk, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
@@ -1214,10 +1606,18 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
             mQkUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(cl_mem), &openCLDeferBuffer(mTempQK.get())()});
             mQkUpdateInfo.update_kernel_args.push_back({0, 10, sizeof(mKvSeqlen), &mKvSeqlen});
             mQkUpdateInfo.update_kernel_args.push_back({0, 11, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+            if (usePagedKV) {
+                mQkUpdateInfo.update_kernel_args.push_back({0, 14, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+                mQkUpdateInfo.update_kernel_args.push_back({0, 15, sizeof(cl_mem), &(*(mKVCacheCLManager->ropeTable()))()});
+            }
         }else{
             mQkUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(cl_mem), &openCLDeferBuffer(mTempQK.get())()});
             mQkUpdateInfo.update_kernel_args.push_back({0, 9, sizeof(mKvSeqlen), &mKvSeqlen});
             mQkUpdateInfo.update_kernel_args.push_back({0, 10, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+            if (usePagedKV) {
+                mQkUpdateInfo.update_kernel_args.push_back({0, 13, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+                mQkUpdateInfo.update_kernel_args.push_back({0, 14, sizeof(cl_mem), &(*(mKVCacheCLManager->ropeTable()))()});
+            }
         }
         mQkPrefillGlobal_size[0] = mGlobalWorkSizeQk[0];
         mQkPrefillGlobal_size[1] = mGlobalWorkSizeQk[1];
@@ -1268,7 +1668,8 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         std::set<std::string> buildOption;
 
         buildOption.emplace("-DOPENCL_PREFILL_ATTENTION");
-        mKernel_rearrangeV = runtime->buildKernel("attention_buf", "rearrange_v", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_rearrangeV = runtime->buildKernel("attention_buf", usePagedKV ? "rearrange_v_paged" : "rearrange_v",
+                                                  buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_rearrangeV));
 
         mGlobalWorkSizeRearrgV = {static_cast<uint32_t>(UP_DIV(headDim, 4)), \
@@ -1282,6 +1683,9 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         ret |= mKernel_rearrangeV->get().setArg(index++, mGlobalWorkSizeRearrgV[2]);
         ret |= mKernel_rearrangeV->get().setArg(index++, openCLBuffer(value));
         ret |= mKernel_rearrangeV->get().setArg(index++, valueBuffer);
+        if (usePagedKV) {
+            ret |= mKernel_rearrangeV->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+        }
         ret |= mKernel_rearrangeV->get().setArg(index++, mPastKvSeqlen);
         ret |= mKernel_rearrangeV->get().setArg(index++, mKeyValueMaxlen);
         ret |= mKernel_rearrangeV->get().setArg(index++, seqlen);
@@ -1295,9 +1699,12 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         mGlobalWorkSizeRearrgV[2] = ROUND_UP(mGlobalWorkSizeRearrgV[2], std::max((uint32_t)1, mLocalWorkSizeRearrgV[2]));
         if(nullptr != mMeta) {
             mRgVUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->value()))()});
+            if (usePagedKV) {
+                mRgVUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+            }
         }
-        mRgVUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mPastKvSeqlen), &mPastKvSeqlen});
-        mRgVUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+        mRgVUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 6 : 5), sizeof(mPastKvSeqlen), &mPastKvSeqlen});
+        mRgVUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 7 : 6), sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
         mOpRecordUpdateInfo.emplace_back(&mRgVUpdateInfo);
         mOpenCLBackend->recordKernel3d(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, &mRgVUpdateInfo);
     }
@@ -1305,7 +1712,8 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
     {
         std::set<std::string> buildOption;
         buildOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize));
-        mKernel_qkv = runtime->buildKernel("attention_buf", "matmul_qkv_prefill", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_qkv = runtime->buildKernel("attention_buf", usePagedKV ? "matmul_qkv_prefill_paged" : "matmul_qkv_prefill",
+                                           buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_qkv));
         mGlobalWorkSizeQkv =  {static_cast<uint32_t>(UP_DIV(headDim, 8)), static_cast<uint32_t>(UP_DIV(seqlen, 4)), static_cast<uint32_t>(numHead*batch)};
 
@@ -1323,6 +1731,9 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         ret |= mKernel_qkv->get().setArg(index++, numHead);
         ret |= mKernel_qkv->get().setArg(index++, kvNumHead);
         ret |= mKernel_qkv->get().setArg(index++, headDim);
+        if (usePagedKV) {
+            ret |= mKernel_qkv->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+        }
         MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qkv_prefill");
 
         mLocalWorkSizeQkv = localWS3DDefault(mGlobalWorkSizeQkv, maxWorkGroupSize, runtime, "matmul_qkv_prefill", mKernel_qkv, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
@@ -1332,6 +1743,9 @@ ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inpu
         mQkvUpdateInfo.update_kernel_args.push_back({0, 3, sizeof(cl_mem), &openCLDeferBuffer(mTempSoftMax.get())()});
         if(nullptr != mMeta) {
             mQkvUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->value()))()});
+            if (usePagedKV) {
+                mQkvUpdateInfo.update_kernel_args.push_back({0, 12, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+            }
         }
         mQkvUpdateInfo.update_kernel_args.push_back({0, 7, sizeof(mKvSeqlen), &mKvSeqlen});
         mQkvUpdateInfo.update_kernel_args.push_back({0, 8, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
@@ -1358,6 +1772,9 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
     int headDim = shape[3];
     int group_size = numHead / kvNumHead;
     float scale = 1.0 / sqrt(headDim);
+    bool usePagedKV = mKVCacheCLManager != nullptr && mKVCacheCLManager->pagedActive();
+    mKernelUsePagedKV = usePagedKV;
+    mKernelIsDecode = true;
 
 
     cl::Buffer keyBuffer, valueBuffer;
@@ -1385,7 +1802,8 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         // rearrange key
         std::set<std::string> buildOption;
 
-        mKernel_rearrange = runtime->buildKernel("attention_buf", "rearrange_k", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_rearrange = runtime->buildKernel("attention_buf", usePagedKV ? "rearrange_k_paged" : "rearrange_k",
+                                                 buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_rearrange));
 
         mGlobalWorkSizeRearrg = {static_cast<uint32_t>(1), \
@@ -1399,6 +1817,10 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         ret |= mKernel_rearrange->get().setArg(index++, mGlobalWorkSizeRearrg[2]);
         ret |= mKernel_rearrange->get().setArg(index++, openCLBuffer(key));
         ret |= mKernel_rearrange->get().setArg(index++, keyBuffer);
+        if (usePagedKV) {
+            ret |= mKernel_rearrange->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+            ret |= mKernel_rearrange->get().setArg(index++, *mKVCacheCLManager->ropeTable());
+        }
         ret |= mKernel_rearrange->get().setArg(index++, mPastKvSeqlen);
         ret |= mKernel_rearrange->get().setArg(index++, mKeyValueMaxlen);
         ret |= mKernel_rearrange->get().setArg(index++, seqlen);
@@ -1413,8 +1835,12 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         mGlobalWorkSizeRearrg[2] = ROUND_UP(mGlobalWorkSizeRearrg[2], std::max((uint32_t)1, mLocalWorkSizeRearrg[2]));
         if(nullptr != mMeta) {
             mRgUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->key()))()});
-            mRgUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mPastKvSeqlen), &mPastKvSeqlen});
-            mRgUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+            if (usePagedKV) {
+                mRgUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+                mRgUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(cl_mem), &(*(mKVCacheCLManager->ropeTable()))()});
+            }
+            mRgUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 7 : 5), sizeof(mPastKvSeqlen), &mPastKvSeqlen});
+            mRgUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 8 : 6), sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
             mOpRecordUpdateInfo.emplace_back(&mRgUpdateInfo);
             mOpenCLBackend->recordKernel3d(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, &mRgUpdateInfo);
         } else {
@@ -1425,7 +1851,8 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         // matmul qk
         std::set<std::string> buildOption;
         buildOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(group_size));
-        mKernel_qk = runtime->buildKernel("attention_buf", "matmul_qk_decode", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_qk = runtime->buildKernel("attention_buf", usePagedKV ? "matmul_qk_decode_paged" : "matmul_qk_decode",
+                                          buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         mGlobalWorkSizeQk =  {static_cast<uint32_t>(UP_DIV(mKvSeqlen, 4)), static_cast<uint32_t>(numHead)};
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_qk));
 
@@ -1441,6 +1868,12 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         ret |= mKernel_qk->get().setArg(index++, mKeyValueMaxlen);
         ret |= mKernel_qk->get().setArg(index++, numHead);
         ret |= mKernel_qk->get().setArg(index++, headDim);
+        if (usePagedKV) {
+            ret |= mKernel_qk->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+            ret |= mKernel_qk->get().setArg(index++, *mKVCacheCLManager->ropeTable());
+            ret |= mKernel_qk->get().setArg(index++, mKVCacheCLManager->pagedRopeDim());
+            ret |= mKernel_qk->get().setArg(index++, mKVCacheCLManager->pagedRopeTheta());
+        }
         MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qk_decode");
 
         mLocalWorkSizeQk = localWS2DDefault(mGlobalWorkSizeQk, maxWorkGroupSize, runtime, "matmul_qk_decode", mKernel_qk, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
@@ -1452,6 +1885,10 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
             mQkUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &openCLDeferBuffer(mTempQK.get())()});
             mQkUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKvSeqlen), &mKvSeqlen});
             mQkUpdateInfo.update_kernel_args.push_back({0, 7, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+            if (usePagedKV) {
+                mQkUpdateInfo.update_kernel_args.push_back({0, 10, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+                mQkUpdateInfo.update_kernel_args.push_back({0, 11, sizeof(cl_mem), &(*(mKVCacheCLManager->ropeTable()))()});
+            }
             mQkGlobal_size[0] = mGlobalWorkSizeQk[0];
             mQkGlobal_size[1] = mGlobalWorkSizeQk[1];
             mQkUpdateInfo.update_global_size.push_back({0, mQkGlobal_size});
@@ -1506,7 +1943,8 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         // rearrange value
         std::set<std::string> buildOption;
 
-        mKernel_rearrangeV = runtime->buildKernel("attention_buf", "rearrange_v", buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        mKernel_rearrangeV = runtime->buildKernel("attention_buf", usePagedKV ? "rearrange_v_paged" : "rearrange_v",
+                                                  buildOption, mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
         auto maxWorkGroupSize  = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mKernel_rearrangeV));
 
         mGlobalWorkSizeRearrgV = {static_cast<uint32_t>(UP_DIV(headDim, 4)), \
@@ -1520,6 +1958,9 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         ret |= mKernel_rearrangeV->get().setArg(index++, mGlobalWorkSizeRearrgV[2]);
         ret |= mKernel_rearrangeV->get().setArg(index++, openCLBuffer(value));
         ret |= mKernel_rearrangeV->get().setArg(index++, valueBuffer);
+        if (usePagedKV) {
+            ret |= mKernel_rearrangeV->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+        }
         ret |= mKernel_rearrangeV->get().setArg(index++, mPastKvSeqlen);
         ret |= mKernel_rearrangeV->get().setArg(index++, mKeyValueMaxlen);
         ret |= mKernel_rearrangeV->get().setArg(index++, seqlen);
@@ -1533,8 +1974,11 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         mGlobalWorkSizeRearrgV[2] = ROUND_UP(mGlobalWorkSizeRearrgV[2], std::max((uint32_t)1, mLocalWorkSizeRearrgV[2]));
         if(nullptr != mMeta) {
             mRgVUpdateInfo.update_kernel_args.push_back({0, 4, sizeof(cl_mem), &(*(mKVCacheCLManager->value()))()});
-            mRgVUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mPastKvSeqlen), &mPastKvSeqlen});
-            mRgVUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
+            if (usePagedKV) {
+                mRgVUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+            }
+            mRgVUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 6 : 5), sizeof(mPastKvSeqlen), &mPastKvSeqlen});
+            mRgVUpdateInfo.update_kernel_args.push_back({0, static_cast<uint32_t>(usePagedKV ? 7 : 6), sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
             mOpRecordUpdateInfo.emplace_back(&mRgVUpdateInfo);
             mOpenCLBackend->recordKernel3d(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, &mRgVUpdateInfo);
         } else {
@@ -1546,7 +1990,10 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         std::set<std::string> buildOption;
         buildOption.emplace("-DNUMHEAD_GROUP_SIZE=" + std::to_string(group_size));
         const int total_kernel = 2;
-        std::string kernelName[total_kernel] = {"matmul_qkv_decode_b4", "matmul_qkv_decode_b8"};
+        std::string kernelName[total_kernel] = {
+            usePagedKV ? "matmul_qkv_decode_b4_paged" : "matmul_qkv_decode_b4",
+            usePagedKV ? "matmul_qkv_decode_b8_paged" : "matmul_qkv_decode_b8"
+        };
         std::string unroll[total_kernel] = {"-DLOOP_UNROLL_4", "-DLOOP_UNROLL_8"};
         int itemC[total_kernel] = {4, 8};
         int actual_kernel = 2;
@@ -1575,6 +2022,9 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
                 ret |= kernel[knl_idx]->get().setArg(index++, numHead);
                 ret |= kernel[knl_idx]->get().setArg(index++, kvNumHead);
                 ret |= kernel[knl_idx]->get().setArg(index++, headDim);
+                if (usePagedKV) {
+                    ret |= kernel[knl_idx]->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+                }
                 MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qkv_decode");
                 std::pair<std::vector<uint32_t>, int> retTune;
                 retTune = localWS2DDefault(globalWorkSize[knl_idx], maxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(), kernelName[i] + unroll[j], kernel[knl_idx], mOpenCLBackend->getCLTuneLevel(), "attention_buf");
@@ -1603,6 +2053,9 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         ret |= mKernel_qkv->get().setArg(index++, numHead);
         ret |= mKernel_qkv->get().setArg(index++, kvNumHead);
         ret |= mKernel_qkv->get().setArg(index++, headDim);
+        if (usePagedKV) {
+            ret |= mKernel_qkv->get().setArg(index++, *mKVCacheCLManager->tokenTable());
+        }
         MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qkv_decode");
 
         mGlobalWorkSizeQkv[0] = ROUND_UP(mGlobalWorkSizeQkv[0], std::max((uint32_t)1, mLocalWorkSizeQkv[0]));
@@ -1610,6 +2063,9 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
         if(nullptr != mMeta) {
             mQkvUpdateInfo.update_kernel_args.push_back({0, 2, sizeof(cl_mem), &openCLDeferBuffer(mTempSoftMax.get())()});
             mQkvUpdateInfo.update_kernel_args.push_back({0, 3, sizeof(cl_mem), &(*(mKVCacheCLManager->value()))()});
+            if (usePagedKV) {
+                mQkvUpdateInfo.update_kernel_args.push_back({0, 10, sizeof(cl_mem), &(*(mKVCacheCLManager->tokenTable()))()});
+            }
             mQkvUpdateInfo.update_kernel_args.push_back({0, 5, sizeof(mKvSeqlen), &mKvSeqlen});
             mQkvUpdateInfo.update_kernel_args.push_back({0, 6, sizeof(mKeyValueMaxlen), &mKeyValueMaxlen});
             mOpRecordUpdateInfo.emplace_back(&mQkvUpdateInfo);
@@ -1748,10 +2204,32 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
         bool cachePreparedBySubclass = false;
         int appendKvSeqLen = seqlen;
         auto prepareErr = onPrepareKVCacheBeforeAppend(inputs, cachePreparedBySubclass, appendKvSeqLen);
-        (void)cachePreparedBySubclass;
-        (void)appendKvSeqLen;
         if (prepareErr != NO_ERROR) {
             return prepareErr;
+        }
+        if (mKVCacheCLManager->pagedActive() && !cachePreparedBySubclass) {
+            int logicalStart = mKVCacheCLManager->pastKvLength();
+            if (!mKVCacheCLManager->ensurePagedDecodeAppendTable(logicalStart, appendKvSeqLen)) {
+                return OUT_OF_MEMORY;
+            }
+        }
+        bool usePagedKV = mKVCacheCLManager->pagedActive();
+        bool needKernelRebuild = (usePagedKV != mKernelUsePagedKV) || (mIsDecode != mKernelIsDecode) ||
+                                 (usePagedKV && mLongPrefill);
+        if (needKernelRebuild) {
+            init();
+            mPastKvSeqlen = mKVCacheCLManager->pastKvLength();
+            mKvSeqlen = mPastKvSeqlen + appendKvSeqLen;
+            mKeyValueMaxlen = ROUND_UP(mKVCacheCLManager->maxLength(), 4);
+            mDecodeTmpMaxlen = mKeyValueMaxlen;
+            if (usePagedKV) {
+                // Paged PrefixAttention uses the short kernels that consume the token table.
+                mLongPrefill = false;
+            }
+            auto resizeErr = mIsDecode ? decodeResize(inputs, outputs) : prefillResize(inputs, outputs);
+            if (resizeErr != NO_ERROR) {
+                return resizeErr;
+            }
         }
     }
     UpdateArgs(inputs, outputs);
@@ -1814,6 +2292,10 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
 #else
     if(mOpenCLBackend->isUseRecordQueue()){
         mOpenCLBackend->addRecord(mRecording, mOpRecordUpdateInfo);
+        auto saveErr = saveOpenCLNativePrefixCache(inputs, mKvSeqlen);
+        if (saveErr != NO_ERROR) {
+            return saveErr;
+        }
 #ifdef LOG_VERBOSE
         MNN_PRINT("End AttentionBufExecution onExecute... \n");
 #endif
@@ -1860,6 +2342,10 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
     MNN_PRINT("end AttentionBufExecution onExecute !\n");
 #endif
 
+    auto saveErr = saveOpenCLNativePrefixCache(inputs, mKvSeqlen);
+    if (saveErr != NO_ERROR) {
+        return saveErr;
+    }
     return NO_ERROR;
 }
 

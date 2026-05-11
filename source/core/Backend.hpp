@@ -55,7 +55,7 @@ struct RuntimeHint {
     std::string kvcacheDirPath = "";
 
     // path of the kvcache directory
-    std::string prefixcacheDirPath = ".cache/prefixcache";
+    std::string prefixcacheDirPath = ".cache/kvshare/prefixcache";
 
     std::string midMemoryPath;
     std::string weightMemoryPath;

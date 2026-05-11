@@ -10,10 +10,22 @@
 
 #include "CPUKVCacheManager.hpp"
 #include "core/Concurrency.h"
+#include "core/PrefixCachePath.hpp"
+#include "core/PrefixKVHostCache.hpp"
 
+#include <chrono>
 #include <cmath>
 
 namespace MNN {
+
+namespace {
+constexpr const char* kCpuPrefixLayout = "cpu-flash-packed-canonical-no-rope-v1";
+
+static double nowMs() {
+    using Clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count();
+}
+}
 
 /*
 **  @brief  Expand the size of kvcache and copy it from the old tensor in memory to the new tensor in memory
@@ -359,50 +371,38 @@ ErrorCode CPUKVCacheManager::onAllocPrefixSegments(KVMeta* meta, int seq_len, in
                       segment.cache_name.c_str());
             return NOT_SUPPORT;
         }
+        if (segment.backend != "cpu" || segment.layout != kCpuPrefixLayout) {
+            MNN_ERROR("[Error]: CPU PrefixAttention requires backend-native CPU cache for %s, got backend=%s layout=%s\n",
+                      segment.cache_name.c_str(), segment.backend.c_str(), segment.layout.c_str());
+            return NOT_SUPPORT;
+        }
 
-        std::string pathk = MNNFilePathConcat(mConfig.mPrefixCacheDir, segment.cache_name) + "_" + std::to_string(resolvedLayerIndex) + ".k";
-        std::string pathv = MNNFilePathConcat(mConfig.mPrefixCacheDir, segment.cache_name) + "_" + std::to_string(resolvedLayerIndex) + ".v";
-        auto srcKeyFD = MNNOpenFile(pathk.c_str(), MNN_FILE_READ);
-        auto srcValueFD = MNNOpenFile(pathv.c_str(), MNN_FILE_READ);
-        if (srcKeyFD == INVALID_FILE || srcValueFD == INVALID_FILE) {
-            MNN_ERROR("[Error]: Failed to open segment prefix cache files: %s / %s\n", pathk.c_str(), pathv.c_str());
-            if (srcKeyFD != INVALID_FILE) {
-                MNNCloseFile(srcKeyFD);
-            }
-            if (srcValueFD != INVALID_FILE) {
-                MNNCloseFile(srcValueFD);
-            }
+        std::string base = prefixCacheLayerBase(mConfig.mPrefixCacheDir, "cpu", segment.cache_name, resolvedLayerIndex);
+        std::string pathk = base + ".k";
+        std::string pathv = base + ".v";
+        auto keyRead = readPrefixKVHostCacheFile(pathk);
+        auto valueRead = readPrefixKVHostCacheFile(pathv);
+        if (!keyRead.ok || !valueRead.ok || keyRead.bytes == nullptr || valueRead.bytes == nullptr) {
+            MNN_ERROR("[Error]: Failed to read segment prefix cache files: %s / %s, key_error=%s value_error=%s\n",
+                      pathk.c_str(), pathv.c_str(), keyRead.error.c_str(), valueRead.error.c_str());
             return FILE_OPEN_FAILED;
         }
 
-        auto srcKeySize = MNNGetFileSize(srcKeyFD);
-        auto srcValueSize = MNNGetFileSize(srcValueFD);
+        auto srcKeySize = keyRead.bytes->size();
+        auto srcValueSize = valueRead.bytes->size();
         size_t srcKeyCapacity = srcKeySize / ((size_t)mKvNumHead * ROUND_UP(mHeadDim, lP) * mBytes);
         size_t srcValueCapacity = srcValueSize / ((size_t)mKvNumHead * ROUND_UP(mHeadDim, hP) * mBytes);
         size_t srcCapacity = ALIMIN(srcKeyCapacity, srcValueCapacity);
         if ((size_t)segment.token_count > srcCapacity) {
             MNN_ERROR("[Error]: Segment prefix token_count %d exceeds KV file capacity %zu for cache %s layer %d\n",
                       segment.token_count, srcCapacity, segment.cache_name.c_str(), resolvedLayerIndex);
-            MNNCloseFile(srcKeyFD);
-            MNNCloseFile(srcValueFD);
             return INVALID_VALUE;
         }
 
-        auto srcKeyAddr = (const int8_t*)MNNMmapFile(srcKeyFD, srcKeySize, true);
-        auto srcValueAddr = (const int8_t*)MNNMmapFile(srcValueFD, srcValueSize, true);
-        if (srcKeyAddr == nullptr || srcValueAddr == nullptr) {
-            MNN_ERROR("[Error]: Failed to mmap segment prefix cache files: %s / %s\n", pathk.c_str(), pathv.c_str());
-            if (srcKeyAddr != nullptr) {
-                MNNUnmapFile((void*)srcKeyAddr, srcKeySize);
-            }
-            if (srcValueAddr != nullptr) {
-                MNNUnmapFile((void*)srcValueAddr, srcValueSize);
-            }
-            MNNCloseFile(srcKeyFD);
-            MNNCloseFile(srcValueFD);
-            return FILE_OPEN_FAILED;
-        }
+        auto srcKeyAddr = reinterpret_cast<const int8_t*>(keyRead.bytes->data());
+        auto srcValueAddr = reinterpret_cast<const int8_t*>(valueRead.bytes->data());
 
+        double materializeStart = nowMs();
         copyPrefixSegmentKV(srcKeyAddr, srcKeySize / mKvNumHead, srcValueAddr, srcValueSize / mKvNumHead,
                             segment.token_count, dstStart);
         if (mBytes == 2) {
@@ -412,12 +412,21 @@ ErrorCode CPUKVCacheManager::onAllocPrefixSegments(KVMeta* meta, int seq_len, in
             applyPackedKeyRoPE<float>(dstStart, segment.token_count, dstStart, segment.rope_dim,
                                       segment.rope_theta, segment.rope_pairing, false);
         }
+        double materializeMs = nowMs() - materializeStart;
         dstStart += segment.token_count;
+        const double waitMs = mMeta->prefix_device_prefetch ?
+            (keyRead.prefetch_wait_ms + valueRead.prefetch_wait_ms) : 0.0;
 
-        MNNUnmapFile((void*)srcKeyAddr, srcKeySize);
-        MNNUnmapFile((void*)srcValueAddr, srcValueSize);
-        MNNCloseFile(srcKeyFD);
-        MNNCloseFile(srcValueFD);
+        MNN_PRINT("[CPUPrefixAttention] layer=%d cache=%s tokens=%d host_cache_hit=%d device_cache_hit=0 device_prefetch=%d device_prefetch_hit=%d prefetch_wait_ms=%.3f disk_read_ms=%.3f host_to_device_ms=0.000 materialize_ms=%.3f attention_wait_ms=%.3f bytes=%zu\n",
+                  resolvedLayerIndex, segment.cache_name.c_str(), segment.token_count,
+                  (keyRead.host_cache_hit && valueRead.host_cache_hit) ? 1 : 0,
+                  mMeta->prefix_device_prefetch ? 1 : 0,
+                  (mMeta->prefix_device_prefetch && keyRead.host_cache_hit && valueRead.host_cache_hit) ? 1 : 0,
+                  keyRead.prefetch_wait_ms + valueRead.prefetch_wait_ms,
+                  keyRead.disk_read_ms + valueRead.disk_read_ms,
+                  materializeMs,
+                  waitMs,
+                  keyRead.file_size + valueRead.file_size);
     }
 
     mPastLength = dstStart;
@@ -435,8 +444,10 @@ void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
     // load disk prefix kvcache
     if(mMeta != nullptr && mMeta->file_name.size() > 0 && mMeta->file_flag == KVMeta::PendingRead) {
         // create new files
-        std::string pathk    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index) + ".k";
-        std::string pathv    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index++) + ".v";
+        auto base = prefixCacheLayerBase(mConfig.mPrefixCacheDir, "cpu", mMeta->file_name, mMeta->layer_index);
+        std::string pathk    = base + ".k";
+        std::string pathv    = base + ".v";
+        mMeta->layer_index++;
         mMeta->layer_index = mMeta->layer_index % mMeta->layer_nums;
         auto old_key_fd   = MNNOpenFile(pathk.c_str(), MNN_FILE_WRITE);
         auto old_value_fd = MNNOpenFile(pathv.c_str(), MNN_FILE_WRITE);
@@ -557,7 +568,7 @@ void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
 
     if (sharePrefixKv) {
         mSaveShareKvPrefix = true;
-        if(!MNNCreateDir(mConfig.mPrefixCacheDir.c_str())) {
+        if(!ensurePrefixCacheObjectDirs(mConfig.mPrefixCacheDir, "cpu", mMeta->file_name)) {
             MNN_PRINT("Failed to create prefix cache file dir: %s\n", mConfig.mPrefixCacheDir.c_str());
         }
     }
@@ -565,7 +576,7 @@ void CPUKVCacheManager::onAlloc(KVMeta* meta, int seq_len) {
         std::string keyStoredDst = "";
         std::string valueStoredDst = "";
         if(mMeta != nullptr) {
-            mBasePrefixFileName = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index);
+            mBasePrefixFileName = prefixCacheLayerBase(mConfig.mPrefixCacheDir, "cpu", mMeta->file_name, mMeta->layer_index);
             keyStoredDst = sharePrefixKv ? mBasePrefixFileName + ".k" : "";
             valueStoredDst = sharePrefixKv ? mBasePrefixFileName + ".v" : "";
             mMeta->layer_index++;
@@ -761,13 +772,15 @@ void CPUKVCacheManager::saveKVCacheInDisk() {
     auto keySize = MNNGetFileSize(mKeyCacheFD);
     auto valueSize = MNNGetFileSize(mValueCacheFD);
     mmapKVCache(keySize, valueSize);
-    if(!MNNCreateDir(mConfig.mPrefixCacheDir.c_str())) {
+    if(!ensurePrefixCacheObjectDirs(mConfig.mPrefixCacheDir, "cpu", mMeta->file_name)) {
         MNN_PRINT("Failed to create prefix cache file dir: %s\n", mConfig.mPrefixCacheDir.c_str());
     }
 
     // create new files
-    std::string pathk    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index) + ".k";
-    std::string pathv    = MNNFilePathConcat(mConfig.mPrefixCacheDir, mMeta->file_name) + "_" + std::to_string(mMeta->layer_index++) + ".v";
+    auto base = prefixCacheLayerBase(mConfig.mPrefixCacheDir, "cpu", mMeta->file_name, mMeta->layer_index);
+    std::string pathk    = base + ".k";
+    std::string pathv    = base + ".v";
+    mMeta->layer_index++;
     mMeta->layer_index = mMeta->layer_index % mMeta->layer_nums;
 
     auto new_key_fd   = MNNCreateFile(pathk.c_str());
