@@ -354,11 +354,11 @@ ErrorCode CPUAttention::onPrepareKVCache(const std::vector<Tensor*>& inputs, int
     insertLen = seqLen;
     if (!mIsKVShared) {
         if (mKVCache && mMeta != nullptr) {
+            if (mMeta->file_flag == KVMeta::PendingReadSegments && !mMeta->prefix_segments.empty()) {
+                MNN_ERROR("[Error]: direct segment prefix cache requires PrefixAttention on CPU\n");
+                return NOT_SUPPORT;
+            }
             if (mMeta->previous == mMeta->remove) {
-                if (mMeta->file_flag == KVMeta::PendingReadSegments && !mMeta->prefix_segments.empty()) {
-                    MNN_ERROR("[Error]: direct segment prefix cache requires PrefixAttention on CPU\n");
-                    return NOT_SUPPORT;
-                }
                 // New request or fully removed history: allocate a fresh runtime KV cache.
                 mKVCacheManager->onClear();
                 mKVCacheManager->onAlloc(mMeta, seqLen);
@@ -429,6 +429,12 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     seqLen = insertLen;
     int kvSeqLen  = mKVCacheManager->kvLength();
     int maxLen = mKVCacheManager->maxLength();
+    bool usePagedPrefix = mKVCacheManager->pagedPrefixActive();
+    if (usePagedPrefix &&
+        (mKeyQuantMode != KVQuantMode::None || mValueQuantMode != KVQuantMode::None || !mUseFlashAttention)) {
+        MNN_ERROR("[Error]: CPU PrefixAttention paged direct_segments only supports flash attention without KV quantization\n");
+        return NOT_SUPPORT;
+    }
     int32_t units[2] = {eP, lP};
     const float* sinksPtr = sinks ? sinks->host<float>() : nullptr;
     int kvValidOffset = kvSeqLen - seqLen; // reuse_kv=true or decode, kvValidOffset>0
@@ -447,6 +453,17 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     backend()->onAcquireBuffer(softmMaxQ.get(), Backend::STATIC);
     backend()->onAcquireBuffer(newPackQK.get(), Backend::STATIC);
     backend()->onAcquireBuffer(mTempQKBlock.get(), Backend::STATIC);
+    std::shared_ptr<Tensor> pagedKeyBlock;
+    std::shared_ptr<Tensor> pagedValueBlock;
+    if (usePagedPrefix) {
+        size_t pagedKeyBytes = (size_t)UP_DIV(mBlockKV, hP) * ROUND_UP(mHeadDim, lP) * hP * mBytes;
+        size_t pagedValueBytes = (size_t)UP_DIV((int32_t)MNN_FLASH_ATTENTION_BLOCK_SIZE, lP) * lP *
+            ROUND_UP(mHeadDim, hP) * mBytes;
+        pagedKeyBlock.reset(Tensor::createDevice<int8_t>({mThreadNum, (int)pagedKeyBytes}));
+        pagedValueBlock.reset(Tensor::createDevice<int8_t>({mThreadNum, (int)pagedValueBytes}));
+        backend()->onAcquireBuffer(pagedKeyBlock.get(), Backend::STATIC);
+        backend()->onAcquireBuffer(pagedValueBlock.get(), Backend::STATIC);
+    }
 
     // Quantize Q and initialize bias 0
     if (mKeyQuantMode == KVQuantMode::Int8) {
@@ -718,6 +735,14 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             // Start computing
             for (int i = 0; i < kvBlocks; ++i) {
                 int subKvSeqLen = ALIMIN(mBlockKV, kvSeqLen - i * mBlockKV);
+                int8_t* pagedKeyPtr = nullptr;
+                int8_t* pagedValuePtr = nullptr;
+                if (usePagedPrefix) {
+                    pagedKeyPtr = pagedKeyBlock->host<int8_t>() + tId * pagedKeyBlock->stride(0);
+                    pagedValuePtr = pagedValueBlock->host<int8_t>() + tId * pagedValueBlock->stride(0);
+                    mKVCacheManager->copyPagedPrefixBlock(i * mBlockKV, subKvSeqLen, kvHeadIndex,
+                                                          pagedKeyPtr, pagedValuePtr);
+                }
 
                 // 1. query @ key
                 if (mKeyQuantMode == KVQuantMode::TQ3) {
@@ -819,7 +844,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         }
                     }
                 } else if (mKeyQuantMode != KVQuantMode::Int8) {
-                    auto keyPtr = keyAddr + i * UP_DIV(mBlockKV, hP) * ROUND_UP(mHeadDim, lP) * hP * mBytes;
+                    auto keyPtr = usePagedPrefix ? pagedKeyPtr :
+                        keyAddr + i * UP_DIV(mBlockKV, hP) * ROUND_UP(mHeadDim, lP) * hP * mBytes;
                     int loop_e = seqLen / eP;
                     int remain = seqLen % eP;
                     auto qStride0 = ROUND_UP(mHeadDim, lP) * eP * mBytes;
@@ -966,7 +992,7 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         }
                     }
                 } else if (mValueQuantMode != KVQuantMode::Int8) {
-                    auto valuePtr = valueAddr + i * vstride0 * mBytes;
+                    auto valuePtr = usePagedPrefix ? pagedValuePtr : valueAddr + i * vstride0 * mBytes;
                     size_t shapeParameters[7] = {(size_t)eP * lP * mBytes, ROUND_UP((size_t)subKvSeqLen, lP), (size_t)mHeadDim, (size_t)seqLen * mPack * mBytes, 0, 0, 0};
                     size_t bExtraStride = (i < kvBlocks - 1) ? 0 : (ROUND_UP(mKVCacheManager->getFlashAttentionBlockKv(), lP) - ROUND_UP(subKvSeqLen, lP)) * hP * mBytes;
                     shapeParameters[5] = bExtraStride;
@@ -1049,6 +1075,10 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
     backend()->onReleaseBuffer(softmMaxQ.get(), Backend::STATIC);
     backend()->onReleaseBuffer(newPackQK.get(), Backend::STATIC);
     backend()->onReleaseBuffer(mTempQKBlock.get(), Backend::STATIC);
+    if (usePagedPrefix) {
+        backend()->onReleaseBuffer(pagedKeyBlock.get(), Backend::STATIC);
+        backend()->onReleaseBuffer(pagedValueBlock.get(), Backend::STATIC);
+    }
 
     if (!mKVCache) {
         mKVCacheManager->onClear();

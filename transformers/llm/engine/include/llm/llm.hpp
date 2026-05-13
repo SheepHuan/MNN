@@ -174,7 +174,7 @@ public:
     bool setPrefixCacheWriteFile(const std::string& filename, int flag = 0);
     bool setPrefixCacheFile(const std::string& filename, int flag = 0);
     void clearPrefixCacheFile();
-    bool setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments, bool device_prefetch = false);
+    bool setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments, bool device_prefetch = false, int prompt_token_count = 0);
     void clearPrefixCacheSegments();
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::string& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
@@ -205,6 +205,7 @@ public:
     // ptompt functions
     std::string apply_chat_template(const std::string& user_content) const;
     std::string apply_chat_template(const ChatMessages& chat_prompts) const;
+    std::string apply_chat_template(const ChatMessages& chat_prompts, bool add_generation_prompt) const;
     void response(const MultimodalPrompt& multimodal_input,
                   std::ostream* os = &std::cout,
                   const char* end_with = nullptr,

@@ -3,6 +3,7 @@
 #include "SoftmaxExecution.hpp"
 #include "core/PrefixCachePath.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <vector>
 
@@ -2222,6 +2223,34 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
     param_cpu.scale = mScale;
     param_cpu.current_kv_seq_len_new = mNewKvSeqLen;
     int append_kv_seq_len = mNewKvSeqLen;
+    auto ensurePrefillTempBuffersAdaptive = [&](int keySeqLen) -> ErrorCode {
+        int adaptiveSplitNum = std::max(1, mQseqSplitNum);
+        if (mQuerySeqLen > 2048 || keySeqLen > 2048) {
+            adaptiveSplitNum = std::max(adaptiveSplitNum, UP_DIV(mQuerySeqLen, 16));
+        } else if (mQuerySeqLen > 1024 || keySeqLen > 1024) {
+            adaptiveSplitNum = std::max(adaptiveSplitNum, UP_DIV(mQuerySeqLen, 64));
+        }
+        while (true) {
+            int candidatePieceLen = UP_DIV(mQuerySeqLen, adaptiveSplitNum);
+            auto err = ensureTempBuffers_gpu(mBatch, mNumHead, candidatePieceLen, keySeqLen, mHeadDim);
+            if (err == NO_ERROR) {
+                if (adaptiveSplitNum != mQseqSplitNum) {
+                    MNN_PRINT("[CUDAAttention] q_seq_split adjusted %d -> %d for query_seq_len=%d key_seq_len=%d\n",
+                              mQseqSplitNum, adaptiveSplitNum, mQuerySeqLen, keySeqLen);
+                    mQseqSplitNum = adaptiveSplitNum;
+                }
+                return NO_ERROR;
+            }
+            if (err != OUT_OF_MEMORY || candidatePieceLen <= 1 || adaptiveSplitNum >= mQuerySeqLen) {
+                return err;
+            }
+            int nextSplitNum = std::min(mQuerySeqLen, std::max(adaptiveSplitNum + 1, adaptiveSplitNum * 2));
+            if (nextSplitNum == adaptiveSplitNum) {
+                return err;
+            }
+            adaptiveSplitNum = nextSplitNum;
+        }
+    };
 
     const void* effective_key_cache_ptr;
     const void* effective_value_cache_ptr;
@@ -2230,6 +2259,7 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
     bool usePagedKV = false;
     bool cachePreparedBySubclassForThisRun = false;
     bool savePrefixKV = false;
+    bool computeProfileStarted = false;
 
     if (mIsKVCacheEnabled) {
         if (!mMeta) {
@@ -2324,6 +2354,14 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
             }
         }
 
+        {
+            auto profileErr = onProfileComputeStreamStart(stream);
+            if (profileErr != MNN::NO_ERROR) {
+                return profileErr;
+            }
+            computeProfileStarted = true;
+        }
+
         // Copy new K, V to cache
         dim3 copy_blockDim(32, 8, 1);
         dim3 copy_gridDim(UP_DIV(mHeadDim, copy_blockDim.x),
@@ -2370,7 +2408,7 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
         param_cpu.key_seq_len = mNewKvSeqLen;
         param_cpu.max_kv_len = allocated_kv_len_for_value_stride;
 
-        ErrorCode temp_err = ensureTempBuffers_gpu(mBatch, mNumHead, UP_DIV(mQuerySeqLen, mQseqSplitNum), current_total_kv_len_for_qk, mHeadDim);
+        ErrorCode temp_err = ensurePrefillTempBuffersAdaptive(current_total_kv_len_for_qk);
         if(temp_err != MNN::NO_ERROR) return temp_err;
 
         dim3 copy_blockDim(32, 8, 1);
@@ -2389,6 +2427,14 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
                 mBatch, mNewKvSeqLen, mKvNumHead, mHeadDim, 0, allocated_kv_len_for_value_stride);
         } else { return MNN::NOT_SUPPORT; }
         checkKernelErrors;
+
+        {
+            auto profileErr = onProfileComputeStreamStart(stream);
+            if (profileErr != MNN::NO_ERROR) {
+                return profileErr;
+            }
+            computeProfileStarted = true;
+        }
 
         effective_key_cache_ptr = getTensorDevicePtr(mTempK_current_step.get());
         effective_value_cache_ptr = getTensorDevicePtr(mTempV_current_step.get());
@@ -2568,6 +2614,12 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
                 return saveErr;
             }
         }
+        if (computeProfileStarted) {
+            auto profileErr = onProfileComputeStreamEnd(stream);
+            if (profileErr != MNN::NO_ERROR) {
+                return profileErr;
+            }
+        }
         return MNN::NO_ERROR;
     }
 
@@ -2646,16 +2698,21 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
                 return saveErr;
             }
         }
+        if (computeProfileStarted) {
+            auto profileErr = onProfileComputeStreamEnd(stream);
+            if (profileErr != MNN::NO_ERROR) {
+                return profileErr;
+            }
+        }
         return MNN::NO_ERROR;
     }
 
     // =====================================================================
     // Prefill path (seq_len > 1) or decode with mask
     // =====================================================================
-    int max_q_seq_piece_len = UP_DIV(mQuerySeqLen, mQseqSplitNum);
-
-    ErrorCode temp_buf_err = ensureTempBuffers_gpu(mBatch, mNumHead, max_q_seq_piece_len, current_total_kv_len_for_qk, mHeadDim);
+    ErrorCode temp_buf_err = ensurePrefillTempBuffersAdaptive(current_total_kv_len_for_qk);
     if (temp_buf_err != MNN::NO_ERROR) return temp_buf_err;
+    int max_q_seq_piece_len = UP_DIV(mQuerySeqLen, mQseqSplitNum);
 
     const void* mask_ptr_device = mHasMask ? getTensorDevicePtr(mask_input_tensor) : nullptr;
 
@@ -2789,6 +2846,12 @@ ErrorCode AttentionExecution::onExecute(const std::vector<Tensor *> &inputs, con
         }
     }
 
+    if (computeProfileStarted) {
+        auto profileErr = onProfileComputeStreamEnd(stream);
+        if (profileErr != MNN::NO_ERROR) {
+            return profileErr;
+        }
+    }
     return MNN::NO_ERROR;
 }
 

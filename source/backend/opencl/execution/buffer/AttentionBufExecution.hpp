@@ -14,8 +14,14 @@
 #include "backend/opencl/execution/image/CommonExecution.hpp"
 #include "core/OpCommonUtils.hpp"
 
+#include <cstdint>
+#include <mutex>
+#include <vector>
+
 namespace MNN {
 namespace OpenCL {
+
+std::recursive_mutex& openCLPrefixQueueMutex();
 
 class KVCacheCLManager {
 public:
@@ -68,17 +74,39 @@ public:
     cl::Buffer * mutableValue() {
         return mPastValue.get();
     }
+    uint8_t * mutableKeyHostPtr() {
+        return mPastKeyHostStorage.empty() ? nullptr : mPastKeyHostStorage.data();
+    }
+    uint8_t * mutableValueHostPtr() {
+        return mPastValueHostStorage.empty() ? nullptr : mPastValueHostStorage.data();
+    }
+    bool hostPtrPagedEnabled() const {
+        return mUseHostPtrPages;
+    }
+    void setHostPtrPagedEnabled(bool enabled) {
+        mUseHostPtrPages = enabled;
+    }
     cl::Buffer * mutableTokenTable() {
         return mPagedTokenTable.get();
     }
     cl::Buffer * mutableRopeTable() {
         return mPagedRopeTable.get();
     }
+    const std::vector<int>& pagedTokenTableHost() const {
+        return mPagedTokenTableHost;
+    }
+    const std::vector<int>& pagedRopeTableHost() const {
+        return mPagedRopeTableHost;
+    }
+    bool updatePagedTableHost(int logicalStart, const std::vector<int>& tokenTable,
+                              const std::vector<int>& ropeTable);
+    bool uploadPagedTableRange(int logicalStart, int tokenCount);
     int byte() const {
         return mByte;
     }
     bool ensureCapacity(int requiredTotal, bool isExecute = true);
     bool ensurePagedCapacity(int requiredPhysicalTotal, int logicalTableLength);
+    void discardPagedTablesForRewrite();
     bool pagedActive() const {
         return mPagedActive;
     }
@@ -108,9 +136,12 @@ private:
     const int mExpandChunk = 64;
     std::shared_ptr<cl::Buffer> mPastKey, mPastValue;
     std::shared_ptr<cl::Buffer> mPagedTokenTable, mPagedRopeTable;
+    std::vector<uint8_t> mPastKeyHostStorage, mPastValueHostStorage;
+    std::vector<int> mPagedTokenTableHost, mPagedRopeTableHost;
     int mPastLength = 0, mMaxLength = 0, mNumHead = 0, mKvNumHead = 0, mHeadDim = 0;
     OpenCLBackend *mOpenCLBackend;
     int mByte = 4;
+    bool mUseHostPtrPages = false;
     bool mPagedActive = false;
     bool mPagedDecodeStarted = false;
     int mPagedPageSize = 64;
@@ -146,7 +177,23 @@ protected:
         prepared = false;
         auto key = inputs[1];
         appendKvSeqLen = key->shape()[1];
+        if (mMeta != nullptr && mMeta->file_flag == KVMeta::PendingReadSegments &&
+            !mMeta->prefix_segments.empty()) {
+            MNN_ERROR("[Error]: direct segment prefix cache requires PrefixAttention on OpenCL\n");
+            return NOT_SUPPORT;
+        }
         return NO_ERROR;
+    }
+    virtual void onBeforeAttentionComputeEnqueue() {
+    }
+    virtual bool onShouldProfileAttentionKernelEvents() const {
+        return false;
+    }
+    virtual void onAttentionKernelEvent(const std::string& name, const cl::Event& event) {
+        (void)name;
+        (void)event;
+    }
+    virtual void onAfterAttentionComputeEnqueue() {
     }
 
     KVMeta* mMeta;

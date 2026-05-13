@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <MNN/MNNDefine.h>
 
 namespace MNN {
 
@@ -75,6 +76,7 @@ struct KVMeta {
     // backend copy stream/queue and wait by event per layer when available.
     bool prefix_device_prefetch = false;
     uint64_t prefix_request_id = 0;
+    int prefix_prompt_token_count = 0;
     // RoPE 元信息由 Llm 从模型 config 注入，CPUKVCacheManager 只按这些参数处理 packed key。
     int key_rope_state = KeyRopePositionEncoded;
     int rope_dim = 0;
@@ -108,6 +110,11 @@ struct KVMeta {
         add = 0;
     }
 };
+
+using PrefixDevicePrefetchSubmitter = bool (*)(KVMeta*);
+
+MNN_PUBLIC void registerPrefixDevicePrefetchSubmitter(PrefixDevicePrefetchSubmitter submitter);
+MNN_PUBLIC bool submitPrefixDevicePrefetch(KVMeta* meta);
 
 } // namespace MNN
 #endif // KVMeta_hpp

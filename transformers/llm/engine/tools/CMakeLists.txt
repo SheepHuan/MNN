@@ -2,6 +2,7 @@ add_executable(llm_bench ${CMAKE_CURRENT_LIST_DIR}/llm_bench.cpp ${CMAKE_CURRENT
 add_executable(quantize_llm ${CMAKE_CURRENT_LIST_DIR}/quantize_llm.cpp)
 add_executable(ppl_eval ${CMAKE_CURRENT_LIST_DIR}/ppl_eval.cpp)
 add_executable(generateLlmIO ${CMAKE_CURRENT_LIST_DIR}/generateLlmIO.cpp)
+add_executable(llm_op_compare ${CMAKE_CURRENT_LIST_DIR}/llm_op_compare.cpp)
 target_link_libraries(llm_bench ${LLM_DEPS})
 target_include_directories(llm_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp)
 target_link_libraries(generateLlmIO ${LLM_DEPS})
@@ -10,3 +11,5 @@ target_include_directories(generateLlmIO PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../sr
 target_include_directories(quantize_llm PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(ppl_eval ${LLM_DEPS})
 target_include_directories(ppl_eval PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(llm_op_compare ${LLM_DEPS})
+target_include_directories(llm_op_compare PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)

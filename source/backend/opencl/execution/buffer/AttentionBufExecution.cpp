@@ -48,7 +48,26 @@ static void writeOpenCLNativeScalar(uint8_t* base, size_t index, int bytes, floa
     ::memcpy(base + index * 4, &value, sizeof(value));
 }
 
+static cl::Buffer* createOpenCLKVBuffer(const cl::Context& context, size_t bufferSize,
+                                        bool useHostPtrPages,
+                                        std::vector<uint8_t>& hostStorage,
+                                        cl_int& res) {
+    if (useHostPtrPages) {
+        hostStorage.resize(bufferSize);
+        return new cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                              bufferSize, hostStorage.data(), &res);
+    }
+    hostStorage.clear();
+    return new cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+                          bufferSize, nullptr, &res);
+}
+
 } // namespace
+
+std::recursive_mutex& openCLPrefixQueueMutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+}
 
 KVCacheCLManager::KVCacheCLManager(Backend *backend, bool kv_cahce) : mKVCache(kv_cahce){
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
@@ -58,6 +77,16 @@ void KVCacheCLManager::allocKVCache(const KVMeta* meta, int seqlen) {
     if (!mKVCache) {
         return;
     }
+    if (meta != nullptr && meta->file_flag == KVMeta::PendingWrite) {
+        mUseHostPtrPages = false;
+        mPagedActive = false;
+        mPagedDecodeStarted = false;
+        mPagedLogicalLength = 0;
+        mPagedPhysicalLength = 0;
+        discardPagedTablesForRewrite();
+        mPagedTokenTableHost.clear();
+        mPagedRopeTableHost.clear();
+    }
     mPastLength = meta != nullptr ? meta->previous : 0;
     if(mOpenCLBackend->getPrecision() != BackendConfig::Precision_High){
         mByte = 2;
@@ -66,6 +95,7 @@ void KVCacheCLManager::allocKVCache(const KVMeta* meta, int seqlen) {
 }
 
 bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExecute) {
+    std::lock_guard<std::recursive_mutex> queueLock(openCLPrefixQueueMutex());
     if (!mKVCache) {
         return false;
     }
@@ -78,46 +108,90 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
     int kvSeqlen = meta->previous + seqlen - meta->remove + meta->computeReverseSize();
     int start = mPastLength - meta->remove;
     cl_int res;
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->defaultCommandQueue();
 
-    // latest length larger than maxLen
-    if(kvSeqlen > mMaxLength){
+    bool needHostPtrTransition = mUseHostPtrPages && mPastKey != nullptr && mPastValue != nullptr &&
+        (mPastKeyHostStorage.empty() || mPastValueHostStorage.empty());
+    bool needDefaultBufferTransition = !mUseHostPtrPages &&
+        (!mPastKeyHostStorage.empty() || !mPastValueHostStorage.empty());
+    // latest length larger than maxLen, or PrefixAttention switched this manager to host-ptr pages.
+    if(kvSeqlen > mMaxLength || needHostPtrTransition || needDefaultBufferTransition){
         int copylen = mPagedActive ? mPagedPhysicalLength :
             (mPastLength - meta->remove + meta->computeReverseSize());
         bool needCopy = copylen > 0 && mPastKey != nullptr && mPastValue != nullptr && mMaxLength > 0;
 
         size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
         size_t oldMaxlen = ROUND_UP(mMaxLength, 4);
-        mMaxLength = kvSeqlen + mExpandChunk;
+        if (kvSeqlen > mMaxLength) {
+            mMaxLength = kvSeqlen + mExpandChunk;
+        }
         size_t newMaxlen = ROUND_UP(mMaxLength, 4);
         size_t bufferSize = UP_DIV(mMaxLength, 4) * mKvNumHead * mHeadDim * 4 * mByte;
+        std::vector<uint8_t> newKeyHostStorage;
+        std::vector<uint8_t> newValueHostStorage;
         // past_key: [1, numhead, headdim, maxlen]
-        auto newKey = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
+        auto newKey = createOpenCLKVBuffer(mOpenCLBackend->getOpenCLRuntime()->context(), bufferSize,
+                                           mUseHostPtrPages, newKeyHostStorage, res);
+        if (res != CL_SUCCESS || newKey == nullptr) {
+            MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL key cache, host_ptr_pages=%d err=%d\n",
+                      mUseHostPtrPages ? 1 : 0, res);
+            return false;
+        }
         // past_value: [1, numhead, maxlen, headdim]
-        auto newValue = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
+        auto newValue = createOpenCLKVBuffer(mOpenCLBackend->getOpenCLRuntime()->context(), bufferSize,
+                                             mUseHostPtrPages, newValueHostStorage, res);
+        if (res != CL_SUCCESS || newValue == nullptr) {
+            delete newKey;
+            MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL value cache, host_ptr_pages=%d err=%d\n",
+                      mUseHostPtrPages ? 1 : 0, res);
+            return false;
+        }
 
+        if (needCopy) {
+            queue.finish();
+        }
         if(needCopy){
             // copy key
             {
                 size_t oldMaxlenSize = oldMaxlen * mByte;
                 size_t newMaxlenSize = newMaxlen * mByte;
-                char *newKeyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newKey, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
-                char *keyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
+                char* newKeyPtr = mUseHostPtrPages ? reinterpret_cast<char*>(newKeyHostStorage.data()) :
+                    (char*)queue.enqueueMapBuffer(*newKey, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
+                char* keyPtr = (!mPastKeyHostStorage.empty()) ? reinterpret_cast<char*>(mPastKeyHostStorage.data()) :
+                    (char*)queue.enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
                 if(newKeyPtr != nullptr && keyPtr != nullptr && res == CL_SUCCESS){
                     for(int i = 0; i < mKvNumHead * mHeadDim; ++i){
                         ::memcpy(newKeyPtr + i * newMaxlenSize, keyPtr + i * oldMaxlenSize, oldMaxlenSize);
                     }
                 }else{
-                    MNN_ERROR("Map error key_ptr == nullptr \n");
-                    MNN_ASSERT(false);
+                    MNN_ERROR("[Error]: KVCacheCLManager failed to map OpenCL key cache during realloc "
+                              "new_ptr=%p old_ptr=%p err=%d host_ptr_pages=%d\n",
+                              newKeyPtr, keyPtr, res, mUseHostPtrPages ? 1 : 0);
+                    if (!mUseHostPtrPages && newKeyPtr != nullptr) {
+                        queue.enqueueUnmapMemObject(*newKey, newKeyPtr);
+                    }
+                    if (mPastKeyHostStorage.empty() && keyPtr != nullptr) {
+                        queue.enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+                    }
+                    queue.finish();
+                    delete newKey;
+                    delete newValue;
+                    return false;
                 }
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newKey, newKeyPtr);
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+                if (!mUseHostPtrPages) {
+                    queue.enqueueUnmapMemObject(*newKey, newKeyPtr);
+                }
+                if (mPastKeyHostStorage.empty()) {
+                    queue.enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+                }
             }
 
             // copy value
             {
-                char *newValuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newValue, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
-                char *valuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
+                char* newValuePtr = mUseHostPtrPages ? reinterpret_cast<char*>(newValueHostStorage.data()) :
+                    (char*)queue.enqueueMapBuffer(*newValue, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
+                char* valuePtr = (!mPastValueHostStorage.empty()) ? reinterpret_cast<char*>(mPastValueHostStorage.data()) :
+                    (char*)queue.enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
                 if(newValuePtr != nullptr && valuePtr != nullptr && res == CL_SUCCESS){
                     for(int i = 0; i < mKvNumHead; ++i){
                         for(int j = 0; j < copylen; ++j){
@@ -125,15 +199,38 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
                         }
                     }
                 }else{
-                    MNN_ERROR("Map error value_ptr == nullptr \n");
-                    MNN_ASSERT(false);
+                    MNN_ERROR("[Error]: KVCacheCLManager failed to map OpenCL value cache during realloc "
+                              "new_ptr=%p old_ptr=%p err=%d host_ptr_pages=%d\n",
+                              newValuePtr, valuePtr, res, mUseHostPtrPages ? 1 : 0);
+                    if (!mUseHostPtrPages && newValuePtr != nullptr) {
+                        queue.enqueueUnmapMemObject(*newValue, newValuePtr);
+                    }
+                    if (mPastValueHostStorage.empty() && valuePtr != nullptr) {
+                        queue.enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+                    }
+                    queue.finish();
+                    delete newKey;
+                    delete newValue;
+                    return false;
                 }
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newValue, newValuePtr);
-                mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+                if (!mUseHostPtrPages) {
+                    queue.enqueueUnmapMemObject(*newValue, newValuePtr);
+                }
+                if (mPastValueHostStorage.empty()) {
+                    queue.enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+                }
             }
+            queue.finish();
         }
         mPastKey.reset(newKey);
         mPastValue.reset(newValue);
+        if (mUseHostPtrPages) {
+            mPastKeyHostStorage = std::move(newKeyHostStorage);
+            mPastValueHostStorage = std::move(newValueHostStorage);
+        } else {
+            mPastKeyHostStorage.clear();
+            mPastValueHostStorage.clear();
+        }
         // resize phase don't update mPastLength value, excute phase will update it
         if(isExecute){
             mPastLength = start;
@@ -149,8 +246,22 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
         }
 
         size_t pastkvSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
-        char *keyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, pastkvSize, nullptr, nullptr, &res);
-        char *valuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, pastkvSize, nullptr, nullptr, &res);
+        queue.finish();
+        char *keyPtr = (char*)queue.enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ | CL_MAP_WRITE, 0, pastkvSize, nullptr, nullptr, &res);
+        char *valuePtr = (char*)queue.enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ | CL_MAP_WRITE, 0, pastkvSize, nullptr, nullptr, &res);
+        if (keyPtr == nullptr || valuePtr == nullptr || res != CL_SUCCESS) {
+            MNN_ERROR("[Error]: KVCacheCLManager failed to map OpenCL KV cache for reserve/remove "
+                      "key_ptr=%p value_ptr=%p err=%d pastkv_size=%zu\n",
+                      keyPtr, valuePtr, res, pastkvSize);
+            if (keyPtr != nullptr) {
+                queue.enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+            }
+            if (valuePtr != nullptr) {
+                queue.enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+            }
+            queue.finish();
+            return false;
+        }
 
         // TODO: need to ensure reserve info is sorted
         for (int n = 0; n < meta->n_reserve; ++n) {
@@ -172,11 +283,15 @@ bool KVCacheCLManager::reallocKVCache(const KVMeta* meta, int seqlen, bool isExe
             start += length;
         }
         mPastLength = (int)start;
+        queue.enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+        queue.enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+        queue.finish();
     }
     return true;
 }
 
 bool KVCacheCLManager::ensureCapacity(int requiredTotal, bool isExecute) {
+    std::lock_guard<std::recursive_mutex> queueLock(openCLPrefixQueueMutex());
     (void)isExecute;
     if (!mKVCache) {
         return false;
@@ -184,39 +299,81 @@ bool KVCacheCLManager::ensureCapacity(int requiredTotal, bool isExecute) {
     if (mOpenCLBackend->getPrecision() != BackendConfig::Precision_High) {
         mByte = 2;
     }
-    if (requiredTotal <= mMaxLength) {
+    bool needHostPtrTransition = mUseHostPtrPages && mPastKey != nullptr && mPastValue != nullptr &&
+        (mPastKeyHostStorage.empty() || mPastValueHostStorage.empty());
+    if (requiredTotal <= mMaxLength && !needHostPtrTransition) {
         return true;
     }
 
     cl_int res = CL_SUCCESS;
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->defaultCommandQueue();
     int copylen = mPagedActive ? mPagedPhysicalLength : mPastLength;
     bool needCopy = copylen > 0 && mPastKey != nullptr && mPastValue != nullptr;
     size_t oldSize = mKvNumHead * UP_DIV(mMaxLength, 4) * mHeadDim * 4 * mByte;
     size_t oldMaxlen = ROUND_UP(mMaxLength, 4);
-    mMaxLength = requiredTotal + mExpandChunk;
+    if (requiredTotal > mMaxLength) {
+        mMaxLength = requiredTotal + mExpandChunk;
+    }
     size_t newMaxlen = ROUND_UP(mMaxLength, 4);
     size_t bufferSize = UP_DIV(mMaxLength, 4) * mKvNumHead * mHeadDim * 4 * mByte;
-    auto newKey = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
-    auto newValue = new cl::Buffer(mOpenCLBackend->getOpenCLRuntime()->context(), CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, bufferSize);
+    std::vector<uint8_t> newKeyHostStorage;
+    std::vector<uint8_t> newValueHostStorage;
+    auto newKey = createOpenCLKVBuffer(mOpenCLBackend->getOpenCLRuntime()->context(), bufferSize,
+                                       mUseHostPtrPages, newKeyHostStorage, res);
+    if (res != CL_SUCCESS || newKey == nullptr) {
+        MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL paged key cache, host_ptr_pages=%d err=%d\n",
+                  mUseHostPtrPages ? 1 : 0, res);
+        return false;
+    }
+    auto newValue = createOpenCLKVBuffer(mOpenCLBackend->getOpenCLRuntime()->context(), bufferSize,
+                                         mUseHostPtrPages, newValueHostStorage, res);
+    if (res != CL_SUCCESS || newValue == nullptr) {
+        delete newKey;
+        MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL paged value cache, host_ptr_pages=%d err=%d\n",
+                  mUseHostPtrPages ? 1 : 0, res);
+        return false;
+    }
 
+    if (needCopy) {
+        queue.finish();
+    }
     if (needCopy) {
         size_t oldMaxlenSize = oldMaxlen * mByte;
         size_t newMaxlenSize = newMaxlen * mByte;
-        char* newKeyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newKey, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
-        char* keyPtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
+        char* newKeyPtr = mUseHostPtrPages ? reinterpret_cast<char*>(newKeyHostStorage.data()) :
+            (char*)queue.enqueueMapBuffer(*newKey, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
+        char* keyPtr = (!mPastKeyHostStorage.empty()) ? reinterpret_cast<char*>(mPastKeyHostStorage.data()) :
+            (char*)queue.enqueueMapBuffer(*mPastKey.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
         if (newKeyPtr != nullptr && keyPtr != nullptr && res == CL_SUCCESS) {
             for (int i = 0; i < mKvNumHead * mHeadDim; ++i) {
                 ::memcpy(newKeyPtr + i * newMaxlenSize, keyPtr + i * oldMaxlenSize, copylen * mByte);
             }
         } else {
-            MNN_ERROR("Map error key_ptr == nullptr in KVCacheCLManager::ensureCapacity\n");
-            MNN_ASSERT(false);
+            MNN_ERROR("[Error]: KVCacheCLManager failed to map OpenCL key cache in ensureCapacity "
+                      "new_ptr=%p old_ptr=%p err=%d host_ptr_pages=%d required_total=%d max_length=%d\n",
+                      newKeyPtr, keyPtr, res, mUseHostPtrPages ? 1 : 0, requiredTotal, mMaxLength);
+            if (!mUseHostPtrPages && newKeyPtr != nullptr) {
+                queue.enqueueUnmapMemObject(*newKey, newKeyPtr);
+            }
+            if (mPastKeyHostStorage.empty() && keyPtr != nullptr) {
+                queue.enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+            }
+            queue.finish();
+            delete newKey;
+            delete newValue;
+            return false;
         }
-        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newKey, newKeyPtr);
-        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+        if (!mUseHostPtrPages) {
+            queue.enqueueUnmapMemObject(*newKey, newKeyPtr);
+        }
+        if (mPastKeyHostStorage.empty()) {
+            queue.enqueueUnmapMemObject(*mPastKey.get(), keyPtr);
+        }
 
-        char* newValuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*newValue, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
-        char* valuePtr = (char*)mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
+        char* newValuePtr = mUseHostPtrPages ? reinterpret_cast<char*>(newValueHostStorage.data()) :
+            (char*)queue.enqueueMapBuffer(*newValue, true, CL_MAP_WRITE, 0, bufferSize, nullptr, nullptr, &res);
+        char* valuePtr = (!mPastValueHostStorage.empty()) ? reinterpret_cast<char*>(mPastValueHostStorage.data()) :
+            (char*)queue.enqueueMapBuffer(*mPastValue.get(), true, CL_MAP_READ, 0, oldSize, nullptr, nullptr, &res);
         if (newValuePtr != nullptr && valuePtr != nullptr && res == CL_SUCCESS) {
             for (int i = 0; i < mKvNumHead; ++i) {
                 for (int j = 0; j < copylen; ++j) {
@@ -225,19 +382,43 @@ bool KVCacheCLManager::ensureCapacity(int requiredTotal, bool isExecute) {
                 }
             }
         } else {
-            MNN_ERROR("Map error value_ptr == nullptr in KVCacheCLManager::ensureCapacity\n");
-            MNN_ASSERT(false);
+            MNN_ERROR("[Error]: KVCacheCLManager failed to map OpenCL value cache in ensureCapacity "
+                      "new_ptr=%p old_ptr=%p err=%d host_ptr_pages=%d required_total=%d max_length=%d\n",
+                      newValuePtr, valuePtr, res, mUseHostPtrPages ? 1 : 0, requiredTotal, mMaxLength);
+            if (!mUseHostPtrPages && newValuePtr != nullptr) {
+                queue.enqueueUnmapMemObject(*newValue, newValuePtr);
+            }
+            if (mPastValueHostStorage.empty() && valuePtr != nullptr) {
+                queue.enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+            }
+            queue.finish();
+            delete newKey;
+            delete newValue;
+            return false;
         }
-        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*newValue, newValuePtr);
-        mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+        if (!mUseHostPtrPages) {
+            queue.enqueueUnmapMemObject(*newValue, newValuePtr);
+        }
+        if (mPastValueHostStorage.empty()) {
+            queue.enqueueUnmapMemObject(*mPastValue.get(), valuePtr);
+        }
+        queue.finish();
     }
 
     mPastKey.reset(newKey);
     mPastValue.reset(newValue);
+    if (mUseHostPtrPages) {
+        mPastKeyHostStorage = std::move(newKeyHostStorage);
+        mPastValueHostStorage = std::move(newValueHostStorage);
+    } else {
+        mPastKeyHostStorage.clear();
+        mPastValueHostStorage.clear();
+    }
     return true;
 }
 
 bool KVCacheCLManager::ensurePagedCapacity(int requiredPhysicalTotal, int logicalTableLength) {
+    std::lock_guard<std::recursive_mutex> queueLock(openCLPrefixQueueMutex());
     if (!mKVCache) {
         return false;
     }
@@ -252,10 +433,11 @@ bool KVCacheCLManager::ensurePagedCapacity(int requiredPhysicalTotal, int logica
         auto oldTokenTable = mPagedTokenTable;
         auto oldRopeTable = mPagedRopeTable;
         int oldCapacity = mPagedTableCapacity;
+        int newCapacity = ROUND_UP(logicalTableLength + mExpandChunk, 64);
         auto tokenTable = std::shared_ptr<cl::Buffer>(new cl::Buffer(
             mOpenCLBackend->getOpenCLRuntime()->context(),
             CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
-            static_cast<size_t>(logicalTableLength) * sizeof(int), nullptr, &res));
+            static_cast<size_t>(newCapacity) * sizeof(int), nullptr, &res));
         if (res != CL_SUCCESS || tokenTable == nullptr) {
             MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL paged token table: %d\n", res);
             return false;
@@ -263,25 +445,92 @@ bool KVCacheCLManager::ensurePagedCapacity(int requiredPhysicalTotal, int logica
         auto ropeTable = std::shared_ptr<cl::Buffer>(new cl::Buffer(
             mOpenCLBackend->getOpenCLRuntime()->context(),
             CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
-            static_cast<size_t>(logicalTableLength) * sizeof(int), nullptr, &res));
+            static_cast<size_t>(newCapacity) * sizeof(int), nullptr, &res));
         if (res != CL_SUCCESS || ropeTable == nullptr) {
             MNN_ERROR("[Error]: KVCacheCLManager failed to allocate OpenCL paged rope table: %d\n", res);
             return false;
         }
         mPagedTokenTable = tokenTable;
         mPagedRopeTable = ropeTable;
-        if (oldTokenTable != nullptr && oldRopeTable != nullptr && oldCapacity > 0) {
+        bool hadHostTables = mPagedTokenTableHost.size() >= static_cast<size_t>(oldCapacity) &&
+                             mPagedRopeTableHost.size() >= static_cast<size_t>(oldCapacity);
+        mPagedTokenTableHost.resize(newCapacity, 0);
+        mPagedRopeTableHost.resize(newCapacity, 0);
+        if (oldCapacity > 0 && hadHostTables) {
+            int copyCount = std::min(oldCapacity, logicalTableLength);
+            if (!uploadPagedTableRange(0, copyCount)) {
+                return false;
+            }
+        } else if (oldTokenTable != nullptr && oldRopeTable != nullptr && oldCapacity > 0) {
             size_t copyBytes = static_cast<size_t>(std::min(oldCapacity, logicalTableLength)) * sizeof(int);
-            auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+            auto& queue = mOpenCLBackend->getOpenCLRuntime()->defaultCommandQueue();
             res |= queue.enqueueCopyBuffer(*oldTokenTable, *mPagedTokenTable, 0, 0, copyBytes);
             res |= queue.enqueueCopyBuffer(*oldRopeTable, *mPagedRopeTable, 0, 0, copyBytes);
+            res |= queue.finish();
             if (res != CL_SUCCESS) {
                 MNN_ERROR("[Error]: KVCacheCLManager failed to copy OpenCL paged tables: %d\n", res);
                 return false;
             }
         }
-        mPagedTableCapacity = logicalTableLength;
+        mPagedTableCapacity = newCapacity;
     }
+    return true;
+}
+
+void KVCacheCLManager::discardPagedTablesForRewrite() {
+    mPagedTokenTable.reset();
+    mPagedRopeTable.reset();
+    mPagedTableCapacity = 0;
+}
+
+bool KVCacheCLManager::updatePagedTableHost(int logicalStart, const std::vector<int>& tokenTable,
+                                            const std::vector<int>& ropeTable) {
+    if (logicalStart < 0 || tokenTable.size() != ropeTable.size()) {
+        return false;
+    }
+    size_t end = static_cast<size_t>(logicalStart) + tokenTable.size();
+    if (end > mPagedTokenTableHost.size() || end > mPagedRopeTableHost.size()) {
+        if (end > static_cast<size_t>(mPagedTableCapacity)) {
+            return false;
+        }
+        mPagedTokenTableHost.resize(mPagedTableCapacity, 0);
+        mPagedRopeTableHost.resize(mPagedTableCapacity, 0);
+    }
+    std::copy(tokenTable.begin(), tokenTable.end(), mPagedTokenTableHost.begin() + logicalStart);
+    std::copy(ropeTable.begin(), ropeTable.end(), mPagedRopeTableHost.begin() + logicalStart);
+    return true;
+}
+
+bool KVCacheCLManager::uploadPagedTableRange(int logicalStart, int tokenCount) {
+    std::lock_guard<std::recursive_mutex> queueLock(openCLPrefixQueueMutex());
+    if (logicalStart < 0 || tokenCount < 0 || tokenCount == 0) {
+        return tokenCount == 0;
+    }
+    if (mPagedTokenTable == nullptr || mPagedRopeTable == nullptr) {
+        return false;
+    }
+    size_t end = static_cast<size_t>(logicalStart) + static_cast<size_t>(tokenCount);
+    if (end > mPagedTokenTableHost.size() || end > mPagedRopeTableHost.size()) {
+        return false;
+    }
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->defaultCommandQueue();
+    queue.finish();
+    cl_int res = CL_SUCCESS;
+    res |= queue.enqueueWriteBuffer(*mPagedTokenTable, CL_TRUE,
+                                    static_cast<size_t>(logicalStart) * sizeof(int),
+                                    static_cast<size_t>(tokenCount) * sizeof(int),
+                                    mPagedTokenTableHost.data() + logicalStart);
+    res |= queue.enqueueWriteBuffer(*mPagedRopeTable, CL_TRUE,
+                                    static_cast<size_t>(logicalStart) * sizeof(int),
+                                    static_cast<size_t>(tokenCount) * sizeof(int),
+                                    mPagedRopeTableHost.data() + logicalStart);
+    if (res != CL_SUCCESS) {
+        MNN_ERROR("[Error]: KVCacheCLManager failed to upload OpenCL paged host table: %d "
+                  "logical_start=%d token_count=%d table_capacity=%d\n",
+                  res, logicalStart, tokenCount, mPagedTableCapacity);
+        return false;
+    }
+    queue.finish();
     return true;
 }
 
@@ -302,10 +551,6 @@ bool KVCacheCLManager::ensurePagedStateForExistingHistory(int logicalLength, int
     if (mPagedActive) {
         return true;
     }
-    if (mPastKey == nullptr || mPastValue == nullptr ||
-        mPagedTokenTable == nullptr || mPagedRopeTable == nullptr) {
-        return false;
-    }
     int safePageSize = pageSize > 0 ? pageSize : mPagedPageSize;
     if (safePageSize <= 0) {
         safePageSize = 64;
@@ -315,6 +560,24 @@ bool KVCacheCLManager::ensurePagedStateForExistingHistory(int logicalLength, int
         physicalLength,
         ROUND_UP(mMaxLength, safePageSize)
     });
+    if (!ensurePagedCapacity(safePhysicalLength, std::max(logicalLength, 1))) {
+        return false;
+    }
+    if (mPastKey == nullptr || mPastValue == nullptr ||
+        mPagedTokenTable == nullptr || mPagedRopeTable == nullptr) {
+        return false;
+    }
+    if (logicalLength > 0) {
+        std::vector<int> tokenTable(logicalLength);
+        std::vector<int> ropeTable(logicalLength, 0);
+        for (int i = 0; i < logicalLength; ++i) {
+            tokenTable[i] = i;
+        }
+        if (!updatePagedTableHost(0, tokenTable, ropeTable) ||
+            !uploadPagedTableRange(0, logicalLength)) {
+            return false;
+        }
+    }
     setPagedState(logicalLength, safePhysicalLength, safePageSize,
                   ropeDim, ropeTheta > 0.0f ? ropeTheta : 10000.0f);
     return true;
@@ -323,6 +586,9 @@ bool KVCacheCLManager::ensurePagedStateForExistingHistory(int logicalLength, int
 bool KVCacheCLManager::ensurePagedAppendTable(int logicalStart, int tokenCount, bool isolateSourceStart) {
     if (!mPagedActive || tokenCount <= 0) {
         return true;
+    }
+    if (isolateSourceStart) {
+        mPagedDecodeStarted = false;
     }
     int physicalStart = mPagedPhysicalLength;
     if (isolateSourceStart && physicalStart > 0 && mPagedPageSize > 0) {
@@ -339,8 +605,11 @@ bool KVCacheCLManager::ensurePagedAppendTable(int logicalStart, int tokenCount, 
     for (int i = 0; i < tokenCount; ++i) {
         tokenTable[i] = physicalStart + i;
     }
-    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->defaultCommandQueue();
     cl_int res = CL_SUCCESS;
+    if (!updatePagedTableHost(logicalStart, tokenTable, ropeTable)) {
+        return false;
+    }
     res |= queue.enqueueWriteBuffer(*mPagedTokenTable, CL_TRUE,
                                     static_cast<size_t>(logicalStart) * sizeof(int),
                                     static_cast<size_t>(tokenCount) * sizeof(int),
@@ -350,7 +619,11 @@ bool KVCacheCLManager::ensurePagedAppendTable(int logicalStart, int tokenCount, 
                                     static_cast<size_t>(tokenCount) * sizeof(int),
                                     ropeTable.data());
     if (res != CL_SUCCESS) {
-        MNN_ERROR("[Error]: KVCacheCLManager failed to upload OpenCL paged append table: %d\n", res);
+        MNN_ERROR("[Error]: KVCacheCLManager failed to upload OpenCL paged append table: %d "
+                  "logical_start=%d token_count=%d required_logical=%d table_capacity=%d "
+                  "physical_start=%d required_physical=%d physical_length=%d\n",
+                  res, logicalStart, tokenCount, requiredLogical, mPagedTableCapacity,
+                  physicalStart, requiredPhysical, mPagedPhysicalLength);
         return false;
     }
     mPagedPhysicalLength = requiredPhysical;
@@ -368,6 +641,7 @@ bool KVCacheCLManager::ensurePagedDecodeAppendTable(int logicalStart, int tokenC
 }
 
 ErrorCode AttentionBufExecution::saveOpenCLNativePrefixCache(const std::vector<Tensor *> &inputs, int totalKvLen) {
+    std::lock_guard<std::recursive_mutex> queueLock(openCLPrefixQueueMutex());
     if (mMeta == nullptr || mMeta->file_flag != KVMeta::PendingWrite || mMeta->file_name.empty()) {
         return NO_ERROR;
     }
@@ -422,7 +696,7 @@ ErrorCode AttentionBufExecution::saveOpenCLNativePrefixCache(const std::vector<T
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     cl_int keyMapStatus = CL_SUCCESS;
     cl_int valueMapStatus = CL_SUCCESS;
-    auto& queue = runtime->commandQueue();
+    auto& queue = runtime->defaultCommandQueue();
     auto* mappedKey = static_cast<uint8_t*>(queue.enqueueMapBuffer(
         *keyBuffer, CL_TRUE, CL_MAP_READ, 0, runtimeBytes, nullptr, nullptr, &keyMapStatus));
     auto* mappedValue = static_cast<uint8_t*>(queue.enqueueMapBuffer(
@@ -949,8 +1223,10 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
             mTempMask.reset(Tensor::createDevice<uint32_t>({ROUND_UP(seqlen, mAlignQ) * ROUND_UP(seqlen, mAlignKV) * batch}));
         }
     }
-    mTempQK.reset(Tensor::createDevice<float>({ROUND_UP(seqlen, mAlignQ) * ROUND_UP(seqlen, mAlignKV) * batch * numHead / mQseqSplitNum}));
-    mTempSoftMax.reset(Tensor::createDevice<float>({ROUND_UP(seqlen, mAlignQ) * ROUND_UP(seqlen, mAlignKV) * batch * numHead / mQseqSplitNum}));
+    const int longPieceQkElements =
+        ROUND_UP(seqlen, mAlignQ) * ROUND_UP(seqlen, mAlignKV) * batch * numHead / mQseqSplitNum;
+    mTempQK.reset(Tensor::createDevice<float>({longPieceQkElements}));
+    mTempSoftMax.reset(Tensor::createDevice<float>({longPieceQkElements}));
     mTempQKV.reset(Tensor::createDevice<float>({ROUND_UP(seqlen, mAlignQ) * ROUND_UP(headDim, mAlignHDN) * batch * numHead}));
 
 
@@ -969,8 +1245,8 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
     if(mHasMask) {
         mOpenCLBackend->onReleaseBuffer(mTempMask.get(), Backend::DYNAMIC);
     }
-    mOpenCLBackend->onReleaseBuffer(mTempSoftMax.get(), Backend::DYNAMIC);
     mOpenCLBackend->onReleaseBuffer(mTempV.get(), Backend::DYNAMIC);
+    mOpenCLBackend->onReleaseBuffer(mTempSoftMax.get(), Backend::DYNAMIC);
     mOpenCLBackend->onReleaseBuffer(mTempQK.get(), Backend::DYNAMIC);
     mOpenCLBackend->onReleaseBuffer(mTempQKV.get(), Backend::DYNAMIC);
 
@@ -1165,6 +1441,11 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
             int batch_offset_c = e_pack_piece * h_pack;
 
             int batch_offset[4] = {batch_offset_a, batch_offset_b, batch_offset_c, 0};
+            // Q reads its logical slice from the full rearranged Q buffer, but the long-prefill
+            // scratch buffers are reused piece by piece. So:
+            // - A (Q) keeps the per-piece source offset.
+            // - C (QK output scratch) stays piece-local at offset 0.
+            // - E (mask / bias) still advances to the matching logical query slice.
             int base_ptr_offset[4] = {e_pack_piece * seq_idx, 0, 0, batch_offset_c * seq_idx};
             int stride[4] = {e_pack, h_pack, h_pack, h_pack};
             int group[4] = {1, group_size, 1, loop};
@@ -2209,7 +2490,10 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
         }
         if (mKVCacheCLManager->pagedActive() && !cachePreparedBySubclass) {
             int logicalStart = mKVCacheCLManager->pastKvLength();
-            if (!mKVCacheCLManager->ensurePagedDecodeAppendTable(logicalStart, appendKvSeqLen)) {
+            bool appendOk = appendKvSeqLen > 1 ?
+                mKVCacheCLManager->ensurePagedAppendTable(logicalStart, appendKvSeqLen, true) :
+                mKVCacheCLManager->ensurePagedDecodeAppendTable(logicalStart, appendKvSeqLen);
+            if (!appendOk) {
                 return OUT_OF_MEMORY;
             }
         }
@@ -2233,64 +2517,85 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
         }
     }
     UpdateArgs(inputs, outputs);
+    const bool captureKernelEvents = onShouldProfileAttentionKernelEvents();
+    onBeforeAttentionComputeEnqueue();
 #ifdef ENABLE_OPENCL_TIME_PROFILER
     if(mLongPrefill) {
         int seq_idx = 0;
         cl::Event event0, event1, event2, event3, event4, event5, event6;
         run3DKernelDefault(mKernel_rearrange_vec[seq_idx], mGwsRearrgVec[seq_idx], mLwsRearrgVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event0);
         mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_qkv", event0});
+        onAttentionKernelEvent("rearrange_qkv", event0);
         if(mHasMask) {
             run3DKernelDefault(mKernel_mask_vec[seq_idx], mGwsMaskVec[seq_idx], mLwsMaskVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event1);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_mask", event1});
+            onAttentionKernelEvent("rearrange_mask", event1);
         }
         for(int seq_idx = 0; seq_idx < mQseqSplitNum; seq_idx++) {
             run3DKernelDefault(mKernel_qk_vec[seq_idx], mGwsQkVec[seq_idx], mLwsQkVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event2);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"matmul_qk_div_mask", event2});
+            onAttentionKernelEvent("matmul_qk_div_mask", event2);
             run3DKernelDefault(mKernel_softmax_vec[seq_idx], mGwsSoftMaxVec[seq_idx], mLwsSoftMaxVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event3);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"softmax", event3});
+            onAttentionKernelEvent("softmax", event3);
             run3DKernelDefault(mKernel_trans_vec[seq_idx], mGwsTransVec[seq_idx], mLwsTransVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event4);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"transpose_softmax", event4});
+            onAttentionKernelEvent("transpose_softmax", event4);
             run3DKernelDefault(mKernel_qkv_vec[seq_idx], mGwsQkvVec[seq_idx], mLwsQkvVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event5);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"matmul_qkv", event5});
+            onAttentionKernelEvent("matmul_qkv", event5);
         }
         seq_idx = 0;
         run3DKernelDefault(mKernel_clip_vec[seq_idx], mGwsClipVec[seq_idx], mLwsClipVec[seq_idx], mOpenCLBackend->getOpenCLRuntime(), &event6);
         mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_output", event6});
+        onAttentionKernelEvent("rearrange_output", event6);
     } else{
         if(mIsDecode){
             cl::Event event0, event1, event2, event3, event4;
             run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime(), &event0);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_k", event0});
+            onAttentionKernelEvent("rearrange_k", event0);
             runKernel2D(mKernel_qk, mGlobalWorkSizeQk, mLocalWorkSizeQk, mOpenCLBackend->getOpenCLRuntime(), &event1);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"matmul_qk_div_mask", event1});
+            onAttentionKernelEvent("matmul_qk_div_mask", event1);
             run3DKernelDefault(mKernel_softmax, mGlobalWorkSizeSoftMax, mLocalWorkSizeSoftMax, mOpenCLBackend->getOpenCLRuntime(), &event2);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"softmax", event2});
+            onAttentionKernelEvent("softmax", event2);
             run3DKernelDefault(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, mOpenCLBackend->getOpenCLRuntime(), &event3);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_v", event3});
+            onAttentionKernelEvent("rearrange_v", event3);
             runKernel2D(mKernel_qkv, mGlobalWorkSizeQkv, mLocalWorkSizeQkv, mOpenCLBackend->getOpenCLRuntime(), &event4);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"matmul_qkv", event4});
+            onAttentionKernelEvent("matmul_qkv", event4);
         }else{
             cl::Event event0, event1, event2, event3, event4, event5, event6;
             run3DKernelDefault(mKernel_rearrangeQ, mGlobalWorkSizeRearrgQ, mLocalWorkSizeRearrgQ, mOpenCLBackend->getOpenCLRuntime(), &event0);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_q", event0});
+            onAttentionKernelEvent("rearrange_q", event0);
             run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime(), &event1);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_k", event1});
+            onAttentionKernelEvent("rearrange_k", event1);
             if(mHasMask) {
                 run3DKernelDefault(mKernel_rearrangeMask, mGlobalWorkSizeRearrgM, mLocalWorkSizeRearrgM, mOpenCLBackend->getOpenCLRuntime(), &event2);
                 mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_mask_shortprefill", event2});
+                onAttentionKernelEvent("rearrange_mask_shortprefill", event2);
             }
             run3DKernelDefault(mKernel_qk, mGlobalWorkSizeQk, mLocalWorkSizeQk, mOpenCLBackend->getOpenCLRuntime(), &event3);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"matmul_qk_div_mask", event3});
+            onAttentionKernelEvent("matmul_qk_div_mask", event3);
             run3DKernelDefault(mKernel_softmax, mGlobalWorkSizeSoftMax, mLocalWorkSizeSoftMax, mOpenCLBackend->getOpenCLRuntime(), &event4);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"softmax", event4});
+            onAttentionKernelEvent("softmax", event4);
             run3DKernelDefault(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, mOpenCLBackend->getOpenCLRuntime(), &event5);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"rearrange_v", event5});
+            onAttentionKernelEvent("rearrange_v", event5);
             run3DKernelDefault(mKernel_qkv, mGlobalWorkSizeQkv, mLocalWorkSizeQkv, mOpenCLBackend->getOpenCLRuntime(), &event6);
             mOpenCLBackend->getOpenCLRuntime()->pushEvent({"matmul_qkv", event6});
+            onAttentionKernelEvent("matmul_qkv", event6);
         }
     }
 #else
-    if(mOpenCLBackend->isUseRecordQueue()){
+    if(mOpenCLBackend->isUseRecordQueue() && !captureKernelEvents){
         mOpenCLBackend->addRecord(mRecording, mOpRecordUpdateInfo);
         auto saveErr = saveOpenCLNativePrefixCache(inputs, mKvSeqlen);
         if (saveErr != NO_ERROR) {
@@ -2302,41 +2607,63 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor *> &inputs, 
         return NO_ERROR;
     }
 
+    auto run3DProfiled = [&](const char* name, const ::std::shared_ptr<KernelWrap>& kernel,
+                             const std::vector<uint32_t>& gws, const std::vector<uint32_t>& lws) {
+        if (captureKernelEvents) {
+            cl::Event event;
+            run3DKernelDefault(kernel, gws, lws, mOpenCLBackend->getOpenCLRuntime(), &event);
+            onAttentionKernelEvent(name, event);
+        } else {
+            run3DKernelDefault(kernel, gws, lws, mOpenCLBackend->getOpenCLRuntime());
+        }
+    };
+    auto run2DProfiled = [&](const char* name, const ::std::shared_ptr<KernelWrap>& kernel,
+                             const std::vector<uint32_t>& gws, const std::vector<uint32_t>& lws) {
+        if (captureKernelEvents) {
+            cl::Event event;
+            runKernel2D(kernel, gws, lws, mOpenCLBackend->getOpenCLRuntime(), &event);
+            onAttentionKernelEvent(name, event);
+        } else {
+            runKernel2D(kernel, gws, lws, mOpenCLBackend->getOpenCLRuntime());
+        }
+    };
+
     if(mLongPrefill) {
         int seq_idx = 0;
-        run3DKernelDefault(mKernel_rearrange_vec[seq_idx], mGwsRearrgVec[seq_idx], mLwsRearrgVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
+        run3DProfiled("rearrange_qkv", mKernel_rearrange_vec[seq_idx], mGwsRearrgVec[seq_idx], mLwsRearrgVec[seq_idx]);
         if(mHasMask) {
-            run3DKernelDefault(mKernel_mask_vec[seq_idx], mGwsMaskVec[seq_idx], mLwsMaskVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
+            run3DProfiled("rearrange_mask", mKernel_mask_vec[seq_idx], mGwsMaskVec[seq_idx], mLwsMaskVec[seq_idx]);
         }
         for(int seq_idx = 0; seq_idx < mQseqSplitNum; seq_idx++) {
-            run3DKernelDefault(mKernel_qk_vec[seq_idx], mGwsQkVec[seq_idx], mLwsQkVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_softmax_vec[seq_idx], mGwsSoftMaxVec[seq_idx], mLwsSoftMaxVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_trans_vec[seq_idx], mGwsTransVec[seq_idx], mLwsTransVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_qkv_vec[seq_idx], mGwsQkvVec[seq_idx], mLwsQkvVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
+            run3DProfiled("matmul_qk_div_mask", mKernel_qk_vec[seq_idx], mGwsQkVec[seq_idx], mLwsQkVec[seq_idx]);
+            run3DProfiled("softmax", mKernel_softmax_vec[seq_idx], mGwsSoftMaxVec[seq_idx], mLwsSoftMaxVec[seq_idx]);
+            run3DProfiled("transpose_softmax", mKernel_trans_vec[seq_idx], mGwsTransVec[seq_idx], mLwsTransVec[seq_idx]);
+            run3DProfiled("matmul_qkv", mKernel_qkv_vec[seq_idx], mGwsQkvVec[seq_idx], mLwsQkvVec[seq_idx]);
 
         }
         seq_idx = 0;
-        run3DKernelDefault(mKernel_clip_vec[seq_idx], mGwsClipVec[seq_idx], mLwsClipVec[seq_idx], mOpenCLBackend->getOpenCLRuntime());
+        run3DProfiled("rearrange_output", mKernel_clip_vec[seq_idx], mGwsClipVec[seq_idx], mLwsClipVec[seq_idx]);
     } else{
         if(mIsDecode){
-            run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime());
-            runKernel2D(mKernel_qk, mGlobalWorkSizeQk, mLocalWorkSizeQk, mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_softmax, mGlobalWorkSizeSoftMax, mLocalWorkSizeSoftMax, mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, mOpenCLBackend->getOpenCLRuntime());
-            runKernel2D(mKernel_qkv, mGlobalWorkSizeQkv, mLocalWorkSizeQkv, mOpenCLBackend->getOpenCLRuntime());
+            run3DProfiled("rearrange_k", mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg);
+            run2DProfiled("matmul_qk_div_mask", mKernel_qk, mGlobalWorkSizeQk, mLocalWorkSizeQk);
+            run3DProfiled("softmax", mKernel_softmax, mGlobalWorkSizeSoftMax, mLocalWorkSizeSoftMax);
+            run3DProfiled("rearrange_v", mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV);
+            run2DProfiled("matmul_qkv", mKernel_qkv, mGlobalWorkSizeQkv, mLocalWorkSizeQkv);
         }else{
-            run3DKernelDefault(mKernel_rearrangeQ, mGlobalWorkSizeRearrgQ, mLocalWorkSizeRearrgQ, mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg, mOpenCLBackend->getOpenCLRuntime());
+            run3DProfiled("rearrange_q", mKernel_rearrangeQ, mGlobalWorkSizeRearrgQ, mLocalWorkSizeRearrgQ);
+            run3DProfiled("rearrange_k", mKernel_rearrange, mGlobalWorkSizeRearrg, mLocalWorkSizeRearrg);
             if(mHasMask) {
-            run3DKernelDefault(mKernel_rearrangeMask, mGlobalWorkSizeRearrgM, mLocalWorkSizeRearrgM, mOpenCLBackend->getOpenCLRuntime());
+            run3DProfiled("rearrange_mask_shortprefill", mKernel_rearrangeMask, mGlobalWorkSizeRearrgM, mLocalWorkSizeRearrgM);
             }
-            run3DKernelDefault(mKernel_qk, mGlobalWorkSizeQk, mLocalWorkSizeQk, mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_softmax, mGlobalWorkSizeSoftMax, mLocalWorkSizeSoftMax, mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV, mOpenCLBackend->getOpenCLRuntime());
-            run3DKernelDefault(mKernel_qkv, mGlobalWorkSizeQkv, mLocalWorkSizeQkv, mOpenCLBackend->getOpenCLRuntime());
+            run3DProfiled("matmul_qk_div_mask", mKernel_qk, mGlobalWorkSizeQk, mLocalWorkSizeQk);
+            run3DProfiled("softmax", mKernel_softmax, mGlobalWorkSizeSoftMax, mLocalWorkSizeSoftMax);
+            run3DProfiled("rearrange_v", mKernel_rearrangeV, mGlobalWorkSizeRearrgV, mLocalWorkSizeRearrgV);
+            run3DProfiled("matmul_qkv", mKernel_qkv, mGlobalWorkSizeQkv, mLocalWorkSizeQkv);
         }
     }
 #endif
+    onAfterAttentionComputeEnqueue();
 
 #ifdef LOG_VERBOSE
     MNN_PRINT("end AttentionBufExecution onExecute !\n");

@@ -102,6 +102,7 @@ public:
     using clReleaseContextFunc        = cl_int (CL_API_CALL *)(cl_context);
     using clWaitForEventsFunc         = cl_int (CL_API_CALL *)(cl_uint, const cl_event *);
     using clEnqueueWaitForEventsFunc  = cl_int (CL_API_CALL *)(cl_command_queue, cl_uint, const cl_event *);
+    using clEnqueueMarkerWithWaitListFunc = cl_int (CL_API_CALL *)(cl_command_queue, cl_uint, const cl_event *, cl_event *);
     using clReleaseEventFunc          = cl_int (CL_API_CALL *)(cl_event);
     using clEnqueueWriteBufferFunc    = cl_int (CL_API_CALL *)(cl_command_queue, cl_mem, cl_bool, size_t, size_t, const void *,
                                                 cl_uint, const cl_event *, cl_event *);
@@ -220,6 +221,7 @@ public:
     MNN_CL_DEFINE_FUNC_PTR(clEnqueueWriteBuffer);
     MNN_CL_DEFINE_FUNC_PTR(clWaitForEvents);
     MNN_CL_DEFINE_FUNC_PTR(clEnqueueWaitForEvents);
+    MNN_CL_DEFINE_FUNC_PTR(clEnqueueMarkerWithWaitList);
     MNN_CL_DEFINE_FUNC_PTR(clReleaseEvent);
     MNN_CL_DEFINE_FUNC_PTR(clCreateContext);
     MNN_CL_DEFINE_FUNC_PTR(clCreateContextFromType);

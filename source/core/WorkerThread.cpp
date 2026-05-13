@@ -1,5 +1,9 @@
 #include "WorkerThread.hpp"
+#include "KVMeta.hpp"
 #include <thread>
+#include <algorithm>
+#include <mutex>
+#include <vector>
 
 #include <MNN/MNNDefine.h>
 //#define MNN_OPEN_TIME_TRACE
@@ -7,6 +11,49 @@
 using namespace std;
 
 namespace MNN {
+namespace {
+
+std::mutex& prefixDevicePrefetchMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::vector<PrefixDevicePrefetchSubmitter>& prefixDevicePrefetchSubmitters() {
+    static std::vector<PrefixDevicePrefetchSubmitter> submitters;
+    return submitters;
+}
+
+} // namespace
+
+void registerPrefixDevicePrefetchSubmitter(PrefixDevicePrefetchSubmitter submitter) {
+    if (submitter == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(prefixDevicePrefetchMutex());
+    auto& submitters = prefixDevicePrefetchSubmitters();
+    if (std::find(submitters.begin(), submitters.end(), submitter) == submitters.end()) {
+        submitters.emplace_back(submitter);
+    }
+}
+
+bool submitPrefixDevicePrefetch(KVMeta* meta) {
+    if (meta == nullptr || !meta->prefix_device_prefetch || meta->prefix_request_id == 0) {
+        return false;
+    }
+    std::vector<PrefixDevicePrefetchSubmitter> submitters;
+    {
+        std::lock_guard<std::mutex> lock(prefixDevicePrefetchMutex());
+        submitters = prefixDevicePrefetchSubmitters();
+    }
+    bool submitted = false;
+    for (auto submitter : submitters) {
+        if (submitter != nullptr && submitter(meta)) {
+            submitted = true;
+        }
+    }
+    return submitted;
+}
+
 WorkerThread::WorkerThread(int numberThread) {
     for (int i=0; i<numberThread; ++i) {
         mWorkers.emplace_back([this]() {

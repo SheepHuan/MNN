@@ -72,6 +72,7 @@ std::string compositeCacheName(const json& segments) {
 }
 
 constexpr const char* kDocumentTokenizerPrefixPolicy = "strip-empty-encode-prefix-v1";
+constexpr const char* kDefaultKVPrefixPlaceholder = "{{kv_prefix}}";
 
 int stripTokenizerPrefixTokens(std::vector<int>& tokens, const std::vector<int>& prefixTokens) {
     if (tokens.empty() || prefixTokens.empty() || tokens.size() <= prefixTokens.size()) {
@@ -82,6 +83,48 @@ int stripTokenizerPrefixTokens(std::vector<int>& tokens, const std::vector<int>&
     }
     tokens.erase(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(prefixTokens.size()));
     return static_cast<int>(prefixTokens.size());
+}
+
+ChatMessages collectSystemMessages(const ChatMessages& messages) {
+    ChatMessages result;
+    for (const auto& message : messages) {
+        if (message.first == "system") {
+            result.emplace_back(message);
+        }
+    }
+    return result;
+}
+
+ChatMessages collectNonSystemMessages(const ChatMessages& messages) {
+    ChatMessages result;
+    for (const auto& message : messages) {
+        if (message.first != "system") {
+            result.emplace_back(message);
+        }
+    }
+    return result;
+}
+
+bool splitRenderedPromptAtPlaceholder(const std::string& renderedPrompt,
+                                      const std::string& placeholder,
+                                      std::string& prelude,
+                                      std::string& suffix,
+                                      std::string& error) {
+    if (placeholder.empty()) {
+        error = "kv_prefix.placeholder must not be empty";
+        return false;
+    }
+    auto pos = renderedPrompt.find(placeholder);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    if (renderedPrompt.find(placeholder, pos + placeholder.size()) != std::string::npos) {
+        error = "kv_prefix placeholder appears more than once in the rendered chat prompt";
+        return false;
+    }
+    prelude = renderedPrompt.substr(0, pos);
+    suffix = renderedPrompt.substr(pos + placeholder.size());
+    return true;
 }
 
 std::filesystem::path cacheObjectDir(const std::string& cacheDir, const std::string& backend,
@@ -156,6 +199,18 @@ int intFromJson(const json& object, const std::string& key, int defaultValue) {
         return object[key].get<int>();
     }
     return defaultValue;
+}
+
+bool isValidCudaPrefixPrefetchThreads(int threads) {
+    return threads == 4 || threads == 8 || threads == 16;
+}
+
+bool isValidOpenCLPrefixPrefetchThreads(int threads) {
+    return threads == 1;
+}
+
+bool isValidPrefixHostCacheThreads(int threads) {
+    return threads == 4 || threads == 8 || threads == 16;
 }
 
 json ropeLayoutFromConfig(Llm* llm, const std::string& backend, std::string& error) {
@@ -443,9 +498,39 @@ bool KvShareServer::init() {
         std::cerr << "Unsupported backend: " << options_.backend << std::endl;
         return false;
     }
+    if (options_.cudaPrefixPrefetchThreads != 0 &&
+        !isValidCudaPrefixPrefetchThreads(options_.cudaPrefixPrefetchThreads)) {
+        std::cerr << "Unsupported cuda prefix prefetch thread count: "
+                  << options_.cudaPrefixPrefetchThreads << " (expected 4, 8, or 16)" << std::endl;
+        return false;
+    }
+    if (options_.openclPrefixPrefetchThreads != 0 &&
+        !isValidOpenCLPrefixPrefetchThreads(options_.openclPrefixPrefetchThreads)) {
+        std::cerr << "Unsupported opencl prefix prefetch thread count: "
+                  << options_.openclPrefixPrefetchThreads << " (expected 1)" << std::endl;
+        return false;
+    }
+    if (options_.prefixHostCacheThreads != 0 &&
+        !isValidPrefixHostCacheThreads(options_.prefixHostCacheThreads)) {
+        std::cerr << "Unsupported prefix host cache thread count: "
+                  << options_.prefixHostCacheThreads << " (expected 4, 8, or 16)" << std::endl;
+        return false;
+    }
     if (options_.configPath.empty()) {
         std::cerr << "Missing config path" << std::endl;
         return false;
+    }
+    if (options_.cudaPrefixPrefetchThreads != 0) {
+        setenv("MNN_CUDA_PREFIX_PREFETCH_THREADS",
+               std::to_string(options_.cudaPrefixPrefetchThreads).c_str(), 1);
+    }
+    if (options_.openclPrefixPrefetchThreads != 0) {
+        setenv("MNN_OPENCL_PREFIX_PREFETCH_THREADS",
+               std::to_string(options_.openclPrefixPrefetchThreads).c_str(), 1);
+    }
+    if (options_.prefixHostCacheThreads != 0) {
+        setenv("MNN_PREFIX_HOST_CACHE_THREADS",
+               std::to_string(options_.prefixHostCacheThreads).c_str(), 1);
     }
     llm_.reset(Llm::createLLM(options_.configPath));
     if (!llm_) {
@@ -498,6 +583,12 @@ bool KvShareServer::init() {
               << " attention_mode=" << options_.attentionMode
               << " reuse_kv=" << (options_.reuseKv ? "true" : "false")
               << " prefix_cache_dir=" << options_.prefixCacheDir
+              << " prefix_host_cache_threads="
+              << (options_.prefixHostCacheThreads == 0 ? std::string("env/default") : std::to_string(options_.prefixHostCacheThreads))
+              << " cuda_prefix_prefetch_threads="
+              << (options_.cudaPrefixPrefetchThreads == 0 ? std::string("env/default") : std::to_string(options_.cudaPrefixPrefetchThreads))
+              << " opencl_prefix_prefetch_threads="
+              << (options_.openclPrefixPrefetchThreads == 0 ? std::string("env/default") : std::to_string(options_.openclPrefixPrefetchThreads))
               << std::endl;
     {
         AUTOTIME;
@@ -772,6 +863,7 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
         return false;
     }
 
+    bool reusedExistingKvCache = false;
     if (force) {
         removePrefixCacheFiles(options_.prefixCacheDir, options_.backend, cacheName, layers);
     }
@@ -786,9 +878,12 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
             !kvLayoutMatchesBackend(existingMeta["kv_layout"], existingMeta, options_.backend)) {
             // 老版本或其他 backend 的缓存不能冒充当前 backend-native canonical key。
             removePrefixCacheFiles(options_.prefixCacheDir, options_.backend, cacheName, layers);
+        } else {
+            reusedExistingKvCache = true;
         }
     }
     if (!prefixCacheReady(options_.prefixCacheDir, options_.backend, cacheName, layers)) {
+        reusedExistingKvCache = false;
         llm_->reset();
         llm_->clearPrefixCacheFile();
         llm_->setPrefixCacheWriteFile(cacheName, MNN::Transformer::PrefixCacheFlagCanonicalNoRopeKey);
@@ -840,6 +935,8 @@ bool KvShareServer::buildDocumentCacheLocked(const json& requestJson, json& resp
         {"backend", options_.backend},
         {"attention_mode", options_.attentionMode},
         {"layer_count", layers},
+        {"cache_hit", reusedExistingKvCache},
+        {"cache_status", reusedExistingKvCache ? "reused" : "built"},
         {"kv_layout", kvLayout},
         {"kv", kvFilesForCache(options_.prefixCacheDir, options_.backend, cacheName, layers)}
     };
@@ -1089,6 +1186,8 @@ void KvShareServer::answer(const ChatRequest& request, httplib::Response& res) {
 
     auto* context = llm_->getContext();
     int prefixTokens = prefixInfo.value("token_count", 0);
+    int preludeTokens = prefixInfo.value("prelude_token_count",
+                                          prefixInfo.value("system_prompt_token_count", 0));
     json responseJson = {
         {"id", "chatcmpl-" + currentTimeString()},
         {"object", "chat.completion"},
@@ -1102,9 +1201,9 @@ void KvShareServer::answer(const ChatRequest& request, httplib::Response& res) {
             }
         })},
         {"usage", {
-            {"prompt_tokens", context->prompt_len + prefixTokens},
+            {"prompt_tokens", context->prompt_len + prefixTokens + preludeTokens},
             {"completion_tokens", context->gen_seq_len},
-            {"total_tokens", context->prompt_len + prefixTokens + context->gen_seq_len}
+            {"total_tokens", context->prompt_len + prefixTokens + preludeTokens + context->gen_seq_len}
         }}
     };
     if (!prefixInfo.empty()) {
@@ -1203,12 +1302,61 @@ bool KvShareServer::applyKvPrefixLocked(const json& kvPrefix, const ChatMessages
         return false;
     }
 
-    auto prompt = llm_->apply_chat_template(messages);
-    if (prompt.empty()) {
-        error = "Failed to apply chat template";
+    const std::string placeholder = kvPrefix.value("placeholder", std::string(kDefaultKVPrefixPlaceholder));
+    std::vector<int> preludeTokens;
+    std::vector<int> promptTokens;
+    std::string promptProtocol = "legacy-system-prefix";
+    auto renderedPrompt = llm_->apply_chat_template(messages);
+    std::string preludeText;
+    std::string suffixText;
+    bool hasPlaceholder = splitRenderedPromptAtPlaceholder(renderedPrompt, placeholder, preludeText, suffixText, error);
+    if (!error.empty()) {
         return false;
     }
-    auto promptTokens = llm_->tokenizer_encode(prompt);
+    if (hasPlaceholder) {
+        promptProtocol = "chat-template-placeholder-v1";
+        if (!preludeText.empty()) {
+            preludeTokens = llm_->tokenizer_encode(preludeText);
+        }
+        promptTokens = llm_->tokenizer_encode(suffixText);
+        auto tokenizerPrefixTokens = llm_->tokenizer_encode("");
+        stripTokenizerPrefixTokens(promptTokens, tokenizerPrefixTokens);
+        if (preludeTokens.empty() && !preludeText.empty()) {
+            error = "direct_segments prompt prelude tokenization produced no tokens";
+            return false;
+        }
+    } else {
+        auto systemMessages = collectSystemMessages(messages);
+        auto promptMessages = collectNonSystemMessages(messages);
+        if (promptMessages.empty()) {
+            error = "direct_segments requires at least one non-system message for the current prompt suffix";
+            return false;
+        }
+
+        if (!systemMessages.empty()) {
+            auto systemPrompt = llm_->apply_chat_template(systemMessages, false);
+            if (systemPrompt.empty()) {
+                error = "Failed to apply system prompt chat template";
+                return false;
+            }
+            preludeTokens = llm_->tokenizer_encode(systemPrompt);
+            if (preludeTokens.empty()) {
+                error = "System prompt tokenization produced no tokens";
+                return false;
+            }
+        }
+
+        auto prompt = llm_->apply_chat_template(promptMessages);
+        if (prompt.empty()) {
+            error = "Failed to apply current prompt chat template";
+            return false;
+        }
+        promptTokens = llm_->tokenizer_encode(prompt);
+        if (!preludeTokens.empty()) {
+            auto tokenizerPrefixTokens = llm_->tokenizer_encode("");
+            stripTokenizerPrefixTokens(promptTokens, tokenizerPrefixTokens);
+        }
+    }
     if (promptTokens.empty()) {
         error = "Prompt tokenization produced no tokens";
         return false;
@@ -1216,8 +1364,11 @@ bool KvShareServer::applyKvPrefixLocked(const json& kvPrefix, const ChatMessages
 
     llm_->clearPrefixCacheFile();
     llm_->generate_init(output, endWith);
+    if (!preludeTokens.empty()) {
+        llm_->generate(preludeTokens, 0);
+    }
     auto prefetchSubmitStart = std::chrono::steady_clock::now();
-    if (!llm_->setPrefixCacheSegments(prefixSegments, devicePrefetch)) {
+    if (!llm_->setPrefixCacheSegments(prefixSegments, devicePrefetch, static_cast<int>(promptTokens.size()))) {
         llm_->clearPrefixCacheSegments();
         error = "Failed to set direct segment prefix cache";
         return false;
@@ -1234,9 +1385,13 @@ bool KvShareServer::applyKvPrefixLocked(const json& kvPrefix, const ChatMessages
         {"prefix_cache_dir", absolutePath(options_.prefixCacheDir)},
         {"token_count", prefixTokens.size()},
         {"token_ids", prefixTokens},
+        {"system_prompt_token_count", preludeTokens.size()},
+        {"prelude_token_count", preludeTokens.size()},
         {"prompt_token_count", promptTokens.size()},
         {"segments", resolvedSegments},
         {"merge_mode", "direct_segments"},
+        {"prompt_protocol", promptProtocol},
+        {"placeholder", hasPlaceholder ? placeholder : ""},
         {"device_prefetch", devicePrefetch},
         {"kv_layout", directKvLayout},
         {"backend", options_.backend},
@@ -1400,6 +1555,39 @@ int main(int argc, char** argv) {
                 return 1;
             }
             options.prefixCacheDir = argv[i];
+        } else if (arg == "--prefix-host-cache-threads") {
+            if (++i >= argc) {
+                std::cerr << "Missing value for --prefix-host-cache-threads" << std::endl;
+                return 1;
+            }
+            options.prefixHostCacheThreads = std::atoi(argv[i]);
+            if (!kvshare::isValidPrefixHostCacheThreads(options.prefixHostCacheThreads)) {
+                std::cerr << "Invalid value for --prefix-host-cache-threads: " << argv[i]
+                          << " (expected 4, 8, or 16)" << std::endl;
+                return 1;
+            }
+        } else if (arg == "--cuda-prefix-prefetch-threads") {
+            if (++i >= argc) {
+                std::cerr << "Missing value for --cuda-prefix-prefetch-threads" << std::endl;
+                return 1;
+            }
+            options.cudaPrefixPrefetchThreads = std::atoi(argv[i]);
+            if (!kvshare::isValidCudaPrefixPrefetchThreads(options.cudaPrefixPrefetchThreads)) {
+                std::cerr << "Invalid value for --cuda-prefix-prefetch-threads: " << argv[i]
+                          << " (expected 4, 8, or 16)" << std::endl;
+                return 1;
+            }
+        } else if (arg == "--opencl-prefix-prefetch-threads") {
+            if (++i >= argc) {
+                std::cerr << "Missing value for --opencl-prefix-prefetch-threads" << std::endl;
+                return 1;
+            }
+            options.openclPrefixPrefetchThreads = std::atoi(argv[i]);
+            if (!kvshare::isValidOpenCLPrefixPrefetchThreads(options.openclPrefixPrefetchThreads)) {
+                std::cerr << "Invalid value for --opencl-prefix-prefetch-threads: " << argv[i]
+                          << " (expected 1)" << std::endl;
+                return 1;
+            }
         } else if (arg == "--reuse-kv") {
             if (++i >= argc) {
                 std::cerr << "Missing value for --reuse-kv" << std::endl;
@@ -1422,7 +1610,7 @@ int main(int argc, char** argv) {
     }
 
     if (options.configPath.empty()) {
-        std::cerr << "Usage: kvshare_server -c <config.json> [--host 127.0.0.1] [--port 9091] [--threads 4] [--attention-mode 8] [--backend cpu] [--prefix-cache-dir .cache/kvshare/prefixcache] [--reuse-kv false]" << std::endl;
+        std::cerr << "Usage: kvshare_server -c <config.json> [--host 127.0.0.1] [--port 9091] [--threads 4] [--attention-mode 8] [--backend cpu] [--prefix-cache-dir .cache/kvshare/prefixcache] [--prefix-host-cache-threads 4|8|16] [--cuda-prefix-prefetch-threads 4|8|16] [--opencl-prefix-prefetch-threads 1] [--reuse-kv false]" << std::endl;
         return 1;
     }
     std::string lowerModelName = options.configPath;

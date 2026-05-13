@@ -94,6 +94,7 @@ public:
     bool isSupportedDotAccInt8() const;
     bool isSupportedIntelSubgroup() const;
     ::cl::Context &context();
+    ::cl::CommandQueue &defaultCommandQueue();
     ::cl::CommandQueue &commandQueue();
     ::cl::CommandQueue &recordableQueue();
     uint64_t deviceGlobalMemeryCacheSize() const;

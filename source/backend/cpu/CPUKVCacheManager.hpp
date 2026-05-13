@@ -17,6 +17,8 @@
 #include "backend/cpu/compute/TurboQuant.hpp"
 #include "MNN/ErrorCode.hpp"
 
+#include <vector>
+
 // KV cache quantization mode enum
 enum class KVQuantMode : int { None = 0, Int8 = 1, TQ3 = 2, TQ4 = 3 };
 
@@ -46,6 +48,10 @@ private:
     template <typename T> void ProcessKey(const Tensor* key, int seq_len, int kv_h);
     template <typename T> void ProcessValue(const Tensor* value, int seq_len, int kv_h);
     template <typename T> void moveKV(int src, int dst, int size);
+    int physicalSlotForLogical(int seq) const;
+    size_t keyIndexPhysical(int seq, int dim) const;
+    size_t valueIndexPhysical(int seq, int dim) const;
+    size_t flashValueIndexPhysical(int seq, int dim) const;
     size_t keyIndex(int seq, int dim) const;
     size_t valueIndex(int seq, int dim) const;
     size_t flashValueIndex(int seq, int dim) const;
@@ -70,6 +76,16 @@ private:
     std::shared_ptr<Tensor> mKeyMax;                // {numhead, headDim}
     decltype(CoreFunctions::MNNQuantAttentionKey) mQuantKeyFunc;
     decltype(CoreFunctions::MNNQuantAttentionValue) mQuantValueFunc;
+
+    bool mPagedPrefixActive = false;
+    int mPagedPrefixPageSize = 64;
+    int mPagedPrefixLogicalLength = 0;
+    int mPagedPrefixPhysicalLength = 0;
+    std::vector<int> mPagedPrefixLogicalToPhysical;
+    std::vector<int> mPagedPrefixKeyNeedsRoPE;
+    std::vector<int> mPagedPrefixRopeDim;
+    std::vector<float> mPagedPrefixRopeTheta;
+    std::vector<int> mPagedPrefixRopePairing;
 public:
     CPUKVCacheManager(Backend * backend, KVCacheConfig & kvConfig): KVCacheManager(backend, kvConfig) {
         // nothing todo
@@ -104,6 +120,13 @@ public:
     size_t getFlashAttentionBlockKv() {
         return mFlashAttentionUpperKv;
     }
+    bool pagedPrefixActive() const {
+        return mPagedPrefixActive;
+    }
+    int pagedPrefixPhysicalLength() const {
+        return mPagedPrefixPhysicalLength;
+    }
+    void copyPagedPrefixBlock(int logicalStart, int tokenCount, int kvHead, int8_t* keyDst, int8_t* valueDst) const;
     
     void onPushBack(const Tensor * key, const Tensor * value, int add);
     void onDequantValue(Tensor * dequantedValues);

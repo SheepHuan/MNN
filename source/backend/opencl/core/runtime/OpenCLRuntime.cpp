@@ -261,6 +261,11 @@ OpenCLRuntime::OpenCLRuntime(int platformSize, int platformId, int deviceId, voi
             mCommandQueueTuning = mCommandQueuePtr;
 #else
             mCommandQueueTuning = std::make_shared<cl::CommandQueue>(*mContext, *mFirstGPUDevicePtr, CL_QUEUE_PROFILING_ENABLE, &res);
+            if (res != CL_SUCCESS || mCommandQueueTuning == nullptr) {
+                MNN_PRINT("[OpenCLRuntime] profiling queue unavailable, fallback to default command queue err=%d\n", res);
+                mCommandQueueTuning = mCommandQueuePtr;
+                res = CL_SUCCESS;
+            }
 #endif
             mCurrentCommandQueue = mCommandQueuePtr.get();
             mFirstGPUDevicePtr->getInfo(CL_DEVICE_GLOBAL_MEM_CACHE_SIZE, &mGPUGlobalMemeryCacheSize);
@@ -350,12 +355,20 @@ OpenCLRuntime::OpenCLRuntime(int platformSize, int platformId, int deviceId, voi
 }
 
 void OpenCLRuntime::setCommandQueueProfileEnable() {
-    mCurrentCommandQueue->finish();
-    mCurrentCommandQueue = mCommandQueueTuning.get();
+    if (mCurrentCommandQueue != nullptr) {
+        mCurrentCommandQueue->finish();
+    }
+    if (mCommandQueueTuning != nullptr) {
+        mCurrentCommandQueue = mCommandQueueTuning.get();
+    } else {
+        mCurrentCommandQueue = mCommandQueuePtr.get();
+    }
 }
 
 void OpenCLRuntime::setCommandQueueProfileDisable() {
-    mCurrentCommandQueue->finish();
+    if (mCurrentCommandQueue != nullptr) {
+        mCurrentCommandQueue->finish();
+    }
     mCurrentCommandQueue = mCommandQueuePtr.get();
 }
 
@@ -417,6 +430,10 @@ bool OpenCLRuntime::isSupportedIntelSubgroup() const {
  }
 cl::Context &OpenCLRuntime::context() {
     return *mContext;
+}
+
+cl::CommandQueue &OpenCLRuntime::defaultCommandQueue() {
+    return *mCommandQueuePtr;
 }
 
 cl::CommandQueue &OpenCLRuntime::commandQueue() {

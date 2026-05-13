@@ -10,6 +10,7 @@
 
 #include "CPUKVCacheManager.hpp"
 #include "core/Concurrency.h"
+#include "core/PagedKVCachePlan.hpp"
 #include "core/PrefixCachePath.hpp"
 #include "core/PrefixKVHostCache.hpp"
 
@@ -337,31 +338,121 @@ ErrorCode CPUKVCacheManager::onAllocPrefixSegments(KVMeta* meta, int seq_len, in
         }
     }
 
-    int kv_seq_len = (int)mMeta->add + segmentTotalTokens;
-    if (kv_seq_len <= segmentTotalTokens) {
-        kv_seq_len = seq_len + segmentTotalTokens;
+    if (mMeta->remove > 0 || mMeta->n_reserve > 0) {
+        MNN_ERROR("[Error]: PrefixAttention direct segment prefix cache does not support remove/reserve compaction yet\n");
+        return NOT_SUPPORT;
     }
-    mMaxLength = kv_seq_len + mConfig.mExpandChunk;
-    setFlashAttentionUpperKv(MNN_FLASH_ATTENTION_BLOCK_SIZE);
-
-    mCurrentKeySizePerHead = ROUND_UP(mMaxLength, hP) * ROUND_UP(mHeadDim, lP) * mBytes;
-    mCurrentValueSizePerHead = UP_DIV(mMaxLength, mFlashAttentionUpperKv) *
-        (ROUND_UP(mHeadDim, hP) * ROUND_UP(mFlashAttentionUpperKv, lP) * mBytes);
-    size_t keySize = (size_t)mKvNumHead * mCurrentKeySizePerHead;
-    size_t valueSize = (size_t)mKvNumHead * mCurrentValueSizePerHead;
-
-    createKVCacheFile();
-    resetKVCacheFileSize(keySize, valueSize);
-    mmapKVCache(keySize, valueSize);
-    if (mMapKeyAddr != nullptr) {
-        ::memset(mMapKeyAddr, 0, keySize);
+    int metaBasePast = static_cast<int>(mMeta->previous);
+    int basePast = (metaBasePast > 0 && mPastLength > 0) ? mPastLength : metaBasePast;
+    if (resolvedLayerIndex == 0 && metaBasePast != basePast) {
+        MNN_PRINT("[CPUPrefixAttention] base_past adjusted to runtime cache length: meta=%d cache=%d\n",
+                  metaBasePast, mPastLength);
     }
-    if (mMapValueAddr != nullptr) {
-        ::memset(mMapValueAddr, 0, valueSize);
+    if (basePast < 0 || mPastLength != basePast) {
+        MNN_ERROR("[Error]: PrefixAttention direct segment base history mismatch: meta=%d cache=%d\n",
+                  metaBasePast, mPastLength);
+        return INVALID_VALUE;
     }
-    mKVCacheInDisk = true;
 
-    int dstStart = 0;
+    int promptAppendLen = (int)mMeta->add;
+    if (promptAppendLen <= 0) {
+        promptAppendLen = seq_len;
+    }
+    RuntimeKVBlockTablePlan pagePlan;
+    if (!buildPrefixRuntimeKVBlockTablePlan(pagePlan, mMeta, promptAppendLen)) {
+        return INVALID_VALUE;
+    }
+    const int basePhysicalReserved = basePast > 0 ? ROUND_UP(basePast, pagePlan.pageSize()) : 0;
+    const int logicalLength = basePast + pagePlan.logicalLength();
+    const int physicalLength = basePhysicalReserved + pagePlan.physicalLength();
+    if (logicalLength <= basePast + segmentTotalTokens || physicalLength < logicalLength) {
+        MNN_ERROR("[Error]: invalid CPU PrefixAttention page plan, logical=%d physical=%d base=%d prefix=%d prompt=%d\n",
+                  logicalLength, physicalLength, basePast, segmentTotalTokens, promptAppendLen);
+        return INVALID_VALUE;
+    }
+
+    auto computeFloatFlashKVSize = [&]() {
+        mCurrentKeySizePerHead = ROUND_UP(mMaxLength, hP) * ROUND_UP(mHeadDim, lP) * mBytes;
+        mCurrentValueSizePerHead = UP_DIV(mMaxLength, mFlashAttentionUpperKv) *
+            (ROUND_UP(mHeadDim, hP) * ROUND_UP(mFlashAttentionUpperKv, lP) * mBytes);
+    };
+
+    if (basePast == 0) {
+        mMaxLength = physicalLength + mConfig.mExpandChunk;
+        setFlashAttentionUpperKv(MNN_FLASH_ATTENTION_BLOCK_SIZE);
+        computeFloatFlashKVSize();
+        size_t keySize = (size_t)mKvNumHead * mCurrentKeySizePerHead;
+        size_t valueSize = (size_t)mKvNumHead * mCurrentValueSizePerHead;
+
+        createKVCacheFile();
+        resetKVCacheFileSize(keySize, valueSize);
+        mmapKVCache(keySize, valueSize);
+        if (mMapKeyAddr != nullptr) {
+            ::memset(mMapKeyAddr, 0, keySize);
+        }
+        if (mMapValueAddr != nullptr) {
+            ::memset(mMapValueAddr, 0, valueSize);
+        }
+        mKVCacheInDisk = true;
+    } else if (physicalLength > mMaxLength) {
+        int oldMaxLength = mMaxLength;
+        size_t oldKeySize = (size_t)mKvNumHead * mCurrentKeySizePerHead;
+        size_t oldValueSize = (size_t)mKvNumHead * mCurrentValueSizePerHead;
+        mMaxLength = physicalLength + mConfig.mExpandChunk;
+        setFlashAttentionUpperKv(MNN_FLASH_ATTENTION_BLOCK_SIZE);
+        computeFloatFlashKVSize();
+        size_t keySize = (size_t)mKvNumHead * mCurrentKeySizePerHead;
+        size_t valueSize = (size_t)mKvNumHead * mCurrentValueSizePerHead;
+        if (mKVCacheInDisk) {
+            expandKVCacheInDisk(oldMaxLength, oldKeySize, oldValueSize, keySize, valueSize);
+        } else {
+            expandKVCacheInMem(oldMaxLength);
+        }
+    }
+
+    mPagedPrefixActive = true;
+    mPagedPrefixPageSize = pagePlan.pageSize();
+    mPagedPrefixLogicalLength = logicalLength;
+    mPagedPrefixPhysicalLength = physicalLength;
+    mPagedPrefixLogicalToPhysical.assign(logicalLength, -1);
+    mPagedPrefixKeyNeedsRoPE.assign(logicalLength, 0);
+    mPagedPrefixRopeDim.assign(logicalLength, 0);
+    mPagedPrefixRopeTheta.assign(logicalLength, 0.0f);
+    mPagedPrefixRopePairing.assign(logicalLength, KVMeta::RopePairingHalf);
+    for (int i = 0; i < basePast; ++i) {
+        mPagedPrefixLogicalToPhysical[i] = i;
+    }
+    for (const auto& ref : pagePlan.refs()) {
+        const KVMeta::PrefixSegment* segment = nullptr;
+        if (ref.source == RuntimeKVBlockRef::Document) {
+            if (ref.segmentIndex < 0 || ref.segmentIndex >= (int)mMeta->prefix_segments.size()) {
+                return INVALID_VALUE;
+            }
+            segment = &mMeta->prefix_segments[ref.segmentIndex];
+        }
+        for (int i = 0; i < ref.tokenCount; ++i) {
+            int logical = basePast + ref.logicalTokenStart + i;
+            int physical = basePhysicalReserved + ref.physicalTokenStart + i;
+            if (logical < 0 || logical >= logicalLength || physical < 0 || physical >= physicalLength) {
+                return INVALID_VALUE;
+            }
+            mPagedPrefixLogicalToPhysical[logical] = physical;
+            if (segment != nullptr) {
+                mPagedPrefixKeyNeedsRoPE[logical] = 1;
+                mPagedPrefixRopeDim[logical] = segment->rope_dim;
+                mPagedPrefixRopeTheta[logical] = segment->rope_theta;
+                mPagedPrefixRopePairing[logical] = segment->rope_pairing;
+            }
+        }
+    }
+    for (int i = 0; i < logicalLength; ++i) {
+        if (mPagedPrefixLogicalToPhysical[i] < 0) {
+            MNN_ERROR("[Error]: CPU PrefixAttention page table has unmapped logical token %d/%d\n", i, logicalLength);
+            return INVALID_VALUE;
+        }
+    }
+
+    int dstStart = basePast;
     for (const auto& segment : mMeta->prefix_segments) {
         if (segment.token_count <= 0) {
             continue;
@@ -405,19 +496,12 @@ ErrorCode CPUKVCacheManager::onAllocPrefixSegments(KVMeta* meta, int seq_len, in
         double materializeStart = nowMs();
         copyPrefixSegmentKV(srcKeyAddr, srcKeySize / mKvNumHead, srcValueAddr, srcValueSize / mKvNumHead,
                             segment.token_count, dstStart);
-        if (mBytes == 2) {
-            applyPackedKeyRoPE<FLOAT16_T>(dstStart, segment.token_count, dstStart, segment.rope_dim,
-                                           segment.rope_theta, segment.rope_pairing, false);
-        } else {
-            applyPackedKeyRoPE<float>(dstStart, segment.token_count, dstStart, segment.rope_dim,
-                                      segment.rope_theta, segment.rope_pairing, false);
-        }
         double materializeMs = nowMs() - materializeStart;
         dstStart += segment.token_count;
         const double waitMs = mMeta->prefix_device_prefetch ?
             (keyRead.prefetch_wait_ms + valueRead.prefetch_wait_ms) : 0.0;
 
-        MNN_PRINT("[CPUPrefixAttention] layer=%d cache=%s tokens=%d host_cache_hit=%d device_cache_hit=0 device_prefetch=%d device_prefetch_hit=%d prefetch_wait_ms=%.3f disk_read_ms=%.3f host_to_device_ms=0.000 materialize_ms=%.3f attention_wait_ms=%.3f bytes=%zu\n",
+        MNN_PRINT("[CPUPrefixAttention] layer=%d cache=%s tokens=%d host_cache_hit=%d device_cache_hit=0 device_prefetch=%d device_prefetch_hit=%d prefetch_wait_ms=%.3f disk_read_ms=%.3f host_to_device_ms=0.000 materialize_ms=%.3f attention_wait_ms=%.3f bytes=%zu host_cache_threads=%d\n",
                   resolvedLayerIndex, segment.cache_name.c_str(), segment.token_count,
                   (keyRead.host_cache_hit && valueRead.host_cache_hit) ? 1 : 0,
                   mMeta->prefix_device_prefetch ? 1 : 0,
@@ -426,13 +510,14 @@ ErrorCode CPUKVCacheManager::onAllocPrefixSegments(KVMeta* meta, int seq_len, in
                   keyRead.disk_read_ms + valueRead.disk_read_ms,
                   materializeMs,
                   waitMs,
-                  keyRead.file_size + valueRead.file_size);
+                  keyRead.file_size + valueRead.file_size,
+                  prefixKVHostCacheWorkerCount());
     }
 
     mPastLength = dstStart;
-    if (mPastLength != segmentTotalTokens) {
+    if (mPastLength != basePast + segmentTotalTokens) {
         MNN_ERROR("[Error]: PrefixAttention direct segment prefix copied length %d does not match expected length %d\n",
-                  mPastLength, segmentTotalTokens);
+                  mPastLength - basePast, segmentTotalTokens);
         return INVALID_VALUE;
     }
     return NO_ERROR;
@@ -847,6 +932,14 @@ void CPUKVCacheManager::onClear() {
     mKeyMax.reset();
     mValueSum.reset();
     mMaxLength = mPastLength = 0;
+    mPagedPrefixActive = false;
+    mPagedPrefixLogicalLength = 0;
+    mPagedPrefixPhysicalLength = 0;
+    mPagedPrefixLogicalToPhysical.clear();
+    mPagedPrefixKeyNeedsRoPE.clear();
+    mPagedPrefixRopeDim.clear();
+    mPagedPrefixRopeTheta.clear();
+    mPagedPrefixRopePairing.clear();
 }
 
 template <typename T>
@@ -886,14 +979,10 @@ void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead) {
         mQuantKeyFunc(keyDst, key->host<float>(), sumDst, (float*)keyMax, params);
     } else { // target: [maxlen/hP, headdim/lP, hP, lP]
         T * key_dst = reinterpret_cast<T*>(addrOfKey(kvHead));
-        auto stride0 = ROUND_UP(mHeadDim, lP) * hP;
-        auto stride1 = hP * lP;
         for (int i = 0; i < seqLen; i++) {
             T * key_src = key->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim;
-            int out_index = (mPastLength + i) / hP;
-            int in_index  = (mPastLength + i) % hP;
             for (int j = 0; j < mHeadDim; j++) {
-                key_dst[out_index * stride0 + (j / lP) * stride1 + in_index * lP + (j % lP)] = key_src[j];
+                key_dst[keyIndex(mPastLength + i, j)] = key_src[j];
             }
         }
     }
@@ -928,48 +1017,41 @@ void CPUKVCacheManager::ProcessValue(const Tensor* value, int seqLen, int kvHead
         int32_t params[] = {mKvNumHead, seqLen, mHeadDim, mConfig.mBlockNum, mMaxLength, lP8, hP8, mPastLength, kvHead, (int32_t)mFlashAttentionUpperKv};
         mQuantValueFunc(valueDst, value->host<float>(), valueSum, params);
     } else {
-        // [mHeadDim/hP, mMaxLength/lP, hP, lP]
-        auto stride0 = ROUND_UP(mMaxLength, lP) * hP;
-        auto stride1 = hP * lP;
-
-        auto weightStride2 = lP * hP;
-        auto weightStride1 = UP_DIV((int32_t)mFlashAttentionUpperKv, lP) * weightStride2;
-        auto weightStride0 = weightStride1 * UP_DIV(mHeadDim, hP);
-
         T * value_dst = reinterpret_cast<T*>(addrOfValue(kvHead));
         for (int i = 0; i < seqLen; i++) {
             T * value_src = value->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim;
-            // int seqLenOut = (mPastLength + i) / lP;
-            // int seqLenIn = (mPastLength + i) % lP;
-
-            int kvSeqIndx = mPastLength + i;
-            int idxInner = (kvSeqIndx / (int32_t)mFlashAttentionUpperKv) * weightStride0 + (kvSeqIndx % (int32_t)mFlashAttentionUpperKv) / lP * weightStride2 + (kvSeqIndx % (int32_t)mFlashAttentionUpperKv) % lP;
             for (int j = 0; j < mHeadDim; j++) {
-                int idxBase = (j / hP) * weightStride1 + (j % hP) * lP;
-                int out_index = j / hP;
-                int in_index  = j % hP;
-                // value_dst[out_index * stride0 + seqLenOut * stride1 + in_index * lP + seqLenIn] = value_src[j];
-                value_dst[idxBase + idxInner] = value_src[j];
+                value_dst[flashValueIndex(mPastLength + i, j)] = value_src[j];
             }
         }
     }
 }
 
-size_t CPUKVCacheManager::keyIndex(int seq, int dim) const {
+int CPUKVCacheManager::physicalSlotForLogical(int seq) const {
+    if (mPagedPrefixActive && seq >= 0 && seq < (int)mPagedPrefixLogicalToPhysical.size()) {
+        int physical = mPagedPrefixLogicalToPhysical[seq];
+        if (physical >= 0) {
+            return physical;
+        }
+    }
+    return seq;
+}
+
+size_t CPUKVCacheManager::keyIndexPhysical(int seq, int dim) const {
     return (seq / hP) * ROUND_UP(mHeadDim, lP) * hP +
            (dim / lP) * hP * lP +
            (seq % hP) * lP +
            (dim % lP);
 }
 
-size_t CPUKVCacheManager::valueIndex(int seq, int dim) const {
+size_t CPUKVCacheManager::valueIndexPhysical(int seq, int dim) const {
     return (dim / hP) * ROUND_UP(mMaxLength, lP) * hP +
            (seq / lP) * hP * lP +
            (dim % hP) * lP +
            (seq % lP);
 }
 
-size_t CPUKVCacheManager::flashValueIndex(int seq, int dim) const {
+size_t CPUKVCacheManager::flashValueIndexPhysical(int seq, int dim) const {
     auto weightStride2 = lP * hP;
     auto weightStride1 = UP_DIV((int32_t)mFlashAttentionUpperKv, lP) * weightStride2;
     auto weightStride0 = weightStride1 * UP_DIV(mHeadDim, hP);
@@ -978,6 +1060,18 @@ size_t CPUKVCacheManager::flashValueIndex(int seq, int dim) const {
                     (seq % (int32_t)mFlashAttentionUpperKv) % lP;
     auto idxBase = (dim / hP) * weightStride1 + (dim % hP) * lP;
     return idxBase + idxInner;
+}
+
+size_t CPUKVCacheManager::keyIndex(int seq, int dim) const {
+    return keyIndexPhysical(physicalSlotForLogical(seq), dim);
+}
+
+size_t CPUKVCacheManager::valueIndex(int seq, int dim) const {
+    return valueIndexPhysical(physicalSlotForLogical(seq), dim);
+}
+
+size_t CPUKVCacheManager::flashValueIndex(int seq, int dim) const {
+    return flashValueIndexPhysical(physicalSlotForLogical(seq), dim);
 }
 
 size_t CPUKVCacheManager::packedKeyIndex(int seq, int dim) const {
@@ -1051,11 +1145,82 @@ void CPUKVCacheManager::copyPrefixSegmentKV(const int8_t* srcKey, size_t srcKeyS
             int dstSeq = dstStart + s;
             for (int d = 0; d < mHeadDim; ++d) {
                 ::memcpy(dstKeyHead + packedKeyIndex(dstSeq, d) * mBytes,
-                         srcKeyHead + packedKeyIndex(s, d) * mBytes,
+                         srcKeyHead + keyIndexPhysical(s, d) * mBytes,
                          mBytes);
                 ::memcpy(dstValueHead + packedFlashValueIndex(dstSeq, d) * mBytes,
-                         srcValueHead + packedFlashValueIndex(s, d) * mBytes,
+                         srcValueHead + flashValueIndexPhysical(s, d) * mBytes,
                          mBytes);
+            }
+        }
+    }
+}
+
+void CPUKVCacheManager::copyPagedPrefixBlock(int logicalStart, int tokenCount, int kvHead,
+                                             int8_t* keyDst, int8_t* valueDst) const {
+    if (tokenCount <= 0 || keyDst == nullptr || valueDst == nullptr) {
+        return;
+    }
+    size_t keyBytes = (size_t)UP_DIV(tokenCount, hP) * ROUND_UP(mHeadDim, lP) * hP * mBytes;
+    size_t valueBytes = (size_t)UP_DIV((int32_t)mFlashAttentionUpperKv, lP) * lP *
+        ROUND_UP(mHeadDim, hP) * mBytes;
+    ::memset(keyDst, 0, keyBytes);
+    ::memset(valueDst, 0, valueBytes);
+
+    auto self = const_cast<CPUKVCacheManager*>(this);
+    auto keySrc = self->addrOfKey(kvHead);
+    auto valueSrc = self->addrOfValue(kvHead);
+    for (int s = 0; s < tokenCount; ++s) {
+        int logicalSeq = logicalStart + s;
+        int physicalSeq = physicalSlotForLogical(logicalSeq);
+        for (int d = 0; d < mHeadDim; ++d) {
+            ::memcpy(keyDst + keyIndexPhysical(s, d) * mBytes,
+                     keySrc + keyIndexPhysical(physicalSeq, d) * mBytes,
+                     mBytes);
+            ::memcpy(valueDst + flashValueIndexPhysical(s, d) * mBytes,
+                     valueSrc + flashValueIndexPhysical(physicalSeq, d) * mBytes,
+                     mBytes);
+        }
+
+        if (!mPagedPrefixActive || logicalSeq < 0 ||
+            logicalSeq >= (int)mPagedPrefixKeyNeedsRoPE.size() ||
+            mPagedPrefixKeyNeedsRoPE[logicalSeq] == 0) {
+            continue;
+        }
+        int ropePairing = mPagedPrefixRopePairing[logicalSeq];
+        int ropeDim = mPagedPrefixRopeDim[logicalSeq] > 0 ? mPagedPrefixRopeDim[logicalSeq] : mHeadDim;
+        float ropeTheta = mPagedPrefixRopeTheta[logicalSeq] > 0.0f ? mPagedPrefixRopeTheta[logicalSeq] : 10000.0f;
+        ropeDim = ALIMIN(ropeDim, mHeadDim);
+        if (ropePairing != KVMeta::RopePairingHalf || ropeDim <= 0 || (ropeDim % 2) != 0 || ropeTheta <= 0.0f) {
+            continue;
+        }
+        int half = ropeDim / 2;
+        if (mBytes == 2) {
+            auto typedKeyDst = reinterpret_cast<FLOAT16_T*>(keyDst);
+            for (int d = 0; d < half; ++d) {
+                double invFreq = 1.0 / std::pow(static_cast<double>(ropeTheta), static_cast<double>(2 * d) / ropeDim);
+                double angle = static_cast<double>(logicalSeq) * invFreq;
+                float cosValue = static_cast<float>(std::cos(angle));
+                float sinValue = static_cast<float>(std::sin(angle));
+                size_t leftIndex = keyIndexPhysical(s, d);
+                size_t rightIndex = keyIndexPhysical(s, d + half);
+                float left = static_cast<float>(typedKeyDst[leftIndex]);
+                float right = static_cast<float>(typedKeyDst[rightIndex]);
+                typedKeyDst[leftIndex] = static_cast<FLOAT16_T>(left * cosValue - right * sinValue);
+                typedKeyDst[rightIndex] = static_cast<FLOAT16_T>(right * cosValue + left * sinValue);
+            }
+        } else {
+            auto typedKeyDst = reinterpret_cast<float*>(keyDst);
+            for (int d = 0; d < half; ++d) {
+                double invFreq = 1.0 / std::pow(static_cast<double>(ropeTheta), static_cast<double>(2 * d) / ropeDim);
+                double angle = static_cast<double>(logicalSeq) * invFreq;
+                float cosValue = static_cast<float>(std::cos(angle));
+                float sinValue = static_cast<float>(std::sin(angle));
+                size_t leftIndex = keyIndexPhysical(s, d);
+                size_t rightIndex = keyIndexPhysical(s, d + half);
+                float left = typedKeyDst[leftIndex];
+                float right = typedKeyDst[rightIndex];
+                typedKeyDst[leftIndex] = left * cosValue - right * sinValue;
+                typedKeyDst[rightIndex] = right * cosValue + left * sinValue;
             }
         }
     }

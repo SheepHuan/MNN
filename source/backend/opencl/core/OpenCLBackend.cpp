@@ -13,6 +13,8 @@
 #include "core/TensorUtils.hpp"
 #include "core/ExecutionClassLogger.hpp"
 #include "shape/SizeComputer.hpp"
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -25,6 +27,20 @@
 //#define OPENCL_FALLBACK_LOG
 namespace MNN {
 namespace OpenCL {
+namespace {
+static bool openCLResizeProfileQueueEnabled() {
+    const char* value = std::getenv("MNN_OPENCL_ENABLE_RESIZE_PROFILE_QUEUE");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    std::string text(value);
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return text == "1" || text == "true" || text == "on" || text == "yes";
+}
+} // namespace
+
 #ifndef MNN_OPENCL_SEP_BUILD
 void registerOpenCLOps();
 #endif
@@ -705,7 +721,9 @@ Execution* OpenCLBackend::onCreate(const std::vector<Tensor*>& inputs, const std
 
 void OpenCLBackend::onResizeBegin() {
 #ifndef ENABLE_OPENCL_TIME_PROFILER
-    mOpenCLRuntime->setCommandQueueProfileEnable();
+    if (openCLResizeProfileQueueEnabled()) {
+        mOpenCLRuntime->setCommandQueueProfileEnable();
+    }
 #endif
     // update mUseRecordableQueueSize if hint has changed
     mUseRecordableQueueSize = mCLRuntime->hint().encorderNumForCommit <= mUseRecordableQueueSize ? mCLRuntime->hint().encorderNumForCommit : mUseRecordableQueueSize;
@@ -715,7 +733,9 @@ void OpenCLBackend::onResizeBegin() {
 
 ErrorCode OpenCLBackend::onResizeEnd() {
 #ifndef ENABLE_OPENCL_TIME_PROFILER
-    mOpenCLRuntime->setCommandQueueProfileDisable();
+    if (openCLResizeProfileQueueEnabled()) {
+        mOpenCLRuntime->setCommandQueueProfileDisable();
+    }
 #endif
     if(!mRecordings.empty()){
         endRecord(mRecordings.back().record, true);

@@ -999,6 +999,10 @@ std::string Llm::apply_chat_template(const ChatMessages& chat_prompts) const {
     return mTokenizer->apply_chat_template(chat_prompts, true);
 }
 
+std::string Llm::apply_chat_template(const ChatMessages& chat_prompts, bool add_generation_prompt) const {
+    return mTokenizer->apply_chat_template(chat_prompts, add_generation_prompt);
+}
+
 std::vector<int> Llm::tokenizer_encode(const std::string& user_content) {
     return mTokenizer->encode(user_content);
 }
@@ -1349,7 +1353,7 @@ void Llm::clearPrefixCacheFile() {
     mMeta->layer_index = 0;
 }
 
-bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments, bool device_prefetch) {
+bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments, bool device_prefetch, int prompt_token_count) {
     if (segments.empty()) {
         return false;
     }
@@ -1358,6 +1362,7 @@ bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments
     mMeta->segment_total_tokens = 0;
     mMeta->prefix_device_prefetch = device_prefetch;
     mMeta->prefix_request_id = ++sPrefixRequestId;
+    mMeta->prefix_prompt_token_count = prompt_token_count;
     const auto historyBefore = mContext->history_tokens.size();
     for (const auto& segment : segments) {
         if (segment.cache_name.empty() || segment.token_count <= 0) {
@@ -1399,8 +1404,21 @@ bool Llm::setPrefixCacheSegments(const std::vector<PrefixCacheSegment>& segments
     mMeta->source_position_base = 0;
     mMeta->layer_index = 0;
     mPrefixSegmentsMode = true;
+    bool deferDevicePrefetchToBackend = false;
+    if (device_prefetch && !mMeta->prefix_segments.empty()) {
+        deferDevicePrefetchToBackend = true;
+        for (const auto& segment : mMeta->prefix_segments) {
+            if (segment.backend != "opencl") {
+                deferDevicePrefetchToBackend = false;
+                break;
+            }
+        }
+    }
     if (device_prefetch) {
         prefetchPrefixKVHostCacheFiles(mMeta->prefix_cache_dir, mMeta->layer_nums, mMeta->prefix_segments);
+    }
+    if (device_prefetch && !deferDevicePrefetchToBackend) {
+        submitPrefixDevicePrefetch(mMeta.get());
     }
     return true;
 }
@@ -1411,6 +1429,7 @@ void Llm::clearPrefixCacheSegments() {
     mMeta->segment_total_tokens = 0;
     mMeta->prefix_device_prefetch = false;
     mMeta->prefix_request_id = 0;
+    mMeta->prefix_prompt_token_count = 0;
     if (mMeta->file_flag == KVMeta::PendingReadSegments) {
         mMeta->file_flag = KVMeta::NoChange;
     }

@@ -12,11 +12,16 @@
 #include "MNNFileUtils.h"
 #include "PrefixCachePath.hpp"
 
+#include <cstdlib>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -101,6 +106,87 @@ inline std::shared_ptr<PrefixKVHostCacheEntry> prefixKVReadFileNow(const std::st
     return entry;
 }
 
+class PrefixKVHostCacheWorkerPool {
+public:
+    static PrefixKVHostCacheWorkerPool& get() {
+        static PrefixKVHostCacheWorkerPool pool(threadCountFromEnv());
+        return pool;
+    }
+
+    void post(std::function<void()>&& task) {
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mTasks.emplace(std::move(task));
+        }
+        mCondition.notify_one();
+    }
+
+    int workerCount() const {
+        return mWorkerCount;
+    }
+
+private:
+    static int threadCountFromEnv() {
+        const char* value = std::getenv("MNN_PREFIX_HOST_CACHE_THREADS");
+        if (value == nullptr || value[0] == '\0') {
+            return 4;
+        }
+        int parsed = std::atoi(value);
+        return (parsed == 4 || parsed == 8 || parsed == 16) ? parsed : 4;
+    }
+
+    explicit PrefixKVHostCacheWorkerPool(int workerCount) : mWorkerCount(workerCount) {
+        for (int i = 0; i < mWorkerCount; ++i) {
+            mWorkers.emplace_back([this]() {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lock(mMutex);
+                        mCondition.wait(lock, [this]() {
+                            return mStop || !mTasks.empty();
+                        });
+                        if (mStop && mTasks.empty()) {
+                            break;
+                        }
+                        task = std::move(mTasks.front());
+                        mTasks.pop();
+                    }
+                    task();
+                }
+            });
+        }
+    }
+
+    ~PrefixKVHostCacheWorkerPool() {
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mStop = true;
+        }
+        mCondition.notify_all();
+        for (auto& worker : mWorkers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+    }
+
+    int mWorkerCount = 4;
+    std::vector<std::thread> mWorkers;
+    std::queue<std::function<void()>> mTasks;
+    std::mutex mMutex;
+    std::condition_variable mCondition;
+    bool mStop = false;
+};
+
+inline std::shared_future<std::shared_ptr<PrefixKVHostCacheEntry>> prefixKVSubmitReadFile(const std::string& path) {
+    auto promise = std::make_shared<std::promise<std::shared_ptr<PrefixKVHostCacheEntry>>>();
+    auto future = promise->get_future().share();
+    PrefixKVHostCacheWorkerPool::get().post([path, promise]() {
+        promise->set_value(prefixKVReadFileNow(path));
+    });
+    return future;
+}
+
 } // namespace detail
 
 class PrefixKVHostCache {
@@ -119,9 +205,7 @@ public:
         if (mEntries.find(identity) != mEntries.end()) {
             return;
         }
-        mEntries.emplace(identity, std::async(std::launch::async, [path]() {
-            return detail::prefixKVReadFileNow(path);
-        }).share());
+        mEntries.emplace(identity, detail::prefixKVSubmitReadFile(path));
     }
 
     PrefixKVHostCacheRead readFile(const std::string& path) {
@@ -143,9 +227,7 @@ public:
                 result.host_cache_hit =
                     future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
             } else {
-                future = std::async(std::launch::async, [path]() {
-                    return detail::prefixKVReadFileNow(path);
-                }).share();
+                future = detail::prefixKVSubmitReadFile(path);
                 mEntries.emplace(identity, future);
             }
         }
@@ -174,6 +256,10 @@ private:
 
 inline PrefixKVHostCacheRead readPrefixKVHostCacheFile(const std::string& path) {
     return PrefixKVHostCache::get().readFile(path);
+}
+
+inline int prefixKVHostCacheWorkerCount() {
+    return detail::PrefixKVHostCacheWorkerPool::get().workerCount();
 }
 
 inline void prefetchPrefixKVHostCacheFiles(const std::string& prefixCacheDir,

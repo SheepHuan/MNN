@@ -64,6 +64,17 @@ protected:
                                                    bool& prepared, int& appendKvSeqLen) {
         prepared = false;
         appendKvSeqLen = mNewKvSeqLen;
+        if (mMeta != nullptr && mMeta->file_flag == KVMeta::PendingReadSegments &&
+            !mMeta->prefix_segments.empty()) {
+            MNN_ERROR("[Error]: direct segment prefix cache requires PrefixAttention on CUDA\n");
+            return MNN::NOT_SUPPORT;
+        }
+        return MNN::NO_ERROR;
+    }
+    virtual ErrorCode onProfileComputeStreamStart(cudaStream_t stream) {
+        return MNN::NO_ERROR;
+    }
+    virtual ErrorCode onProfileComputeStreamEnd(cudaStream_t stream) {
         return MNN::NO_ERROR;
     }
 

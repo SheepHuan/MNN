@@ -59,6 +59,9 @@ public:
         int threads = 4;
         bool isR1 = false;
         bool reuseKv = false;
+        int prefixHostCacheThreads = 0;
+        int cudaPrefixPrefetchThreads = 0;
+        int openclPrefixPrefetchThreads = 0;
         std::string backend = "cpu";
         std::string configPath;
         std::string prefixCacheDir = ".cache/kvshare/prefixcache";
