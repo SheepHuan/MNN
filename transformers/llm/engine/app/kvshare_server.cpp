@@ -74,6 +74,26 @@ std::string compositeCacheName(const json& segments) {
 constexpr const char* kDocumentTokenizerPrefixPolicy = "strip-empty-encode-prefix-v1";
 constexpr const char* kDefaultKVPrefixPlaceholder = "{{kv_prefix}}";
 
+const char* llmStatusName(LlmStatus status) {
+    switch (status) {
+        case LlmStatus::NOT_LOADED:
+            return "NOT_LOADED";
+        case LlmStatus::RUNNING:
+            return "RUNNING";
+        case LlmStatus::NORMAL_FINISHED:
+            return "NORMAL_FINISHED";
+        case LlmStatus::MAX_TOKENS_FINISHED:
+            return "MAX_TOKENS_FINISHED";
+        case LlmStatus::USER_CANCEL:
+            return "USER_CANCEL";
+        case LlmStatus::INTERNAL_ERROR:
+            return "INTERNAL_ERROR";
+        case LlmStatus::TIMEOUT:
+            return "TIMEOUT";
+    }
+    return "UNKNOWN";
+}
+
 int stripTokenizerPrefixTokens(std::vector<int>& tokens, const std::vector<int>& prefixTokens) {
     if (tokens.empty() || prefixTokens.empty() || tokens.size() <= prefixTokens.size()) {
         return 0;
@@ -1373,8 +1393,35 @@ bool KvShareServer::applyKvPrefixLocked(const json& kvPrefix, const ChatMessages
         error = "Failed to set direct segment prefix cache";
         return false;
     }
+    int prefixTokenCount = 0;
+    for (const auto& segment : prefixSegments) {
+        prefixTokenCount += segment.token_count;
+    }
+    if (auto* context = llm_->getContext()) {
+        std::cout << "[KvPrefixDebug] stage=setPrefixCacheSegments_ok"
+                  << " backend=" << options_.backend
+                  << " segments=" << prefixSegments.size()
+                  << " prefix_tokens=" << prefixTokenCount
+                  << " prompt_tokens=" << promptTokens.size()
+                  << " history_tokens=" << context->history_tokens.size()
+                  << " all_seq_len=" << context->all_seq_len
+                  << " status=" << llmStatusName(context->status)
+                  << std::endl;
+    }
     double prefetchSubmitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prefetchSubmitStart).count();
     llm_->generate(promptTokens, maxTokens);
+    if (auto* context = llm_->getContext()) {
+        std::cout << "[KvPrefixDebug] stage=generate_return"
+                  << " backend=" << options_.backend
+                  << " prefix_tokens=" << prefixTokenCount
+                  << " prompt_tokens=" << promptTokens.size()
+                  << " status=" << llmStatusName(context->status)
+                  << " prompt_len=" << context->prompt_len
+                  << " gen_seq_len=" << context->gen_seq_len
+                  << " prefill_us=" << context->prefill_us
+                  << " decode_us=" << context->decode_us
+                  << std::endl;
+    }
     llm_->clearPrefixCacheSegments();
 
     prefixInfo = {
