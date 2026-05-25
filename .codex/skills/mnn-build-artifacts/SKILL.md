@@ -54,18 +54,33 @@ Jetson 默认平台名是 `jetson`，默认安装目录是：
 
 需要覆盖时只设置 `MNN_ARTIFACT_PLATFORM` 或 `MNN_ARTIFACT_ROOT`，不要在各个 skill 里写死 `x64`、`jetson_cuda` 或旧的 `output/mnn/<name>`。
 
-## Jetson CUDA 推荐构建
+## Jetson 推荐构建入口
 
-Jetson 上优先使用本仓库内脚本，显式把 build/install 放到本仓库：
+Jetson 构建脚本由本 Skill 维护：
+
+```text
+.codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+```
+
+`project/linux/build_on_jetson.sh` 只保留为兼容入口，内部转发到上面的 skill 脚本；不要再把构建逻辑维护到 `project/linux`。
+
+不显式设置 `JOBS` 时，脚本默认使用当前设备在线 CPU 总数的一半，最少为 1。
+
+优先显式把 build/install 放到本仓库：
 
 ```bash
 BUILD_DIR="$PWD/.cache/build/mnn/jetson_cuda" \
 INSTALL_PREFIX="$PWD/.cache/output/mnn/artifacts/jetson" \
 JOBS=6 CUDA_ARCHS=72 CLEAN=1 \
-bash project/linux/build_on_jetson.sh
+bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
 ```
 
-预期配置日志包含：
+脚本会自动判断当前脚本运行平台：
+
+- Jetson 本机：走原有 CUDA 构建流程，使用 `/usr/local/cuda`、`nvcc`、自动探测或使用 `CUDA_ARCHS`。
+- Linux x86_64：自动下载并校验 AArch64 Linux 交叉工具链到 `.cache/toolchains/`，再交叉编译 Jetson Linux 可运行产物。默认交叉编译不启用 CUDA，因为 x86 主机通常没有 Jetson CUDA sysroot；需要自行提供 CUDA/sysroot 时设置 `ENABLE_CROSS_CUDA=ON` 或 `MNN_CROSS_CUDA=ON`。
+
+Jetson 本机预期配置日志包含：
 
 ```text
 CUDA architectures: 7.2
@@ -76,9 +91,55 @@ Enabling CUDA support (... archs: sm_72)
 -gencode arch=compute_72,code=sm_72
 ```
 
-`project/linux/build_on_jetson.sh` 会显式配置 `-DMNN_BUILD_CONVERTER=ON`，完整构建和快速目标构建后都会尝试把已有运行时产物同步到 `INSTALL_PREFIX`，其中必须包含可用于导出校验的 `MNNConvert`。
+`.codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh` 会显式配置 `-DMNN_BUILD_CONVERTER=ON`，完整构建和快速目标构建后都会尝试把已有运行时产物同步到 `INSTALL_PREFIX`，其中必须包含可用于导出校验的 `MNNConvert`。
 
-`CUDA_ARCHS=72`、`sm_72`、`compute_72` 都应该被归一化为 `7.2`。如果 CMake 报 `Unknown CUDA Architecture Name 72`，优先检查 `project/linux/build_on_jetson.sh` 和 `source/backend/cuda/SelectCudaComputeArch.cmake` 的归一化逻辑。
+`CUDA_ARCHS=72`、`sm_72`、`compute_72` 都应该被归一化为 `7.2`。如果 CMake 报 `Unknown CUDA Architecture Name 72`，优先检查 `.codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh` 和 `source/backend/cuda/SelectCudaComputeArch.cmake` 的归一化逻辑。
+
+## Linux x86_64 交叉编译 Jetson 产物
+
+在 Linux x86_64 主机上直接运行同一个脚本即可自动进入交叉编译：
+
+```bash
+CLEAN=1 \
+bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+```
+
+默认工具链：
+
+```text
+https://developer.arm.com/-/media/files/downloads/gnu-a/9.2-2019.12/binrel/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu.tar.xz
+```
+
+脚本会下载压缩包和同路径 `.asc` 校验文件到：
+
+```text
+.cache/toolchains/
+```
+
+缓存复用条件是本地同时存在压缩包和 `.asc` 文件，并且校验通过；否则会重新下载。Arm 这个工具链的 `.asc` 是 checksum 文本时，脚本按 MD5/SHA1/SHA256 校验压缩包；如果 `.asc` 是 OpenPGP 签名，则使用 `gpg --verify`。缺少 OpenPGP 公钥时脚本会尝试从 `GPG_KEYSERVER` 导入，默认：
+
+```text
+hkps://keyserver.ubuntu.com
+```
+
+可覆盖项：
+
+```bash
+TOOLCHAIN_URL=<aarch64-linux-gnu-toolchain.tar.xz> \
+TOOLCHAIN_SIG_URL=<toolchain.tar.xz.asc> \
+TOOLCHAIN_CACHE_DIR="$PWD/.cache/toolchains" \
+GPG_KEYSERVER=hkps://keyserver.ubuntu.com \
+bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+```
+
+注意不要使用 `gcc-arm-none-eabi` 这类裸机工具链。Jetson 是 Linux 用户态目标，必须使用 `aarch64-*-linux-gnu` 工具链；脚本解压后会检查 `aarch64*linux*gcc/g++`，不匹配就报错。
+
+交叉编译默认输出：
+
+```text
+.cache/build/mnn/jetson_cross/
+.cache/output/mnn/artifacts/jetson/
+```
 
 ## 暂停和清理残留构建
 
@@ -92,6 +153,7 @@ ps -eo pid,ppid,pgid,stat,cmd | rg -n "build_on_jetson|cmake --build|ninja|make|
 
 ```text
 .cache/build/mnn
+.codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
 project/linux/build_on_jetson.sh
 ```
 
@@ -143,7 +205,7 @@ file .cache/build/mnn/jetson_cuda/source/backend/cuda/libMNN_Cuda_Main.so \
      .cache/build/mnn/jetson_cuda/tools/converter/libMNNConvertDeps.so
 ```
 
-`project/linux/build_on_jetson.sh` 默认 `INSTALL_AFTER_BUILD=1`，完整构建后会先运行 `cmake --install "${BUILD_DIR}"`，再把 Jetson 运行时产物同步到 `INSTALL_PREFIX`：
+`.codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh` 默认 `INSTALL_AFTER_BUILD=1`，完整构建后会先运行 `cmake --install "${BUILD_DIR}"`，再把 Jetson 运行时产物同步到 `INSTALL_PREFIX`：
 
 ```text
 .cache/output/mnn/artifacts/jetson/lib/libMNN.so
@@ -164,7 +226,7 @@ file .cache/build/mnn/jetson_cuda/source/backend/cuda/libMNN_Cuda_Main.so \
 如果只用 `BUILD_TARGET=<target>` 做快速增量构建，脚本会跳过 `cmake --install`，但仍会把 build 目录中已经存在的运行时产物同步到 `INSTALL_PREFIX`。需要完全跳过同步时显式设置：
 
 ```bash
-INSTALL_AFTER_BUILD=0 bash project/linux/build_on_jetson.sh
+INSTALL_AFTER_BUILD=0 bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
 ```
 
 ## 常见失败点

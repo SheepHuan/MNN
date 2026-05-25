@@ -8,7 +8,7 @@ PERF_RE = re.compile(
     r"^\[bench_ops/cuda/perf/(?P<op>[^\]]+)\]\s+"
     r"(?P<case>\S+)\s+B=(?P<batch>\d+)\s+qH=(?P<qh>\d+)\s+kvH=(?P<kvh>\d+)\s+"
     r"D=(?P<dim>\d+)\s+past=(?P<past>\d+)\s+add=(?P<add>\d+)\s+"
-    r"avg=(?P<avg>[0-9.eE+-]+)\s+ms\s+(?P<us>[0-9.eE+-]+)\s+us/token"
+    r"avg=(?P<avg>[0-9.eE+-]+)\s+ms(?:\s+(?P<us>[0-9.eE+-]+)\s+us/token)?"
 )
 CASE_RE = re.compile(r"^(?P<model>llama3\.2-[^_]+)_(?P<stage>prefill|decode)_ctx(?P<ctx>\d+)$")
 ACC_RE = re.compile(
@@ -65,7 +65,7 @@ def parse_perf(lines):
             "dim": match.group("dim"),
             "op": match.group("op"),
             "avg": float(match.group("avg")),
-            "us": float(match.group("us")),
+            "us": float(match.group("us")) if match.group("us") else None,
         }
         rows[(row["stage"], row["model"], row["ctx"], row["op"])] = row
     return list(rows.values())
@@ -172,7 +172,11 @@ def print_perf(rows):
         ),
     ):
         base = attention.get((row["stage"], row["model"], row["ctx"]))
-        vs = "-" if not base else f"{row['avg'] / base:.2f}x"
+        ratio = "-"
+        if base and row["op"] == "Attention":
+            ratio = "1.00x"
+        elif base:
+            ratio = f"{base / row['avg']:.2f}x"
         out.append(
             {
                 "stage": row["stage"],
@@ -182,13 +186,12 @@ def print_perf(rows):
                 "kvH": row["kvh"],
                 "D": row["dim"],
                 "op": row["op"],
-                "avg_ms": f"{row['avg']:.4f}",
-                "us/token": f"{row['us']:.2f}",
-                "vs_Attention": vs,
+                "latency_ms": f"{row['avg']:.4f}",
+                "Attention/PagedAttention": ratio,
             }
         )
     print("## Performance")
-    markdown(["stage", "model", "ctx", "qH", "kvH", "D", "op", "avg_ms", "us/token", "vs_Attention"], out)
+    markdown(["stage", "model", "ctx", "qH", "kvH", "D", "op", "latency_ms", "Attention/PagedAttention"], out)
 
 
 def print_accuracy(rows):

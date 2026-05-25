@@ -14,11 +14,8 @@ using namespace MNN::BenchOpsCuda;
 namespace {
 
 static bool printTimedResult(const char* op, const BenchCase& c, float avgMs) {
-    float tokens = static_cast<float>(c.seqLen);
-    float us = avgMs * 1000.0f;
-    MNN_PRINT("[bench_ops/cuda/perf/%s] %-18s B=%d qH=%d kvH=%d D=%d past=%d add=%d avg=%.4f ms %.2f us/token\n",
-              op, c.name, c.batch, c.qHeads, c.kvHeads, c.headDim, c.pastLen, c.seqLen, avgMs,
-              tokens > 0.0f ? us / tokens : 0.0f);
+    MNN_PRINT("[bench_ops/cuda/perf/%s] %-18s B=%d qH=%d kvH=%d D=%d past=%d add=%d avg=%.4f ms\n",
+              op, c.name, c.batch, c.qHeads, c.kvHeads, c.headDim, c.pastLen, c.seqLen, avgMs);
     ::fflush(stdout);
     return true;
 }

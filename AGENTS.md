@@ -12,6 +12,7 @@ MNN 专属 Codex skills 由本目录维护：
 .codex/skills/mnn-llm-bench/SKILL.md  运行和诊断 MNN llm_bench
 .codex/skills/mnn-llm-export/SKILL.md  导出 MNN LLM 或 prefixllm 模型
 .codex/skills/mnn-ops-bench/SKILL.md  CUDA 单算子精度/性能测试
+.codex/skills/mnn-opt-ops/SKILL.md  CPU/CUDA 算子优化和 Jetson 验证流程
 .codex/skills/mnn-support-new-llm/SKILL.md  在 transformers/pic_llm 中适配新 LLM 模型
 ```
 
@@ -36,6 +37,7 @@ git status --short
 - MNN 构建、重编 CUDA MNN、CUDA arch、Jetson/x64 MNN CUDA/LLM 产物构建、install/output 检查或残留构建进程诊断：读 `.codex/skills/mnn-build-artifacts/SKILL.md`。
 - 新增或扩展 MNN 算子、schema/op type/shape/backend/注册表、`PrefixAttention`：读 `.codex/skills/mnn-add-new-op/SKILL.md`。
 - CUDA 单算子 direct-op 精度/性能测试、`test/bench_ops/cuda` 或 CUDA event kernel 耗时统计：读 `.codex/skills/mnn-ops-bench/SKILL.md`。
+- CPU/CUDA 算子性能优化、分析算子慢因，或在本机交叉编译产物并推到 Jetson 验证：读 `.codex/skills/mnn-opt-ops/SKILL.md`。
 - 从 ModelScope 或 Hugging Face/Transformers 格式模型导出 MNN LLM、PIC LLM PagedAttention 或 PrefixLLM/PrefixAttention 模型：读 `.codex/skills/mnn-llm-export/SKILL.md`。
 - 运行 `llm_bench`、测试 CUDA/OpenCL/Vulkan/CPU LLM 推理、确认 GPU 后端注册、检查 execution class 日志或排查后端回退：读 `.codex/skills/mnn-llm-bench/SKILL.md`。
 - 新增、适配或诊断一个尚未支持的 Hugging Face/ModelScope LLM 或多模态 LLM 模型，并修改 `transformers/pic_llm` 的 mapper/config/model/vision/audio/export 流程：读 `.codex/skills/mnn-support-new-llm/SKILL.md`。

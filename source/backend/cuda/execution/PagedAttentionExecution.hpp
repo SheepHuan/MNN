@@ -26,7 +26,7 @@ public:
     };
 
     CUDAPagedAttention(Backend* backend, const MNN::Op* op);
-    virtual ~CUDAPagedAttention() = default;
+    virtual ~CUDAPagedAttention();
     virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override;
@@ -34,6 +34,7 @@ public:
 private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
     ErrorCode syncSlotTable(int requiredSlots);
+    bool ensurePrefillTemp(size_t elements);
 
     CUDABackend* mCudaBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -49,6 +50,9 @@ private:
     int mKvNumHead = 0;
     int mNewKvSeqLen = 0;
     float mScale = 1.0f;
+    float* mPrefillQK = nullptr;
+    float* mPrefillSoftmax = nullptr;
+    size_t mPrefillElements = 0;
 };
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

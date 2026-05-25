@@ -8,6 +8,7 @@
 #include "CPUPagedAttention.hpp"
 #include "CPUBackend.hpp"
 #include "compute/CommonOptFunction.h"
+#include "core/Concurrency.h"
 #include "core/Macro.h"
 #include <algorithm>
 #include <cmath>
@@ -178,21 +179,24 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     auto vCache = mCache->value->host<int8_t>();
     const auto kInput = key->host<int8_t>();
     const auto vInput = value->host<int8_t>();
+    std::vector<int> physicalSlots(kvLen);
+    for (int k = 0; k < kvLen; ++k) {
+        int slot = mMeta ? mMeta->physicalSlot(k) : k;
+        if (slot < 0 || slot >= mCache->maxSlots) {
+            return OUT_OF_MEMORY;
+        }
+        physicalSlots[k] = slot;
+    }
     if (!mIsKVShared) {
         for (int b = 0; b < batch; ++b) {
             for (int l = 0; l < insertLen; ++l) {
-                int slot = mMeta ? mMeta->physicalSlot(baseLogical + l) : (baseLogical + l);
-                if (slot < 0 || slot >= mCache->maxSlots) {
-                    return OUT_OF_MEMORY;
-                }
+                int slot = physicalSlots[baseLogical + l];
                 for (int h = 0; h < kvHeads; ++h) {
-                    for (int d = 0; d < headDim; ++d) {
-                        int inOffset = ((b * newKvLen + l) * kvHeads + h) * headDim + d;
-                        int kOffset = ((slot * batch + b) * kvHeads + h) * headDim + d;
-                        int vOffset = ((b * kvHeads + h) * mCache->maxSlots + slot) * headDim + d;
-                        _pagedWrite(kCache, kOffset, _pagedRead(kInput, inOffset, mBytes), mBytes);
-                        _pagedWrite(vCache, vOffset, _pagedRead(vInput, inOffset, mBytes), mBytes);
-                    }
+                    int inOffset = ((b * newKvLen + l) * kvHeads + h) * headDim;
+                    int kOffset = ((slot * batch + b) * kvHeads + h) * headDim;
+                    int vOffset = ((b * kvHeads + h) * mCache->maxSlots + slot) * headDim;
+                    ::memcpy(kCache + kOffset * mBytes, kInput + inOffset * mBytes, headDim * mBytes);
+                    ::memcpy(vCache + vOffset * mBytes, vInput + inOffset * mBytes, headDim * mBytes);
                 }
             }
         }
@@ -206,57 +210,68 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     const int group = numHeads / kvHeads;
     const auto qInput = query->host<int8_t>();
     auto outPtr = output->host<int8_t>();
-    std::vector<float> scores(kvLen);
-    for (int b = 0; b < batch; ++b) {
-        for (int q = 0; q < insertLen; ++q) {
+    int threadNum = static_cast<CPUBackend*>(backend())->threadNumber();
+    int totalWork = batch * insertLen * numHeads;
+    MNN_CONCURRENCY_BEGIN(tId, threadNum) {
+        std::vector<float> scores(kvLen);
+        for (int index = (int)tId; index < totalWork; index += threadNum) {
+            int h = index % numHeads;
+            int tmp = index / numHeads;
+            int q = tmp % insertLen;
+            int b = tmp / insertLen;
+            int kvHead = h / group;
             int qLogical = baseLogical + q;
-            for (int h = 0; h < numHeads; ++h) {
-                int kvHead = h / group;
-                float maxScore = -std::numeric_limits<float>::infinity();
-                for (int k = 0; k < kvLen; ++k) {
-                    if (k > qLogical) {
-                        scores[k] = -std::numeric_limits<float>::infinity();
-                        continue;
+            int validLen = std::min(kvLen, qLogical + 1);
+            float maxScore = -std::numeric_limits<float>::infinity();
+            for (int k = 0; k < validLen; ++k) {
+                int slot = physicalSlots[k];
+                float score = 0.0f;
+                if (mBytes == 4) {
+                    const float* qPtr = reinterpret_cast<const float*>(qInput) +
+                        ((b * queryLen + q) * numHeads + h) * headDim;
+                    const float* kPtr = reinterpret_cast<const float*>(kCache) +
+                        ((slot * batch + b) * kvHeads + kvHead) * headDim;
+                    for (int d = 0; d < headDim; ++d) {
+                        score += qPtr[d] * kPtr[d];
                     }
-                    int slot = mMeta ? mMeta->physicalSlot(k) : k;
-                    if (slot < 0 || slot >= mCache->maxSlots) {
-                        return OUT_OF_MEMORY;
-                    }
-                    float score = 0.0f;
+                } else {
                     for (int d = 0; d < headDim; ++d) {
                         int qOffset = ((b * queryLen + q) * numHeads + h) * headDim + d;
                         int kOffset = ((slot * batch + b) * kvHeads + kvHead) * headDim + d;
                         score += _pagedRead(qInput, qOffset, mBytes) * _pagedRead(kCache, kOffset, mBytes);
                     }
-                    score = score * mScale + _readFloatMask(mask, q, k, insertLen, kvLen, mBytes);
-                    scores[k] = score;
-                    maxScore = std::max(maxScore, score);
                 }
-                float sum = 0.0f;
-                for (int k = 0; k < kvLen; ++k) {
-                    if (scores[k] == -std::numeric_limits<float>::infinity()) {
+                score = score * mScale + _readFloatMask(mask, q, k, insertLen, kvLen, mBytes);
+                scores[k] = score;
+                maxScore = std::max(maxScore, score);
+            }
+            float sum = 0.0f;
+            for (int k = 0; k < validLen; ++k) {
+                scores[k] = std::exp(scores[k] - maxScore);
+                sum += scores[k];
+            }
+            float invSum = sum > 0.0f ? 1.0f / sum : 0.0f;
+            for (int d = 0; d < headDim; ++d) {
+                float acc = 0.0f;
+                for (int k = 0; k < validLen; ++k) {
+                    if (scores[k] <= 0.0f) {
                         continue;
                     }
-                    scores[k] = std::exp(scores[k] - maxScore);
-                    sum += scores[k];
+                    int slot = physicalSlots[k];
+                    int vOffset = ((b * kvHeads + kvHead) * mCache->maxSlots + slot) * headDim + d;
+                    float v = mBytes == 4 ? reinterpret_cast<const float*>(vCache)[vOffset] : _pagedRead(vCache, vOffset, mBytes);
+                    acc += scores[k] * invSum * v;
                 }
-                float invSum = sum > 0.0f ? 1.0f / sum : 0.0f;
-                for (int d = 0; d < headDim; ++d) {
-                    float acc = 0.0f;
-                    for (int k = 0; k < kvLen; ++k) {
-                        if (scores[k] <= 0.0f) {
-                            continue;
-                        }
-                        int slot = mMeta ? mMeta->physicalSlot(k) : k;
-                        int vOffset = ((b * kvHeads + kvHead) * mCache->maxSlots + slot) * headDim + d;
-                        acc += scores[k] * invSum * _pagedRead(vCache, vOffset, mBytes);
-                    }
-                    int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
+                int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
+                if (mBytes == 4) {
+                    reinterpret_cast<float*>(outPtr)[outOffset] = acc;
+                } else {
                     _pagedWrite(outPtr, outOffset, acc, mBytes);
                 }
             }
         }
     }
+    MNN_CONCURRENCY_END();
     return NO_ERROR;
 }
 
