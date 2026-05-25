@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN LLM Export"
+  short_description: "Export ModelScope LLMs to standard MNN, PIC PagedAttention, or PrefixLLM"
+  default_prompt: "Use $mnn-llm-export from .codex/skills to export a ModelScope cached LLM. Default to standard transformers/llm Llama 3.2 3B under .cache/mnn-llm-export; use .cache/weight only for PIC PagedAttention or PrefixLLM exports."

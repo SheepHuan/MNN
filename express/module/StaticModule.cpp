@@ -136,10 +136,12 @@ static std::vector<std::shared_ptr<BufferStorage>> preRearrangeWeights( // NOLIN
                 break;
             }
             case MNN::OpType_Attention:
+            case MNN::OpType_PagedAttention:
             case MNN::OpType_LinearAttention:
             {
                 // KV Cache sharing: clone from source Attention's execution instead of creating new
-                if (op->type() == OpType_Attention && op->main_type() == OpParameter_AttentionParam) {
+                if ((op->type() == OpType_Attention || op->type() == OpType_PagedAttention) &&
+                    op->main_type() == OpParameter_AttentionParam) {
                     auto param = op->main_as_AttentionParam();
                     int kvSharedIdx = param ? param->kv_shared_layer_index() : -1;
                     if (kvSharedIdx >= 0) {
@@ -167,7 +169,8 @@ static std::vector<std::shared_ptr<BufferStorage>> preRearrangeWeights( // NOLIN
                     break;
                 }
                 // Register Attention execution for KV Cache sharing
-                if (op->type() == OpType_Attention && op->main_type() == OpParameter_AttentionParam) {
+                if ((op->type() == OpType_Attention || op->type() == OpType_PagedAttention) &&
+                    op->main_type() == OpParameter_AttentionParam) {
                     auto param = op->main_as_AttentionParam();
                     int layerIndex = param ? param->layer_index() : -1;
                     if (layerIndex >= 0) {

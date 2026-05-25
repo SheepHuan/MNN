@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN Support New LLM"
+  short_description: "Adapt new LLMs for transformers/pic_llm in this MNN repo"
+  default_prompt: "Use $mnn-support-new-llm from .codex/skills to add or debug a new LLM or multimodal LLM model in transformers/pic_llm."

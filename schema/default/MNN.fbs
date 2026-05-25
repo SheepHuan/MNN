@@ -195,6 +195,7 @@ enum OpType : int {
     SplitGeLU = 303,
     GroupNorm = 304,
     LinearAttention = 305,
+    PagedAttention = 306,
 
     Extra = 512,
     // quantization

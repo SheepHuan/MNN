@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN Add New Op"
+  short_description: "Add custom MNN operators in this MNN repo"
+  default_prompt: "Use $mnn-add-new-op from .codex/skills to add or extend a custom MNN operator in this MNN repo."

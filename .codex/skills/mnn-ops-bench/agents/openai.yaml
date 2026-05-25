@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN Ops Bench"
+  short_description: "Add and run direct CUDA single-op accuracy/performance tests"
+  default_prompt: "Use $mnn-ops-bench from .codex/skills to add or run direct MNN CUDA single-op accuracy and performance tests."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN LLM Bench"
+  short_description: "Run and diagnose MNN llm_bench"
+  default_prompt: "Use $mnn-llm-bench from .codex/skills to run or debug MNN llm_bench backends."

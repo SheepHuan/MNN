@@ -790,6 +790,24 @@ def _compute_yarn_parameters(rotary_dim, base_theta, scaling_config, max_positio
 
     return inv_freq, attention_scaling
 
+def _compute_llama3_parameters(rotary_dim, base_theta, scaling_config):
+    factor = scaling_config['factor']
+    low_freq_factor = scaling_config['low_freq_factor']
+    high_freq_factor = scaling_config['high_freq_factor']
+    old_context_len = scaling_config['original_max_position_embeddings']
+
+    inv_freq = 1.0 / (base_theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim))
+    wavelen = 2 * math.pi / inv_freq
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+
+    inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+    smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+    smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+    is_medium_freq = (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen)
+    inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+    return inv_freq_llama, 1.0
+
 class Rotary(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -851,6 +869,12 @@ class Rotary(torch.nn.Module):
                     base_theta=self.rope_theta,
                     scaling_config=scaling_config,
                     max_position_embeddings=config.max_position_embeddings
+                )
+            elif rope_type == 'llama3':
+                self.theta, self.attention_scaling = _compute_llama3_parameters(
+                    rotary_dim=self.rotary_dim,
+                    base_theta=self.rope_theta,
+                    scaling_config=scaling_config
                 )
             elif rope_type == 'longrope': # longrope in MiniCPM
                 self.is_scaled = True
