@@ -16,6 +16,7 @@ public:
         std::shared_ptr<Tensor> key;       // [max_slots, B, H_kv, D]
         std::shared_ptr<Tensor> value;     // [B, H_kv, max_slots, D]
         std::shared_ptr<Tensor> slotTable; // [max_slots], int32
+        std::shared_ptr<Tensor> sparseQuery; // [max_slots], int32 logical indices for sparse recompute
         int maxSlots = 0;
         int batch = 0;
         int kvHeads = 0;

@@ -1,5 +1,6 @@
 option(BUILD_MLS "Build PC Commandline." OFF)
 option(MNN_LLM_BUILD_DEMO "Build LLM demo" ON)
+option(MNN_PIC_BUILD_SERVER "Build standalone PIC server." ON)
 option(LLM_SUPPORT_HTTP_RESOURCE "Support HTTP resource download" ON)
 
 set(LLM_DEPS ${MNN_DEPS})
@@ -99,6 +100,22 @@ if(MNN_LLM_BUILD_TEST)
     add_executable(pic_test_tokenizer ${CMAKE_CURRENT_LIST_DIR}/test/test_tokenizer.cpp)
     target_include_directories(pic_test_tokenizer PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/)
     target_link_libraries(pic_test_tokenizer pic_llm ${LLM_DEPS})
+endif()
+
+if (MNN_PIC_BUILD_SERVER)
+    add_executable(pic_server
+        ${CMAKE_CURRENT_LIST_DIR}/app/pic_server_main.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/app/pic_server.cpp
+    )
+    target_include_directories(pic_server PRIVATE
+        ${MNN_INCLUDES}
+        ${CMAKE_CURRENT_LIST_DIR}/src/
+        ${CMAKE_CURRENT_LIST_DIR}/app/
+    )
+    set_property(TARGET pic_server PROPERTY CXX_STANDARD 17)
+    set_property(TARGET pic_server PROPERTY CXX_STANDARD_REQUIRED ON)
+    target_link_libraries(pic_server PRIVATE ${LLM_DEPS})
+    target_compile_definitions(pic_server PRIVATE CPPHTTPLIB_NO_EXCEPTIONS)
 endif()
 
 if (BUILD_MLS)

@@ -34,6 +34,18 @@ struct KVMeta {
     std::vector<int> reserveHost;
     // Attention scaling override (gemma4 uses 1.0 instead of 1/sqrt(head_dim))
     float attn_scale = 0.0f; // 0 means use default 1/sqrt(head_dim)
+    // RoPE metadata used when exporting reusable paged KV cache. PagedAttention
+    // stores key cache after forward RoPE; text-cache export writes canonical
+    // no-RoPE keys so later PIC requests can reapply RoPE for their slot.
+    float rope_theta = 10000.0f;
+    float rope_scaling_factor = 1.0f;
+    float rope_scaling_low_freq_factor = 1.0f;
+    float rope_scaling_high_freq_factor = 4.0f;
+    int rope_scaling_original_max_position_embeddings = 0;
+    int max_position_embeddings = 0;
+    int rope_dim = 0; // 0 means use head_dim.
+    float rope_attention_scaling = 1.0f;
+    std::string rope_type = "default";
     int computeReverseSize() const {
         int sum = 0;
         for (int i=0; i<n_reserve; ++i) {

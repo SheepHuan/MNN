@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN PIC Benchmark"
+  short_description: "Run MNN PIC dataset bench on Jetson"
+  default_prompt: "Use $mnn-pic-benchmark from .codex/skills to build and deploy MNN pic_server to Jetson, then run local dataset benchmarks against it."
