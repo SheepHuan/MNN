@@ -328,6 +328,15 @@ PagedAttention 专用分支约定：
 - `precision_recovery.execution_mode` 必须确认是 `native-full-reuse`、`native-cacheblend-sparse-recompute`、`native-epic-sparse-recompute` 或 `native-kvshare-sparse-recompute`，不能只看 HTTP 成功。
 - 对 OpenCL UMA 优化，验证时至少对比优化前后的 full-reuse latency；full-reuse 是隔离 PagedCache hydrate/cache 访问成本的最直接用例。
 
+Full-compute / CUDA PagedAttention 经验：
+
+- 如果普通 MNN LLM prefill 明显快于 PIC `selection_algorithm=full-compute`，优先检查 CUDA `PagedAttention` 是否因为 float causal mask 掉进逐 query row 的 generic kernel。full-compute 长 prefill 通常带 mask；fast/tiled path 必须支持 mask，不能只在 `!useMask` 时启用。
+- CUDA `PagedAttention` 的优化边界是：仍然先把当前 K/V 写入 PagedCache，再通过 `slotTable + PagedCache key/value` 读回做 QK/QKV；不要为了追普通 Attention 性能绕过 PagedCache 直接吃原始 K/V。
+- mask 在 CUDA PagedAttention 中按 float additive mask 读取。fp16 Q/K/V 时也不能把 float mask 指针转成 half；否则既慢又可能在 fallback path 上读错 mask。
+- 长 prefill 应像普通 CUDA Attention 一样按 query piece 分片，例如 256/1024 token 阈值，而不是一次性分配完整 `B*H*Q*K` 的 QK/Softmax 临时缓冲。对 2k+ prompt，这能显著降低显存压力和 cache 抖动。
+- Direct-op 验证要覆盖带 mask 的 PagedAttention prefill。`bench_ops/cuda/perf/PagedAttention/Prefill` 和 `bench_ops/cuda/accuracy/PagedAttention/CompareAttention` 中的 PagedAttention prefill 应传 causal mask，否则测试不到线上 full-compute 的慢路径。
+- 2026-06-03 Jetson / Llama-3.2-3B / CUDA 参考数据：修正 mask fast path 和 query split 后，direct-op `PagedAttention/Prefill` 与普通 `Attention/Prefill` 同量级；ctx2048 的 3B 形状约 `PagedAttention 480ms` vs `Attention 550ms`。端到端 PIC full-compute 在 2312 PIC tokens + 39 prelude + 18 suffix + `max_tokens=1` 下，从约 59.5s 降到首轮约 26.2s、热态约 21.8s；同长度普通 LLM `llm_bench -p 2369 -n 1 -rep 3` 约 94.3 tok/s，即约 25.1s。
+
 Full-reuse / TTFT 经验：
 
 - `full-reuse` 不是“默认重算 PIC 最后一个 token”。正确语义是：hydrate 全量 PIC KV 到 PagedCache 后，suffix token 作为当前上下文里的真实 query 去 attend 已 hydrate 的 PIC KV；`precision_recovery.recompute_token_count` 应为 0，metadata 应体现 `reuse_token_count=pic_token_count`。只有 `cacheblend` / `epic` / `kvshare` / explicit 计划选中的 PIC token 才 sparse recompute。

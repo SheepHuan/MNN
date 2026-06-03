@@ -735,7 +735,16 @@ nsys --version: NVIDIA Nsight Systems version 2025.6.3.541-256337736014v0
 ncu / nv-nsight-cu-cli / nvprof: not found in PATH
 ```
 
-因此当前优先用 Nsight Systems 生成端到端时间线、CUDA API、CUDA kernel、GPU memory 和 OS runtime 摘要。需要逐 kernel 的 occupancy、warp stall 等更细指标时，再安装 Nsight Compute 或把 `ncu` 加入 `PATH`。
+Jetson 设备上也可能已经安装 Nsight Compute，例如：
+
+```text
+nsys: /usr/local/bin/nsys
+nsys-ui: /usr/local/bin/nsys-ui
+ncu: /opt/nvidia/nsight-compute/2022.2.1/ncu
+nsys --version: NVIDIA Nsight Systems version 2023.2.4.44-33011852v0
+```
+
+优先用 Nsight Systems 生成端到端时间线、CUDA API、CUDA kernel、GPU memory 和 OS runtime 摘要；这能对比 normal LLM、PIC full-compute、full-reuse 的 kernel 序列和阶段耗时。需要逐 kernel 的 occupancy、warp stall、memory throughput 等更细指标时，再用 Nsight Compute `ncu` 对少量 kernel 或短 prompt 做二次采样。
 
 采样前确认：
 
@@ -842,6 +851,158 @@ nsys-ui .cache/nsight/llm_bench_cuda_p1024_n1_rep3.nsys-rep
 ```
 
 如果要 profile Vulkan bench，把 `--trace=cuda,nvtx,osrt` 改为 `--trace=vulkan,nvtx,osrt`，按 Vulkan 章节保留 `LD_PRELOAD="$MNN_ARTIFACT_ROOT/lib/libMNN_Vulkan.so"`，并把 bench 参数改为 `-a vulkan`。OpenCL bench 仍优先看 MNN 日志和厂商工具；Nsight Systems 当前主要用于 CUDA/Vulkan 时间线。
+
+### Jetson 四模式 Nsight 对比
+
+当用户要比较“正常 LLM、普通 full-compute、PIC LLM full-compute、full-reuse”的计算图/时间线时，在 Jetson 上用同一套 artifact 和模型长度采集，输出统一放到 `.cache/nsight/<run_id>/`。建议先用 `max_tokens=1` 和固定 prompt/token 长度，避免 decode 循环把 prefill 差异淹没。
+
+严格对比时必须记录每个响应的 `usage.prompt_tokens`。`normal_llm` 的 `-p <N>`、`pic_full_compute` / `pic_full_reuse` 的 `prelude + PIC + suffix`、以及 `server_full_compute` 的真实文本 prompt 长度应尽量一致；如果没有原始全文，只能把 `server_full_compute` 当作 no-PIC server 路径 smoke，不要直接和 PIC 594/2312-token 路径下结论。
+
+四类模式约定：
+
+```text
+normal_llm              普通导出模型，.cache/mnn-llm-export/...，用 llm_bench
+server_full_compute     pic_server 无 pic_cache 的普通 chat/full-compute 请求
+pic_full_compute        pic_server 带 pic_cache，selection_algorithm=full-compute
+pic_full_reuse          pic_server 带 pic_cache，selection_algorithm=full-reuse
+```
+
+先确认工具和路径：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  command -v nsys && nsys --version && command -v ncu || true && \
+  ART=$PWD/.cache/output/mnn/artifacts/jetson_cross_cuda && \
+  test -x "$ART/bin/llm_bench" && test -x "$ART/bin/pic_server" && \
+  test -f "$ART/lib/libMNN_Cuda_Main.so"'
+```
+
+采集 normal LLM：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  REPO=$PWD && ART=$REPO/.cache/output/mnn/artifacts/jetson_cross_cuda && \
+  RUN_ID=${RUN_ID:-jetson_nsight_llm_pic_compare} && OUT=$REPO/.cache/nsight/$RUN_ID && \
+  NORMAL=$REPO/.cache/mnn-llm-export/AI-ModelScope__Llama-3___2-3B-Instruct/config_cuda_greedy.json && \
+  mkdir -p "$OUT" && \
+  LD_LIBRARY_PATH="$ART/lib:/usr/local/cuda-12.2/targets/aarch64-linux/lib:${LD_LIBRARY_PATH:-}" \
+  nsys profile --force-overwrite=true --trace=cuda,nvtx,osrt --sample=process-tree \
+    --cuda-memory-usage=true --stats=true \
+    --output="$OUT/normal_llm_p2369_n1" \
+    "$ART/bin/llm_bench" -m "$NORMAL" -a cuda -p 2369 -n 1 -rep 1 -kv true -load false \
+    2>&1 | tee "$OUT/normal_llm_p2369_n1.console.log"'
+```
+
+采集 `pic_server` 三种请求时，用 `nsys profile` 包住 server 进程，再发送一次 HTTP 请求。`TEXT_META` 指向已经由 `/v1/prefill/text` 生成的 text cache `meta.json`；如果没有现成 cache，先启动一次普通 server 调 `/v1/prefill/text` 构建。
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && bash -s' <<'REMOTE'
+set -euo pipefail
+REPO=$PWD
+ART=$REPO/.cache/output/mnn/artifacts/jetson_cross_cuda
+CONFIG=$REPO/.cache/weight/AI-ModelScope__Llama-3___2-3B-Instruct/config_cuda_greedy.json
+TEXT_META=${TEXT_META:-$REPO/.cache/kvshare/jetson_full_reuse_final/objects/mnn_cuda/doc_jetson-full-reuse-doc/meta.json}
+RUN_ID=${RUN_ID:-jetson_nsight_llm_pic_compare}
+OUT=$REPO/.cache/nsight/$RUN_ID
+mkdir -p "$OUT"
+
+profile_pic_server_mode() {
+  local mode="$1"
+  local port="$2"
+  local out="$OUT/${mode}"
+  local kv_dir="$REPO/.cache/kvshare/nsight_${mode}"
+  rm -f "${out}.nsys-rep" "${out}.sqlite" "${out}.console.log" "${out}.response.json"
+  mkdir -p "$kv_dir"
+  fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+
+  LD_LIBRARY_PATH="$ART/lib:/usr/local/cuda-12.2/targets/aarch64-linux/lib:${LD_LIBRARY_PATH:-}" \
+  nsys profile --force-overwrite=true --trace=cuda,nvtx,osrt --sample=process-tree \
+    --cuda-memory-usage=true --stats=true --output="$out" \
+    "$ART/bin/pic_server" --config "$CONFIG" --host 127.0.0.1 --port "$port" \
+      --kv-cache-dir "$kv_dir" --model llama-pic \
+    > "${out}.console.log" 2>&1 &
+  local nsys_pid=$!
+
+  for _ in $(seq 1 120); do
+    if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  MODE="$mode" PORT="$port" TEXT_META="$TEXT_META" RESPONSE_PATH="${out}.response.json" python3 - <<'PY'
+import http.client, json, os
+mode = os.environ["MODE"]
+port = int(os.environ["PORT"])
+text_meta = os.environ["TEXT_META"]
+response_path = os.environ["RESPONSE_PATH"]
+messages = [
+    {"role": "system", "content": "You are concise. Use cached context if present.\n{{pic_cache}}"},
+    {"role": "user", "content": "Answer with exactly one token: KV"},
+]
+payload = {"model": "llama-pic", "messages": messages, "max_tokens": 1, "temperature": 0.0}
+if mode == "pic_full_compute":
+    payload["pic_cache"] = {"id": "nsight-pic-full-compute", "text_cache_refs": [{"meta_path": text_meta}], "selection_algorithm": "full-compute"}
+elif mode == "pic_full_reuse":
+    payload["pic_cache"] = {"id": "nsight-pic-full-reuse", "text_cache_refs": [{"meta_path": text_meta}], "selection_algorithm": "full-reuse"}
+conn = http.client.HTTPConnection("127.0.0.1", port, timeout=240)
+conn.request("POST", "/v1/chat/completions", body=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+resp = conn.getresponse()
+raw = resp.read()
+conn.close()
+open(response_path, "wb").write(raw)
+print(resp.status)
+PY
+
+  kill -INT "$nsys_pid" >/dev/null 2>&1 || true
+  wait "$nsys_pid" || true
+}
+
+profile_pic_server_mode server_full_compute 18151
+profile_pic_server_mode pic_full_compute 18152
+profile_pic_server_mode pic_full_reuse 18153
+REMOTE
+```
+
+生成四种模式的摘要：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  RUN_ID=${RUN_ID:-jetson_nsight_llm_pic_compare} && OUT=$PWD/.cache/nsight/$RUN_ID && \
+  for rep in "$OUT"/*.nsys-rep; do \
+    base=${rep%.nsys-rep}; \
+    nsys stats --force-overwrite=true \
+      --report cuda_gpu_kern_sum --report cuda_api_sum \
+      --report cuda_gpu_mem_time_sum --report cuda_gpu_mem_size_sum \
+      --format table --output - "$rep" 2>&1 | tee "${base}.stats.txt"; \
+    nsys export --force-overwrite=true --type sqlite --output "${base}.sqlite" "$rep" >/dev/null 2>&1 || true; \
+  done'
+```
+
+对比时至少交付：
+
+```text
+*.nsys-rep          Nsight Systems GUI 时间线，可看 kernel 序列/并发/空洞
+*.stats.txt         kernel、CUDA API、memcpy/memset 汇总
+*.sqlite            可脚本化抽取 kernel 顺序和阶段
+*.console.log       MNN backend / execution mode / fallback 日志
+*.response.json     pic_server 返回的 precision_recovery.execution_mode 和 token usage
+```
+
+`server_full_compute` 的响应不应包含 `pic_cache`；`pic_full_compute` 应为 `precision_recovery.execution_mode=native-full-compute`；`pic_full_reuse` 应为 `native-full-reuse` 且 `recompute_token_count=0`。如果响应 metadata 不满足这些条件，该 profile 不能用于四模式对比。
+
+需要逐 kernel 计算指标时，用 Nsight Compute 对短 prompt 或少量 kernel 采样，避免完整 LLM 运行过慢：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  REPO=$PWD && ART=$REPO/.cache/output/mnn/artifacts/jetson_cross_cuda && \
+  NORMAL=$REPO/.cache/mnn-llm-export/AI-ModelScope__Llama-3___2-3B-Instruct/config_cuda_greedy.json && \
+  OUT=$REPO/.cache/nsight/ncu_smoke && mkdir -p "$OUT" && \
+  LD_LIBRARY_PATH="$ART/lib:/usr/local/cuda-12.2/targets/aarch64-linux/lib:${LD_LIBRARY_PATH:-}" \
+  ncu --target-processes all --set default --launch-count 20 \
+    --export "$OUT/normal_llm_p128_ncu" --force-overwrite \
+    "$ART/bin/llm_bench" -m "$NORMAL" -a cuda -p 128 -n 1 -rep 1 -kv true -load false'
+```
 
 ## MLS server
 

@@ -129,7 +129,7 @@ __global__ void exportCanonicalPagedKeyKernel(const T* keyCache, T* keyOut, cons
 
 template <typename T>
 __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T* valueCache, T* output,
-                                     const T* mask, const int* slotTable, int maskElements, int batch,
+                                     const float* mask, const int* slotTable, int maskElements, int batch,
                                      int queryLen, int insertLen, int numHeads, int kvHeads, int headDim,
                                      int baseLogical, int kvLen, int maxSlots, float scale,
                                      const int* queryLogicalIndices) {
@@ -176,7 +176,7 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
             int col = k - maskGap;
             int maskIdx = q * maskCols + col;
             if (maskIdx >= 0 && maskIdx < maskElements) {
-                score += pagedToFloat<T>(mask[maskIdx]);
+                score += mask[maskIdx];
             }
         }
         scores[k] = score;
@@ -228,8 +228,10 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
 
 template <typename T>
 __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* scores, const int* slotTable,
+                                     const float* mask, int maskElements,
                                      int batch, int queryLen, int insertLen, int numHeads, int kvHeads,
-                                     int headDim, int baseLogical, int kvLen, int maxSlots, float scale,
+                                     int headDim, int baseLogical, int qStart, int qPieceLen, int kvLen, int maxSlots,
+                                     float scale,
                                      const int* queryLogicalIndices) {
     constexpr int TILE_Q = 16;
     constexpr int TILE_K = 16;
@@ -238,7 +240,8 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
     __shared__ float kTile[TILE_K][TILE_D + 1];
 
     int k = blockIdx.x * TILE_K + threadIdx.x;
-    int q = blockIdx.y * TILE_Q + threadIdx.y;
+    int qLocal = blockIdx.y * TILE_Q + threadIdx.y;
+    int q = qStart + qLocal;
     int bh = blockIdx.z;
     if (bh >= batch * numHeads) {
         return;
@@ -247,13 +250,19 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
     int h = bh % numHeads;
     int group = numHeads / kvHeads;
     int kvHead = h / group;
-    int qLogical = queryLogicalIndices ? queryLogicalIndices[q] : (baseLogical + q);
-    int scoreOffset = ((b * numHeads + h) * insertLen + q) * kvLen + k;
+    bool validQ = qLocal < qPieceLen && q < insertLen;
+    int qLogical = validQ ? (queryLogicalIndices ? queryLogicalIndices[q] : (baseLogical + q)) : -1;
+    int scoreOffset = ((b * numHeads + h) * qPieceLen + qLocal) * kvLen + k;
 
     int slot = k < kvLen ? (slotTable ? slotTable[k] : k) : -1;
-    bool validQ = q < insertLen;
     bool validK = k < kvLen && slot >= 0 && slot < maxSlots;
     bool validScore = validQ && validK && k <= qLogical;
+    int maskCols = 0;
+    int maskGap = 0;
+    if (mask != nullptr && maskElements > 1) {
+        maskCols = maskElements >= insertLen * kvLen ? kvLen : insertLen;
+        maskGap = kvLen - maskCols;
+    }
 
     float score = 0.0f;
     for (int dStart = 0; dStart < headDim; dStart += TILE_D) {
@@ -287,13 +296,21 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
         __syncthreads();
     }
     if (validQ && k < kvLen) {
-        scores[scoreOffset] = validScore ? score * scale : -FLT_MAX;
+        float finalScore = validScore ? score * scale : -FLT_MAX;
+        if (validScore && mask != nullptr && maskCols > 0 && k >= maskGap) {
+            int col = k - maskGap;
+            int maskIdx = q * maskCols + col;
+            if (maskIdx >= 0 && maskIdx < maskElements) {
+                finalScore += mask[maskIdx];
+            }
+        }
+        scores[scoreOffset] = finalScore;
     }
 }
 
 template <typename T>
 __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T* output, const int* slotTable,
-                                      int batch, int queryLen, int insertLen, int numHeads, int kvHeads,
+                                      int batch, int queryLen, int qStart, int qPieceLen, int numHeads, int kvHeads,
                                       int headDim, int kvLen, int maxSlots) {
     constexpr int TILE_D = 32;
     constexpr int TILE_Q = 8;
@@ -302,7 +319,8 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
     __shared__ float valueTile[TILE_K][TILE_D + 1];
 
     int d = blockIdx.x * TILE_D + threadIdx.x;
-    int q = blockIdx.y * TILE_Q + threadIdx.y;
+    int qLocal = blockIdx.y * TILE_Q + threadIdx.y;
+    int q = qStart + qLocal;
     int bh = blockIdx.z;
     if (bh >= batch * numHeads) {
         return;
@@ -311,7 +329,7 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
     int h = bh % numHeads;
     int group = numHeads / kvHeads;
     int kvHead = h / group;
-    const float* probBase = probs + ((b * numHeads + h) * insertLen) * kvLen;
+    const float* probBase = probs + ((b * numHeads + h) * qPieceLen) * kvLen;
     const T* valueBase = valueCache + ((b * kvHeads + kvHead) * maxSlots) * headDim;
 
     float acc = 0.0f;
@@ -319,8 +337,8 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
     int linearThreads = blockDim.x * blockDim.y;
     for (int kStart = 0; kStart < kvLen; kStart += TILE_K) {
         int kForProb = kStart + threadIdx.x;
-        if (q < insertLen && kForProb < kvLen) {
-            probTile[threadIdx.y][threadIdx.x] = probBase[q * kvLen + kForProb];
+        if (qLocal < qPieceLen && kForProb < kvLen) {
+            probTile[threadIdx.y][threadIdx.x] = probBase[qLocal * kvLen + kForProb];
         } else {
             probTile[threadIdx.y][threadIdx.x] = 0.0f;
         }
@@ -341,7 +359,7 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
         }
         __syncthreads();
 
-        if (q < insertLen && d < headDim) {
+        if (qLocal < qPieceLen && q < queryLen && d < headDim) {
 #pragma unroll
             for (int kk = 0; kk < TILE_K; ++kk) {
                 if (kStart + kk < kvLen) {
@@ -352,7 +370,7 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
         __syncthreads();
     }
 
-    if (q < insertLen && d < headDim) {
+    if (qLocal < qPieceLen && q < queryLen && d < headDim) {
         int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
         output[outOffset] = pagedFromFloat<T>(acc);
     }
@@ -950,51 +968,67 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     mScale = (mMeta && mMeta->attn_scale > 0) ? mMeta->attn_scale : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
     bool useMask = mask != nullptr && mask->elementSize() > 1 && mask->getType().code == halide_type_float;
     int maskElements = useMask ? static_cast<int>(mask->elementSize()) : 0;
-    if (insertLen > 1 && !useMask) {
-        size_t prefillElements = static_cast<size_t>(mBatch) * mNumHead * insertLen * kvLen;
+    if (insertLen > 1) {
+        int qSplitNum = 1;
+        if (insertLen > 1024) {
+            qSplitNum = UP_DIV(insertLen, 1024);
+        } else if (insertLen > 256) {
+            qSplitNum = UP_DIV(insertLen, 256);
+        }
+        const int maxPieceLen = UP_DIV(insertLen, qSplitNum);
+        size_t prefillElements = static_cast<size_t>(mBatch) * mNumHead * maxPieceLen * kvLen;
         if (ensurePrefillTemp(prefillElements)) {
-            dim3 qkBlock(16, 16, 1);
-            dim3 qkGrid(UP_DIV(kvLen, qkBlock.x), UP_DIV(insertLen, qkBlock.y), mBatch * mNumHead);
-            if (mPrecision == 4) {
-                pagedPrefillQKKernel<float><<<qkGrid, qkBlock, 0, stream>>>(
-                    pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), mPrefillQK,
-                    pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, insertLen, mNumHead,
-                    mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
-            } else {
-                pagedPrefillQKKernel<half><<<qkGrid, qkBlock, 0, stream>>>(
-                    pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), mPrefillQK,
-                    pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, insertLen, mNumHead,
-                    mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
-            }
-            checkKernelErrors;
+            for (int piece = 0; piece < qSplitNum; ++piece) {
+                const int qStart = piece * maxPieceLen;
+                const int qPieceLen = std::min(maxPieceLen, insertLen - qStart);
+                if (qPieceLen <= 0) {
+                    continue;
+                }
+                dim3 qkBlock(16, 16, 1);
+                dim3 qkGrid(UP_DIV(kvLen, qkBlock.x), UP_DIV(qPieceLen, qkBlock.y), mBatch * mNumHead);
+                if (mPrecision == 4) {
+                    pagedPrefillQKKernel<float><<<qkGrid, qkBlock, 0, stream>>>(
+                        pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), mPrefillQK,
+                        pagedDevPtr<int>(mCache->slotTable.get()), useMask ? pagedDevPtr<float>(mask) : nullptr,
+                        maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead, mKvNumHead, mHeadDim,
+                        baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+                } else {
+                    pagedPrefillQKKernel<half><<<qkGrid, qkBlock, 0, stream>>>(
+                        pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), mPrefillQK,
+                        pagedDevPtr<int>(mCache->slotTable.get()), useMask ? pagedDevPtr<float>(mask) : nullptr,
+                        maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead, mKvNumHead, mHeadDim,
+                        baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+                }
+                checkKernelErrors;
 
-            const int axis = kvLen;
-            const int outside = mBatch * mNumHead * insertLen;
-            const int count = outside;
-            if (axis <= 32) {
-                SOFTMAX_WARP_32<float><<<count, 32, 0, stream>>>(mPrefillQK, mPrefillSoftmax, 1, axis, outside, count);
-            } else {
-                constexpr int threads = 256;
-                int calcMultiNum = UP_DIV(axis, threads);
-                SOFTMAX_AXIS_REDUCE<float><<<count, threads, 0, stream>>>(
-                    mPrefillQK, mPrefillSoftmax, 1, axis, threads, calcMultiNum, outside, count);
-            }
-            checkKernelErrors;
+                const int axis = kvLen;
+                const int outside = mBatch * mNumHead * qPieceLen;
+                const int count = outside;
+                if (axis <= 32) {
+                    SOFTMAX_WARP_32<float><<<count, 32, 0, stream>>>(mPrefillQK, mPrefillSoftmax, 1, axis, outside, count);
+                } else {
+                    constexpr int threads = 256;
+                    int calcMultiNum = UP_DIV(axis, threads);
+                    SOFTMAX_AXIS_REDUCE<float><<<count, threads, 0, stream>>>(
+                        mPrefillQK, mPrefillSoftmax, 1, axis, threads, calcMultiNum, outside, count);
+                }
+                checkKernelErrors;
 
-            dim3 qkvBlock(32, 8, 1);
-            dim3 qkvGrid(UP_DIV(mHeadDim, qkvBlock.x), UP_DIV(insertLen, qkvBlock.y), mBatch * mNumHead);
-            if (mPrecision == 4) {
-                pagedPrefillQKVKernel<float><<<qkvGrid, qkvBlock, 0, stream>>>(
-                    mPrefillSoftmax, pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
-                    pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, insertLen, mNumHead,
-                    mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
-            } else {
-                pagedPrefillQKVKernel<half><<<qkvGrid, qkvBlock, 0, stream>>>(
-                    mPrefillSoftmax, pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
-                    pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, insertLen, mNumHead,
-                    mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
+                dim3 qkvBlock(32, 8, 1);
+                dim3 qkvGrid(UP_DIV(mHeadDim, qkvBlock.x), UP_DIV(qPieceLen, qkvBlock.y), mBatch * mNumHead);
+                if (mPrecision == 4) {
+                    pagedPrefillQKVKernel<float><<<qkvGrid, qkvBlock, 0, stream>>>(
+                        mPrefillSoftmax, pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
+                        pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, qStart, qPieceLen,
+                        mNumHead, mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
+                } else {
+                    pagedPrefillQKVKernel<half><<<qkvGrid, qkvBlock, 0, stream>>>(
+                        mPrefillSoftmax, pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
+                        pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, qStart, qPieceLen,
+                        mNumHead, mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
+                }
+                checkKernelErrors;
             }
-            checkKernelErrors;
             return NO_ERROR;
         }
     }
@@ -1011,7 +1045,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     } else {
         pagedAttentionKernel<half><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), pagedDevPtr<half>(mCache->value.get()),
-            pagedDevPtr<half>(output), useMask ? pagedDevPtr<half>(mask) : nullptr,
+            pagedDevPtr<half>(output), useMask ? pagedDevPtr<float>(mask) : nullptr,
             pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead,
             mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
     }

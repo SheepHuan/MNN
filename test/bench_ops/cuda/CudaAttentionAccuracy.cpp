@@ -151,7 +151,12 @@ static bool runPagedSequence(MNNForwardType type, PagedOutputs* outputs) {
         !bench.writeTensor(v, vData)) {
         return false;
     }
-    std::vector<Tensor*> inputs = {q, k, v};
+    auto mask = bench.tensor({prefillLen, prefillLen});
+    auto maskData = makeCausalMask(prefillLen, prefillLen);
+    if (!mask || !bench.writeTensor(mask, maskData)) {
+        return false;
+    }
+    std::vector<Tensor*> inputs = {q, k, v, mask};
     std::vector<Tensor*> outTensors = {out};
     auto exe = bench.create(inputs, outTensors, op->get());
     if (!exe) {
@@ -306,7 +311,12 @@ static bool runPagedSequenceConfig(MNNForwardType type, const PagedDecodeCase& c
         !bench.writeTensor(v, vData)) {
         return false;
     }
-    std::vector<Tensor*> inputs = {q, k, v};
+    auto mask = bench.tensor({c.context, c.context});
+    auto maskData = makeCausalMask(c.context, c.context);
+    if (!mask || !bench.writeTensor(mask, maskData)) {
+        return false;
+    }
+    std::vector<Tensor*> inputs = {q, k, v, mask};
     std::vector<Tensor*> outTensors = {out};
     auto exe = bench.create(inputs, outTensors, op->get());
     if (!exe) {

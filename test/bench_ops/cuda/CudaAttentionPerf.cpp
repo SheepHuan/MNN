@@ -215,6 +215,14 @@ static bool runPagedAttentionCase(const BenchCase& c) {
         return false;
     }
     std::vector<Tensor*> inputs = {q, k, v};
+    if (c.pastLen == 0 && c.seqLen > 1) {
+        auto mask = bench.tensor({c.seqLen, c.seqLen});
+        auto maskData = makeCausalMask(c.seqLen, c.seqLen);
+        if (!mask || !bench.writeTensor(mask, maskData)) {
+            return false;
+        }
+        inputs.emplace_back(mask);
+    }
     std::vector<Tensor*> outputs = {o};
     auto exe = bench.create(inputs, outputs, op->get());
     if (!exe) {
