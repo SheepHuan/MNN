@@ -97,6 +97,12 @@ rsync -a --delete \
   jetson@192.168.101.192:/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda/
 ```
 
+LLM / PIC server 产物也走同一个 artifact root；`pic_server` 应出现在：
+
+```text
+.cache/output/mnn/artifacts/jetson_cross_cuda/bin/pic_server
+```
+
 Jetson 原生构建只作为 fallback：
 
 ```bash
@@ -162,11 +168,51 @@ ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
   python3 .codex/skills/mnn-ops-bench/scripts/summarize_attention_logs.py .cache/bench_ops/cross_cuda_latest'
 ```
 
+## PIC Server Smoke
+
+需要验证 MNN 自维护的独立 PIC server 时，仍然在本机交叉编译产物并推到 Jetson，再从远端 artifact root 启动，不依赖 `mls`：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  REPO=$PWD && \
+  ART=$REPO/.cache/output/mnn/artifacts/jetson_cross_cuda && \
+  MODEL=$REPO/.cache/weight/AI-ModelScope__Llama-3___2-3B-Instruct && \
+  CONFIG=$MODEL/config_cuda_greedy.json && \
+  KV_DIR=$REPO/.cache/kvshare/pic_server_smoke && \
+  LD_LIBRARY_PATH="$ART/lib:/usr/local/cuda-12.2/targets/aarch64-linux/lib:${LD_LIBRARY_PATH:-}" \
+    "$ART/bin/pic_server" --config "$CONFIG" --host 127.0.0.1 --port 18091 \
+    --kv-cache-dir "$KV_DIR" --model llama-pic'
+```
+
+另一个远端命令发文档 prefill：
+
+```bash
+ssh jetson@192.168.101.192 'curl -s -X POST http://127.0.0.1:18091/v1/prefill/text \
+  -H "Content-Type: application/json" \
+  -d "{\"id\":\"smoke_doc\",\"type\":\"text\",\"content\":\"Jetson PIC cache smoke text.\",\"force\":true}"'
+```
+
+期望响应包含 `format=kvshare-prefix-cache-meta-v1`、`cache_status=built`、非零 `token_count`、`layer_count`，并在 `.cache/kvshare/pic_server_smoke/objects/<backend>/<cache_name>/layers/` 下生成每层分离的 `.k` / `.v` raw KV 文件和同层 `.json` shape sidecar。确认 `kv_layout.kv_heads`、`kv_layout.head_dim`、`key_shape`、`value_shape` 来自真实 sidecar，而不是 0 或猜测值。
+
+继续验证 PIC 复用与重算模式：
+
+```bash
+ssh jetson@192.168.101.192 'curl -s -X POST http://127.0.0.1:18091/v1/kv/pic_caches \
+  -H "Content-Type: application/json" \
+  -d "{\"id\":\"smoke_pic\",\"text_cache_refs\":[{\"id\":\"smoke_doc\"}],\"selection_algorithm\":\"full-reuse\"}"'
+
+ssh jetson@192.168.101.192 'curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"llama-pic\",\"messages\":[{\"role\":\"user\",\"content\":\"{{pic_cache}}\\nQuestion: what text was cached?\"}],\"max_tokens\":8,\"temperature\":0,\"pic_cache\":{\"id\":\"smoke_pic\",\"text_cache_refs\":[{\"id\":\"smoke_doc\"}],\"selection_algorithm\":\"full-reuse\"}}"'
+```
+
+`precision_recovery.execution_mode` 是判断实际执行路径的关键：`native-full-reuse` 表示磁盘 PIC KV 已写入 paged slots，`native-full-compute` 表示完整重算，`native-epic-sparse-recompute` 表示 EPIC 头部 token sparse recompute + 其余 PIC token 复用，`native-cacheblend-sparse-recompute` 表示按 score layer value delta 选 top-ratio token，`native-kvshare-sparse-recompute` 表示按 MNN C++ K/V delta influence proxy 选 top-ratio token。`epic/cacheblend/kvshare` 应有 `metadata.native_sparse_recompute_scope=python_prefill_layer_plan`；当 `pic_recompute_score_layer_idx > 0` 时，`metadata.pre_score_kv_source=full_prompt_reference` 和 `metadata.pre_score_compute_layers=<score_layer_idx>` 表示 score layer 前保持 token 正常计算语义。从 score layer 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
+
 ## 优化判断
 
 报告结果时至少说明：
 
 - 修改了 CPU 还是 CUDA 路径，核心瓶颈是什么。
 - 精度是否通过。
-- 性能表包含 `stage | model | ctx | qH | kvH | D | op | avg_ms | us/token | vs_Attention`。
-- 与优化前的 Jetson 数据相比，PagedAttention 的 prefill/decode 倍数是否下降。
+- 性能表包含 `stage | model | ctx | qH | kvH | D | op | latency_ms | Attention/PagedAttention`，其中 `Attention/PagedAttention > 1` 表示普通 `Attention` 比 `PagedAttention` 慢。
+- 与优化前的 Jetson 数据相比，PagedAttention 的 prefill/decode 延迟和 `Attention/PagedAttention` 倍数是否改善。

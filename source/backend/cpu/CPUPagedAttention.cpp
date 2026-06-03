@@ -10,9 +10,11 @@
 #include "compute/CommonOptFunction.h"
 #include "core/Concurrency.h"
 #include "core/Macro.h"
+#include "core/MNNFileUtils.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <vector>
 
@@ -67,6 +69,255 @@ static inline float _readFloatMask(const Tensor* mask, int q, int logicalK, int 
         return 0.0f;
     }
     return _pagedRead(mask->host<int8_t>(), idx, bytes);
+}
+
+static bool _writeBinaryFile(const std::string& path, const std::vector<int8_t>& data) {
+    std::ofstream os(path, std::ios::binary);
+    if (!os.good()) {
+        return false;
+    }
+    if (!data.empty()) {
+        os.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+    return os.good();
+}
+
+static bool _readBinaryFile(const std::string& path, std::vector<int8_t>& data) {
+    std::ifstream is(path, std::ios::binary | std::ios::ate);
+    if (!is.good()) {
+        return false;
+    }
+    auto size = is.tellg();
+    if (size < 0) {
+        return false;
+    }
+    data.resize(static_cast<size_t>(size));
+    is.seekg(0, std::ios::beg);
+    if (!data.empty()) {
+        is.read(reinterpret_cast<char*>(data.data()), size);
+    }
+    return is.good() || is.eof();
+}
+
+static int _ropeDimForExport(const KVMeta* meta, int headDim) {
+    if (meta == nullptr || meta->rope_dim <= 0) {
+        return headDim;
+    }
+    return std::min(headDim, meta->rope_dim);
+}
+
+static float _ropeInvFreqForExport(const KVMeta* meta, int pairIndex, int ropeDim) {
+    const float theta = (meta != nullptr && meta->rope_theta > 0.0f) ? meta->rope_theta : 10000.0f;
+    float invFreq = std::pow(theta, -static_cast<float>(2 * pairIndex) / static_cast<float>(ropeDim));
+    if (meta == nullptr || meta->rope_type != "llama3") {
+        return invFreq;
+    }
+    const float factor = std::max(meta->rope_scaling_factor, 1.0f);
+    const float lowFreqFactor = std::max(meta->rope_scaling_low_freq_factor, 1.0e-6f);
+    const float highFreqFactor = std::max(meta->rope_scaling_high_freq_factor, 1.0e-6f);
+    const int oldContext = meta->rope_scaling_original_max_position_embeddings > 0
+        ? meta->rope_scaling_original_max_position_embeddings
+        : meta->max_position_embeddings;
+    if (oldContext <= 0 || factor == 1.0f || lowFreqFactor == highFreqFactor) {
+        return invFreq;
+    }
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const float wavelen = kTwoPi / invFreq;
+    const float lowFreqWavelen = static_cast<float>(oldContext) / lowFreqFactor;
+    const float highFreqWavelen = static_cast<float>(oldContext) / highFreqFactor;
+    float scaled = wavelen > lowFreqWavelen ? invFreq / factor : invFreq;
+    if (wavelen >= highFreqWavelen && wavelen <= lowFreqWavelen) {
+        const float smooth = (static_cast<float>(oldContext) / wavelen - lowFreqFactor) /
+                             (highFreqFactor - lowFreqFactor);
+        scaled = (1.0f - smooth) * invFreq / factor + smooth * invFreq;
+    }
+    return scaled;
+}
+
+static float _ropeInvFreqForSegment(const PagedKVExternalSegment& segment, int pairIndex, int ropeDim) {
+    const float theta = segment.ropeTheta > 0.0f ? segment.ropeTheta : 10000.0f;
+    float invFreq = std::pow(theta, -static_cast<float>(2 * pairIndex) / static_cast<float>(ropeDim));
+    if (segment.ropeType != "llama3") {
+        return invFreq;
+    }
+    const float factor = std::max(segment.ropeScalingFactor, 1.0f);
+    const float lowFreqFactor = std::max(segment.ropeScalingLowFreqFactor, 1.0e-6f);
+    const float highFreqFactor = std::max(segment.ropeScalingHighFreqFactor, 1.0e-6f);
+    const int oldContext = segment.ropeScalingOriginalMaxPositionEmbeddings > 0
+        ? segment.ropeScalingOriginalMaxPositionEmbeddings
+        : segment.maxPositionEmbeddings;
+    if (oldContext <= 0 || factor == 1.0f || lowFreqFactor == highFreqFactor) {
+        return invFreq;
+    }
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const float wavelen = kTwoPi / invFreq;
+    const float lowFreqWavelen = static_cast<float>(oldContext) / lowFreqFactor;
+    const float highFreqWavelen = static_cast<float>(oldContext) / highFreqFactor;
+    float scaled = wavelen > lowFreqWavelen ? invFreq / factor : invFreq;
+    if (wavelen >= highFreqWavelen && wavelen <= lowFreqWavelen) {
+        const float smooth = (static_cast<float>(oldContext) / wavelen - lowFreqFactor) /
+                             (highFreqFactor - lowFreqFactor);
+        scaled = (1.0f - smooth) * invFreq / factor + smooth * invFreq;
+    }
+    return scaled;
+}
+
+static void _inverseRopeKeyData(std::vector<int8_t>& keyData, int tokenCount, int batch, int kvHeads, int headDim,
+                                int bytes, const KVMeta* meta) {
+    int ropeDim = _ropeDimForExport(meta, headDim);
+    ropeDim = std::min(ropeDim, headDim);
+    ropeDim = (ropeDim / 2) * 2;
+    if (ropeDim <= 0) {
+        return;
+    }
+    const int half = ropeDim / 2;
+    const float invAttentionScale = (meta != nullptr && meta->rope_attention_scaling > 0.0f)
+        ? (1.0f / meta->rope_attention_scaling)
+        : 1.0f;
+    for (int l = 0; l < tokenCount; ++l) {
+        for (int b = 0; b < batch; ++b) {
+            for (int h = 0; h < kvHeads; ++h) {
+                int base = ((l * batch + b) * kvHeads + h) * headDim;
+                for (int p = 0; p < half; ++p) {
+                    const float angle = static_cast<float>(l) * _ropeInvFreqForExport(meta, p, ropeDim);
+                    const float c = std::cos(angle);
+                    const float s = std::sin(angle);
+                    const int first = base + p;
+                    const int second = base + p + half;
+                    const float y0 = _pagedRead(keyData.data(), first, bytes);
+                    const float y1 = _pagedRead(keyData.data(), second, bytes);
+                    _pagedWrite(keyData.data(), first, (y0 * c + y1 * s) * invAttentionScale, bytes);
+                    _pagedWrite(keyData.data(), second, (y1 * c - y0 * s) * invAttentionScale, bytes);
+                }
+            }
+        }
+    }
+}
+
+static bool _writeShapeFile(const std::string& path, int batch, int kvHeads, int headDim, int tokenCount, int bytes,
+                            const KVMeta* meta) {
+    std::ofstream os(path, std::ios::binary);
+    if (!os.good()) {
+        return false;
+    }
+    int ropeDim = _ropeDimForExport(meta, headDim);
+    os << "{\n"
+       << "  \"format\": \"mnn-paged-attention-kv-shape-v1\",\n"
+       << "  \"batch\": " << batch << ",\n"
+       << "  \"kv_heads\": " << kvHeads << ",\n"
+       << "  \"head_dim\": " << headDim << ",\n"
+       << "  \"token_count\": " << tokenCount << ",\n"
+       << "  \"dtype_bytes\": " << bytes << ",\n"
+       << "  \"key_layout\": \"[token,batch,kv_head,head_dim]\",\n"
+       << "  \"value_layout\": \"[batch,kv_head,token,head_dim]\",\n"
+       << "  \"key_rope_state\": \"canonical_no_rope\",\n"
+       << "  \"rope_pairing\": \"half\",\n"
+       << "  \"rope_theta\": " << ((meta != nullptr && meta->rope_theta > 0.0f) ? meta->rope_theta : 10000.0f) << ",\n"
+       << "  \"rope_dim\": " << ropeDim << ",\n"
+       << "  \"rope_type\": \"" << ((meta != nullptr && !meta->rope_type.empty()) ? meta->rope_type : "default") << "\",\n"
+       << "  \"rope_scaling_factor\": " << (meta != nullptr ? meta->rope_scaling_factor : 1.0f) << ",\n"
+       << "  \"rope_scaling_low_freq_factor\": " << (meta != nullptr ? meta->rope_scaling_low_freq_factor : 1.0f) << ",\n"
+       << "  \"rope_scaling_high_freq_factor\": " << (meta != nullptr ? meta->rope_scaling_high_freq_factor : 4.0f) << ",\n"
+       << "  \"rope_scaling_original_max_position_embeddings\": "
+       << (meta != nullptr ? meta->rope_scaling_original_max_position_embeddings : 0) << ",\n"
+       << "  \"max_position_embeddings\": " << (meta != nullptr ? meta->max_position_embeddings : 0) << "\n"
+       << "}\n";
+    return os.good();
+}
+
+static ErrorCode _restoreExternalSegmentsCPU(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
+                                             int bytes, int maxSlots, const std::vector<int>& physicalSlots,
+                                             int kvLen, int8_t* keyCache, int8_t* valueCache) {
+    if (meta == nullptr || meta->external_segments.empty() || meta->externalLayerLoaded(layerIndex)) {
+        return NO_ERROR;
+    }
+    for (const auto& segment : meta->external_segments) {
+        auto layer = segment.layer(layerIndex);
+        if (layer == nullptr) {
+            MNN_ERROR("CPUPagedAttention layer %d missing external PIC KV for cache %s\n", layerIndex,
+                      segment.cacheName.c_str());
+            return INVALID_VALUE;
+        }
+        const int segBatch = segment.batch > 0 ? segment.batch : batch;
+        const int segKvHeads = segment.kvHeads > 0 ? segment.kvHeads : kvHeads;
+        const int segHeadDim = segment.headDim > 0 ? segment.headDim : headDim;
+        const int segBytes = segment.dtypeBytes > 0 ? segment.dtypeBytes : bytes;
+        if (segBatch != batch || segKvHeads != kvHeads || segHeadDim != headDim || segBytes != bytes) {
+            MNN_ERROR("CPUPagedAttention external KV shape mismatch at layer %d, cache %s\n", layerIndex,
+                      segment.cacheName.c_str());
+            return INVALID_VALUE;
+        }
+        if (segment.keyRopeState != "canonical_no_rope" || segment.ropePairing != "half") {
+            MNN_ERROR("CPUPagedAttention external KV must be canonical_no_rope/half, got %s/%s\n",
+                      segment.keyRopeState.c_str(), segment.ropePairing.c_str());
+            return INVALID_VALUE;
+        }
+        if (segment.logicalStart + segment.tokenCount > static_cast<size_t>(kvLen)) {
+            MNN_ERROR("CPUPagedAttention external KV range exceeds visible KV length at layer %d\n", layerIndex);
+            return INVALID_VALUE;
+        }
+        std::vector<int8_t> keyData;
+        std::vector<int8_t> valueData;
+        if (!_readBinaryFile(layer->keyPath, keyData) || !_readBinaryFile(layer->valuePath, valueData)) {
+            MNN_ERROR("CPUPagedAttention failed to read external PIC KV files for layer %d\n", layerIndex);
+            return INVALID_VALUE;
+        }
+        const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset
+                                                                  : segment.sourceTokenOffset;
+        const size_t sourceTokenCount = layer->hasSourceOverride && layer->sourceTokenCount > 0
+            ? layer->sourceTokenCount
+            : (segment.sourceTokenCount > 0 ? segment.sourceTokenCount : (sourceTokenOffset + segment.tokenCount));
+        const size_t sourceEnd = sourceTokenOffset + segment.tokenCount;
+        if (sourceEnd > sourceTokenCount) {
+            return INVALID_VALUE;
+        }
+        const size_t expectedKey = sourceTokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
+        const size_t expectedValue = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * headDim * bytes;
+        if (keyData.size() < expectedKey || valueData.size() < expectedValue) {
+            MNN_ERROR("CPUPagedAttention external PIC KV file is too small at layer %d\n", layerIndex);
+            return INVALID_VALUE;
+        }
+        int ropeDim = segment.ropeDim > 0 ? segment.ropeDim : headDim;
+        ropeDim = std::min(ropeDim, headDim);
+        ropeDim = (ropeDim / 2) * 2;
+        const int half = ropeDim / 2;
+        const float attentionScale = segment.ropeAttentionScaling > 0.0f ? segment.ropeAttentionScaling : 1.0f;
+        for (size_t local = 0; local < segment.tokenCount; ++local) {
+            const int logical = static_cast<int>(segment.logicalStart + local);
+            const int slot = logical >= 0 && logical < static_cast<int>(physicalSlots.size())
+                ? physicalSlots[logical]
+                : -1;
+            if (slot < 0 || slot >= maxSlots) {
+                return OUT_OF_MEMORY;
+            }
+            for (int b = 0; b < batch; ++b) {
+                for (int h = 0; h < kvHeads; ++h) {
+                    const int sourceToken = static_cast<int>(sourceTokenOffset + local);
+                    const int keySrcBase = ((sourceToken * batch + b) * kvHeads + h) * headDim;
+                    const int keyDstBase = ((slot * batch + b) * kvHeads + h) * headDim;
+                    for (int p = 0; p < half; ++p) {
+                        const float angle = static_cast<float>(logical) * _ropeInvFreqForSegment(segment, p, ropeDim);
+                        const float c = std::cos(angle);
+                        const float s = std::sin(angle);
+                        const float x0 = _pagedRead(keyData.data(), keySrcBase + p, bytes);
+                        const float x1 = _pagedRead(keyData.data(), keySrcBase + p + half, bytes);
+                        _pagedWrite(keyCache, keyDstBase + p, (x0 * c - x1 * s) * attentionScale, bytes);
+                        _pagedWrite(keyCache, keyDstBase + p + half, (x1 * c + x0 * s) * attentionScale, bytes);
+                    }
+                    for (int d = ropeDim; d < headDim; ++d) {
+                        _pagedWrite(keyCache, keyDstBase + d, _pagedRead(keyData.data(), keySrcBase + d, bytes), bytes);
+                    }
+                    const int valueSrcTokenCount = static_cast<int>(sourceTokenCount);
+                    const int valueSrcBase = ((b * kvHeads + h) * valueSrcTokenCount + sourceToken) * headDim;
+                    const int valueDstBase = ((b * kvHeads + h) * maxSlots + slot) * headDim;
+                    ::memcpy(valueCache + valueDstBase * bytes, valueData.data() + valueSrcBase * bytes,
+                             headDim * bytes);
+                }
+            }
+        }
+    }
+    meta->markExternalLayerLoaded(layerIndex);
+    return NO_ERROR;
 }
 
 CPUPagedAttention::CPUPagedAttention(Backend* backend, const Op* op) : Execution(backend) {
@@ -157,13 +408,20 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     int reverse = _reverseCount(mMeta);
     int baseLogical = 0;
     int insertLen = newKvLen;
+    bool sparseQuery = mMeta != nullptr && mMeta->sparse_query_active;
     if (mMeta != nullptr) {
         size_t kept = mMeta->previous >= mMeta->remove ? (mMeta->previous - mMeta->remove) : 0;
         baseLogical = static_cast<int>(kept) + reverse;
         insertLen = mMeta->add > 0 ? static_cast<int>(std::min<size_t>(mMeta->add, newKvLen)) : newKvLen;
     }
     insertLen = std::min(insertLen, queryLen);
-    int kvLen = baseLogical + insertLen;
+    if (sparseQuery) {
+        if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < insertLen) {
+            return INVALID_VALUE;
+        }
+        baseLogical = 0;
+    }
+    int kvLen = sparseQuery ? std::max(0, mMeta->logical_length) : (baseLogical + insertLen);
     if (kvLen > mCache->maxSlots) {
         MNN_ERROR("CPUPagedAttention layer %d needs %d slots, cache capacity is %d\n", mLayerIndex, kvLen,
                   mCache->maxSlots);
@@ -187,10 +445,20 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         }
         physicalSlots[k] = slot;
     }
+    int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
+    auto restore = _restoreExternalSegmentsCPU(mMeta, layerIndex, batch, kvHeads, headDim, mBytes,
+                                               mCache->maxSlots, physicalSlots, kvLen, kCache, vCache);
+    if (restore != NO_ERROR) {
+        return restore;
+    }
     if (!mIsKVShared) {
         for (int b = 0; b < batch; ++b) {
             for (int l = 0; l < insertLen; ++l) {
-                int slot = physicalSlots[baseLogical + l];
+                int logical = sparseQuery ? mMeta->sparseLogicalIndex(l) : (baseLogical + l);
+                if (logical < 0 || logical >= kvLen) {
+                    return INVALID_VALUE;
+                }
+                int slot = physicalSlots[logical];
                 for (int h = 0; h < kvHeads; ++h) {
                     int inOffset = ((b * newKvLen + l) * kvHeads + h) * headDim;
                     int kOffset = ((slot * batch + b) * kvHeads + h) * headDim;
@@ -199,6 +467,41 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                     ::memcpy(vCache + vOffset * mBytes, vInput + inOffset * mBytes, headDim * mBytes);
                 }
             }
+        }
+    }
+    if (mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite && kvLen > 0) {
+        auto prefixDir = static_cast<CPUBackend*>(backend())->getRuntime()->hint().prefixcacheDirPath;
+        MNNCreateDir(prefixDir.c_str());
+        int layerIndex = mLayerIndex >= 0 ? mLayerIndex : mMeta->layer_index;
+        std::string basePath = MNNFilePathConcat(prefixDir, mMeta->file_name) + "_" + std::to_string(layerIndex);
+        std::vector<int8_t> keyData(static_cast<size_t>(kvLen) * batch * kvHeads * headDim * mBytes);
+        std::vector<int8_t> valueData(static_cast<size_t>(batch) * kvHeads * kvLen * headDim * mBytes);
+        for (int l = 0; l < kvLen; ++l) {
+            int slot = physicalSlots[l];
+            for (int b = 0; b < batch; ++b) {
+                for (int h = 0; h < kvHeads; ++h) {
+                    const int8_t* srcK = kCache + ((slot * batch + b) * kvHeads + h) * headDim * mBytes;
+                    int8_t* dstK = keyData.data() + ((l * batch + b) * kvHeads + h) * headDim * mBytes;
+                    ::memcpy(dstK, srcK, headDim * mBytes);
+
+                    const int8_t* srcV = vCache + ((b * kvHeads + h) * mCache->maxSlots + slot) * headDim * mBytes;
+                    int8_t* dstV = valueData.data() + ((b * kvHeads + h) * kvLen + l) * headDim * mBytes;
+                    ::memcpy(dstV, srcV, headDim * mBytes);
+                }
+            }
+        }
+        _inverseRopeKeyData(keyData, kvLen, batch, kvHeads, headDim, mBytes, mMeta);
+        if (!_writeBinaryFile(basePath + ".k", keyData)) {
+            MNN_PRINT("CPUPagedAttention: failed to export key cache: %s\n", (basePath + ".k").c_str());
+        }
+        if (!_writeBinaryFile(basePath + ".v", valueData)) {
+            MNN_PRINT("CPUPagedAttention: failed to export value cache: %s\n", (basePath + ".v").c_str());
+        }
+        if (!_writeShapeFile(basePath + ".json", batch, kvHeads, headDim, kvLen, mBytes, mMeta)) {
+            MNN_PRINT("CPUPagedAttention: failed to export shape metadata: %s\n", (basePath + ".json").c_str());
+        }
+        if (mLayerIndex < 0) {
+            mMeta->layer_index = (mMeta->layer_index + 1) % std::max(1, mMeta->layer_nums);
         }
     }
     ::memset(output->host<int8_t>(), 0, output->elementSize() * mBytes);
@@ -220,7 +523,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
             int q = tmp % insertLen;
             int b = tmp / insertLen;
             int kvHead = h / group;
-            int qLogical = baseLogical + q;
+            int qLogical = sparseQuery ? mMeta->sparseLogicalIndex(q) : (baseLogical + q);
             int validLen = std::min(kvLen, qLogical + 1);
             float maxScore = -std::numeric_limits<float>::infinity();
             for (int k = 0; k < validLen; ++k) {

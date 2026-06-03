@@ -22,6 +22,17 @@ from utils.smooth_quantizer import SmoothQuantizer
 from utils.omni_quantizer import OmniQuantizer
 from utils.torch_utils import onnx_export
 
+def _jsonable_config_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable_config_value(item) for key, item in value.items()}
+    return None
+
 class LlmExporter(torch.nn.Module):
     '''
     Base class for all llm model export. Inherits from [`torch.nn.Module`].
@@ -87,6 +98,20 @@ class LlmExporter(torch.nn.Module):
             'paged_attention': bool(getattr(self.args, 'paged_attention', False)),
             'is_mrope': self.model.rotary.is_mrope
         }
+        for key in [
+            'num_attention_heads',
+            'num_key_value_heads',
+            'head_dim',
+            'rope_theta',
+            'rope_ratio',
+            'rotary_dim',
+            'rope_scaling',
+            'rope_parameters',
+            'max_position_embeddings',
+        ]:
+            value = _jsonable_config_value(getattr(self.config, key, None))
+            if value is not None:
+                self.llm_config[key] = value
         if getattr(self.args, 'paged_kv_max_tokens', 0) > 0:
             self.llm_config['paged_kv_max_tokens'] = self.args.paged_kv_max_tokens
         self.llm_config.update(self.model.get_config())

@@ -1,4 +1,4 @@
 interface:
   display_name: "MNN LLM Bench"
-  short_description: "Run and diagnose MNN llm_bench"
-  default_prompt: "Use $mnn-llm-bench from .codex/skills to run or debug MNN llm_bench backends."
+  short_description: "Run MNN LLM bench/demo, compare outputs, and collect power"
+  default_prompt: "Use $mnn-llm-bench from .codex/skills to run MNN LLM bench/demo, compare normal .cache/mnn-llm-export outputs with PIC .cache/weight outputs, debug backend fallback, or collect DF/tegrastats power around LLM bench."

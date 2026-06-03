@@ -20,6 +20,11 @@ Environment:
   MNN_LLM_BENCH_LOAD           loading-time option passed to -load. Defaults to true.
   MNN_LLM_BENCH_MEMORY         Optional --memory value. Defaults unset.
   MNN_LLM_BENCH_EXTRA_ARGS     Extra arguments appended to every bench invocation.
+  MNN_LLM_BENCH_POWER          Set to 1 to wrap each case with DF power capture.
+  MNN_POWER_DEVICE             jetson, orangepi5plus, oneplus13t, or explicit serial.
+  MNN_POWER_API_URL            DF power API. Defaults to http://192.168.101.14:8000.
+  MNN_POWER_SAMPLE_RATE_HZ     Defaults to 2000.
+  MNN_POWER_VOLTAGE_MV         Defaults to 4200.
   CUDA_LIB_DIR                 CUDA lib64 directory. Auto-detected from nvcc when unset.
   MNN_LLM_BENCH_DRY_RUN        Print resolved commands without running when set to 1.
   MNN_EXPORT_DRY_RUN           Also accepted as a dry-run switch when MNN_LLM_BENCH_DRY_RUN is unset.
@@ -219,6 +224,9 @@ PRECISION="${MNN_LLM_BENCH_PRECISION:-2}"
 LOAD_TIME="${MNN_LLM_BENCH_LOAD:-true}"
 MEMORY="${MNN_LLM_BENCH_MEMORY:-}"
 DRY_RUN="${MNN_LLM_BENCH_DRY_RUN:-${MNN_EXPORT_DRY_RUN:-0}}"
+POWER_CAPTURE="${MNN_LLM_BENCH_POWER:-0}"
+POWER_DEVICE="${MNN_POWER_DEVICE:-${ARTIFACT_PLATFORM}}"
+POWER_SCRIPT="${SCRIPT_DIR}/df_power_capture.sh"
 EXTRA_ARGS=()
 if [[ -n "${MNN_LLM_BENCH_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
@@ -245,6 +253,9 @@ SUMMARY_LOG="${LOG_DIR}/${STAMP}_${MODEL_NAME}_${BACKEND}_summary.log"
   echo "threads: ${THREADS}"
   echo "precision: ${PRECISION}"
   echo "load_time: ${LOAD_TIME}"
+  echo "power_capture: ${POWER_CAPTURE}"
+  echo "power_device: ${POWER_DEVICE}"
+  echo "power_api_url: ${MNN_POWER_API_URL:-http://192.168.101.14:8000}"
   echo "summary_log: ${SUMMARY_LOG}"
 } | tee "${SUMMARY_LOG}"
 
@@ -265,6 +276,7 @@ for case_spec in ${CASES}; do
   fi
 
   case_log="${LOG_DIR}/${STAMP}_${MODEL_NAME}_${BACKEND}_p${prompt}_n${decode}.log"
+  power_csv="${LOG_DIR}/${STAMP}_${MODEL_NAME}_${BACKEND}_p${prompt}_n${decode}_power.csv"
   cmd=(
     "${BENCH_BIN}"
     -m "${MODEL_CONFIG}"
@@ -286,28 +298,52 @@ for case_spec in ${CASES}; do
     echo
     echo "==> case p=${prompt} n=${decode}"
     echo "workdir: ${MODEL_DIR}"
-    printf 'command: LD_LIBRARY_PATH=%q ' "${LD_PATH}"
+    printf 'command: '
+    if [[ "${POWER_CAPTURE}" == "1" ]]; then
+      printf 'MNN_POWER_DEVICE=%q MNN_POWER_OUTPUT_CSV=%q %q -- ' "${POWER_DEVICE}" "${power_csv}" "${POWER_SCRIPT}"
+    fi
+    printf 'LD_LIBRARY_PATH=%q ' "${LD_PATH}"
     for kv in "${PRELOAD[@]}"; do
       printf '%q ' "${kv}"
     done
     printf '%q ' "${cmd[@]}"
     echo
     echo "log: ${case_log}"
+    if [[ "${POWER_CAPTURE}" == "1" ]]; then
+      echo "power_csv: ${power_csv}"
+    fi
   } | tee -a "${SUMMARY_LOG}"
 
   if [[ "${DRY_RUN}" == "1" ]]; then
     continue
   fi
 
+  if [[ "${POWER_CAPTURE}" == "1" && ! -x "${POWER_SCRIPT}" ]]; then
+    echo "Power capture script not found or not executable: ${POWER_SCRIPT}" | tee -a "${SUMMARY_LOG}" >&2
+    exit 2
+  fi
+
   set +e
-  (
-    cd "${MODEL_DIR}"
-    env LD_LIBRARY_PATH="${LD_PATH}" "${PRELOAD[@]}" "${cmd[@]}"
-  ) 2>&1 | tee "${case_log}"
+  if [[ "${POWER_CAPTURE}" == "1" ]]; then
+    (
+      cd "${MODEL_DIR}"
+      MNN_POWER_DEVICE="${POWER_DEVICE}" \
+      MNN_POWER_OUTPUT_CSV="${power_csv}" \
+      "${POWER_SCRIPT}" -- env LD_LIBRARY_PATH="${LD_PATH}" "${PRELOAD[@]}" "${cmd[@]}"
+    ) 2>&1 | tee "${case_log}"
+  else
+    (
+      cd "${MODEL_DIR}"
+      env LD_LIBRARY_PATH="${LD_PATH}" "${PRELOAD[@]}" "${cmd[@]}"
+    ) 2>&1 | tee "${case_log}"
+  fi
   case_status=${PIPESTATUS[0]}
   set -e
 
   echo "case p=${prompt} n=${decode} exit_code=${case_status}" | tee -a "${SUMMARY_LOG}"
+  if [[ "${POWER_CAPTURE}" == "1" ]]; then
+    echo "case p=${prompt} n=${decode} power_csv=${power_csv}" | tee -a "${SUMMARY_LOG}"
+  fi
   if [[ "${case_status}" -ne 0 ]]; then
     status="${case_status}"
   fi

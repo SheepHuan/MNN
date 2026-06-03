@@ -490,6 +490,77 @@ void Llm::setKVCacheInfo(size_t add, size_t remove, int* reserve, int n_reserve)
     mMeta->add = add;
 }
 
+bool Llm::beginExternalPagedKVRequest() {
+    return beginPagedRequestIfNeeded() || (mConfig->paged_attention() && static_cast<PagedKVMeta*>(mMeta.get())->request_active);
+}
+
+bool Llm::appendExternalPagedKV(const std::vector<int>& token_ids,
+                                const std::vector<MNN::PagedKVExternalSegment>& segments) {
+    if (!mConfig->paged_attention()) {
+        MNN_ERROR("External paged KV requires paged_attention=true\n");
+        return false;
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return false;
+    }
+    if (!paged->request_active) {
+        paged->beginRequest(mConfig->paged_kv_max_tokens());
+    }
+    size_t segmentTokens = 0;
+    for (const auto& segment : segments) {
+        segmentTokens += segment.tokenCount;
+    }
+    if (segmentTokens != token_ids.size()) {
+        MNN_ERROR("External paged KV token mismatch, token_ids=%d segment_tokens=%d\n",
+                  static_cast<int>(token_ids.size()), static_cast<int>(segmentTokens));
+        return false;
+    }
+    if (!paged->appendExternalSegments(segments, token_ids.size())) {
+        MNN_ERROR("External paged KV exceeds request capacity, current=%d add=%d capacity=%d\n",
+                  paged->logical_length, static_cast<int>(token_ids.size()), paged->request_capacity);
+        return false;
+    }
+    mContext->all_seq_len += static_cast<int>(token_ids.size());
+    mContext->history_tokens.insert(mContext->history_tokens.end(), token_ids.begin(), token_ids.end());
+    return true;
+}
+
+bool Llm::recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids) {
+    if (!mConfig->paged_attention()) {
+        MNN_ERROR("Sparse external KV recompute requires paged_attention=true\n");
+        return false;
+    }
+    if (logical_indices.empty()) {
+        return true;
+    }
+    if (logical_indices.size() != token_ids.size()) {
+        MNN_ERROR("Sparse external KV recompute mismatch, logical_indices=%d token_ids=%d\n",
+                  static_cast<int>(logical_indices.size()), static_cast<int>(token_ids.size()));
+        return false;
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr || !paged->beginSparseQuery(logical_indices)) {
+        MNN_ERROR("Sparse external KV recompute failed to bind logical indices\n");
+        return false;
+    }
+    auto oldStatus = mContext->status;
+    auto outputs = forwardVec(token_ids);
+    paged->finishSparseQuery();
+    if (outputs.empty()) {
+        return false;
+    }
+    if (oldStatus == LlmStatus::RUNNING && mContext->status != LlmStatus::INTERNAL_ERROR &&
+        mContext->status != LlmStatus::TIMEOUT && mContext->status != LlmStatus::USER_CANCEL) {
+        mContext->status = oldStatus;
+    }
+    return true;
+}
+
+void Llm::finishExternalPagedKVRequest() {
+    finishPagedRequestIfNeeded();
+}
+
 bool Llm::beginPagedRequestIfNeeded() {
     if (!mConfig->paged_attention()) {
         return false;
@@ -963,6 +1034,10 @@ std::string Llm::apply_chat_template(const ChatMessages& chat_prompts) const {
     return mTokenizer->apply_chat_template(chat_prompts, true);
 }
 
+std::string Llm::apply_chat_template(const ChatMessages& chat_prompts, bool add_generation_prompt) const {
+    return mTokenizer->apply_chat_template(chat_prompts, add_generation_prompt);
+}
+
 std::vector<int> Llm::tokenizer_encode(const std::string& user_content) {
     return mTokenizer->encode(user_content);
 }
@@ -1247,6 +1322,15 @@ Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     }
     mMeta->layer_nums = mConfig->layer_nums();
     mMeta->attn_scale = mConfig->attn_scale();
+    mMeta->rope_theta = mConfig->rope_theta();
+    mMeta->rope_dim = mConfig->rope_dim();
+    mMeta->rope_type = mConfig->rope_type();
+    mMeta->rope_scaling_factor = mConfig->rope_scaling_value("factor", 1.0f);
+    mMeta->rope_scaling_low_freq_factor = mConfig->rope_scaling_value("low_freq_factor", 1.0f);
+    mMeta->rope_scaling_high_freq_factor = mConfig->rope_scaling_value("high_freq_factor", 4.0f);
+    mMeta->rope_scaling_original_max_position_embeddings =
+        mConfig->rope_scaling_int_value("original_max_position_embeddings", 0);
+    mMeta->max_position_embeddings = mConfig->max_position_embeddings();
     mGenerateParam.reset(new GenerationParams);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();
 }
@@ -1456,6 +1540,15 @@ std::string Llm::tokenizer_decode(int id) {
 
 VARP Llm::gen_attention_mask(int seq_len) {
     MNN::Express::ExecutorScope s(mExecutor);
+    if (mConfig->paged_attention()) {
+        auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        if (paged != nullptr && paged->sparse_query_active) {
+            attentionMask = _Input({}, NCHW, halide_type_of<float>());
+            auto ptr = attentionMask->writeMap<float>();
+            ptr[0] = 0.0f;
+            return attentionMask;
+        }
+    }
     int kv_seq_len = mContext->all_seq_len + seq_len;
     if (mConfig->attention_mask() == "float") {
         // full and sliding mix, using normal mask
@@ -1570,6 +1663,28 @@ VARP Llm::gen_position_ids(int seq_len) {
         return positionIds;
     } else {
         bool is_glm2 = mConfig->attention_mask() == "glm2";
+        if (mConfig->paged_attention()) {
+            auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+            if (paged != nullptr && paged->sparse_query_active) {
+                if (mConfig->is_mrope()) {
+                    positionIds = _Input({3, seq_len}, NCHW, halide_type_of<int>());
+                    auto ptr = positionIds->writeMap<int>();
+                    for (int i = 0; i < seq_len; i++) {
+                        int pos = paged->sparseLogicalIndex(i);
+                        ptr[0 * seq_len + i] = pos;
+                        ptr[1 * seq_len + i] = pos;
+                        ptr[2 * seq_len + i] = pos;
+                    }
+                    return positionIds;
+                }
+                positionIds = _Input({1, seq_len}, NCHW, halide_type_of<int>());
+                auto ptr = positionIds->writeMap<int>();
+                for (int i = 0; i < seq_len; i++) {
+                    ptr[i] = paged->sparseLogicalIndex(i);
+                }
+                return positionIds;
+            }
+        }
         if (seq_len == 1) {
             auto ptr = mPositionIdsVarVec[0]->writeMap<int>();
             ptr[0] = is_glm2 ? mContext->gen_seq_len : mContext->all_seq_len;

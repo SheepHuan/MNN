@@ -73,7 +73,7 @@ LinearAttention  MNN 自身 linear attention，语义不同，只做 CPU/CUDA �
 1. 只创建 CUDA backend。
 2. `onResize` 在计时前完成。
 3. warmup 不计时。
-4. 用 `cudaEventRecord(start)` 和 `cudaEventRecord(stop)` 包住重复 `onExecute`，最终输出平均 ms 和 us/token。
+4. 用 `cudaEventRecord(start)` 和 `cudaEventRecord(stop)` 包住重复 `onExecute`，最终直接输出平均延迟 ms；不要再输出 `us/token`。
 5. 不把 host timer、Express 调度或 Module 构建计入结果。
 6. 如果要测 decode with cache，计时循环里要保持 logical KV 长度稳定，避免每轮无限增长导致 case 漂移。
 7. speed case 拆成 `Prefill` 和 `Decode` 两类；decode 的 `past` 等于 context，`add=1`。
@@ -114,10 +114,50 @@ BUILD_DIR="$PWD/.cache/build/mnn/jetson_cuda" \
 INSTALL_PREFIX="$PWD/.cache/output/mnn/artifacts/jetson" \
 JOBS=6 CUDA_ARCHS=72 CMAKE_ARGS="-DMNN_BUILD_TEST=ON" \
 BUILD_TARGET=run_test.out INSTALL_AFTER_BUILD=1 \
-bash project/linux/build_on_jetson.sh
+bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
 ```
 
 需要全量产物时按 `$mnn-build-artifacts` 使用默认构建；只验证单算子测试时优先构建 `run_test.out` target。
+
+## Jetson 远端环境
+
+默认 Jetson 开发板可免密登录：
+
+```text
+ssh jetson@192.168.101.192
+```
+
+远端 MNN 仓库根目录：
+
+```text
+/home/jetson/code/kvshare-edge/impl/MNN
+```
+
+远端 `.cache` 是默认工作目录，用于放构建、日志和临时产物：
+
+```text
+/home/jetson/code/kvshare-edge/impl/MNN/.cache
+```
+
+在本机触发 Jetson 单算子 bench 时，从远端仓库根目录执行命令，并把日志放到远端 `.cache/bench_ops`：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  mkdir -p .cache/bench_ops && \
+  export LD_LIBRARY_PATH="$PWD/.cache/output/mnn/artifacts/jetson/lib:$PWD/.cache/build/mnn/jetson_cuda:$PWD/.cache/build/mnn/jetson_cuda/source/backend/cuda:${LD_LIBRARY_PATH:-}" && \
+  ./.cache/build/mnn/jetson_cuda/run_test.out bench_ops/cuda/perf/Attention 2 1 2>&1 | tee .cache/bench_ops/jetson_attention_perf_$(date +%Y%m%d_%H%M%S).log'
+```
+
+PagedAttention 对比同理：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  mkdir -p .cache/bench_ops && \
+  export LD_LIBRARY_PATH="$PWD/.cache/output/mnn/artifacts/jetson/lib:$PWD/.cache/build/mnn/jetson_cuda:$PWD/.cache/build/mnn/jetson_cuda/source/backend/cuda:${LD_LIBRARY_PATH:-}" && \
+  ./.cache/build/mnn/jetson_cuda/run_test.out bench_ops/cuda/perf/PagedAttention 2 1 2>&1 | tee .cache/bench_ops/jetson_paged_attention_perf_$(date +%Y%m%d_%H%M%S).log'
+```
+
+如果 `.cache/build/mnn/jetson_cuda/run_test.out` 不存在，先按本 Skill 的 Jetson 构建命令构建 `run_test.out`。
 
 ## 产物自动定位
 
@@ -195,14 +235,16 @@ export LD_LIBRARY_PATH="$MNN_ARTIFACT_ROOT/lib:${LD_LIBRARY_PATH:-}"
 性能测试通过时会打印每个 case 的 CUDA event 平均耗时：
 
 ```text
-[bench_ops/cuda/perf/PagedAttention] decode_ctx2048... avg=... ms ... us/token
+[bench_ops/cuda/perf/PagedAttention] decode_ctx2048... avg=... ms
 ```
 
 汇总结果时，性能表必须包含这些列：
 
 ```text
-stage | model | ctx | qH | kvH | D | op | avg_ms | us/token | vs_Attention
+stage | model | ctx | qH | kvH | D | op | latency_ms | Attention/PagedAttention
 ```
+
+`Attention/PagedAttention > 1` 表示普通 `Attention` 比当前 `PagedAttention` 行慢；`< 1` 表示 `PagedAttention` 仍慢于普通 `Attention`。
 
 精度表必须包含这些列：
 

@@ -310,6 +310,85 @@ public:
         return config_.value("attn_scale", 0.0f);
     }
 
+    float rope_theta() const {
+        float theta = config_.value("rope_theta", 10000.0f);
+        float ratio = config_.value("rope_ratio", 1.0f);
+        if (ratio != 0.0f) {
+            theta *= ratio;
+        }
+        auto rope_parameters = config_["rope_parameters"];
+        if (rope_parameters.is_object() && rope_parameters.contains("rope_theta")) {
+            theta = rope_parameters.value("rope_theta", theta);
+        }
+        return theta;
+    }
+
+    int rope_dim() const {
+        int dim = config_.value("rotary_dim", 0);
+        if (dim > 0) {
+            return dim;
+        }
+        auto rope_parameters = config_["rope_parameters"];
+        if (rope_parameters.is_object() && rope_parameters.contains("partial_rotary_factor")) {
+            float partial = rope_parameters.value("partial_rotary_factor", 1.0f);
+            int head = config_.value("head_dim", 0);
+            if (head > 0 && partial > 0.0f) {
+                return static_cast<int>(head * partial);
+            }
+        }
+        return dim;
+    }
+
+    std::string rope_type() const {
+        auto rope_scaling = config_["rope_scaling"];
+        if (rope_scaling.is_object()) {
+            if (rope_scaling.contains("rope_type")) {
+                return rope_scaling.value("rope_type", "default");
+            }
+            if (rope_scaling.contains("type")) {
+                return rope_scaling.value("type", "default");
+            }
+        }
+        auto rope_parameters = config_["rope_parameters"];
+        if (rope_parameters.is_object()) {
+            if (rope_parameters.contains("rope_type")) {
+                return rope_parameters.value("rope_type", "default");
+            }
+            if (rope_parameters.contains("type")) {
+                return rope_parameters.value("type", "default");
+            }
+        }
+        return "default";
+    }
+
+    float rope_scaling_value(const std::string& key, float fallback) const {
+        auto rope_scaling = config_["rope_scaling"];
+        if (rope_scaling.is_object() && rope_scaling.contains(key)) {
+            return rope_scaling.value(key, fallback);
+        }
+        auto rope_parameters = config_["rope_parameters"];
+        if (rope_parameters.is_object() && rope_parameters.contains(key)) {
+            return rope_parameters.value(key, fallback);
+        }
+        return fallback;
+    }
+
+    int rope_scaling_int_value(const std::string& key, int fallback) const {
+        auto rope_scaling = config_["rope_scaling"];
+        if (rope_scaling.is_object() && rope_scaling.contains(key)) {
+            return rope_scaling.value(key, fallback);
+        }
+        auto rope_parameters = config_["rope_parameters"];
+        if (rope_parameters.is_object() && rope_parameters.contains(key)) {
+            return rope_parameters.value(key, fallback);
+        }
+        return fallback;
+    }
+
+    int max_position_embeddings() const {
+        return config_.value("max_position_embeddings", 0);
+    }
+
     bool use_template() const {
         return config_.value("use_template", true);
     }
