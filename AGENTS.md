@@ -33,6 +33,7 @@ git status --short
 3. 仓库级构建、输出同步和测试命令默认从本 MNN 仓库根目录执行。
 4. 构建产物、模型缓存、导出结果和临时文件放在本仓库 `.cache/`、`output/` 或用户指定的本地目录，不要提交到本仓库。
 5. Python 导出、模型分析和相关测试默认使用 `kvshare-edge` conda 环境，例如 `conda run -n kvshare-edge python ...`；不要直接用系统 `python`/`python3` 或 base 环境跑 exporter。
+6. 本机编译、交叉编译和构建验证如果没有用户显式指定 `JOBS` / `--parallel`，默认只使用当前机器在线 CPU 总数的一半，最少为 1；不要默认跑满全部 CPU。
 
 ## 何时读 skill
 
@@ -60,7 +61,7 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 
 ## PIC Server 约定
 
-`transformers/pic_llm/engine/app/pic_server.cpp` 是 MNN PIC 自维护的独立 HTTP server，不依赖 `mls`。构建产物名固定为 `pic_server`，由 `.codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh` 安装到 artifact root 的 `bin/` 下；旧的 `build_jetson_artifacts.sh` 只作为兼容入口转发。
+`transformers/pic_llm/engine/app/pic_server.cpp` 是 MNN PIC 自维护的独立 HTTP server，不依赖 `mls`。构建产物名固定为 `pic_server`，由 `.codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh` 安装到 artifact root 的 `bin/` 下。
 
 首个协议入口是：
 
@@ -75,7 +76,7 @@ POST /chat/completions
 
 `POST /v1/kv/pic_caches` 接受 `{"id":"pic-1","text_cache_refs":[{"id":"doc-1"}],"selection_algorithm":"full-reuse"}`，解析一个或多个 text cache 并返回 PIC metadata。`POST /v1/chat/completions` / `/chat/completions` 兼容 OpenAI 风格 `messages`，可在 `pic_cache` 中内联同一份 spec；prompt 中的 `{{pic_cache}}` 是 PIC 注入位置。当前 MNN 原生执行语义：
 
-- `full-reuse`：不重算 PIC token，CPU/CUDA PagedAttention 从磁盘 `.k/.v` 读取 canonical_no_rope key，按当前 logical slot 重新施加 RoPE，并写入 paged KV slots。
+- `full-reuse`：特殊 PIC 计算路径，不重算 PIC token。执行时先从磁盘 `.k/.v` hydrate 全量 PIC KV，CPU/CUDA/OpenCL PagedAttention 对 canonical_no_rope key 按当前 logical slot 重新施加 RoPE 并写入 paged KV slots；suffix token 作为真实 query 继续从同一份 PagedCache 读取 PIC KV。
 - `full-compute`：不读取磁盘 PIC KV，按 prelude + PIC tokens + suffix 完整计算。
 - `epic`：参考 `hf_pic_runtime` 的 EpicPlanner，按 `pic_recompute_ratio` 选择 PIC 开头连续 token；`score_layer_idx` 之前的层保持 token 正常计算语义，使用 full-prompt reference PIC K/V hydrate slots；从 `score_layer_idx` 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
 - `cacheblend` / `delta-v`：参考 Python CacheBlend/DeltaV planner，用 score layer 上 full-prompt reference 与 cached PIC value 的 mean-abs delta 选 top-ratio token；执行模式为 `native-cacheblend-sparse-recompute`。

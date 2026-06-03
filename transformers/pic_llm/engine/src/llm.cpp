@@ -934,6 +934,7 @@ void Llm::generate(int max_token) {
         return;
     }
     mGenerateParam->max_new_tokens = max_token;
+    mGenerateParam->skipNextLogitsOnLimit = false;
     mGenerationStrategy->generate(*mGenerateParam);
     // MAX_TOKENS_FINISHED only means this chunk ended; generate(1) callers may continue the same request.
     const bool interrupted = mContext->status == LlmStatus::INTERNAL_ERROR ||
@@ -1128,7 +1129,9 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
     // call generation function
     if (0 < max_tokens) {
         mGenerateParam->max_new_tokens = max_tokens;
+        mGenerateParam->skipNextLogitsOnLimit = true;
         mGenerationStrategy->generate(*mGenerateParam);
+        mGenerateParam->skipNextLogitsOnLimit = false;
     }
     if (startedPagedRequest && max_tokens != 0) {
         finishPagedRequestIfNeeded();

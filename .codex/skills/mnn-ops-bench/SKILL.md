@@ -114,7 +114,7 @@ BUILD_DIR="$PWD/.cache/build/mnn/jetson_cuda" \
 INSTALL_PREFIX="$PWD/.cache/output/mnn/artifacts/jetson" \
 JOBS=6 CUDA_ARCHS=72 CMAKE_ARGS="-DMNN_BUILD_TEST=ON" \
 BUILD_TARGET=run_test.out INSTALL_AFTER_BUILD=1 \
-bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 ```
 
 需要全量产物时按 `$mnn-build-artifacts` 使用默认构建；只验证单算子测试时优先构建 `run_test.out` target。

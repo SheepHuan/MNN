@@ -137,7 +137,7 @@ BUILD_DIR="$PWD/.cache/build/mnn/jetson_cross_cuda" \
 INSTALL_PREFIX="$PWD/.cache/output/mnn/artifacts/jetson_cross_cuda" \
 JOBS=8 CUDA_ARCHS=72 ENABLE_CROSS_CUDA=ON \
 BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
-bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 ```
 
 2. 补齐 runtime artifact：

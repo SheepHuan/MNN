@@ -45,7 +45,7 @@ Jetson CUDA 补编示例：
 BUILD_DIR="$PWD/.cache/build/jetson_cuda" \
 INSTALL_PREFIX="$PWD/.cache/output/mnn/artifacts/jetson" \
 JOBS=6 CUDA_ARCHS=72 CLEAN=1 \
-bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 ```
 
 补编后仍只从 `MNN_ARTIFACT_ROOT="$PWD/.cache/output/mnn/artifacts/$MNN_ARTIFACT_PLATFORM"` 运行 bench；不要直接混用 build 目录里的二进制做最终验证，除非是在定位构建产物同步问题，并且最终回复中明确说明。

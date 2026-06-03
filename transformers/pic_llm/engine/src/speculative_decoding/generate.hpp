@@ -24,6 +24,7 @@ struct GenerationParams {
     std::vector<MNN::Express::VARP> outputs;
     int validLogitStart = 0;
     int validLogitSize = 0;
+    bool skipNextLogitsOnLimit = false;
 };
 
 class Generation {

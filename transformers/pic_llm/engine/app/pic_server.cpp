@@ -281,6 +281,27 @@ struct PicExecutionPlan {
     bool sparseRecompute = false;
 };
 
+KvShape kvShapeFromSegment(const MNN::PagedKVExternalSegment& segment) {
+    KvShape shape;
+    shape.batch = segment.batch;
+    shape.kvHeads = segment.kvHeads;
+    shape.headDim = segment.headDim;
+    shape.dtypeBytes = segment.dtypeBytes;
+    shape.ropeDim = segment.ropeDim;
+    shape.ropeTheta = segment.ropeTheta;
+    shape.ropeType = segment.ropeType;
+    shape.ropeScalingFactor = segment.ropeScalingFactor;
+    shape.ropeScalingLowFreqFactor = segment.ropeScalingLowFreqFactor;
+    shape.ropeScalingHighFreqFactor = segment.ropeScalingHighFreqFactor;
+    shape.ropeScalingOriginalMaxPositionEmbeddings = segment.ropeScalingOriginalMaxPositionEmbeddings;
+    shape.maxPositionEmbeddings = segment.maxPositionEmbeddings;
+    return shape;
+}
+
+KvShape kvShapeFromFirstSegment(const std::vector<MNN::PagedKVExternalSegment>& segments) {
+    return segments.empty() ? KvShape() : kvShapeFromSegment(segments.front());
+}
+
 std::string pathJoinForMNN(const std::string& lhs, const std::string& rhs) {
     if (lhs.empty()) {
         return rhs;
@@ -445,6 +466,106 @@ std::string trimStopStrings(std::string text, const json& stop) {
         }
     }
     return text;
+}
+
+bool normalizeChatCompletionBatchRequest(
+        const json& payload,
+        std::vector<json>& requests,
+        std::string& error) {
+    requests.clear();
+    bool explicitBatch = false;
+    if (payload.is_array()) {
+        explicitBatch = true;
+        for (const auto& item : payload) {
+            requests.emplace_back(item);
+        }
+    } else if (payload.is_object()) {
+        const char* aliases[] = {"requests", "batch", "items", "inputs"};
+        for (const char* alias : aliases) {
+            if (!payload.contains(alias)) {
+                continue;
+            }
+            explicitBatch = true;
+            if (!payload[alias].is_array()) {
+                error = std::string("Chat batch field `") + alias + "` must be an array";
+                return false;
+            }
+            for (const auto& item : payload[alias]) {
+                requests.emplace_back(item);
+            }
+            break;
+        }
+        if (!explicitBatch && payload.contains("messages")) {
+            requests.emplace_back(payload);
+        }
+    }
+    if (requests.empty()) {
+        error = "ChatCompletionBatchRequest requires non-empty `requests` or a single request with `messages`";
+        return false;
+    }
+    for (const auto& item : requests) {
+        if (!item.is_object()) {
+            error = "Each chat batch item must be a JSON object";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validateHomogeneousChatBatchRequest(const std::vector<json>& requests, std::string& error) {
+    bool sawPic = false;
+    bool sawFullCompute = false;
+    for (const auto& item : requests) {
+        const bool hasPic = item.contains("pic_cache") && !item["pic_cache"].is_null();
+        sawPic = sawPic || hasPic;
+        sawFullCompute = sawFullCompute || !hasPic;
+    }
+    if (sawPic && sawFullCompute) {
+        error = "mnn_pic_server chat batch must be homogeneous: either every request has pic_cache "
+                "or no request has pic_cache. Mixed PIC/full-compute batches are not supported.";
+        return false;
+    }
+    return true;
+}
+
+void writeJson(httplib::Response& res, const json& body, int status = 200, int indent = 2) {
+    res.status = status;
+    res.set_content(body.dump(indent), "application/json");
+}
+
+void writeJsonError(httplib::Response& res, int status, const std::string& error) {
+    writeJson(res, json({{"error", error}}), status, -1);
+}
+
+bool parseJsonBody(const httplib::Request& req, httplib::Response& res, json& body) {
+    if (!json::accept(req.body)) {
+        writeJsonError(res, 400, "Invalid JSON in request body");
+        return false;
+    }
+    body = json::parse(req.body, nullptr, false);
+    return true;
+}
+
+template <typename Handler>
+void runLockedJsonEndpoint(const httplib::Request& req, httplib::Response& res, std::mutex& mutex,
+                           Handler&& handler, int errorStatus = 400) {
+    json request;
+    if (!parseJsonBody(req, res, request)) {
+        return;
+    }
+
+    json response;
+    std::string error;
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        ok = handler(request, response, error);
+    }
+    if (!ok) {
+        writeJsonError(res, errorStatus, error);
+        return;
+    }
+    writeJson(res, response);
 }
 
 float halfToFloat(uint16_t h) {
@@ -883,6 +1004,7 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
             {"score_kind", "none"},
             {"pic_token_count", picLength},
             {"reuse_token_count", picLength},
+            {"suffix_query_source", "current_context"},
         };
         return plan;
     }
@@ -1312,12 +1434,12 @@ void PicServer::handleRoot(const httplib::Request&, httplib::Response& res) {
         "/v1/chat/completions",
         "/chat/completions",
     });
-    res.set_content(body.dump(2), "application/json");
+    writeJson(res, body);
 }
 
 void PicServer::handleHealth(const httplib::Request&, httplib::Response& res) {
     allowCors(res);
-    res.set_content(json({{"status", "ok"}, {"model", mConfig.servedModelName}}).dump(), "application/json");
+    writeJson(res, json({{"status", "ok"}, {"model", mConfig.servedModelName}}), 200, -1);
 }
 
 void PicServer::handleModels(const httplib::Request&, httplib::Response& res) {
@@ -1331,7 +1453,7 @@ void PicServer::handleModels(const httplib::Request&, httplib::Response& res) {
             {"owned_by", "kvshare-edge"},
         }})},
     };
-    res.set_content(body.dump(2), "application/json");
+    writeJson(res, body);
 }
 
 void PicServer::handleReset(const httplib::Request&, httplib::Response& res) {
@@ -1340,76 +1462,50 @@ void PicServer::handleReset(const httplib::Request&, httplib::Response& res) {
     if (mLlm) {
         mLlm->reset();
     }
-    res.set_content(json({{"status", "ok"}}).dump(), "application/json");
+    writeJson(res, json({{"status", "ok"}}), 200, -1);
 }
 
 void PicServer::handlePrefillText(const httplib::Request& req, httplib::Response& res) {
     allowCors(res);
-    if (!json::accept(req.body)) {
-        res.status = 400;
-        res.set_content(json({{"error", "Invalid JSON in request body"}}).dump(), "application/json");
-        return;
-    }
-    auto request = json::parse(req.body, nullptr, false);
-    json response;
-    std::string error;
-    bool ok = false;
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        ok = buildTextCache(request, response, error);
-    }
-    if (!ok) {
-        res.status = 400;
-        res.set_content(json({{"error", error}}).dump(), "application/json");
-        return;
-    }
-    res.set_content(response.dump(2), "application/json");
+    runLockedJsonEndpoint(req, res, mMutex, [this](const json& request, json& response, std::string& error) {
+        return buildTextCache(request, response, error);
+    });
 }
 
 void PicServer::handlePicCaches(const httplib::Request& req, httplib::Response& res) {
     allowCors(res);
-    if (!json::accept(req.body)) {
-        res.status = 400;
-        res.set_content(json({{"error", "Invalid JSON in request body"}}).dump(), "application/json");
-        return;
-    }
-    auto request = json::parse(req.body, nullptr, false);
-    json response;
-    std::string error;
-    bool ok = false;
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        ok = buildPicCache(request, response, error);
-    }
-    if (!ok) {
-        res.status = 400;
-        res.set_content(json({{"error", error}}).dump(), "application/json");
-        return;
-    }
-    res.set_content(response.dump(2), "application/json");
+    runLockedJsonEndpoint(req, res, mMutex, [this](const json& request, json& response, std::string& error) {
+        return buildPicCache(request, response, error);
+    });
 }
 
 void PicServer::handleChatCompletions(const httplib::Request& req, httplib::Response& res) {
     allowCors(res);
-    if (!json::accept(req.body)) {
-        res.status = 400;
-        res.set_content(json({{"error", "Invalid JSON in request body"}}).dump(), "application/json");
+    json request;
+    if (!parseJsonBody(req, res, request)) {
         return;
     }
-    auto request = json::parse(req.body, nullptr, false);
+    std::vector<json> requests;
     json response;
     std::string error;
     bool ok = false;
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        ok = completeChat(request, response, error);
-    }
-    if (!ok) {
-        res.status = 500;
-        res.set_content(json({{"error", error}}).dump(), "application/json");
+    if (!normalizeChatCompletionBatchRequest(request, requests, error)) {
+        writeJsonError(res, 400, error);
         return;
     }
-    res.set_content(response.dump(2), "application/json");
+    if (!validateHomogeneousChatBatchRequest(requests, error)) {
+        writeJsonError(res, 400, error);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        ok = completeChatBatch(requests, response, error);
+    }
+    if (!ok) {
+        writeJsonError(res, 500, error);
+        return;
+    }
+    writeJson(res, response);
 }
 
 json PicServer::runtimeInfo() const {
@@ -1601,22 +1697,7 @@ bool PicServer::buildPicCache(const json& request, json& response, std::string& 
         return false;
     }
     auto cfg = modelConfig();
-    KvShape shape;
-    if (!pic.segments.empty()) {
-        const auto& segment = pic.segments.front();
-        shape.batch = segment.batch;
-        shape.kvHeads = segment.kvHeads;
-        shape.headDim = segment.headDim;
-        shape.dtypeBytes = segment.dtypeBytes;
-        shape.ropeDim = segment.ropeDim;
-        shape.ropeTheta = segment.ropeTheta;
-        shape.ropeType = segment.ropeType;
-        shape.ropeScalingFactor = segment.ropeScalingFactor;
-        shape.ropeScalingLowFreqFactor = segment.ropeScalingLowFreqFactor;
-        shape.ropeScalingHighFreqFactor = segment.ropeScalingHighFreqFactor;
-        shape.ropeScalingOriginalMaxPositionEmbeddings = segment.ropeScalingOriginalMaxPositionEmbeddings;
-        shape.maxPositionEmbeddings = segment.maxPositionEmbeddings;
-    }
+    KvShape shape = kvShapeFromFirstSegment(pic.segments);
     json kvLayout = makeKvLayout(cfg, static_cast<int>(pic.tokenIds.size()), shape);
     response = {
         {"format", kMetaFormat},
@@ -1647,7 +1728,62 @@ bool PicServer::buildPicCache(const json& request, json& response, std::string& 
     return true;
 }
 
-bool PicServer::completeChat(const json& request, json& response, std::string& error) {
+bool PicServer::completeChatBatch(const std::vector<json>& requests, json& response, std::string& error) {
+    if (!mLlm) {
+        error = "LLM is not loaded";
+        return false;
+    }
+    if (requests.empty()) {
+        error = "ChatCompletionBatchRequest requires at least one request";
+        return false;
+    }
+
+    const auto created = unixSecondsNow();
+    const std::string responseId = "chatcmpl-batch-" + std::to_string(created);
+    json data = json::array();
+    int totalPromptTokens = 0;
+    int totalCompletionTokens = 0;
+    for (size_t index = 0; index < requests.size(); ++index) {
+        json itemResponse;
+        std::string itemError;
+        if (!completeChatBatchItem(requests[index], itemResponse, itemError)) {
+            error = "batch item " + std::to_string(index) + " failed: " + itemError;
+            return false;
+        }
+        itemResponse["id"] = responseId + "-" + std::to_string(index);
+        itemResponse["batch_index"] = index;
+        if (itemResponse.contains("choices") && itemResponse["choices"].is_array() &&
+            !itemResponse["choices"].empty() && itemResponse["choices"][0].is_object()) {
+            itemResponse["choices"][0]["index"] = index;
+        }
+        if (itemResponse.contains("usage") && itemResponse["usage"].is_object()) {
+            totalPromptTokens += jsonInt(itemResponse["usage"], "prompt_tokens", 0);
+            totalCompletionTokens += jsonInt(itemResponse["usage"], "completion_tokens", 0);
+        }
+        data.push_back(std::move(itemResponse));
+    }
+
+    response = {
+        {"id", responseId},
+        {"object", "list"},
+        {"created", created},
+        {"model", mConfig.servedModelName},
+        {"batch_execution", {
+            {"mode", "request-scheduled-batch-entry"},
+            {"native_paged_batch", false},
+            {"batch_size", requests.size()},
+        }},
+        {"usage", {
+            {"prompt_tokens", totalPromptTokens},
+            {"completion_tokens", totalCompletionTokens},
+            {"total_tokens", totalPromptTokens + totalCompletionTokens},
+        }},
+        {"data", data},
+    };
+    return true;
+}
+
+bool PicServer::completeChatBatchItem(const json& request, json& response, std::string& error) {
     if (!mLlm) {
         error = "LLM is not loaded";
         return false;
@@ -1844,22 +1980,16 @@ bool PicServer::completeChat(const json& request, json& response, std::string& e
         preludeTokensCount = static_cast<int>(preludeTokenIds.size());
         picTokensCount = static_cast<int>(pic.tokenIds.size());
 
-        KvShape shape;
-        if (!pic.segments.empty()) {
-            const auto& segment = pic.segments.front();
-            shape.batch = segment.batch;
-            shape.kvHeads = segment.kvHeads;
-            shape.headDim = segment.headDim;
-            shape.dtypeBytes = segment.dtypeBytes;
-            shape.ropeDim = segment.ropeDim;
-            shape.ropeTheta = segment.ropeTheta;
-            shape.ropeType = segment.ropeType;
-            shape.ropeScalingFactor = segment.ropeScalingFactor;
-            shape.ropeScalingLowFreqFactor = segment.ropeScalingLowFreqFactor;
-            shape.ropeScalingHighFreqFactor = segment.ropeScalingHighFreqFactor;
-            shape.ropeScalingOriginalMaxPositionEmbeddings = segment.ropeScalingOriginalMaxPositionEmbeddings;
-            shape.maxPositionEmbeddings = segment.maxPositionEmbeddings;
+        std::vector<int> recomputePicLocalIndices;
+        recomputePicLocalIndices.reserve(plan.recomputeLogicalIndices.size());
+        for (int logical : plan.recomputeLogicalIndices) {
+            int local = logical - preludeTokensCount;
+            if (local >= 0 && local < static_cast<int>(pic.tokenIds.size())) {
+                recomputePicLocalIndices.emplace_back(local);
+            }
         }
+
+        KvShape shape = kvShapeFromFirstSegment(pic.segments);
         picInfo = {
             {"format", kMetaFormat},
             {"type", "pic_cache"},
@@ -1877,8 +2007,8 @@ bool PicServer::completeChat(const json& request, json& response, std::string& e
             {"selection_algorithm", pic.selectionAlgorithm},
             {"pic_recompute_ratio", pic.recomputeRatio},
             {"pic_recompute_score_layer_idx", pic.scoreLayerIdx},
-            {"pic_recompute_logical_indices", pic.explicitLogicalIndices},
-            {"pic_recompute_pic_local_indices", pic.explicitPicLocalIndices},
+            {"pic_recompute_logical_indices", plan.recomputeLogicalIndices},
+            {"pic_recompute_pic_local_indices", recomputePicLocalIndices},
             {"pic_decode_refine_enabled", false},
             {"pic_decode_refine_tokens_per_decode_step", 1},
             {"pic_decode_refine_top_m", 32},

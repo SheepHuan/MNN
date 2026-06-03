@@ -98,7 +98,7 @@ ls -la MODEL/
 如果还没有构建，先按 `$mnn-build-artifacts` 构建并同步当前平台产物，Jetson 默认输出到 `.cache/output/mnn/artifacts/jetson`：
 
 ```bash
-JOBS=6 CUDA_ARCHS=72 bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+JOBS=6 CUDA_ARCHS=72 bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 ```
 
 ### 运行 C++ 推理

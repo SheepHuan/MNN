@@ -349,7 +349,7 @@ void CPULinearAttention::short_conv(const std::vector<Tensor*>& inputs,
 
 ```bash
 # 构建并同步当前平台 artifacts
-JOBS=6 CUDA_ARCHS=72 bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+JOBS=6 CUDA_ARCHS=72 bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 
 # 导出
 MNN_LLM_EXPORTER=pic \

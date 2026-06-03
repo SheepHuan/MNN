@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace pic {
 
@@ -44,7 +45,8 @@ private:
 
     bool buildTextCache(const json& request, json& response, std::string& error);
     bool buildPicCache(const json& request, json& response, std::string& error);
-    bool completeChat(const json& request, json& response, std::string& error);
+    bool completeChatBatch(const std::vector<json>& requests, json& response, std::string& error);
+    bool completeChatBatchItem(const json& request, json& response, std::string& error);
     json runtimeInfo() const;
     json modelConfig() const;
     std::string runtimeBackend() const;

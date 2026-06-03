@@ -176,7 +176,7 @@ $MNN_ARTIFACT_ROOT/bin/MNNConvert
 ```bash
 BUILD_TARGET=MNNConvert \
 JOBS=6 CUDA_ARCHS=72 \
-bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 ```
 
 ## 产物检查

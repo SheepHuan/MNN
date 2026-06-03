@@ -63,14 +63,19 @@ void ArGeneration::generate(GenerationParams& param) {
             break;
         }
         // Decode and Output
-        MNN::Timer _t;
         auto decodeStr = mLlm->tokenizer_decode(mContext->current_token);
         mContext->generate_str += decodeStr;
         if (nullptr != mContext->os) {
             *mContext->os << decodeStr;
             *mContext->os << std::flush;
         }
+        const int nextLen = len + 1;
+        if (nextLen >= max_token && param.skipNextLogitsOnLimit) {
+            len = nextLen;
+            break;
+        }
         // Compute Next Logits
+        MNN::Timer _t;
         auto outputs = mLlm->forwardVec({mContext->current_token});
         if(outputs.empty()) {
             break;
@@ -78,7 +83,7 @@ void ArGeneration::generate(GenerationParams& param) {
         // Update input seq
         mLlm->updateContext(1, 0);
         mContext->decode_us += _t.durationInUs();
-        len++;
+        len = nextLen;
     }
     if(len >= max_token) {
         mContext->status = LlmStatus::MAX_TOKENS_FINISHED;

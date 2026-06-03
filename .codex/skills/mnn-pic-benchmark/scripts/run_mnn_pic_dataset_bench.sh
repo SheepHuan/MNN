@@ -186,7 +186,7 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
     if [[ -z "${CMAKE_ARGS:-}" && -x "${MNN_ROOT}/.cache/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]]; then
       export CMAKE_ARGS="-DCUDA_HOST_COMPILER=${MNN_ROOT}/.cache/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
     fi
-    bash .codex/skills/mnn-build-artifacts/scripts/build_jetson_artifacts.sh
+    bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
     cmake --install "${BUILD_DIR}" --prefix "${INSTALL_PREFIX}"
     mkdir -p "${INSTALL_PREFIX}/bin" "${INSTALL_PREFIX}/lib"
     install -m 755 "${BUILD_DIR}/pic_server" "${INSTALL_PREFIX}/bin/pic_server"
