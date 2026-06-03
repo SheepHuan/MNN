@@ -70,18 +70,21 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
                                      const T* mask, const int* slotTable, int maskElements, int batch,
                                      int queryLen, int insertLen, int numHeads, int kvHeads, int headDim,
                                      int baseLogical, int kvLen, int maxSlots, float scale) {
-    extern __shared__ float scores[];
+    extern __shared__ float smem[];
+    float* scores = smem;
+    float* reduce = smem + kvLen;
     int q = blockIdx.x;
     int h = blockIdx.y;
     int b = blockIdx.z;
-    if (threadIdx.x != 0 || b >= batch || h >= numHeads || q >= insertLen) {
+    int tid = threadIdx.x;
+    if (b >= batch || h >= numHeads || q >= insertLen) {
         return;
     }
 
     int group = numHeads / kvHeads;
     int kvHead = h / group;
     int qLogical = baseLogical + q;
-    float maxScore = -FLT_MAX;
+    float localMax = -FLT_MAX;
     int maskCols = 0;
     int maskGap = 0;
     if (mask != nullptr && maskElements > 1) {
@@ -89,7 +92,7 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
         maskGap = kvLen - maskCols;
     }
 
-    for (int k = 0; k < kvLen; ++k) {
+    for (int k = tid; k < kvLen; k += blockDim.x) {
         if (k > qLogical) {
             scores[k] = -FLT_MAX;
             continue;
@@ -114,19 +117,38 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
             }
         }
         scores[k] = score;
-        maxScore = fmaxf(maxScore, score);
+        localMax = fmaxf(localMax, score);
     }
 
-    float sum = 0.0f;
-    for (int k = 0; k < kvLen; ++k) {
+    reduce[tid] = localMax;
+    __syncthreads();
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[tid] = fmaxf(reduce[tid], reduce[tid + stride]);
+        }
+        __syncthreads();
+    }
+    float maxScore = reduce[0];
+
+    float localSum = 0.0f;
+    for (int k = tid; k < kvLen; k += blockDim.x) {
         if (scores[k] == -FLT_MAX) {
             continue;
         }
         scores[k] = expf(scores[k] - maxScore);
-        sum += scores[k];
+        localSum += scores[k];
     }
+    reduce[tid] = localSum;
+    __syncthreads();
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[tid] += reduce[tid + stride];
+        }
+        __syncthreads();
+    }
+    float sum = reduce[0];
     float invSum = sum > 0.0f ? 1.0f / sum : 0.0f;
-    for (int d = 0; d < headDim; ++d) {
+    for (int d = tid; d < headDim; d += blockDim.x) {
         float acc = 0.0f;
         for (int k = 0; k < kvLen; ++k) {
             if (scores[k] <= 0.0f) {
@@ -319,15 +341,16 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     bool useMask = mask != nullptr && mask->elementSize() > 1 && mask->getType().code == halide_type_float;
     int maskElements = useMask ? static_cast<int>(mask->elementSize()) : 0;
     dim3 grid(insertLen, mNumHead, mBatch);
-    int sharedBytes = kvLen * sizeof(float);
+    int blockSize = 128;
+    int sharedBytes = (kvLen + blockSize) * sizeof(float);
     if (mPrecision == 4) {
-        pagedAttentionKernel<float><<<grid, 1, sharedBytes, stream>>>(
+        pagedAttentionKernel<float><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), pagedDevPtr<float>(mCache->value.get()),
             pagedDevPtr<float>(output), useMask ? pagedDevPtr<float>(mask) : nullptr,
             pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead,
             mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale);
     } else {
-        pagedAttentionKernel<half><<<grid, 1, sharedBytes, stream>>>(
+        pagedAttentionKernel<half><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), pagedDevPtr<half>(mCache->value.get()),
             pagedDevPtr<half>(output), useMask ? pagedDevPtr<half>(mask) : nullptr,
             pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead,

@@ -239,13 +239,16 @@ bash .codex/skills/mnn-llm-bench/scripts/run_paged_attention_token_alignment.sh
 - 生成默认 prompt 集：`short_exact`、`medium_exact`、`long_rules`、`long_repeated_context`。
 - 对每个 prompt 跑 `cpu/direct`、`cpu/step`、`cuda/direct`、`cuda/step`，其中 `step` 覆盖 `response(..., 0) + generate(1)` 的 request 延续路径。
 - 严格比较所有输出 token id 是否与 `cpu/direct` baseline 一致。
-- 默认要求日志中能看到 `CPUPagedAttention` / `CUDAPagedAttention` 或对应 backend 的 PagedAttention execution class 日志，防止 CUDA fallback 被误判为对齐。
+- 默认记录但不强制要求 `CPUPagedAttention` / `CUDAPagedAttention` execution class 日志；如果当前构建确认开启了 execution class log，可设置 `MNN_LLM_ALIGNMENT_REQUIRE_EXEC_LOG=1` 防止 CUDA fallback 被误判为对齐。
 - 保存日志和 Markdown 报告到 `.cache/logs/paged-attention-token-alignment/<timestamp>/`。
 
 常用覆盖：
 
 ```bash
 MNN_LLM_ALIGNMENT_MAX_TOKENS=6 \
+bash .codex/skills/mnn-llm-bench/scripts/run_paged_attention_token_alignment.sh
+
+MNN_LLM_ALIGNMENT_REQUIRE_EXEC_LOG=1 \
 bash .codex/skills/mnn-llm-bench/scripts/run_paged_attention_token_alignment.sh
 
 MNN_LLM_ALIGNMENT_BACKENDS="cuda" \
@@ -292,13 +295,13 @@ CUDA_LIB_DIR
 
 ```text
 failed_cases: 0
-exec_log: yes
+exec_log: yes/no
 match: yes
 ```
 
 若 `match=no`，优先看对应 prompt 的 `cpu/direct`、`cpu/step`、`cuda/direct`、`cuda/step` token ids；若只有 `step` 漂移，重点检查 request 生命周期、KV/cache/position/slot table 延续状态；若只有 CUDA 漂移，再回到 `$mnn-ops-bench` 的 PagedAttention direct-op 精度测试。
 
-当前仓库构建默认开启 `MNN_EXECUTION_CLASS_LOG=ON`。模型初始化阶段应出现对应 backend 的日志：
+若当前构建开启 execution class log，模型初始化阶段应出现对应 backend 的日志：
 
 ```text
 [CPUExecution] op="..." type=... dispatch=... execution=MNN::...

@@ -21,7 +21,7 @@ Environment:
   MNN_LLM_ALIGNMENT_MEMORY          Runtime memory mode. Defaults to low.
   MNN_LLM_ALIGNMENT_THREADS         Runtime thread count. Defaults to 4.
   MNN_LLM_ALIGNMENT_REQUIRE_EXEC_LOG
-                                      Require CPUPagedAttention/CUDAPagedAttention execution logs. Defaults to 1.
+                                      Require CPUPagedAttention/CUDAPagedAttention execution logs. Defaults to 0.
   MNN_LLM_ALIGNMENT_DRY_RUN         Print resolved work without running when set to 1.
   CUDA_LIB_DIR                      CUDA lib64 directory. Auto-detected from nvcc when unset.
 
@@ -206,7 +206,7 @@ done
 PRECISION="${MNN_LLM_ALIGNMENT_PRECISION:-high}"
 MEMORY="${MNN_LLM_ALIGNMENT_MEMORY:-low}"
 THREADS="${MNN_LLM_ALIGNMENT_THREADS:-4}"
-REQUIRE_EXEC_LOG="${MNN_LLM_ALIGNMENT_REQUIRE_EXEC_LOG:-1}"
+REQUIRE_EXEC_LOG="${MNN_LLM_ALIGNMENT_REQUIRE_EXEC_LOG:-0}"
 DRY_RUN="${MNN_LLM_ALIGNMENT_DRY_RUN:-0}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"

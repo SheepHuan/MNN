@@ -30,6 +30,7 @@ git status --short
 
 3. 仓库级构建、输出同步和测试命令默认从本 MNN 仓库根目录执行。
 4. 构建产物、模型缓存、导出结果和临时文件放在本仓库 `.cache/`、`output/` 或用户指定的本地目录，不要提交到本仓库。
+5. Python 导出、模型分析和相关测试默认使用 `kvshare-edge` conda 环境，例如 `conda run -n kvshare-edge python ...`；不要直接用系统 `python`/`python3` 或 base 环境跑 exporter。
 
 ## 何时读 skill
 
