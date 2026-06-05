@@ -54,6 +54,14 @@ private:
     float* mPrefillQK = nullptr;
     float* mPrefillSoftmax = nullptr;
     size_t mPrefillElements = 0;
+    void* mExternalKey = nullptr;
+    size_t mExternalKeyBytes = 0;
+    void* mExternalValue = nullptr;
+    size_t mExternalValueBytes = 0;
+    float* mCacheBlendScores = nullptr;
+    size_t mCacheBlendScoreCount = 0;
+    int* mCacheBlendIndices = nullptr;
+    size_t mCacheBlendIndexCount = 0;
 };
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

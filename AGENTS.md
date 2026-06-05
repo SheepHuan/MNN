@@ -33,7 +33,7 @@ git status --short
 3. 仓库级构建、输出同步和测试命令默认从本 MNN 仓库根目录执行。
 4. 构建产物、模型缓存、导出结果和临时文件放在本仓库 `.cache/`、`output/` 或用户指定的本地目录，不要提交到本仓库。
 5. Python 导出、模型分析和相关测试默认使用 `kvshare-edge` conda 环境，例如 `conda run -n kvshare-edge python ...`；不要直接用系统 `python`/`python3` 或 base 环境跑 exporter。
-6. 本机编译、交叉编译和构建验证如果没有用户显式指定 `JOBS` / `--parallel`，默认只使用当前机器在线 CPU 总数的一半，最少为 1；不要默认跑满全部 CPU。
+6. 本机编译、交叉编译和构建验证如果没有用户显式指定 `JOBS` / `--parallel`，默认只使用当前进程可用 CPU 总数的一半，最少为 1；不要默认跑满全部 CPU。
 
 ## 何时读 skill
 
@@ -59,6 +59,8 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 
 不要把 `.cache/weight/` 下的 PIC 模型复制或改配置当作普通模型对比；普通模型以 `.cache/mnn-llm-export/` 下的正常导出为准。两边用同一个 prompt、相同 backend / precision / memory / sampler 配置，并分别从各自模型目录执行 demo。
 
+`--skip_weight` 导出的模型只用于检查导出流程和图结构，不作为正确性或性能测试产物。尤其 GLM / GLM-Edge 这类 `tie_word_embeddings=false` 的模型，不能因为 skip-weight skeleton 里的空/meta tensor 看起来相等就把 `tie_word_embeddings` / `tie_embeddings` 写成 true；正确性测试必须使用真实 embedding 文件和完整 `llm.mnn.weight`。历史上 OrangePi GLM PIC skiptest 产物曾因为错误 tied embedding 和 EOF 后 lm_head offset 输出 NUL/`APP`，修复后的判据是普通/PIC demo 都能输出自然语言，再进入 PIC server full-compute/full-reuse/cacheblend/epic 测试。
+
 ## PIC Server 约定
 
 `transformers/pic_llm/engine/app/pic_server.cpp` 是 MNN PIC 自维护的独立 HTTP server，不依赖 `mls`。构建产物名固定为 `pic_server`，由 `.codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh` 安装到 artifact root 的 `bin/` 下。
@@ -74,13 +76,31 @@ POST /chat/completions
 
 它接受内联文本 `{"id":"doc-1","type":"text","content":"...","force":false}`，用 PIC/PagedAttention 模型 prefill 文档，并按 layer 导出 raw KV cache：key 和 value 分开写到 `.k` / `.v` 文件，真实 `batch/kv_heads/head_dim/dtype_bytes` 写到同层 `.json` sidecar。导出前 CPU/CUDA PagedAttention 必须对 key cache 做 inverse RoPE，metadata 标注 `kv_layout.layout=mnn_paged_attention_raw_v1` 和 `kv_layout.key_rope_state=canonical_no_rope`；value cache 保持原布局。
 
-`POST /v1/kv/pic_caches` 接受 `{"id":"pic-1","text_cache_refs":[{"id":"doc-1"}],"selection_algorithm":"full-reuse"}`，解析一个或多个 text cache 并返回 PIC metadata。`POST /v1/chat/completions` / `/chat/completions` 兼容 OpenAI 风格 `messages`，可在 `pic_cache` 中内联同一份 spec；prompt 中的 `{{pic_cache}}` 是 PIC 注入位置。当前 MNN 原生执行语义：
+`POST /v1/kv/pic_caches` 接受 `{"id":"pic-1","text_cache_refs":[{"id":"doc-1"}],"selection_algorithm":"full-reuse"}`，解析一个或多个 text cache 并返回 PIC metadata。`POST /v1/chat/completions` / `/chat/completions` 兼容 OpenAI 风格 `messages`，可在 `pic_cache` 中内联同一份 spec；prompt 中的 `{{pic_cache}}` 是 PIC 注入位置。带 `pic_cache` 的 chat 请求必须在 `messages.content` 中显式包含该 placeholder（或 `pic_cache.placeholder` 指定的自定义 placeholder）；不再支持无 placeholder 的 legacy 隐式 PIC 插入。独立正确性/性能实验之间由客户端显式调用 `POST /reset` 清理 LLM 请求状态；不要在 CUDA/OpenCL PagedAttention backend 按请求自动清整块 PagedCache，这会干扰 decode/continuous 状态和性能。Jetson CUDA 服务启动后的首轮 prefix-cache 写盘若用于 warm-up，必须匹配目标 token length / shape bucket，或对首个 text cache 做重建/验证；这些探测不计入报告。当前 MNN 原生执行语义：
 
 - `full-reuse`：特殊 PIC 计算路径，不重算 PIC token。执行时先从磁盘 `.k/.v` hydrate 全量 PIC KV，CPU/CUDA/OpenCL PagedAttention 对 canonical_no_rope key 按当前 logical slot 重新施加 RoPE 并写入 paged KV slots；suffix token 作为真实 query 继续从同一份 PagedCache 读取 PIC KV。
 - `full-compute`：不读取磁盘 PIC KV，按 prelude + PIC tokens + suffix 完整计算。
-- `epic`：参考 `hf_pic_runtime` 的 EpicPlanner，按 `pic_recompute_ratio` 选择 PIC 开头连续 token；`score_layer_idx` 之前的层保持 token 正常计算语义，使用 full-prompt reference PIC K/V hydrate slots；从 `score_layer_idx` 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
+- `epic`：参考 `hf_pic_runtime` 的 EpicPlanner，按 `pic_recompute_ratio` 选择 PIC 开头连续 token；`score_layer_idx` 之前的层保持 token 正常计算语义，走普通 full-prompt PagedAttention 并把当前请求 K/V 写入 PagedCache；从 `score_layer_idx` 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
 - `cacheblend` / `delta-v`：参考 Python CacheBlend/DeltaV planner，用 score layer 上 full-prompt reference 与 cached PIC value 的 mean-abs delta 选 top-ratio token；执行模式为 `native-cacheblend-sparse-recompute`。
 - `kvshare` / `delta-a`：执行模式为 `native-kvshare-sparse-recompute`，复用同一套 sparse prefill layer plan；当前 MNN C++ 没有 HF autograd，因此评分使用 full-vs-cached K/V delta influence proxy，metadata 中必须标注与 Python `attention_output` gradient influence 的差异。
+
+CPU / CUDA / OpenCL 三个 PagedAttention backend 的功能语义必须对齐：都要支持 full-compute 写入并从 PagedCache 读取、full-reuse 从持久 `.k/.v` hydrate 到 PagedCache 并对 canonical_no_rope key 重新施加 RoPE、sparse recompute 按 logical slot 更新选中 PIC token、任意 `score_layer_idx` 的 cacheblend/kvshare scoring。CPU backend 可以在 host 上计算 delta-v score 和 top-k，但仍必须读取当前请求 PagedCache / slot table 与持久 cached `.v`，通过 `PagedKVMeta::setCacheBlendScoringResult` 返回 local indices；不得新增 chat/scoring scratch `.k/.v`，不得绕过 PagedCache 直接比较临时 tensor。CUDA/OpenCL backend 的 scoring/top-k 仍按设备侧 native 分支要求实现。
+
+PIC cache 磁盘边界是硬约束：只有 `POST /v1/prefill/text` 允许把 text cache 的 K/V 作为持久 `.k/.v` 写入磁盘。`/v1/chat/completions` 中的 `full-compute`、`full-reuse`、`epic`、`cacheblend`、`kvshare` 以及任何 full-reference / scoring 过程，都不得为了实现内部 reference 或评分调用 prefix-cache `PendingWrite`、`setPrefixCacheFile`，也不得生成 scratch reference `.k/.v` 再读回。`cacheblend` / `delta-v` 的正确数据流是：正常 forward 到 score layer，score layer 之前的 Attention 也是普通 full-prompt PagedAttention，当前请求 K/V 只写入 PagedCache；reference K/V 保留在 PagedCache / backend device buffer；CUDA/OpenCL scoring 分支直接读 reference device buffer 与 cached PIC source/PagedCache buffer 计算 score，并在 GPU/CL/CUDA 上完成 top-k 选择。不得把完整 score vector 拷回 CPU 后排序；如当前调度接口需要，最多只把最终 compact top-k logical indices/少量 metadata 暴露给 CPU。若 GPU/CL/CUDA scoring + top-k 分支尚未实现，必须明确标注为 unsupported/fallback，不能用 CPU `std::vector` 读盘扫描冒充 `native-cacheblend-sparse-recompute`。
+
+多 ratio 性能对比也是硬约束：`cacheblend` / `kvshare` 的 `1%/5%/10%/20%/30%` 只能共享同一个已由 `/v1/prefill/text` 构建的 text cache、同一模型和同一 suffix；每个 ratio 必须作为独立 `/v1/chat/completions` 请求执行，并在该请求内独立完成 full-reference / scoring / top-k 选择。不得跨 ratio 或跨请求缓存、复用 score vector 或 recompute logical indices；单个 ratio 的延迟必须包含它自己的 scoring 成本。
+
+历史调试记录：Jetson CUDA 上曾出现 `/v1/prefill/text` 冷启动首轮 prefix-cache 写盘后层 `.k/.v` 变成 `ff7f...`，随后 `full-reuse` / `cacheblend` / `epic` 输出大量 `!`。定位结论是问题集中在 legacy prefix-cache `PendingWrite` 与 PagedAttention/PagedCache 状态交界处，而不是 decode 本身。尝试过在 backend 按 request 自动清整块 PagedCache，这条路被否定，因为会干扰 decode/continuous 状态和性能；尝试过为 prefix-write 临时 clone prefill module，也不是真正隔离 PagedAttention 共享 cache，且会引入 runtime path / session 状态复杂度。正确方向是减少旧 prefix-cache 兼容面：旧逻辑只允许服务 `/v1/prefill/text` 持久导出；chat、full-reference、scoring、sparse recompute 全部围绕当前请求 PagedCache 维护，不写 scratch `.k/.v`，不绕过 slot table，不用 CPU 读盘扫描冒充 native scoring。
+
+PIC/PagedAttention 优化目标按正确语义分层处理，不为了跑分绕过 PagedCache 或省略请求内 scoring：
+
+- 当前性能分析只看 prefill-only，PIC chat 请求使用 `max_tokens=0`；不要把 decode token、采样、decode1 或 next-logits forward 算入 prefill latency。
+- `normal LLM full-compute prefill` 是普通模型基线，必须用 `.cache/mnn-llm-export/<model>/config.json` 的真实普通导出模型跑 `llm_bench -n 0`，只读取 `results[type=prefill]`。
+- `PIC full-compute prefill` 必须完整计算 prelude + PIC tokens + suffix，不读取磁盘 PIC KV；但仍要把当前 K/V 写入 PagedCache，再从 PagedCache / slot table 读回做 PagedAttention，不能绕过 PagedCache 直接用原始 K/V 伪装普通 Attention。优化目标是接近 normal LLM full-compute；若明显更慢，优先优化 PagedAttention mask fast path、query split、PagedCache 读写和 kernel 选择。
+- `PIC full-reuse prefill` 不做 full-reference、scoring 或 sparse recompute，也不默认重算最后一个 PIC token；它只 hydrate 磁盘 cached PIC KV 到 PagedCache、在 GPU/CUDA/OpenCL kernel 内按当前 logical slot 重新施加 RoPE，然后执行 suffix prefill。优化目标是显著快于 PIC full-compute；若慢，优先拆 `disk_read`、`hydrate`、`PagedCache write`、`suffix_prefill`。
+- `cacheblend` / `epic` / `kvshare` sparse prefill 的目标不是复用跨请求 scoring，而是在每个独立请求内高效完成 full-reference / scoring / top-k，再 hydrate 大量复用 KV，只 sparse recompute 选中的 PIC token。低 ratio 应接近 full-reuse，高 ratio 延迟应随重算 token 数增加而合理上升；若比 full-compute 更慢，优先拆 `full_reference/scoring`、`disk_read/hydrate`、`sparse_recompute`、`suffix_prefill` 定位瓶颈。
+- 报告性能时至少给出 `PIC full-compute / normal LLM full-compute`、`full-reuse / PIC full-compute`、各 ratio `cacheblend / full-reuse`、各 ratio `cacheblend / PIC full-compute`、各 ratio `cacheblend / normal LLM full-compute`。这些倍数是判断优化方向是否正确的主指标。
+- 优先级固定为：先让 `PIC full-compute` 对齐 `normal LLM full-compute`，再让 `full-reuse` 只剩 hydrate + suffix prefill 成本，最后再优化 `cacheblend` / `epic` / `kvshare` 的 GPU/CL/CUDA native scoring 和 sparse recompute。
 
 ## MNN 修改约束
 

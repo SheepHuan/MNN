@@ -10,10 +10,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -568,68 +568,6 @@ void runLockedJsonEndpoint(const httplib::Request& req, httplib::Response& res, 
     writeJson(res, response);
 }
 
-float halfToFloat(uint16_t h) {
-    const uint16_t hExp = h & 0x7c00u;
-    const uint16_t hSig = h & 0x03ffu;
-    const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
-    uint32_t out = 0;
-    if (hExp == 0) {
-        if (hSig == 0) {
-            out = sign;
-        } else {
-            uint16_t sig = hSig;
-            int exp = -1;
-            do {
-                ++exp;
-                sig <<= 1;
-            } while ((sig & 0x0400u) == 0);
-            sig &= 0x03ffu;
-            const uint32_t fExp = static_cast<uint32_t>(127 - 15 - exp) << 23;
-            out = sign | fExp | (static_cast<uint32_t>(sig) << 13);
-        }
-    } else if (hExp == 0x7c00u) {
-        out = sign | 0x7f800000u | (static_cast<uint32_t>(hSig) << 13);
-    } else {
-        const uint32_t fExp = static_cast<uint32_t>((hExp >> 10) + (127 - 15)) << 23;
-        out = sign | fExp | (static_cast<uint32_t>(hSig) << 13);
-    }
-    float value = 0.0f;
-    std::memcpy(&value, &out, sizeof(value));
-    return value;
-}
-
-float readRawFloat(const std::vector<int8_t>& data, size_t elementIndex, int dtypeBytes) {
-    const size_t byteOffset = elementIndex * static_cast<size_t>(dtypeBytes);
-    if (byteOffset + static_cast<size_t>(dtypeBytes) > data.size()) {
-        return 0.0f;
-    }
-    if (dtypeBytes == 4) {
-        float value = 0.0f;
-        std::memcpy(&value, data.data() + byteOffset, sizeof(value));
-        return value;
-    }
-    uint16_t h = 0;
-    std::memcpy(&h, data.data() + byteOffset, sizeof(h));
-    return halfToFloat(h);
-}
-
-bool readBinaryFile(const fs::path& path, std::vector<int8_t>& data) {
-    std::ifstream is(path, std::ios::binary | std::ios::ate);
-    if (!is.good()) {
-        return false;
-    }
-    auto size = is.tellg();
-    if (size < 0) {
-        return false;
-    }
-    data.resize(static_cast<size_t>(size));
-    is.seekg(0, std::ios::beg);
-    if (!data.empty()) {
-        is.read(reinterpret_cast<char*>(data.data()), size);
-    }
-    return is.good() || is.eof();
-}
-
 KvShape readKvShape(const fs::path& layersDir, const std::string& cacheName) {
     KvShape shape;
     auto sidecar = readJsonFile(layersDir / (cacheName + "_0.json"));
@@ -919,7 +857,8 @@ bool preparePicCacheFromRequest(const std::string& kvCacheDir, const std::string
         return false;
     }
     prepared.recomputeRatio = clampDouble(jsonDouble(request, "pic_recompute_ratio", 0.20), 0.0, 1.0);
-    prepared.scoreLayerIdx = std::max(0, jsonInt(request, "pic_recompute_score_layer_idx", 1));
+    const int defaultScoreLayer = 1;
+    prepared.scoreLayerIdx = std::max(0, jsonInt(request, "pic_recompute_score_layer_idx", defaultScoreLayer));
     prepared.explicitLogicalIndices = jsonIntVector(request.value("pic_recompute_logical_indices", json::array()));
     prepared.explicitPicLocalIndices = jsonIntVector(request.value("pic_recompute_pic_local_indices", json::array()));
 
@@ -976,16 +915,28 @@ std::vector<MNN::PagedKVExternalSegment> sliceExternalSegments(
     return out;
 }
 
-std::vector<int> selectTopRatioLocalIndices(const std::vector<double>& scores, double ratio);
+bool startsWithTokenPrefix(const std::vector<int>& tokens, const std::vector<int>& prefix) {
+    return !prefix.empty() && tokens.size() >= prefix.size() &&
+           std::equal(prefix.begin(), prefix.end(), tokens.begin());
+}
+
+size_t trimLeadingTokenPrefix(std::vector<int>& tokens, const std::vector<int>& prefix) {
+    if (!startsWithTokenPrefix(tokens, prefix)) {
+        return 0;
+    }
+    tokens.erase(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(prefix.size()));
+    return prefix.size();
+}
 
 PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeTokenCount, int layerCount,
-                                    const std::vector<double>* scoreValues = nullptr,
+                                    const std::vector<int>* nativeSelectedLocalIndices = nullptr,
                                     const json* scoreMetadata = nullptr) {
     PicExecutionPlan plan;
     plan.selectionAlgorithm = pic.selectionAlgorithm;
     const int picStart = preludeTokenCount;
     const int picLength = static_cast<int>(pic.tokenIds.size());
     const int picEnd = picStart + picLength;
+    const int effectiveScoreLayer = std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
     auto fillAllRecompute = [&]() {
         plan.recomputeLogicalIndices.clear();
         for (int i = picStart; i < picEnd; ++i) {
@@ -993,6 +944,23 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
             plan.recomputeScores[std::to_string(i)] = 1.0;
         }
         plan.recomputeTokenCount = static_cast<int>(plan.recomputeLogicalIndices.size());
+    };
+    auto fillFullComputeFallback = [&](const std::string& plannerName, const std::string& scoreKind,
+                                       const std::string& reason) {
+        plan.plannerName = plannerName;
+        plan.executionMode = "full-compute-fallback";
+        plan.fullCompute = true;
+        plan.scoreLayerIdx = layerCount;
+        plan.fallbackReason = reason;
+        fillAllRecompute();
+        plan.prefillPicTokenIds = pic.tokenIds;
+        plan.metadata = {
+            {"score_kind", scoreKind},
+            {"pic_token_count", picLength},
+            {"reuse_token_count", 0},
+            {"fallback_reason", plan.fallbackReason},
+            {"native_sparse_recompute", false},
+        };
     };
     if (pic.selectionAlgorithm == "full-reuse") {
         plan.plannerName = "FullReusePlanner";
@@ -1025,7 +993,7 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
     if (pic.selectionAlgorithm == "epic") {
         plan.plannerName = "EpicPlanner";
         plan.executionMode = "native-epic-sparse-recompute";
-        plan.scoreLayerIdx = std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
+        plan.scoreLayerIdx = effectiveScoreLayer;
         int recompute = picLength <= 0 || pic.recomputeRatio <= 0.0
             ? 0
             : std::min(picLength, std::max(1, static_cast<int>(std::ceil(picLength * pic.recomputeRatio))));
@@ -1042,12 +1010,14 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
         plan.sparseRecompute = recompute > 0;
         plan.metadata = {
             {"score_kind", "pic_head_fixed_ratio"},
+            {"score_source", "fixed_pic_head_contiguous_tokens"},
+            {"score_pass", "not_required_fixed_pic_head"},
             {"pic_token_count", picLength},
             {"reuse_token_count", picLength - recompute},
             {"native_sparse_recompute", true},
             {"native_sparse_recompute_scope", "python_prefill_layer_plan"},
             {"pre_score_compute_layers", plan.scoreLayerIdx},
-            {"pre_score_kv_source", "full_prompt_reference"},
+            {"pre_score_kv_source", "none_fixed_pic_head_selection"},
             {"post_score_reuse_kv_source", "cached_pic_kv"},
         };
         return plan;
@@ -1055,12 +1025,12 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
     plan.plannerName = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
         ? "CacheBlendPlanner"
         : (pic.selectionAlgorithm == "explicit" ? "ExplicitPlanner" : "KvsharePlanner");
-    if (scoreValues != nullptr || pic.selectionAlgorithm == "explicit") {
+    if (nativeSelectedLocalIndices != nullptr || pic.selectionAlgorithm == "explicit") {
         plan.executionMode = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
             ? "native-cacheblend-sparse-recompute"
             : (pic.selectionAlgorithm == "explicit" ? "native-explicit-sparse-recompute"
                                                      : "native-kvshare-sparse-recompute");
-        plan.scoreLayerIdx = std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
+        plan.scoreLayerIdx = effectiveScoreLayer;
         plan.externalTokenIds = pic.tokenIds;
         plan.externalSegments = pic.segments;
         std::vector<int> localIndices;
@@ -1079,18 +1049,20 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
             std::sort(localIndices.begin(), localIndices.end());
             localIndices.erase(std::unique(localIndices.begin(), localIndices.end()), localIndices.end());
         } else {
-            localIndices = selectTopRatioLocalIndices(*scoreValues, pic.recomputeRatio);
+            localIndices = *nativeSelectedLocalIndices;
+            std::sort(localIndices.begin(), localIndices.end());
+            localIndices.erase(std::unique(localIndices.begin(), localIndices.end()), localIndices.end());
         }
         for (size_t rank = 0; rank < localIndices.size(); ++rank) {
             int local = localIndices[rank];
+            if (local < 0 || local >= picLength) {
+                continue;
+            }
             int logical = picStart + local;
             plan.recomputeLogicalIndices.emplace_back(logical);
             plan.sparseLogicalIndices.emplace_back(logical);
             plan.sparseTokenIds.emplace_back(pic.tokenIds[local]);
-            double score = scoreValues != nullptr && local >= 0 && local < static_cast<int>(scoreValues->size())
-                ? (*scoreValues)[local]
-                : static_cast<double>(localIndices.size() - rank);
-            plan.recomputeScores[std::to_string(logical)] = score;
+            plan.recomputeScores[std::to_string(logical)] = static_cast<double>(localIndices.size() - rank);
         }
         plan.recomputeTokenCount = static_cast<int>(plan.recomputeLogicalIndices.size());
         plan.sparseRecompute = plan.recomputeTokenCount > 0;
@@ -1105,7 +1077,9 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
             {"native_sparse_recompute", true},
             {"native_sparse_recompute_scope", "python_prefill_layer_plan"},
             {"pre_score_compute_layers", plan.scoreLayerIdx},
-            {"pre_score_kv_source", "full_prompt_reference"},
+            {"pre_score_kv_source", scoreMetadata != nullptr && plan.scoreLayerIdx > 0
+                                         ? "request_full_reference_pagedcache_no_disk_write"
+                                         : "none"},
             {"post_score_reuse_kv_source", "cached_pic_kv"},
         };
         if (scoreMetadata != nullptr) {
@@ -1117,21 +1091,12 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
         }
         return plan;
     }
-    plan.executionMode = "full-compute-fallback";
-    plan.fullCompute = true;
-    plan.scoreLayerIdx = layerCount;
-    plan.fallbackReason =
-        "MNN C++ PIC server does not yet expose HF-style full prompt Q/K/V scoring and sparse hidden-state recompute";
-    fillAllRecompute();
-    plan.prefillPicTokenIds = pic.tokenIds;
-    plan.metadata = {
-        {"score_kind", pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
-                           ? "layer_value_delta_mean_abs_unavailable"
-                           : "attention_output_error_kv_first_order_influence_unavailable"},
-        {"pic_token_count", picLength},
-        {"reuse_token_count", 0},
-        {"fallback_reason", plan.fallbackReason},
-    };
+    const std::string scoreKind = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
+        ? "layer_value_delta_mean_abs_gpu_topk_unavailable"
+        : "attention_output_error_kv_first_order_influence_gpu_topk_unavailable";
+    fillFullComputeFallback(
+        plan.plannerName, scoreKind,
+        "Native CUDA/OpenCL score + GPU top-k is not implemented; legacy scratch .k/.v CPU scoring is disabled");
     return plan;
 }
 
@@ -1156,213 +1121,6 @@ json precisionRecoverySummary(const PicExecutionPlan& plan, double ratio, int re
             {"steps", json::array()},
         }},
     };
-}
-
-const json* findLayerEntry(const json& kv, int layerIndex) {
-    if (!kv.is_array()) {
-        return nullptr;
-    }
-    for (const auto& entry : kv) {
-        if (entry.is_object() && jsonInt(entry, "layer_index", -1) == layerIndex) {
-            return &entry;
-        }
-    }
-    return nullptr;
-}
-
-bool buildFullPromptReference(MNN::Transformer::Llm* llm, const std::string& kvCacheDir,
-                              const std::vector<int>& fullTokens, const std::string& scratchName,
-                              int layerCount, std::string& fileStem, std::string& error) {
-    if (llm == nullptr || fullTokens.empty()) {
-        error = "Full prompt reference needs a loaded LLM and non-empty token list";
-        return false;
-    }
-    fileStem = pathJoinForMNN(pathJoinForMNN(pathJoinForMNN("scratch", sanitizeCachePart(scratchName)), "layers"), "full");
-    fs::path scratchRoot = fs::path(kvCacheDir) / "scratch" / sanitizeCachePart(scratchName);
-    std::error_code ec;
-    fs::remove_all(scratchRoot, ec);
-    fs::create_directories(scratchRoot / "layers", ec);
-    if (ec) {
-        error = "Failed to create full prompt scratch directory: " + scratchRoot.string();
-        return false;
-    }
-    llm->reset();
-    llm->setPrefixCacheFile(fileStem);
-    std::ostringstream sink;
-    llm->response(fullTokens, &sink, "", 0);
-    llm->reset();
-    for (int layer = 0; layer < layerCount; ++layer) {
-        fs::path valuePath = fs::path(kvCacheDir) / (fileStem + "_" + std::to_string(layer) + ".v");
-        if (!fileExistsNonEmpty(valuePath)) {
-            error = "Full prompt reference did not export layer " + std::to_string(layer) + ": " + valuePath.string();
-            return false;
-        }
-    }
-    return true;
-}
-
-bool scorePicKvDelta(const PreparedPicCache& pic, const std::string& kvCacheDir, const std::string& fullFileStem,
-                     int fullTokenCount, int picStart, int scoreLayerIdx, bool includeKey, bool includeValue,
-                     std::vector<double>& scores, json& metadata, std::string& error) {
-    scores.assign(pic.tokenIds.size(), 0.0);
-    if (pic.tokenIds.empty()) {
-        return true;
-    }
-    fs::path fullKeyPath = fs::path(kvCacheDir) / (fullFileStem + "_" + std::to_string(scoreLayerIdx) + ".k");
-    fs::path fullValuePath = fs::path(kvCacheDir) / (fullFileStem + "_" + std::to_string(scoreLayerIdx) + ".v");
-    fs::path fullShapePath = fs::path(kvCacheDir) / (fullFileStem + "_" + std::to_string(scoreLayerIdx) + ".json");
-    auto fullShape = readJsonFile(fullShapePath);
-    if (!fullShape.is_object()) {
-        error = "Missing full prompt reference shape sidecar: " + fullShapePath.string();
-        return false;
-    }
-    int batch = jsonInt(fullShape, "batch", 1);
-    int kvHeads = jsonInt(fullShape, "kv_heads", 0);
-    int headDim = jsonInt(fullShape, "head_dim", 0);
-    int dtypeBytes = jsonInt(fullShape, "dtype_bytes", 0);
-    if (batch <= 0 || kvHeads <= 0 || headDim <= 0 || dtypeBytes <= 0) {
-        error = "Full prompt reference shape sidecar is incomplete: " + fullShapePath.string();
-        return false;
-    }
-    std::vector<int8_t> fullKey;
-    std::vector<int8_t> fullValue;
-    if (includeKey && !readBinaryFile(fullKeyPath, fullKey)) {
-        error = "Failed to read full prompt key reference: " + fullKeyPath.string();
-        return false;
-    }
-    if (includeValue && !readBinaryFile(fullValuePath, fullValue)) {
-        error = "Failed to read full prompt value reference: " + fullValuePath.string();
-        return false;
-    }
-    const double invDen = 1.0 / static_cast<double>(std::max(1, batch * kvHeads * headDim));
-    size_t picCursor = 0;
-    for (size_t segmentIndex = 0; segmentIndex < pic.segments.size(); ++segmentIndex) {
-        const auto& segment = pic.segments[segmentIndex];
-        const auto& textCache = pic.textCaches[segmentIndex];
-        json kvEntries = textCache.value("kv", json::array());
-        auto layerEntry = findLayerEntry(kvEntries, scoreLayerIdx);
-        if (layerEntry == nullptr) {
-            error = "Text cache is missing score layer " + std::to_string(scoreLayerIdx);
-            return false;
-        }
-        if (segment.batch != batch || segment.kvHeads != kvHeads || segment.headDim != headDim ||
-            segment.dtypeBytes != dtypeBytes) {
-            error = "Text cache shape does not match full prompt reference at score layer";
-            return false;
-        }
-        std::vector<int8_t> cachedKey;
-        std::vector<int8_t> cachedValue;
-        if (includeKey && !readBinaryFile(layerEntry->value("key_path", ""), cachedKey)) {
-            error = "Failed to read cached PIC key for score layer";
-            return false;
-        }
-        if (includeValue && !readBinaryFile(layerEntry->value("value_path", ""), cachedValue)) {
-            error = "Failed to read cached PIC value for score layer";
-            return false;
-        }
-        const size_t sourceTokenCount = segment.sourceTokenCount > 0 ? segment.sourceTokenCount : segment.tokenCount;
-        for (size_t local = 0; local < segment.tokenCount; ++local) {
-            const size_t globalPicLocal = picCursor + local;
-            const int fullToken = picStart + static_cast<int>(globalPicLocal);
-            const size_t sourceToken = segment.sourceTokenOffset + local;
-            if (fullToken < 0 || fullToken >= fullTokenCount || sourceToken >= sourceTokenCount) {
-                error = "PIC scoring token index is out of range";
-                return false;
-            }
-            double score = 0.0;
-            for (int b = 0; b < batch; ++b) {
-                for (int h = 0; h < kvHeads; ++h) {
-                    for (int d = 0; d < headDim; ++d) {
-                        if (includeValue) {
-                            const size_t fullOffset =
-                                ((static_cast<size_t>(b) * kvHeads + h) * fullTokenCount + fullToken) *
-                                    headDim +
-                                d;
-                            const size_t cachedOffset =
-                                ((static_cast<size_t>(b) * kvHeads + h) * sourceTokenCount + sourceToken) *
-                                    headDim +
-                                d;
-                            score += std::abs(readRawFloat(fullValue, fullOffset, dtypeBytes) -
-                                              readRawFloat(cachedValue, cachedOffset, dtypeBytes));
-                        }
-                        if (includeKey) {
-                            const size_t fullOffset =
-                                ((static_cast<size_t>(fullToken) * batch + b) * kvHeads + h) * headDim + d;
-                            const size_t cachedOffset =
-                                ((sourceToken * static_cast<size_t>(batch) + b) * kvHeads + h) * headDim + d;
-                            score += std::abs(readRawFloat(fullKey, fullOffset, dtypeBytes) -
-                                              readRawFloat(cachedKey, cachedOffset, dtypeBytes));
-                        }
-                    }
-                }
-            }
-            scores[globalPicLocal] = score * invDen;
-        }
-        picCursor += segment.tokenCount;
-    }
-    metadata["score_layer_idx"] = scoreLayerIdx;
-    metadata["score_source"] = "full_prompt_reference_minus_cached_pic_kv";
-    metadata["score_dtype_bytes"] = dtypeBytes;
-    metadata["score_batch"] = batch;
-    metadata["score_kv_heads"] = kvHeads;
-    metadata["score_head_dim"] = headDim;
-    return true;
-}
-
-bool attachFullReferenceBeforeScoreLayer(PicExecutionPlan& plan, const std::string& kvCacheDir,
-                                         const std::string& fullFileStem, int fullTokenCount, int picStart,
-                                         std::string& error) {
-    if (plan.fullCompute || plan.externalSegments.empty() || plan.scoreLayerIdx <= 0) {
-        return true;
-    }
-    if (fullFileStem.empty() || fullTokenCount <= 0) {
-        error = "Sparse PIC execution needs full prompt reference KV before score layer";
-        return false;
-    }
-    size_t picCursor = 0;
-    for (auto& segment : plan.externalSegments) {
-        for (auto& layer : segment.layers) {
-            if (layer.layerIndex >= plan.scoreLayerIdx) {
-                continue;
-            }
-            fs::path keyPath = fs::path(kvCacheDir) / (fullFileStem + "_" + std::to_string(layer.layerIndex) + ".k");
-            fs::path valuePath = fs::path(kvCacheDir) / (fullFileStem + "_" + std::to_string(layer.layerIndex) + ".v");
-            if (!fileExistsNonEmpty(keyPath) || !fileExistsNonEmpty(valuePath)) {
-                error = "Missing full prompt reference KV for pre-score layer " + std::to_string(layer.layerIndex);
-                return false;
-            }
-            layer.keyPath = absoluteString(keyPath);
-            layer.valuePath = absoluteString(valuePath);
-            layer.hasSourceOverride = true;
-            layer.sourceTokenOffset = static_cast<size_t>(picStart) + picCursor;
-            layer.sourceTokenCount = static_cast<size_t>(fullTokenCount);
-        }
-        picCursor += segment.tokenCount;
-    }
-    plan.metadata["pre_score_compute_layers"] = plan.scoreLayerIdx;
-    plan.metadata["pre_score_kv_source"] = "full_prompt_reference";
-    return true;
-}
-
-std::vector<int> selectTopRatioLocalIndices(const std::vector<double>& scores, double ratio) {
-    std::vector<int> indices(scores.size());
-    for (size_t i = 0; i < scores.size(); ++i) {
-        indices[i] = static_cast<int>(i);
-    }
-    if (scores.empty() || ratio <= 0.0) {
-        return {};
-    }
-    int topK = std::min(static_cast<int>(scores.size()),
-                        std::max(1, static_cast<int>(std::ceil(scores.size() * ratio))));
-    std::stable_sort(indices.begin(), indices.end(), [&](int lhs, int rhs) {
-        if (scores[lhs] == scores[rhs]) {
-            return lhs < rhs;
-        }
-        return scores[lhs] > scores[rhs];
-    });
-    indices.resize(topK);
-    std::sort(indices.begin(), indices.end());
-    return indices;
 }
 
 } // namespace
@@ -1460,9 +1218,15 @@ void PicServer::handleReset(const httplib::Request&, httplib::Response& res) {
     allowCors(res);
     std::lock_guard<std::mutex> lock(mMutex);
     if (mLlm) {
+        mLlm->clearPrefixCacheFile();
+        mLlm->finishExternalPagedKVRequest();
         mLlm->reset();
     }
-    writeJson(res, json({{"status", "ok"}}), 200, -1);
+    writeJson(res, json({
+        {"status", "ok"},
+        {"scope", "llm_request_state"},
+        {"cleared", json::array({"prefix_cache_mode", "external_paged_request", "context_history"})},
+    }), 200, -1);
 }
 
 void PicServer::handlePrefillText(const httplib::Request& req, httplib::Response& res) {
@@ -1608,6 +1372,7 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     mLlm->setPrefixCacheFile(fileStem);
     std::ostringstream sink;
     mLlm->response(tokenIds, &sink, "", 0);
+    mLlm->clearPrefixCacheFile();
     mLlm->reset();
 
     auto cfg = modelConfig();
@@ -1816,8 +1581,8 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         messages.emplace_back(item["role"].get<std::string>(), item["content"].get<std::string>());
     }
     int maxTokens = jsonInt(request, "max_tokens", -1);
-    if (maxTokens == 0) {
-        error = "max_tokens must be positive when provided";
+    if (maxTokens < -1) {
+        error = "max_tokens must be non-negative when provided";
         return false;
     }
 
@@ -1845,103 +1610,74 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         }
         std::vector<int> preludeTokenIds;
         std::vector<int> suffixTokenIds;
-        bool hasPlaceholder = false;
-        std::string promptProtocol = "legacy-system-prelude";
+        const std::string promptProtocol = "chat-template-placeholder-v1";
         std::string rendered = mLlm->apply_chat_template(messages, true);
         std::string placeholder = pic.placeholder.empty() ? kDefaultPicPlaceholder : pic.placeholder;
         auto placeholderPos = rendered.find(placeholder);
-        if (placeholderPos != std::string::npos) {
-            hasPlaceholder = true;
-            promptProtocol = "chat-template-placeholder-v1";
-            auto preludeText = rendered.substr(0, placeholderPos);
-            auto suffixText = rendered.substr(placeholderPos + placeholder.size());
-            if (!preludeText.empty()) {
-                preludeTokenIds = mLlm->tokenizer_encode(preludeText);
+        if (placeholderPos == std::string::npos) {
+            error = "pic_cache chat request must include placeholder `" + placeholder +
+                "` in messages content; legacy implicit PIC insertion is not supported";
+            return false;
+        }
+        auto preludeText = rendered.substr(0, placeholderPos);
+        auto suffixText = rendered.substr(placeholderPos + placeholder.size());
+        if (!preludeText.empty()) {
+            preludeTokenIds = mLlm->tokenizer_encode(preludeText);
+        }
+        suffixTokenIds = mLlm->tokenizer_encode(suffixText);
+        const auto emptyPrefix = mLlm->tokenizer_encode("");
+        size_t trimmedPicPrefix = 0;
+        if (!preludeTokenIds.empty()) {
+            trimmedPicPrefix = trimLeadingTokenPrefix(pic.tokenIds, emptyPrefix);
+            if (trimmedPicPrefix > 0) {
+                pic.segments = sliceExternalSegments(pic.segments, trimmedPicPrefix);
             }
-            suffixTokenIds = mLlm->tokenizer_encode(suffixText);
-        } else {
-            MNN::Transformer::ChatMessages systemMessages;
-            MNN::Transformer::ChatMessages promptMessages;
-            for (const auto& message : messages) {
-                if (message.first == "system") {
-                    systemMessages.emplace_back(message);
-                } else {
-                    promptMessages.emplace_back(message);
-                }
-            }
-            if (promptMessages.empty()) {
-                error = "pic_cache requires at least one non-system message";
-                return false;
-            }
-            if (!systemMessages.empty()) {
-                preludeTokenIds = mLlm->tokenizer_encode(mLlm->apply_chat_template(systemMessages, false));
-            }
-            suffixTokenIds = mLlm->tokenizer_encode(mLlm->apply_chat_template(promptMessages, true));
-            if (!preludeTokenIds.empty()) {
-                auto emptyPrefix = mLlm->tokenizer_encode("");
-                if (!emptyPrefix.empty() && suffixTokenIds.size() >= emptyPrefix.size() &&
-                    std::equal(emptyPrefix.begin(), emptyPrefix.end(), suffixTokenIds.begin())) {
-                    suffixTokenIds.erase(suffixTokenIds.begin(), suffixTokenIds.begin() + emptyPrefix.size());
-                }
-            }
+        }
+        if (!preludeTokenIds.empty() || !pic.tokenIds.empty()) {
+            trimLeadingTokenPrefix(suffixTokenIds, emptyPrefix);
         }
         if (suffixTokenIds.empty()) {
             error = "PIC prompt suffix tokenization produced no tokens";
             return false;
         }
-        std::vector<int> fullPromptForScoring;
-        fullPromptForScoring.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
-        fullPromptForScoring.insert(fullPromptForScoring.end(), preludeTokenIds.begin(), preludeTokenIds.end());
-        fullPromptForScoring.insert(fullPromptForScoring.end(), pic.tokenIds.begin(), pic.tokenIds.end());
-        fullPromptForScoring.insert(fullPromptForScoring.end(), suffixTokenIds.begin(), suffixTokenIds.end());
-
-        std::vector<double> scoreValues;
+        std::vector<int> nativeSelectedLocalIndices;
         json scoreMetadata = json::object();
-        bool hasNativeScores = false;
-        std::string fullFileStem;
-        auto ensureFullPromptReference = [&](const std::string& reason) -> bool {
-            if (!fullFileStem.empty()) {
-                return true;
-            }
-            std::ostringstream tokenDigestInput;
-            for (int token : fullPromptForScoring) {
-                tokenDigestInput << token << ",";
-            }
-            std::string scratchName = sanitizeCachePart(reason) + "_" + sanitizeCachePart(pic.id) + "_" +
-                                      sha256Hex(tokenDigestInput.str()).substr(0, 12);
-            return buildFullPromptReference(mLlm.get(), mConfig.kvCacheDir, fullPromptForScoring, scratchName,
-                                            layerCount, fullFileStem, error);
-        };
-        if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v" ||
-            pic.selectionAlgorithm == "kvshare" || pic.selectionAlgorithm == "delta-a") {
-            if (!ensureFullPromptReference("pic_score")) {
-                return false;
-            }
+        bool hasNativeSelectedLocalIndices = false;
+        if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v") {
             const int effectiveScoreLayer =
                 std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-            const bool includeKey = pic.selectionAlgorithm == "kvshare" || pic.selectionAlgorithm == "delta-a";
-            const bool includeValue = true;
-            if (!scorePicKvDelta(pic, mConfig.kvCacheDir, fullFileStem,
-                                 static_cast<int>(fullPromptForScoring.size()),
-                                 static_cast<int>(preludeTokenIds.size()), effectiveScoreLayer,
-                                 includeKey, includeValue, scoreValues, scoreMetadata, error)) {
+            std::vector<int> fullPromptForScoring;
+            fullPromptForScoring.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
+            fullPromptForScoring.insert(fullPromptForScoring.end(), preludeTokenIds.begin(),
+                                        preludeTokenIds.end());
+            fullPromptForScoring.insert(fullPromptForScoring.end(), pic.tokenIds.begin(), pic.tokenIds.end());
+            fullPromptForScoring.insert(fullPromptForScoring.end(), suffixTokenIds.begin(),
+                                        suffixTokenIds.end());
+            mLlm->reset();
+            std::ostringstream scoreSink;
+            mLlm->generate_init(&scoreSink, "");
+            if (!mLlm->selectCacheBlendExternalPagedKV(
+                    fullPromptForScoring, pic.segments, static_cast<int>(preludeTokenIds.size()),
+                    static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
+                    nativeSelectedLocalIndices)) {
+                error = "Native cacheblend score/top-k failed on backend " + runtimeBackend();
                 return false;
             }
-            hasNativeScores = true;
+            hasNativeSelectedLocalIndices = true;
+            scoreMetadata = {
+                {"score_layer_idx", effectiveScoreLayer},
+                {"score_source", "request_full_reference_pagedcache_minus_cached_pic_value"},
+                {"score_kind", "layer_value_delta_mean_abs"},
+                {"score_pass", "request_full_reference_pagedcache_no_disk_write"},
+                {"topk_location", "backend_device"},
+                {"host_transfer", "selected_local_indices_only"},
+                {"selected_count", nativeSelectedLocalIndices.size()},
+            };
         }
-        PicExecutionPlan plan = buildExecutionPlan(pic, static_cast<int>(preludeTokenIds.size()), layerCount,
-                                                   hasNativeScores ? &scoreValues : nullptr,
-                                                   hasNativeScores ? &scoreMetadata : nullptr);
-        if (!plan.fullCompute && plan.scoreLayerIdx > 0) {
-            if (!ensureFullPromptReference("pic_prescore")) {
-                return false;
-            }
-            if (!attachFullReferenceBeforeScoreLayer(plan, mConfig.kvCacheDir, fullFileStem,
-                                                     static_cast<int>(fullPromptForScoring.size()),
-                                                     static_cast<int>(preludeTokenIds.size()), error)) {
-                return false;
-            }
-        }
+        PicExecutionPlan plan = buildExecutionPlan(
+            pic, static_cast<int>(preludeTokenIds.size()), layerCount,
+            hasNativeSelectedLocalIndices ? &nativeSelectedLocalIndices : nullptr,
+            hasNativeSelectedLocalIndices ? &scoreMetadata : nullptr);
         mLlm->reset();
         mLlm->generate_init(&sink, "");
         if (plan.fullCompute) {
@@ -2003,7 +1739,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             {"prompt_token_count", promptTokens},
             {"text_caches", pic.textCaches},
             {"prompt_protocol", promptProtocol},
-            {"placeholder", hasPlaceholder ? placeholder : ""},
+            {"placeholder", placeholder},
             {"selection_algorithm", pic.selectionAlgorithm},
             {"pic_recompute_ratio", pic.recomputeRatio},
             {"pic_recompute_score_layer_idx", pic.scoreLayerIdx},

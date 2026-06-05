@@ -29,6 +29,8 @@ PIC 需要固定预分配 KV token 上限时追加：
 --paged_kv_max_tokens <N>
 ```
 
+`--skip_weight` 是导出流程/图结构 smoke，不是可用于正确性或性能的模型产物。skip-weight 模型可以缺少真实 embedding / lm_head 数值；测试输出、PIC server 精度、full-reuse/cacheblend/epic 延迟时必须使用真实权重导出，或者明确标注只是结构诊断。对 GLM / GLM-Edge 等 `tie_word_embeddings=false` 的模型，导出后必须确认 `export_args.json` 中 `tie_word_embeddings` 仍为 false，`llm_config.json` 不应出现错误的 `tie_embeddings`；否则输入 embedding 可能读到 lm_head 或 EOF 后占位数据，典型现象是 NUL、`APP` 或无意义重复 token。
+
 ## 基本工作流
 
 1. 所有命令默认从本 MNN 仓库根目录执行。

@@ -69,6 +69,14 @@ struct PagedKVMeta : public KVMeta {
     std::vector<int> external_loaded_layers;
     bool sparse_query_active = false;
     std::vector<int> sparse_query_logical_indices;
+    bool cacheblend_score_active = false;
+    bool cacheblend_score_ready = false;
+    int cacheblend_score_layer_idx = -1;
+    int cacheblend_score_pic_start = 0;
+    int cacheblend_score_pic_token_count = 0;
+    int cacheblend_score_top_k = 0;
+    std::vector<PagedKVExternalSegment> cacheblend_score_segments;
+    std::vector<int> cacheblend_score_selected_local_indices;
 
     void beginRequest(int capacity) {
         request_active = true;
@@ -86,6 +94,7 @@ struct PagedKVMeta : public KVMeta {
         external_loaded_layers.clear();
         sparse_query_active = false;
         sparse_query_logical_indices.clear();
+        finishCacheBlendScoring();
         slot_table_host.resize(request_capacity);
         for (int i = 0; i < request_capacity; ++i) {
             slot_table_host[i] = request_base + i;
@@ -99,6 +108,7 @@ struct PagedKVMeta : public KVMeta {
         external_loaded_layers.clear();
         sparse_query_active = false;
         sparse_query_logical_indices.clear();
+        finishCacheBlendScoring();
     }
 
     bool appendExternalSegments(const std::vector<PagedKVExternalSegment>& segments, size_t tokenCount) {
@@ -165,6 +175,64 @@ struct PagedKVMeta : public KVMeta {
             return -1;
         }
         return sparse_query_logical_indices[queryIndex];
+    }
+
+    bool beginCacheBlendScoring(int picStart, int picTokenCount, int scoreLayerIdx, int topK,
+                                const std::vector<PagedKVExternalSegment>& segments) {
+        if (!request_active || picStart < 0 || picTokenCount < 0 || scoreLayerIdx < 0 || topK < 0) {
+            return false;
+        }
+        if (picTokenCount == 0 || topK == 0) {
+            cacheblend_score_active = true;
+            cacheblend_score_ready = true;
+            cacheblend_score_layer_idx = scoreLayerIdx;
+            cacheblend_score_pic_start = picStart;
+            cacheblend_score_pic_token_count = picTokenCount;
+            cacheblend_score_top_k = 0;
+            cacheblend_score_segments.clear();
+            cacheblend_score_selected_local_indices.clear();
+            return true;
+        }
+        size_t total = 0;
+        cacheblend_score_segments.clear();
+        cacheblend_score_segments.reserve(segments.size());
+        for (auto segment : segments) {
+            segment.logicalStart = static_cast<size_t>(picStart) + total;
+            total += segment.tokenCount;
+            cacheblend_score_segments.emplace_back(std::move(segment));
+        }
+        if (total != static_cast<size_t>(picTokenCount)) {
+            finishCacheBlendScoring();
+            return false;
+        }
+        cacheblend_score_active = true;
+        cacheblend_score_ready = false;
+        cacheblend_score_layer_idx = scoreLayerIdx;
+        cacheblend_score_pic_start = picStart;
+        cacheblend_score_pic_token_count = picTokenCount;
+        cacheblend_score_top_k = std::min(topK, picTokenCount);
+        cacheblend_score_selected_local_indices.clear();
+        return true;
+    }
+
+    bool needsCacheBlendScoring(int layerIndex) const {
+        return cacheblend_score_active && !cacheblend_score_ready && layerIndex == cacheblend_score_layer_idx;
+    }
+
+    void setCacheBlendScoringResult(const std::vector<int>& selectedLocalIndices) {
+        cacheblend_score_selected_local_indices = selectedLocalIndices;
+        cacheblend_score_ready = true;
+    }
+
+    void finishCacheBlendScoring() {
+        cacheblend_score_active = false;
+        cacheblend_score_ready = false;
+        cacheblend_score_layer_idx = -1;
+        cacheblend_score_pic_start = 0;
+        cacheblend_score_pic_token_count = 0;
+        cacheblend_score_top_k = 0;
+        cacheblend_score_segments.clear();
+        cacheblend_score_selected_local_indices.clear();
     }
 
     bool ensureLogicalCapacity(size_t required) {

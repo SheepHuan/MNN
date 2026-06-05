@@ -42,7 +42,9 @@ private:
     ErrorCode syncSparseQuery(int insertLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen);
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
+    ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
+    ErrorCode runCacheBlendScoring(int layerIndex, int kvLen);
     bool canUseFastPrefill(const Tensor* mask, int baseLogical, int insertLen, int kvLen, bool sparseQuery,
                            bool externalHydrated, int* maskKeyLen) const;
     ErrorCode runFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
@@ -56,6 +58,8 @@ private:
     std::shared_ptr<KernelWrap> mAttentionRowKernel;
     std::shared_ptr<KernelWrap> mPackPagedKVKernel;
     std::shared_ptr<KernelWrap> mHydrateExternalKernel;
+    std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
+    std::shared_ptr<KernelWrap> mCacheBlendTopKKernel;
     std::shared_ptr<KernelWrap> mRearrangeQKernel;
     std::shared_ptr<KernelWrap> mRearrangeMaskKernel;
     std::shared_ptr<KernelWrap> mQKKernel;
@@ -70,8 +74,12 @@ private:
     std::shared_ptr<Tensor> mTempSoftmax;
     std::shared_ptr<Tensor> mExternalKey;
     std::shared_ptr<Tensor> mExternalValue;
+    std::shared_ptr<Tensor> mCacheBlendScores;
+    std::shared_ptr<Tensor> mCacheBlendIndices;
     size_t mExternalKeyElements = 0;
     size_t mExternalValueElements = 0;
+    int mCacheBlendScoreCount = 0;
+    int mCacheBlendIndexCount = 0;
     int mLayerIndex = -1;
     int mKVSharedLayerIndex = -1;
     bool mIsKVShared = false;

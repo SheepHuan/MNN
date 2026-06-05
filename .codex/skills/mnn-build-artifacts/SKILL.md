@@ -64,7 +64,7 @@ Jetson 默认平台名是 `jetson`，默认安装目录是：
 
 `project/linux/build_on_jetson.sh` 只保留为兼容入口，内部转发到上面的通用脚本；不要再把构建逻辑维护到 `project/linux`。
 
-不显式设置 `JOBS` 时，脚本默认使用当前设备在线 CPU 总数的一半，最少为 1；这个默认值对 Jetson、Orange Pi 5 Plus 和 OnePlus 13T 三类目标都一致生效。本机编译、交叉编译和构建验证都遵守同一约定，除非用户明确给出 `JOBS` 或 `--parallel`。
+不显式设置 `JOBS` 时，脚本默认使用当前进程可用 CPU 总数的一半，最少为 1；这个默认值对 Jetson、Orange Pi 5 Plus 和 OnePlus 13T 三类目标都一致生效。本机编译、交叉编译和构建验证都遵守同一约定，除非用户明确给出 `JOBS` 或 `--parallel`。
 
 优先显式把 build/install 放到本仓库：
 
@@ -330,7 +330,7 @@ cmake -S . -B .cache/build/mnn/x64 \
   -DMNN_BUILD_LLM=ON \
   -DMNN_BUILD_CONVERTER=ON \
   -DMNN_BUILD_SHARED_LIBS=ON
-TOTAL_CPUS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
+TOTAL_CPUS="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
 JOBS="${JOBS:-$((TOTAL_CPUS > 1 ? TOTAL_CPUS / 2 : 1))}"
 cmake --build .cache/build/mnn/x64 --parallel "${JOBS}"
 cmake --install .cache/build/mnn/x64 --prefix .cache/output/mnn/artifacts/x64
@@ -353,7 +353,7 @@ install -m 755 .cache/build/mnn/x64/run_test.out .cache/output/mnn/artifacts/x64
 只重编某个 target 时指定 target：
 
 ```bash
-TOTAL_CPUS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
+TOTAL_CPUS="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
 JOBS="${JOBS:-$((TOTAL_CPUS > 1 ? TOTAL_CPUS / 2 : 1))}"
 cmake --build .cache/build/mnn/x64 --target <target> --parallel "${JOBS}"
 ```

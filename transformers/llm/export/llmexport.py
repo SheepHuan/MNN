@@ -22,6 +22,13 @@ from utils.smooth_quantizer import SmoothQuantizer
 from utils.omni_quantizer import OmniQuantizer
 from utils.torch_utils import onnx_export
 
+def _resolve_tie_word_embeddings(args, config, model):
+    if args.seperate_embed:
+        return False
+    if getattr(args, 'skip_weight', False):
+        return bool(getattr(config, 'tie_word_embeddings', False))
+    return model.lm.lm.weight.equal(model.embed.embed.weight)
+
 class LlmExporter(torch.nn.Module):
     '''
     Base class for all llm model export. Inherits from [`torch.nn.Module`].
@@ -119,7 +126,7 @@ class LlmExporter(torch.nn.Module):
             }
 
         # tie word embeddings
-        self.args.tie_word_embeddings = not self.args.seperate_embed and self.model.lm.lm.weight.equal(self.model.embed.embed.weight)
+        self.args.tie_word_embeddings = _resolve_tie_word_embeddings(self.args, self.config, self.model)
         # Pass properties from model to exporter
         self.visual = self.model.visual
         self.audio = self.model.audio

@@ -303,6 +303,7 @@ CACHEBLEND / EPIC / KVSHARE PIC PREFILL
 - 磁盘 KV 读取只允许进入小的 mapped source CL buffer。OpenCL UMA 设备上优先用 host-visible / mapped buffer，CPU 直接拿 host pointer，把 `.k/.v` 文件内容读进这个 mapped pointer；unmap 后由 GPU kernel 消费。避免 `std::vector` 暂存后再 `enqueueWriteBuffer` 的二次拷贝。
 - 如果某个 OpenCL runtime 不能高效 map host-visible buffer，才允许 fallback 到普通 source buffer + `enqueueWriteBuffer`，并在性能报告中明确标注这个 fallback。
 - PIC token RoPE 必须融合进 `PICPageAttention` 系列 GPU kernel 中，包括 full-reuse hydrate、cacheblend/epic/kvshare reused-KV hydrate、sparse recompute 这些变体。磁盘里的 key cache 保持 `canonical_no_rope`，CPU 不做逐 token/head/dim 的 RoPE sin/cos 计算，也不要增加独立 RoPE 预处理 pass。
+- hydrate kernel 做 RoPE 时，同一 pair 的前半维度线程应一次写出前后两个 key 维度，避免后一半维度重复计算同一组 `sin/cos`。value 仍按全 head_dim 拷贝到 PagedCache。
 - 对 full-reuse 这类纯 hydrate 路径，目标数据流是：`disk .k/.v -> mapped source CL buffer host pointer -> PICPageAttention hydrate path -> PagedCache CL Buffer -> PICPageAttention suffix prefill`。
 - OpenCL buffer 实现应使用专门的 PIC hydrate kernel（例如 `pic_page_attention_hydrate_kv`）承接 `mapped source CL buffer -> PagedCache CL Buffer + GPU RoPE`，不要退回到 CPU patch PagedCache。
 - `cacheblend` / `epic` / `kvshare` 仍然会复用大量 PIC KV；这些复用 KV 同样来自磁盘 `.k/.v`，也必须走 `mapped source CL buffer -> PICPageAttention hydrate path -> PagedCache CL Buffer`，并在 PICPageAttention 系列 kernel 中按当前 logical slot 重新施加 RoPE。
@@ -313,18 +314,35 @@ CACHEBLEND / EPIC / KVSHARE PIC PREFILL
 PagedAttention 专用分支约定：
 
 - `full-compute` prefill：不读取磁盘 PIC KV。应使用与普通 Attention 对齐的 tiled/prefill 计算路径，但仍然先写入 PagedCache，再从 PagedCache/packed PagedCache 读出计算输出；不能绕过 PagedCache 直接用原始 K/V “作假”。
+- `/v1/prefill/text` 持久化 text cache 时会用 prefix-cache `PendingWrite` 写 `.k/.v`，但这不应强制 attention 退到逐行 `row` kernel；当前 K/V 已先写入 PagedCache，写盘后仍可走 fast/tiled PagedCache prefill。
 - `full-reuse`：特殊 PIC 计算路径，不重算 PIC token。应启动专门的 PIC hydrate + PICPageAttention 路径，先把磁盘 PIC KV 按 slot 注入 PagedCache，suffix token 作为真实 query 从同一份 PagedCache 读取 PIC KV。
 - `cacheblend`：参考 `/root/code/kvshare-edge/impl/pic_server` 的语义，不应在通用 PagedAttention 中隐式完成全部工作。应拆成两个明确阶段：
-  - `CacheblendScorePageAttention` / score 分支：在指定 score layer 上计算或读取评分所需的 full-reference/cached delta，产出需要重算的 PIC logical indices。
+  - `CacheblendScorePageAttention` / score 分支：在指定 score layer 上计算或读取评分所需的 full-reference/cached delta，并在 GPU/CL/CUDA 上完成 top-k，产出需要重算的 PIC logical indices。不得把完整 score vector 拷回 CPU 后排序。
   - `PICPageAttention` / sparse recompute 分支：后续层从磁盘 `.k/.v` hydrate 大量复用 KV 到 PagedCache，只对选中的 PIC token 重新计算 K/V，其余 PIC token 继续复用 PagedCache 中的 cached KV。
+- cacheblend / kvshare 的磁盘边界必须严格遵守：只有 `/v1/prefill/text` 可以把 text cache K/V 持久写成 `.k/.v`。`/v1/chat/completions` 的 full-reference / scoring 只是请求内的正常计算，不得通过 prefix-cache `PendingWrite`、`setPrefixCacheFile`、scratch `.k/.v` 或 CPU 读盘扫描来实现。
+- score layer 之前的 Attention 是普通 full-prompt PagedAttention：prelude + PIC + suffix 正常计算，并把当前请求 K/V 写入 PagedCache；不写 full-reference `.k/.v`，也不从磁盘 hydrate pre-score full-reference KV。
+- cacheblend / delta-v 的 score 分支必须读内存态 backend buffer：full-reference 正常 forward 到 score layer 后，reference K/V 留在 PagedCache / device buffer；CUDA/OpenCL score kernel 直接比较 reference K/V 与 cached PIC source/PagedCache 中的 K/V，输出每个 PIC token 的 score，并在设备侧按 `pic_recompute_ratio` 选 top-k token。不应改变 reference 计算、触发重复落盘或重复读盘；如果当前 C++ 调度还需要 CPU vector，最多只拷回最终 top-k logical indices，不拷完整 score vector 做 CPU 排序。
+- CPU / CUDA / OpenCL 三套 PagedAttention backend 的语义能力要对齐。CPU 也必须支持 full-compute PagedCache 读写、full-reuse external `.k/.v` hydrate + canonical_no_rope key 重新 RoPE、sparse recompute 按 logical slot 写回、任意 `score_layer_idx` 的 cacheblend/kvshare scoring。CPU 上 delta-v score 和 top-k 可以在 host 执行，但仍必须读当前请求 PagedCache / slot table 与持久 cached `.v`，并通过 `PagedKVMeta::setCacheBlendScoringResult` 返回 local indices；不得用 chat/scoring scratch `.k/.v`、临时 tensor 对比或绕过 PagedCache 来冒充对齐。
+- CacheBlend 的执行顺序必须保持自然语义：score layer 先按完整 token 长度正常计算 Q/K/V 和该层 PagedAttention，随后基于本次 request 的 reference V 与 cached PIC V 做 Delta-V 评分和设备侧 top-k；选出 token 后才进入 PIC sparse recompute，把选中 logical slot 的 K/V 覆盖回 PagedCache。不要在 score layer attention 之前先切 Q，也不要把未选中的 PIC token 当 query 重算。
+- 当前实现可以先用 score-layer-only Module 完成“跑到 score layer 后立即评分，然后 reset 进入 sparse recompute”的两阶段路径。下一步更优目标是 fused score-to-sparse 路径：score layer 的 reference Q/K/V 和 PagedCache 保留在同一请求内，设备侧 top-k 后直接 compact/slice selected PIC query，覆盖 selected logical slots，并从 score layer 之后继续 forward，避免 reset 后重复跑 pre-score 层。
+- CacheBlend score 的数学定义必须在 metadata 和报告中写清楚：若实现是 `mean(abs(V_ref - V_cached))`，标注为 `layer_value_delta_mean_abs`；若切到二次项误差，标注为 `layer_value_delta_mean_square` 或等价名称。不要把 mean-abs 实现说成二次项 Delta-V。
+- 多 ratio 测试不共享 scoring 结果：`1%/5%/10%/20%/30%` 可以共享同一份 text cache、模型和 suffix，但每个 ratio 都必须是一次独立 `/v1/chat/completions` 请求，独立执行 full-reference / scoring / top-k 选择。不要跨 ratio 或跨请求缓存 score vector、排序结果或 recompute logical indices；每个 ratio 的 latency 都要包含本次请求自己的 scoring 成本。
+- 如果 CUDA/OpenCL scoring + top-k 分支尚未实现，报告为 unsupported/fallback；不能把 `std::vector` + `readBinaryFile(.k/.v)` 的 CPU delta 扫描标成 `native-cacheblend-sparse-recompute`。
 - `epic` / `kvshare` 同理应有各自明确的 scoring/planning 分支，再把 logical indices 传给 PIC sparse recompute，不要让每个 layer 重复做规划。
 - `cacheblend` / `epic` / `kvshare` 的 sparse recompute 只发生在 PIC prefill/reuse 阶段；进入 decode 后，所有模式都使用普通 PagedAttention 读现有 PagedCache，不对旧 PIC KV 做二次 RoPE 或二次重算。
 - batch 请求必须保持同质：要么全是 full-compute，要么全带 PIC cache；混合 PIC/no-PIC 拒绝。单请求也按 batch=1 走同一套 batch scheduler 和 PagedAttention 逻辑。
 
+自然语言正确性门槛：
+
+- 性能优化后必须跑 `max_tokens>0` 的功能 smoke，确认 full-reuse、cacheblend、epic 输出的是正常自然语言或可解析答案，而不是重复标点、空串或乱码。正式延迟表仍只用 `max_tokens=0`，这个 smoke 只验证 hydrate / sparse recompute 后 decode 能正确读取 PagedCache。
+- 带 `pic_cache` 的 chat smoke 必须显式包含 `{{pic_cache}}` 或 `pic_cache.placeholder` 指定的自定义 placeholder；无 placeholder 的 legacy 隐式 PIC 插入路径已删除，不再作为兼容入口或测试路径。
+- 正确性 smoke 的响应解析要覆盖 OpenAI 形状和 MNN PIC server 包装形状，尤其是 `choices[0].message.content` 与 `data[0].choices[0].message.content`。不能因为解析器漏字段而把正常输出误报失败。
+- sparse 模式若返回 HTTP 200 但输出重复标点或无意义文本，应优先排查：score pass 后 reset 是否破坏 position/history，selected logical slot 是否覆盖到正确 physical slot，sparse recompute 后 `logical_length` / `slotTable` 是否仍包含全量 PIC + suffix 上下文，以及 decode 是否直接读混合后的 PagedCache。
+
 瓶颈定位要求：
 
-- 报告 cacheblend/kvshare 性能时必须拆开：`text_cache_build`、`full_reference/scoring`、`disk_read/hydrate`、`sparse_recompute`、`suffix_generate/TTFT`。
-- 如果 full-reuse 慢，优先检查 disk read + hydrate + PagedCache CL Buffer 写入；如果 cacheblend 比 full-reuse 多出大段延迟，优先检查 full-reference/scoring 是否每次请求重跑和是否落盘。
+- 报告 cacheblend/kvshare 性能时必须拆开：`text_cache_build`、`full_reference/scoring`、`disk_read/hydrate`、`sparse_recompute`、`suffix_prefill`。当前优化分析暂不比较 decode 性能。
+- 如果 full-reuse 慢，优先检查 disk read + hydrate + PagedCache CL Buffer 写入；如果 cacheblend 比 full-reuse 多出大段延迟，优先检查 full-reference/scoring 是否错误走了 prefix-cache 写盘、scratch `.k/.v` 读回或 CPU `std::vector` 扫描。
 - `precision_recovery.execution_mode` 必须确认是 `native-full-reuse`、`native-cacheblend-sparse-recompute`、`native-epic-sparse-recompute` 或 `native-kvshare-sparse-recompute`，不能只看 HTTP 成功。
 - 对 OpenCL UMA 优化，验证时至少对比优化前后的 full-reuse latency；full-reuse 是隔离 PagedCache hydrate/cache 访问成本的最直接用例。
 
@@ -335,17 +353,19 @@ Full-compute / CUDA PagedAttention 经验：
 - mask 在 CUDA PagedAttention 中按 float additive mask 读取。fp16 Q/K/V 时也不能把 float mask 指针转成 half；否则既慢又可能在 fallback path 上读错 mask。
 - 长 prefill 应像普通 CUDA Attention 一样按 query piece 分片，例如 256/1024 token 阈值，而不是一次性分配完整 `B*H*Q*K` 的 QK/Softmax 临时缓冲。对 2k+ prompt，这能显著降低显存压力和 cache 抖动。
 - Direct-op 验证要覆盖带 mask 的 PagedAttention prefill。`bench_ops/cuda/perf/PagedAttention/Prefill` 和 `bench_ops/cuda/accuracy/PagedAttention/CompareAttention` 中的 PagedAttention prefill 应传 causal mask，否则测试不到线上 full-compute 的慢路径。
-- 2026-06-03 Jetson / Llama-3.2-3B / CUDA 参考数据：修正 mask fast path 和 query split 后，direct-op `PagedAttention/Prefill` 与普通 `Attention/Prefill` 同量级；ctx2048 的 3B 形状约 `PagedAttention 480ms` vs `Attention 550ms`。端到端 PIC full-compute 在 2312 PIC tokens + 39 prelude + 18 suffix + `max_tokens=1` 下，从约 59.5s 降到首轮约 26.2s、热态约 21.8s；同长度普通 LLM `llm_bench -p 2369 -n 1 -rep 3` 约 94.3 tok/s，即约 25.1s。
+- 2026-06-03 Jetson / Llama-3.2-3B / CUDA 旧参考数据：修正 mask fast path 和 query split 后，direct-op `PagedAttention/Prefill` 与普通 `Attention/Prefill` 同量级；ctx2048 的 3B 形状约 `PagedAttention 480ms` vs `Attention 550ms`。旧端到端 PIC full-compute 数据使用 2312 PIC tokens + 39 prelude + 18 suffix + `max_tokens=1`，从约 59.5s 降到首轮约 26.2s、热态约 21.8s；同长度普通 LLM `llm_bench -p 2369 -n 1 -rep 3` 约 94.3 tok/s，即约 25.1s。当前 prefill-only 对比不要沿用这组含首 token 的口径。
 
-Full-reuse / TTFT 经验：
+Full-reuse / prefill-only 经验：
 
 - `full-reuse` 不是“默认重算 PIC 最后一个 token”。正确语义是：hydrate 全量 PIC KV 到 PagedCache 后，suffix token 作为当前上下文里的真实 query 去 attend 已 hydrate 的 PIC KV；`precision_recovery.recompute_token_count` 应为 0，metadata 应体现 `reuse_token_count=pic_token_count`。只有 `cacheblend` / `epic` / `kvshare` / explicit 计划选中的 PIC token 才 sparse recompute。
-- 统计 TTFT 时，口径是“模型拿到请求到输出第一个 token”。不应把输出第一个 token 之后、为了准备下一 token logits 而执行的 decode forward 算进去。高层一次性 `generate(input, max_tokens)` 可以在达到 `max_tokens` 后跳过 next-logits forward；底层可连续调用的 `generate(1)` 仍应保留 next-logits forward，避免破坏连续 decode。
-- `max_tokens=0` 不能作为 chat prefill-only benchmark；当前 chat completion 会拒绝 `max_tokens <= 0`。需要 prefill-only 拆分时，应加专门 timing 或使用 server 内部阶段计时，不要把这个快速错误响应当作 prefill 延迟。
-- OpenCL PagedAttention profiling 可用 `MNN_PAGED_ATTENTION_PROFILE=1` 打开。profile 日志应至少区分 `hydrate`、`fast_prefill`、`row`、`generic`。注意 profile 中会 `queue.finish()`，只用于定位瓶颈，不作为最终性能数。
+- 当前 cacheblend / kvshare / full-reuse / full-compute 延迟分析只测 prefill。PIC server 请求应设置 `max_tokens=0`，完成 prelude / hydrate / sparse recompute / suffix prefill 后直接返回；不要把 decode token、采样或 next-logits forward 算入这组结果。
+- 对比 cacheblend 不同重计算预算时，必须在同一份 text cache 和 suffix 下同时跑 `full-reuse`、`full-compute`、`cacheblend 1%/5%/10%/20%/30%`。每个 ratio 是独立请求，独立 scoring，不共享 score 或 top-k 计划。报告要列出各 ratio 相对 `full-reuse`、PIC `full-compute`、普通 LLM full-compute prefill 的倍数。
+- 普通 LLM baseline 用真实普通导出模型跑 `llm_bench -n 0`，只读 `results[type=prefill]` 计算 `prefill_s = prompt_len / tps`；不要使用 `prefill + decode1` 或进程 wall time 代表普通 full-compute prefill。
+- CUDA/OpenCL PagedAttention profiling 可用 `MNN_PAGED_ATTENTION_PROFILE=1` 打开。profile 日志应至少区分 `hydrate`、`fast_prefill`、`row` 或 `generic`。注意 profile 中会触发 `cudaDeviceSynchronize()` / `queue.finish()`，只用于定位瓶颈，不作为最终性能数。
+- 远端 `pic_server` profile 写文件时 stdout 可能块缓冲；需要统计完整层数时用 `stdbuf -oL -eL env MNN_PAGED_ATTENTION_PROFILE=1 ...` 启动，或等 server 正常 flush 后再杀进程。不要把半截 profile 日志误判为缺层。
 - 如果 profile 中 full-reuse 出现大量 `row` / `generic` 且 `sparse=1`，先检查是否错误触发了 PIC sparse recompute。一次错误的 1-token sparse recompute 会过全部层，KV 长度接近 PIC+prelude，延迟会远高于 hydrate 本身。
-- 如果 `max_tokens=1` 后还出现一轮 `row` / `generic`、`sparse=0` 的 decode forward，通常是在输出第一个 token 后又为下一 token 准备 logits；它不属于 TTFT，应通过高层生成参数跳过。
-- 2026-06-03 Orange Pi 5 Plus / GLM Edge 4B / OpenCL 参考数据：594 PIC tokens + 15 suffix tokens + `max_tokens=1`，修正后 `native-full-reuse`、`recompute_token_count=0`，热态约 3.0s，首轮偏冷态约 4.6s。此前约 13s 的主要原因是错误默认重算最后一个 PIC token，并且 `max_tokens=1` 后额外跑了 next-logits forward。
+- 复查旧 `max_tokens=1` 数据时，如果出现一轮 `row` / `generic`、`sparse=0` 的 decode forward，通常是在输出第一个 token 后又为下一 token 准备 logits；它不属于当前 prefill-only 口径。
+- 2026-06-03 Orange Pi 5 Plus / GLM Edge 4B / OpenCL 旧参考数据：594 PIC tokens + 15 suffix tokens + `max_tokens=1`，修正后 `native-full-reuse`、`recompute_token_count=0`，热态约 3.0s，首轮偏冷态约 4.6s。此前约 13s 的主要原因是错误默认重算最后一个 PIC token，并且 `max_tokens=1` 后额外跑了 next-logits forward。当前 prefill-only 对比应改用 `max_tokens=0` 重测。
 - 同一组 profile 中，错误版本约可见：40 层 hydrate 约 0.46s，suffix fast-prefill 约 0.52s，错误 sparse recompute generic 约 3.44s，额外 decode generic 约 1.44s。修正后 profile 应没有 PIC sparse recompute，剩余延迟主要来自 KV hydrate、15 个 suffix token 的真实模型计算，以及 HTTP/调度/采样开销。
 
 ## PIC Server Smoke
@@ -386,7 +406,7 @@ ssh jetson@192.168.101.192 'curl -s -X POST http://127.0.0.1:18091/v1/chat/compl
   -d "{\"model\":\"llama-pic\",\"messages\":[{\"role\":\"user\",\"content\":\"{{pic_cache}}\\nQuestion: what text was cached?\"}],\"max_tokens\":8,\"temperature\":0,\"pic_cache\":{\"id\":\"smoke_pic\",\"text_cache_refs\":[{\"id\":\"smoke_doc\"}],\"selection_algorithm\":\"full-reuse\"}}"'
 ```
 
-`precision_recovery.execution_mode` 是判断实际执行路径的关键：`native-full-reuse` 表示磁盘 PIC KV 已写入 paged slots，`native-full-compute` 表示完整重算，`native-epic-sparse-recompute` 表示 EPIC 头部 token sparse recompute + 其余 PIC token 复用，`native-cacheblend-sparse-recompute` 表示按 score layer value delta 选 top-ratio token，`native-kvshare-sparse-recompute` 表示按 MNN C++ K/V delta influence proxy 选 top-ratio token。`epic/cacheblend/kvshare` 应有 `metadata.native_sparse_recompute_scope=python_prefill_layer_plan`；当 `pic_recompute_score_layer_idx > 0` 时，`metadata.pre_score_kv_source=full_prompt_reference` 和 `metadata.pre_score_compute_layers=<score_layer_idx>` 表示 score layer 前保持 token 正常计算语义。从 score layer 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
+`precision_recovery.execution_mode` 是判断实际执行路径的关键：`native-full-reuse` 表示磁盘 PIC KV 已写入 paged slots，`native-full-compute` 表示完整重算，`native-epic-sparse-recompute` 表示 EPIC 头部 token sparse recompute + 其余 PIC token 复用，`native-cacheblend-sparse-recompute` 表示按 score layer value delta 选 top-ratio token，`native-kvshare-sparse-recompute` 表示按 MNN C++ K/V delta influence proxy 选 top-ratio token。`epic/cacheblend/kvshare` 应有 `metadata.native_sparse_recompute_scope=python_prefill_layer_plan`；当 `pic_recompute_score_layer_idx > 0` 时，`metadata.pre_score_kv_source=request_pagedcache_full_compute` 和 `metadata.pre_score_compute_layers=<score_layer_idx>` 表示 score layer 前保持 token 正常计算语义，正常 Attention 只把 KV 写入当前请求 PagedCache，不写 scratch `.k/.v`。从 score layer 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
 
 ## 优化判断
 

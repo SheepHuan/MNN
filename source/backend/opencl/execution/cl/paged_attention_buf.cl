@@ -167,8 +167,8 @@ static inline float paged_rope_inv_freq(
 }
 
 __kernel void pic_page_attention_hydrate_kv(
-    __global const FLOAT* source_key,      // [source_token_count, batch, kv_heads, head_dim]
-    __global const FLOAT* source_value,    // [batch, kv_heads, source_token_count, head_dim]
+    __global const FLOAT* source_key,      // [token_count, batch, kv_heads, head_dim]
+    __global const FLOAT* source_value,    // [batch, kv_heads, token_count, head_dim]
     __global FLOAT* key_cache,             // [max_slots, batch, kv_heads, head_dim]
     __global FLOAT* value_cache,           // [batch, kv_heads, max_slots, head_dim]
     __global const int* slot_table,
@@ -178,8 +178,6 @@ __kernel void pic_page_attention_hydrate_kv(
     const int max_slots,
     const int logical_start,
     const int token_count,
-    const int source_token_offset,
-    const int source_token_count,
     const int rope_dim_in,
     const float rope_theta,
     const int rope_type_llama3,
@@ -208,19 +206,19 @@ __kernel void pic_page_attention_hydrate_kv(
     if (slot < 0 || slot >= max_slots) {
         return;
     }
-    int source_token = source_token_offset + local_index;
-    if (source_token < 0 || source_token >= source_token_count) {
+    int source_token = local_index;
+    if (source_token < 0 || source_token >= token_count) {
         return;
     }
     int key_src_base = ((source_token * batch + b) * kv_heads + h) * head_dim;
     int key_dst_base = ((slot * batch + b) * kv_heads + h) * head_dim;
-    int value_src = ((b * kv_heads + h) * source_token_count + source_token) * head_dim + d;
+    int value_src = ((b * kv_heads + h) * token_count + source_token) * head_dim + d;
     int value_dst = ((b * kv_heads + h) * max_slots + slot) * head_dim + d;
     int rope_dim = min(rope_dim_in > 0 ? rope_dim_in : head_dim, head_dim);
     rope_dim = (rope_dim / 2) * 2;
     int rope_half = rope_dim / 2;
-    if (d < rope_dim) {
-        int pair = d < rope_half ? d : d - rope_half;
+    if (d < rope_half) {
+        int pair = d;
         float inv_freq = paged_rope_inv_freq(
             rope_theta > 0.0f ? rope_theta : 10000.0f,
             rope_type_llama3,
@@ -236,13 +234,111 @@ __kernel void pic_page_attention_hydrate_kv(
         float s = sin(angle);
         float x0 = (float)source_key[key_src_base + pair];
         float x1 = (float)source_key[key_src_base + pair + rope_half];
-        float out = d < rope_half ? (x0 * c - x1 * s) * rope_attention_scaling
-                                  : (x1 * c + x0 * s) * rope_attention_scaling;
-        key_cache[key_dst_base + d] = (FLOAT)out;
-    } else {
+        key_cache[key_dst_base + pair] = (FLOAT)((x0 * c - x1 * s) * rope_attention_scaling);
+        key_cache[key_dst_base + pair + rope_half] = (FLOAT)((x1 * c + x0 * s) * rope_attention_scaling);
+    } else if (d >= rope_dim) {
         key_cache[key_dst_base + d] = source_key[key_src_base + d];
     }
     value_cache[value_dst] = source_value[value_src];
+}
+
+__kernel void pic_cacheblend_value_score(
+    __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
+    __global const FLOAT* cached_value,          // [batch, kv_heads, token_count, head_dim]
+    __global const int* slot_table,
+    __global float* scores,
+    const int batch,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots,
+    const int logical_start,
+    const int token_count,
+    const int score_offset) {
+    int token_local = get_global_id(0);
+    if (token_local >= token_count) {
+        return;
+    }
+    int logical = logical_start + token_local;
+    if (logical < 0 || logical >= max_slots) {
+        scores[score_offset + token_local] = -3.4028234663852886e+38f;
+        return;
+    }
+    int slot = slot_table[logical];
+    if (slot < 0 || slot >= max_slots) {
+        scores[score_offset + token_local] = -3.4028234663852886e+38f;
+        return;
+    }
+    float acc = 0.0f;
+    for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < kv_heads; ++h) {
+            int ref_base = ((b * kv_heads + h) * max_slots + slot) * head_dim;
+            int cached_base = ((b * kv_heads + h) * token_count + token_local) * head_dim;
+            for (int d = 0; d < head_dim; ++d) {
+                acc += fabs((float)reference_value_cache[ref_base + d] - (float)cached_value[cached_base + d]);
+            }
+        }
+    }
+    int denom_int = batch * kv_heads * head_dim;
+    float denom = (float)(denom_int > 0 ? denom_int : 1);
+    scores[score_offset + token_local] = acc / denom;
+}
+
+__kernel void pic_cacheblend_topk(
+    __global const float* scores,
+    __global int* selected,
+    const int token_count,
+    const int top_k) {
+    const int lid = get_local_id(0);
+    const int local_size = get_local_size(0);
+    __local float best_values[128];
+    __local int best_indices[128];
+    if (get_group_id(0) != 0 || lid >= 128) {
+        return;
+    }
+    for (int k = 0; k < top_k; ++k) {
+        float best = -3.4028234663852886e+38f;
+        int best_index = -1;
+        for (int i = lid; i < token_count; i += local_size) {
+            int used = 0;
+            for (int prev = 0; prev < k; ++prev) {
+                if (selected[prev] == i) {
+                    used = 1;
+                    break;
+                }
+            }
+            if (used) {
+                continue;
+            }
+            float value = scores[i];
+            if (isnan(value)) {
+                value = -3.4028234663852886e+38f;
+            }
+            if (best_index < 0 || value > best || (value == best && i < best_index)) {
+                best = value;
+                best_index = i;
+            }
+        }
+        best_values[lid] = best;
+        best_indices[lid] = best_index;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int stride = local_size >> 1; stride > 0; stride >>= 1) {
+            if (lid < stride) {
+                float other_value = best_values[lid + stride];
+                int other_index = best_indices[lid + stride];
+                if (other_value > best_values[lid] ||
+                    (other_value == best_values[lid] && other_index >= 0 &&
+                     (best_indices[lid] < 0 || other_index < best_indices[lid]))) {
+                    best_values[lid] = other_value;
+                    best_indices[lid] = other_index;
+                }
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (lid == 0) {
+            selected[k] = best_indices[0];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+    }
 }
 
 __kernel void paged_attention_row(

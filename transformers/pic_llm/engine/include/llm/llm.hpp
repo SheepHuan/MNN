@@ -156,9 +156,14 @@ public:
     size_t getCurrentHistory() const;
     void eraseHistory(size_t begin, size_t end);
     bool setPrefixCacheFile(const std::string& filename, int flag = 0);
+    void clearPrefixCacheFile();
     bool beginExternalPagedKVRequest();
     bool appendExternalPagedKV(const std::vector<int>& token_ids, const std::vector<MNN::PagedKVExternalSegment>& segments);
     bool recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids);
+    bool selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                         const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                         int pic_start, int pic_token_count, int score_layer_idx,
+                                         double recompute_ratio, std::vector<int>& selected_local_indices);
     void finishExternalPagedKVRequest();
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::string& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
@@ -221,6 +226,7 @@ protected:
      */
     const int mPrefillKey = 100;
     std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> mModulePool;
+    std::map<int, std::shared_ptr<Express::Module>> mCacheBlendScoreModulePool;
     const Express::Module* mBaseModule = nullptr;
     Express::VARP inputsEmbeds, attentionMask, positionIds;
     std::vector<Express::VARP> mAttentionMaskVarVec, mPositionIdsVarVec;
@@ -248,6 +254,9 @@ private:
     std::vector<int> mValidBlockSize;
     bool beginPagedRequestIfNeeded();
     void finishPagedRequestIfNeeded();
+    std::shared_ptr<Express::Module> cloneModuleWithRuntime(const Express::Module* module);
+    std::shared_ptr<Express::Module> getCacheBlendScoreModule(int scoreLayerIdx);
+    bool runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, int scoreLayerIdx);
     bool mPrefixCacheMode = false;
     std::string mPrefixCacheFileName;
     int mCallIndex;

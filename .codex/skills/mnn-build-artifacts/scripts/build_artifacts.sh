@@ -72,7 +72,7 @@ else
     ARTIFACT_PLATFORM="${MNN_ARTIFACT_PLATFORM:-${TARGET_DEVICE}}"
 fi
 BUILD_TYPE="${BUILD_TYPE:-Release}"
-TOTAL_CPUS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
+TOTAL_CPUS="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
 DEFAULT_JOBS="$((TOTAL_CPUS > 1 ? TOTAL_CPUS / 2 : 1))"
 JOBS="${JOBS:-${DEFAULT_JOBS}}"
 CLEAN="${CLEAN:-0}"

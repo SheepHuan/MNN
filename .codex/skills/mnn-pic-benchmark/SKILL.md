@@ -124,6 +124,64 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
 /root/code/kvshare-edge/.cache/mnn-pic-benchmark/logs/<run_id>/
 ```
 
+## Prefill-only 延迟对比
+
+当前做 PIC 延迟分析时暂不比较 decode 性能，只测模型拿到请求后完成 prefill 的时间。PIC server `/v1/chat/completions` 请求必须显式设置：
+
+```json
+{"max_tokens": 0}
+```
+
+`max_tokens=0` 是 prefill-only 请求：服务端应完成 prelude / PIC hydrate / sparse recompute / suffix prefill，但不生成第一个 decode token，也不把 decode 或采样时间计入结果。不要把 `max_tokens=1` 的首 token输出或额外 next-logits forward 混入这组数据。
+
+请求隔离由客户端显式 `/reset` 完成，不要在 CUDA/OpenCL PagedAttention backend 里按请求自动清整块 PagedCache；backend 级清理会影响 decode/continuous 状态和性能。数据集 bench、ratio sweep、手工 smoke 在每个独立 infer 前调用：
+
+```bash
+curl -fsS -X POST "$BASE_URL/reset" -H 'Content-Type: application/json' -d '{}'
+```
+
+Jetson CUDA 服务刚启动后的第一轮 prefix-cache `PendingWrite` 可能包含 CUDA/session warm-up 噪声，而且这个问题可能和 token length / shape bucket 有关；泛化短文本 warm-up 不一定覆盖正式样本。正式构建 text cache 或统计延迟前，客户端应对同目标长度/同 shape bucket 做 disposable `/v1/prefill/text` warm-up，或对首个 text cache 做重建/验证；warm-up 和重建探测都不进入正确性或性能报告。
+
+磁盘 K/V 边界必须一起验证：只有 `/v1/prefill/text` 可以生成持久 text cache `.k/.v`。`/v1/chat/completions` 里的 `cacheblend`、`kvshare`、`epic`、`full-compute`、full-reference 和 scoring 都不得调用 prefix-cache `PendingWrite`、`setPrefixCacheFile`，不得写 scratch reference `.k/.v`，也不得把 full-reference K/V 读回 CPU 做 `std::vector` delta 扫描。cacheblend 的 score 应由 CUDA/OpenCL scoring 分支在 score layer 直接读 PagedCache / device buffer 得到，并在 GPU/CL/CUDA 上完成 top-k；不得拷回完整 score vector 到 CPU 排序。
+
+多 ratio 测试不共享 scoring 结果：`cacheblend 1%/5%/10%/20%/30%` 可以共享同一份已构建 text cache、同一模型和同一 suffix，但每个 ratio 必须发送独立 `/v1/chat/completions` 请求，并在该请求内重新完成 full-reference / scoring / GPU top-k 选择。不得为了加速报告跨 ratio 复用 score vector、排序结果或 recompute logical indices；每个 ratio 的 latency 都应包含本次请求自己的 scoring 成本。
+
+历史调试记录：Jetson CUDA 曾复现过首轮 `/v1/prefill/text` prefix-cache `PendingWrite` 后层 `.k/.v` 写成 `ff7f...`，导致后续 full-reuse / sparse reuse 输出大量 `!`。这不是 decode 性能问题，而是 legacy prefix-cache 写盘路径与当前 PagedCache 语义的交界问题。不要用 backend 按请求自动清整块 PagedCache 兜底；这会影响 decode/continuous 状态和性能。也不要依赖临时 clone prefill module 隔离 prefix-write，因为 PagedAttention `onClone()` 仍可能共享 PagedCache/session 资源。长期方向是最小化 legacy prefix-cache 兼容：只有 `/v1/prefill/text` 可以持久导出 `.k/.v`；chat、full-reference、scoring、top-k、sparse recompute 全部维护当前请求 PagedCache，不写 scratch `.k/.v`，不绕过 slot table，不把磁盘 KV 拷回 CPU 做 scoring。
+
+比较 cacheblend 重计算预算时，同一台设备、同一模型、同一份 text cache、同一 suffix 下至少跑这些模式：
+
+```text
+full-reuse              selection_algorithm=full-reuse, recompute_token_count=0
+full-compute            selection_algorithm=full-compute
+cacheblend 1%           selection_algorithm=cacheblend, pic_recompute_ratio=0.01
+cacheblend 5%           selection_algorithm=cacheblend, pic_recompute_ratio=0.05
+cacheblend 10%          selection_algorithm=cacheblend, pic_recompute_ratio=0.10
+cacheblend 20%          selection_algorithm=cacheblend, pic_recompute_ratio=0.20
+cacheblend 30%          selection_algorithm=cacheblend, pic_recompute_ratio=0.30
+```
+
+报告时不要只列 cacheblend 自身耗时；必须同时给出：
+
+```text
+normal LLM full-compute prefill baseline
+PIC full-reuse prefill latency
+PIC full-compute prefill latency
+cacheblend 各 ratio prefill latency
+cacheblend / full-reuse 倍数
+cacheblend / PIC full-compute 倍数
+cacheblend / normal LLM full-compute 倍数
+```
+
+报告里如果写“同一份 text cache / suffix”，只表示输入条件对齐；不表示多个 ratio 共享一次 scoring。若脚本做了多 ratio sweep，必须确认每个 ratio 的 HTTP 请求、metadata 和计时都是独立记录。
+
+普通 MNN LLM baseline 用真实普通导出模型目录跑 `llm_bench`，建议用同等 prompt token 长度并设 `-n 0`：
+
+```bash
+"$ART/bin/llm_bench" -m "$NORMAL_CONFIG" -a cuda -p <prompt_tokens> -n 0 -rep 3 -load false -j normal_prefill.json
+```
+
+只读取 JSON 中 `results[].type == "prefill"` 的 `prompt_len` 和 `tps`，计算 `prefill_s = prompt_len / tps`；不要把 decode 或 `ttft_est` 加进这张对比表。
+
 ## 手动流程
 
 脚本不适合当前调试时，按下面顺序手动执行。
@@ -210,7 +268,16 @@ cd /root/code/kvshare-edge
 - bench `summary.json.errors == 0`。
 - `manifest.jsonl` 中有非空 text cache refs / segments。
 - `predictions.jsonl` 中 PIC 请求响应带 `pic_cache.precision_recovery.execution_mode`。
+
+自然语言正确性 smoke：
+
+- 性能报告之外还要跑一组 `max_tokens>0` 的小问题，覆盖 `full-reuse`、`cacheblend`、`epic`。判定标准不是只看 HTTP 200，而是输出应包含文档中的可核验答案，且文本应是正常自然语言或短答案。
+- 带 `pic_cache` 的 chat 请求必须在 `messages.content` 中显式包含 `{{pic_cache}}` 或 `pic_cache.placeholder` 指定的自定义 placeholder；不要再用无 placeholder 的 legacy 隐式插入路径做测试。
+- 推荐固定文档里放一个唯一答案，例如 `BLUE-17`，请求 `{{pic_cache}}` 后问“secret launch code”。`temperature=0`、`top_k=1`、`top_p=1.0`，每种模式生成 16-32 token 即可。
+- 解析响应时同时检查 `choices[0].message.content`、`data[0].message.content`、`data[0].choices[0].message.content` 和常见 `text/content/response/generated_text` 字段。MNN PIC server 常把 OpenAI 风格结果包在 `data[0]` 下，漏掉这一层会误判。
+- 结果报告至少列出：设备、模式、HTTP status、`precision_recovery.execution_mode`、`recompute_token_count`、`reuse_token_count`、输出文本、是否包含期望答案。若 sparse 模式输出重复标点或乱码，即使 latency 正常也视为正确性失败。
 - `cacheblend/epic/kvshare` 不应静默退化为 `full-compute-fallback`。
+- `cacheblend` / `delta-v` 不应通过 prefix-cache `PendingWrite`、scratch `.k/.v` 或 CPU 读盘 delta 扫描冒充 native scoring；如果 GPU/CL/CUDA score + top-k 分支缺失，结果必须标为 unsupported/fallback。
 
 精度恢复 metadata 重点看：
 
@@ -218,7 +285,7 @@ cd /root/code/kvshare-edge
 native-epic-sparse-recompute
 native-cacheblend-sparse-recompute
 native-kvshare-sparse-recompute
-metadata.pre_score_kv_source=full_prompt_reference
+metadata.pre_score_kv_source=request_pagedcache_full_compute
 metadata.post_score_reuse_kv_source=cached_pic_kv
 ```
 

@@ -6,6 +6,7 @@
 //
 // #define MNN_OPEN_TIME_TRACE 1
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include "core/PagedKVMeta.hpp"
 #include "core/TensorUtils.hpp"
 #include "cpp/ExprDebug.hpp"
+#include "MNN_generated.h"
 #include "llm/llm.hpp"
 #include "kvmeta.hpp"
 #include "llmconfig.hpp"
@@ -247,6 +249,54 @@ static bool checkFile(const std::string& path, const char* name) {
     return true;
 }
 
+static std::string findPagedAttentionOutputName(const std::string& modelPath, int layerIndex) {
+    if (layerIndex < 0) {
+        return "";
+    }
+    std::ifstream input(modelPath, std::ios::binary | std::ios::ate);
+    if (!input.is_open()) {
+        MNN_ERROR("Failed to open MNN model for cacheblend score-layer scan: %s\n", modelPath.c_str());
+        return "";
+    }
+    auto fileSize = input.tellg();
+    if (fileSize <= 0) {
+        return "";
+    }
+    std::vector<char> buffer(static_cast<size_t>(fileSize));
+    input.seekg(0, std::ios::beg);
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    if (!input.good()) {
+        return "";
+    }
+    auto net = flatbuffers::GetRoot<MNN::Net>(buffer.data());
+    if (net == nullptr || net->oplists() == nullptr || net->tensorName() == nullptr) {
+        return "";
+    }
+    auto ops = net->oplists();
+    auto tensorNames = net->tensorName();
+    for (int i = 0; i < ops->size(); ++i) {
+        auto op = ops->GetAs<MNN::Op>(i);
+        if (op == nullptr || op->type() != MNN::OpType_PagedAttention) {
+            continue;
+        }
+        auto param = op->main_as_AttentionParam();
+        if (param == nullptr || param->layer_index() != layerIndex) {
+            continue;
+        }
+        auto outputs = op->outputIndexes();
+        if (outputs == nullptr || outputs->size() <= 0) {
+            return "";
+        }
+        int outputIndex = outputs->Get(0);
+        if (outputIndex < 0 || outputIndex >= tensorNames->size()) {
+            return "";
+        }
+        auto name = tensorNames->GetAsString(outputIndex);
+        return name == nullptr ? "" : name->str();
+    }
+    return "";
+}
+
 bool Llm::load() {
     // check required files before loading
     std::string tokenizer_path = mConfig->tokenizer_file();
@@ -347,11 +397,11 @@ bool Llm::load() {
         decode_type_num = 2;
         verify_length = mDraftLength + 1;
         // speculative decode module
-        mModulePool[std::make_pair(verify_length, true)].reset(Module::clone(mModule.get()));
+        mModulePool[std::make_pair(verify_length, true)] = cloneModuleWithRuntime(mModule.get());
     }
 
     // autoregressive decode module
-    mModulePool[std::make_pair(1, false)].reset(Module::clone(mModule.get()));
+    mModulePool[std::make_pair(1, false)] = cloneModuleWithRuntime(mModule.get());
     // prefill module
     mModulePool[std::make_pair(mPrefillKey, mConfig->all_logits())] = mModule;
 
@@ -557,6 +607,154 @@ bool Llm::recomputeExternalPagedKV(const std::vector<int>& logical_indices, cons
     return true;
 }
 
+std::shared_ptr<Module> Llm::getCacheBlendScoreModule(int scoreLayerIdx) {
+    auto iter = mCacheBlendScoreModulePool.find(scoreLayerIdx);
+    if (iter != mCacheBlendScoreModulePool.end()) {
+        return iter->second;
+    }
+    auto scoreOutputName = findPagedAttentionOutputName(mConfig->llm_model(), scoreLayerIdx);
+    if (scoreOutputName.empty()) {
+        MNN_ERROR("Failed to find PagedAttention output for cacheblend score layer %d\n", scoreLayerIdx);
+        return nullptr;
+    }
+    Module::Config moduleConfig;
+    if (mConfig->backend_type() == "opencl" || mConfig->backend_type() == "vulkan" ||
+        mConfig->backend_type() == "npu") {
+        moduleConfig.shapeMutable = false;
+    } else {
+        moduleConfig.shapeMutable = true;
+    }
+    moduleConfig.rearrange = true;
+    if (mBaseModule != nullptr) {
+        moduleConfig.base = mBaseModule;
+    }
+    std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids", "logits_index"};
+    if (mConfig->has_deepstack()) {
+        inputNames.emplace_back("deepstack_embeds");
+    }
+    if (mConfig->has_ple()) {
+        inputNames.emplace_back("ple_embeddings");
+    }
+    mRuntimeManager->setExternalFile(mConfig->llm_weight());
+    std::shared_ptr<Module> module(Module::load(inputNames, {scoreOutputName}, mConfig->llm_model().c_str(),
+                                                mRuntimeManager, &moduleConfig));
+    mRuntimeManager->setExternalFile("");
+    if (module == nullptr) {
+        MNN_ERROR("Failed to load cacheblend score-layer module for layer %d output %s\n",
+                  scoreLayerIdx, scoreOutputName.c_str());
+        return nullptr;
+    }
+    MNN_PRINT("Loaded cacheblend score-layer module layer=%d output=%s\n", scoreLayerIdx, scoreOutputName.c_str());
+    mCacheBlendScoreModulePool[scoreLayerIdx] = module;
+    return module;
+}
+
+bool Llm::runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, int scoreLayerIdx) {
+    if (fullPromptTokenIds.empty()) {
+        return false;
+    }
+    auto scoreModule = getCacheBlendScoreModule(scoreLayerIdx);
+    if (scoreModule == nullptr) {
+        return false;
+    }
+    MNN::Express::ExecutorScope s(mExecutor);
+    auto hiddenStates = embedding(fullPromptTokenIds);
+    if (hiddenStates == nullptr) {
+        return false;
+    }
+    int seqLen = hiddenStates->getInfo()->dim[mSeqLenIndex];
+    if (seqLen <= 0) {
+        return false;
+    }
+    mMeta->add = seqLen;
+    auto attentionMask = gen_attention_mask(seqLen);
+    auto positionIds = gen_position_ids(seqLen);
+    mGenerateParam->input_embeds = nullptr;
+    mGenerateParam->outputs.clear();
+    mGenerateParam->validLogitSize = 0;
+    mGenerateParam->validLogitStart = 0;
+    Express::VARPS extraArgs;
+    if (mPleInput.get()) {
+        extraArgs.push_back(mPleInput);
+    }
+    std::vector<Express::VARP> inputs {hiddenStates, attentionMask, positionIds, logitsLastIdx};
+    inputs.insert(inputs.end(), extraArgs.begin(), extraArgs.end());
+    auto outputs = scoreModule->onForward(inputs);
+    if (outputs.empty() || outputs[0] == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return false;
+    }
+    // Force the truncated graph to execute so the target PagedAttention layer can
+    // run its backend-side delta scoring and top-k selection.
+    if (outputs[0]->readMap<float>() == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return false;
+    }
+    if (mConfig->paged_attention()) {
+        static_cast<PagedKVMeta*>(mMeta.get())->syncPaged();
+    } else {
+        mMeta->sync();
+    }
+    updateContext(seqLen, 0);
+    return true;
+}
+
+bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                          const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                          int pic_start, int pic_token_count, int score_layer_idx,
+                                          double recompute_ratio, std::vector<int>& selected_local_indices) {
+    selected_local_indices.clear();
+    if (!mConfig->paged_attention()) {
+        MNN_ERROR("Native cacheblend scoring requires paged_attention=true\n");
+        return false;
+    }
+    if (pic_start < 0 || pic_token_count < 0 || score_layer_idx < 0 ||
+        pic_start + pic_token_count > static_cast<int>(full_prompt_token_ids.size())) {
+        return false;
+    }
+    int topK = 0;
+    if (pic_token_count > 0 && recompute_ratio > 0.0) {
+        topK = std::min(pic_token_count,
+                        std::max(1, static_cast<int>(std::ceil(pic_token_count * recompute_ratio))));
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return false;
+    }
+    bool startedPagedRequest = beginPagedRequestIfNeeded();
+    if (!paged->beginCacheBlendScoring(pic_start, pic_token_count, score_layer_idx, topK, segments)) {
+        if (startedPagedRequest) {
+            finishPagedRequestIfNeeded();
+        }
+        return false;
+    }
+    auto oldStatus = mContext->status;
+    if (!runCacheBlendScorePrefill(full_prompt_token_ids, score_layer_idx)) {
+        paged->finishCacheBlendScoring();
+        if (startedPagedRequest) {
+            finishPagedRequestIfNeeded();
+        }
+        if (oldStatus == LlmStatus::RUNNING && mContext->status != LlmStatus::TIMEOUT &&
+            mContext->status != LlmStatus::USER_CANCEL) {
+            mContext->status = oldStatus;
+        }
+        return false;
+    }
+    const bool ready = paged->cacheblend_score_ready;
+    if (ready) {
+        selected_local_indices = paged->cacheblend_score_selected_local_indices;
+    }
+    paged->finishCacheBlendScoring();
+    if (startedPagedRequest) {
+        finishPagedRequestIfNeeded();
+    }
+    if (oldStatus == LlmStatus::RUNNING && mContext->status != LlmStatus::INTERNAL_ERROR &&
+        mContext->status != LlmStatus::TIMEOUT && mContext->status != LlmStatus::USER_CANCEL) {
+        mContext->status = oldStatus;
+    }
+    return ready && static_cast<int>(selected_local_indices.size()) == topK;
+}
+
 void Llm::finishExternalPagedKVRequest() {
     finishPagedRequestIfNeeded();
 }
@@ -583,6 +781,24 @@ void Llm::finishPagedRequestIfNeeded() {
     }
 }
 
+std::shared_ptr<Module> Llm::cloneModuleWithRuntime(const Module* module) {
+    if (module == nullptr || mRuntimeManager == nullptr) {
+        return nullptr;
+    }
+    mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    mRuntimeManager->setExternalPath(mConfig->prefix_cache_path(), MNN::Interpreter::EXTERNAL_PATH_PREFIXCACHE_DIR);
+    if (mConfig->kvcache_mmap()) {
+        mRuntimeManager->setExternalPath(mConfig->tmp_path(), MNN::Interpreter::EXTERNAL_PATH_KVCACHE_DIR);
+    }
+    if (mConfig->use_mmap()) {
+        mRuntimeManager->setExternalPath(mConfig->tmp_path(), MNN::Interpreter::EXTERNAL_WEIGHT_DIR);
+    }
+    mRuntimeManager->setExternalPath(mConfig->npu_model_dir(), MNN::Interpreter::EXTERNAL_NPU_FILE_DIR);
+    Module::CloneContext cloneContext;
+    cloneContext.pRuntimeManager = mRuntimeManager;
+    return std::shared_ptr<Module>(module->clone(&cloneContext));
+}
+
 std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs) {
     CHECK_LLM_RUNNING_RET(mContext, std::vector<Express::VARP>());
     MNN::Express::ExecutorScope s(mExecutor);
@@ -598,8 +814,7 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     if (mValidBlockSize.empty()) {
         if(mModulePool.find(moduleKey) == mModulePool.end()) {
             MNN_PRINT("Warning: module need new clone, cloning now.\n");
-            mRuntimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
-            mModulePool[moduleKey].reset(Module::clone(mModule.get()));
+            mModulePool[moduleKey] = cloneModuleWithRuntime(mModule.get());
         }
         selectModule = mModulePool[moduleKey];
     }
@@ -1371,7 +1586,6 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     mCallIndex = 0;
     mPrefixCacheMode = true;
 
-
     mIsPrefixFileExist = true;
     // check kvcache, validate file existence
     for(int i = 0; i < mConfig->layer_nums(); i++) {
@@ -1452,6 +1666,18 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     }
 
     return mIsPrefixFileExist;
+}
+
+void Llm::clearPrefixCacheFile() {
+    mPrefixCacheMode = false;
+    mPrefixCacheFileName.clear();
+    mCallIndex = 0;
+    mPrefixLength = 0;
+    mIsPrefixFileExist = false;
+    mMeta->file_flag = KVMeta::NoChange;
+    mMeta->file_name = "";
+    mMeta->seqlen_in_disk = 0;
+    mMeta->layer_index = 0;
 }
 
 void Llm::completePrefixWrite() {

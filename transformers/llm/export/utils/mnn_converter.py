@@ -317,6 +317,12 @@ class MNNConverter:
             data = np.array(data).astype(np.float32)
         return self.mnn_weight.write(data.tobytes())
 
+    def skip_weight_bytes(self, size):
+        if size <= 0:
+            return
+        self.mnn_weight.seek(size - 1, 1)
+        self.mnn_weight.write(b'\0')
+
     def write_header(self, ic, oc, quant_bit):
         dim_num = self.mnn_weight.write(b'\x02')
         shape_dtype = np.int16
@@ -339,7 +345,7 @@ class MNNConverter:
             if self.exporter.args.skip_weight:
                 # Use a small dummy buffer and skip full weight loading/conversion
                 weight_len = (ic * oc * 2)
-                self.mnn_weight.seek(weight_len, 1)
+                self.skip_weight_bytes(weight_len)
             else:
                 half_weight = linear.weight.data.flatten().half()
                 weight_len = self.write_weight(half_weight)
@@ -351,9 +357,9 @@ class MNNConverter:
             header_len, shape_int32 = self.write_header(ic, oc, quant_bit)
             if self.exporter.args.skip_weight:
                 weight_len = len(q_weight) + header_len
-                self.mnn_weight.seek(len(q_weight), 1)
+                self.skip_weight_bytes(len(q_weight))
                 alpha_len = len(alpha) * 4
-                self.mnn_weight.seek(alpha_len, 1)
+                self.skip_weight_bytes(alpha_len)
             else:
                 weight_len = self.write_weight(q_weight) + header_len
                 alpha_len = self.write_weight(alpha)
@@ -361,7 +367,7 @@ class MNNConverter:
         if linear.bias is not None:
             bias_length = (oc * 4)
             if self.exporter.args.skip_weight:
-                self.mnn_weight.seek(bias_length, 1)
+                self.skip_weight_bytes(bias_length)
             else:
                 bias = linear.bias.data.flatten().float()
                 bias_length = self.write_weight(bias)

@@ -123,23 +123,6 @@ static uint64_t _nowUs() {
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-static bool _readBinaryFile(const std::string& path, std::vector<int8_t>& data) {
-    std::ifstream is(path, std::ios::binary | std::ios::ate);
-    if (!is.good()) {
-        return false;
-    }
-    auto size = is.tellg();
-    if (size < 0) {
-        return false;
-    }
-    data.resize(static_cast<size_t>(size));
-    is.seekg(0, std::ios::beg);
-    if (!data.empty()) {
-        is.read(reinterpret_cast<char*>(data.data()), size);
-    }
-    return is.good() || is.eof();
-}
-
 static bool _writeBinaryFile(const std::string& path, const std::vector<int8_t>& data) {
     std::ofstream os(path, std::ios::binary);
     if (!os.good()) {
@@ -236,7 +219,7 @@ static void _prefetchExternalLayersFrom(const PagedKVMeta* meta, int startLayer)
     gExternalLayerPrefetchTasks.emplace_back(std::move(future));
 }
 
-static bool _readBinaryFilePrefix(const std::string& path, void* dst, size_t expectedBytes) {
+static bool _readBinaryFileRange(const std::string& path, size_t offsetBytes, void* dst, size_t expectedBytes) {
     if (dst == nullptr || expectedBytes == 0) {
         return false;
     }
@@ -245,10 +228,14 @@ static bool _readBinaryFilePrefix(const std::string& path, void* dst, size_t exp
         return false;
     }
     auto fileSize = is.tellg();
-    if (fileSize < 0 || static_cast<uint64_t>(static_cast<std::streamoff>(fileSize)) < expectedBytes) {
+    if (fileSize < 0) {
         return false;
     }
-    is.seekg(0, std::ios::beg);
+    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(fileSize));
+    if (offsetBytes > fileBytes || fileBytes - offsetBytes < expectedBytes) {
+        return false;
+    }
+    is.seekg(static_cast<std::streamoff>(offsetBytes), std::ios::beg);
     char* cursor = reinterpret_cast<char*>(dst);
     size_t remaining = expectedBytes;
     while (remaining > 0) {
@@ -264,14 +251,32 @@ static bool _readBinaryFilePrefix(const std::string& path, void* dst, size_t exp
     return true;
 }
 
+static bool _readBinaryFilePrefix(const std::string& path, void* dst, size_t expectedBytes) {
+    return _readBinaryFileRange(path, 0, dst, expectedBytes);
+}
+
 enum class SourceCLReadStatus {
     Success,
     MapFailed,
     ReadFailed,
 };
 
+static SourceCLReadStatus _readBinaryFileRangeToMappedCLBuffer(const std::string& path, size_t offsetBytes,
+                                                               cl::Buffer& buffer, size_t expectedBytes,
+                                                               cl::CommandQueue& queue);
+static bool _readBinaryFileRangeToCLBufferFallback(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
+                                                   size_t expectedBytes, cl::CommandQueue& queue);
+static bool _readBinaryFileRangeToSourceCLBuffer(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
+                                                 size_t expectedBytes, cl::CommandQueue& queue);
+
 static SourceCLReadStatus _readBinaryFileToMappedCLBuffer(const std::string& path, cl::Buffer& buffer,
                                                           size_t expectedBytes, cl::CommandQueue& queue) {
+    return _readBinaryFileRangeToMappedCLBuffer(path, 0, buffer, expectedBytes, queue);
+}
+
+static SourceCLReadStatus _readBinaryFileRangeToMappedCLBuffer(const std::string& path, size_t offsetBytes,
+                                                               cl::Buffer& buffer, size_t expectedBytes,
+                                                               cl::CommandQueue& queue) {
     if (expectedBytes == 0) {
         return SourceCLReadStatus::ReadFailed;
     }
@@ -280,7 +285,7 @@ static SourceCLReadStatus _readBinaryFileToMappedCLBuffer(const std::string& pat
     if (ptr == nullptr || error != CL_SUCCESS) {
         return SourceCLReadStatus::MapFailed;
     }
-    bool ok = _readBinaryFilePrefix(path, ptr, expectedBytes);
+    bool ok = _readBinaryFileRange(path, offsetBytes, ptr, expectedBytes);
     auto unmap = queue.enqueueUnmapMemObject(buffer, ptr);
     if (!ok) {
         return SourceCLReadStatus::ReadFailed;
@@ -290,8 +295,13 @@ static SourceCLReadStatus _readBinaryFileToMappedCLBuffer(const std::string& pat
 
 static bool _readBinaryFileToCLBufferFallback(const std::string& path, cl::Buffer& buffer, size_t expectedBytes,
                                               cl::CommandQueue& queue) {
+    return _readBinaryFileRangeToCLBufferFallback(path, 0, buffer, expectedBytes, queue);
+}
+
+static bool _readBinaryFileRangeToCLBufferFallback(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
+                                                   size_t expectedBytes, cl::CommandQueue& queue) {
     std::vector<int8_t> data(expectedBytes);
-    if (!_readBinaryFilePrefix(path, data.data(), expectedBytes)) {
+    if (!_readBinaryFileRange(path, offsetBytes, data.data(), expectedBytes)) {
         return false;
     }
     return queue.enqueueWriteBuffer(buffer, CL_TRUE, 0, expectedBytes, data.data()) == CL_SUCCESS;
@@ -299,7 +309,12 @@ static bool _readBinaryFileToCLBufferFallback(const std::string& path, cl::Buffe
 
 static bool _readBinaryFileToSourceCLBuffer(const std::string& path, cl::Buffer& buffer, size_t expectedBytes,
                                             cl::CommandQueue& queue) {
-    auto status = _readBinaryFileToMappedCLBuffer(path, buffer, expectedBytes, queue);
+    return _readBinaryFileRangeToSourceCLBuffer(path, 0, buffer, expectedBytes, queue);
+}
+
+static bool _readBinaryFileRangeToSourceCLBuffer(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
+                                                 size_t expectedBytes, cl::CommandQueue& queue) {
+    auto status = _readBinaryFileRangeToMappedCLBuffer(path, offsetBytes, buffer, expectedBytes, queue);
     if (status == SourceCLReadStatus::Success) {
         return true;
     }
@@ -310,7 +325,97 @@ static bool _readBinaryFileToSourceCLBuffer(const std::string& path, cl::Buffer&
     std::call_once(fallbackOnce, []() {
         MNN_PRINT("OpenCLPagedAttention: mapped source CL buffer unavailable, fallback to enqueueWriteBuffer\n");
     });
-    return _readBinaryFileToCLBufferFallback(path, buffer, expectedBytes, queue);
+    return _readBinaryFileRangeToCLBufferFallback(path, offsetBytes, buffer, expectedBytes, queue);
+}
+
+static bool _readExternalValueSegment(const std::string& path, void* dst, size_t expectedBytes, int batch,
+                                      int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset,
+                                      size_t tokenCount, int headDim, int bytes) {
+    if (dst == nullptr || expectedBytes == 0 || batch <= 0 || kvHeads <= 0 || headDim <= 0 || bytes <= 0) {
+        return false;
+    }
+    std::ifstream is(path, std::ios::binary | std::ios::ate);
+    if (!is.good()) {
+        return false;
+    }
+    auto fileSize = is.tellg();
+    if (fileSize < 0) {
+        return false;
+    }
+    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(fileSize));
+    const size_t tokenBytes = static_cast<size_t>(headDim) * bytes;
+    const size_t segmentBytes = tokenCount * tokenBytes;
+    const size_t requiredBytes = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * tokenBytes;
+    if (sourceTokenOffset + tokenCount > sourceTokenCount || fileBytes < requiredBytes ||
+        expectedBytes < static_cast<size_t>(batch) * kvHeads * segmentBytes) {
+        return false;
+    }
+    char* out = reinterpret_cast<char*>(dst);
+    for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < kvHeads; ++h) {
+            const size_t src = ((static_cast<size_t>(b) * kvHeads + h) * sourceTokenCount +
+                                sourceTokenOffset) * tokenBytes;
+            const size_t dstOffset = (static_cast<size_t>(b) * kvHeads + h) * segmentBytes;
+            is.seekg(static_cast<std::streamoff>(src), std::ios::beg);
+            is.read(out + dstOffset, static_cast<std::streamsize>(segmentBytes));
+            if (is.gcount() != static_cast<std::streamsize>(segmentBytes)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static SourceCLReadStatus _readExternalValueSegmentToMappedCLBuffer(
+    const std::string& path, cl::Buffer& buffer, size_t expectedBytes, cl::CommandQueue& queue, int batch,
+    int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset, size_t tokenCount, int headDim, int bytes) {
+    if (expectedBytes == 0) {
+        return SourceCLReadStatus::ReadFailed;
+    }
+    cl_int error = CL_SUCCESS;
+    void* ptr = queue.enqueueMapBuffer(buffer, CL_TRUE, CL_MAP_WRITE, 0, expectedBytes, nullptr, nullptr, &error);
+    if (ptr == nullptr || error != CL_SUCCESS) {
+        return SourceCLReadStatus::MapFailed;
+    }
+    bool ok = _readExternalValueSegment(path, ptr, expectedBytes, batch, kvHeads, sourceTokenCount,
+                                        sourceTokenOffset, tokenCount, headDim, bytes);
+    auto unmap = queue.enqueueUnmapMemObject(buffer, ptr);
+    if (!ok) {
+        return SourceCLReadStatus::ReadFailed;
+    }
+    return unmap == CL_SUCCESS ? SourceCLReadStatus::Success : SourceCLReadStatus::MapFailed;
+}
+
+static bool _readExternalValueSegmentToCLBufferFallback(
+    const std::string& path, cl::Buffer& buffer, size_t expectedBytes, cl::CommandQueue& queue, int batch,
+    int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset, size_t tokenCount, int headDim, int bytes) {
+    std::vector<int8_t> data(expectedBytes);
+    if (!_readExternalValueSegment(path, data.data(), expectedBytes, batch, kvHeads, sourceTokenCount,
+                                   sourceTokenOffset, tokenCount, headDim, bytes)) {
+        return false;
+    }
+    return queue.enqueueWriteBuffer(buffer, CL_TRUE, 0, expectedBytes, data.data()) == CL_SUCCESS;
+}
+
+static bool _readExternalValueSegmentToSourceCLBuffer(
+    const std::string& path, cl::Buffer& buffer, size_t expectedBytes, cl::CommandQueue& queue, int batch,
+    int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset, size_t tokenCount, int headDim, int bytes) {
+    auto status = _readExternalValueSegmentToMappedCLBuffer(path, buffer, expectedBytes, queue, batch, kvHeads,
+                                                            sourceTokenCount, sourceTokenOffset, tokenCount, headDim,
+                                                            bytes);
+    if (status == SourceCLReadStatus::Success) {
+        return true;
+    }
+    if (status == SourceCLReadStatus::ReadFailed) {
+        return false;
+    }
+    static std::once_flag fallbackOnce;
+    std::call_once(fallbackOnce, []() {
+        MNN_PRINT("OpenCLPagedAttention: mapped value segment CL buffer unavailable, fallback to enqueueWriteBuffer\n");
+    });
+    return _readExternalValueSegmentToCLBufferFallback(path, buffer, expectedBytes, queue, batch, kvHeads,
+                                                       sourceTokenCount, sourceTokenOffset, tokenCount, headDim,
+                                                       bytes);
 }
 
 static int _ropeDimForExport(const PagedKVMeta* meta, int headDim) {
@@ -354,16 +459,6 @@ static float _ropeInvFreqForExport(const PagedKVMeta* meta, int pairIndex, int r
                         meta != nullptr && meta->rope_scaling_original_max_position_embeddings > 0
                             ? meta->rope_scaling_original_max_position_embeddings
                             : (meta != nullptr ? meta->max_position_embeddings : 0),
-                        pairIndex, ropeDim);
-}
-
-static float _ropeInvFreqForSegment(const PagedKVExternalSegment& segment, int pairIndex, int ropeDim) {
-    return _ropeInvFreq(segment.ropeTheta > 0.0f ? segment.ropeTheta : 10000.0f, segment.ropeType,
-                        segment.ropeScalingFactor, segment.ropeScalingLowFreqFactor,
-                        segment.ropeScalingHighFreqFactor,
-                        segment.ropeScalingOriginalMaxPositionEmbeddings > 0
-                            ? segment.ropeScalingOriginalMaxPositionEmbeddings
-                            : segment.maxPositionEmbeddings,
                         pairIndex, ropeDim);
 }
 
@@ -428,93 +523,6 @@ static bool _writeShapeFile(const std::string& path, int batch, int kvHeads, int
     return os.good();
 }
 
-static ErrorCode _restoreExternalSegmentsHost(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
-                                              int bytes, int maxSlots, const std::vector<int>& physicalSlots,
-                                              int kvLen, std::vector<int8_t>& keyCache,
-                                              std::vector<int8_t>& valueCache) {
-    if (meta == nullptr || meta->external_segments.empty() || meta->externalLayerLoaded(layerIndex)) {
-        return NO_ERROR;
-    }
-    for (const auto& segment : meta->external_segments) {
-        auto layer = segment.layer(layerIndex);
-        if (layer == nullptr) {
-            MNN_ERROR("OpenCLPagedAttention layer %d missing external PIC KV for cache %s\n", layerIndex,
-                      segment.cacheName.c_str());
-            return INVALID_VALUE;
-        }
-        const int segBatch = segment.batch > 0 ? segment.batch : batch;
-        const int segKvHeads = segment.kvHeads > 0 ? segment.kvHeads : kvHeads;
-        const int segHeadDim = segment.headDim > 0 ? segment.headDim : headDim;
-        const int segBytes = segment.dtypeBytes > 0 ? segment.dtypeBytes : bytes;
-        if (segBatch != batch || segKvHeads != kvHeads || segHeadDim != headDim || segBytes != bytes) {
-            return INVALID_VALUE;
-        }
-        if (segment.keyRopeState != "canonical_no_rope" || segment.ropePairing != "half") {
-            return INVALID_VALUE;
-        }
-        if (segment.logicalStart + segment.tokenCount > static_cast<size_t>(kvLen)) {
-            return INVALID_VALUE;
-        }
-        std::vector<int8_t> keyData;
-        std::vector<int8_t> valueData;
-        if (!_readBinaryFile(layer->keyPath, keyData) || !_readBinaryFile(layer->valuePath, valueData)) {
-            return INVALID_VALUE;
-        }
-        const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset
-                                                                  : segment.sourceTokenOffset;
-        const size_t sourceTokenCount = layer->hasSourceOverride && layer->sourceTokenCount > 0
-            ? layer->sourceTokenCount
-            : (segment.sourceTokenCount > 0 ? segment.sourceTokenCount : (sourceTokenOffset + segment.tokenCount));
-        const size_t sourceEnd = sourceTokenOffset + segment.tokenCount;
-        if (sourceEnd > sourceTokenCount) {
-            return INVALID_VALUE;
-        }
-        const size_t expectedKey = sourceTokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
-        const size_t expectedValue = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * headDim * bytes;
-        if (keyData.size() < expectedKey || valueData.size() < expectedValue) {
-            return INVALID_VALUE;
-        }
-        int ropeDim = segment.ropeDim > 0 ? segment.ropeDim : headDim;
-        ropeDim = std::min(ropeDim, headDim);
-        ropeDim = (ropeDim / 2) * 2;
-        const int half = ropeDim / 2;
-        const float attentionScale = segment.ropeAttentionScaling > 0.0f ? segment.ropeAttentionScaling : 1.0f;
-        for (size_t local = 0; local < segment.tokenCount; ++local) {
-            const int logical = static_cast<int>(segment.logicalStart + local);
-            const int slot = logical >= 0 && logical < static_cast<int>(physicalSlots.size()) ? physicalSlots[logical] : -1;
-            if (slot < 0 || slot >= maxSlots) {
-                return OUT_OF_MEMORY;
-            }
-            for (int b = 0; b < batch; ++b) {
-                for (int h = 0; h < kvHeads; ++h) {
-                    const int sourceToken = static_cast<int>(sourceTokenOffset + local);
-                    const int keySrcBase = ((sourceToken * batch + b) * kvHeads + h) * headDim;
-                    const int keyDstBase = ((slot * batch + b) * kvHeads + h) * headDim;
-                    for (int p = 0; p < half; ++p) {
-                        const float angle = static_cast<float>(logical) * _ropeInvFreqForSegment(segment, p, ropeDim);
-                        const float c = std::cos(angle);
-                        const float s = std::sin(angle);
-                        const float x0 = _readScalar(keyData.data(), keySrcBase + p, bytes);
-                        const float x1 = _readScalar(keyData.data(), keySrcBase + p + half, bytes);
-                        _writeScalar(keyCache.data(), keyDstBase + p, (x0 * c - x1 * s) * attentionScale, bytes);
-                        _writeScalar(keyCache.data(), keyDstBase + p + half, (x1 * c + x0 * s) * attentionScale, bytes);
-                    }
-                    for (int d = ropeDim; d < headDim; ++d) {
-                        _writeScalar(keyCache.data(), keyDstBase + d,
-                                     _readScalar(keyData.data(), keySrcBase + d, bytes), bytes);
-                    }
-                    const int valueSrcBase = ((b * kvHeads + h) * static_cast<int>(sourceTokenCount) + sourceToken) * headDim;
-                    const int valueDstBase = ((b * kvHeads + h) * maxSlots + slot) * headDim;
-                    ::memcpy(valueCache.data() + valueDstBase * bytes, valueData.data() + valueSrcBase * bytes,
-                             headDim * bytes);
-                }
-            }
-        }
-    }
-    meta->markExternalLayerLoaded(layerIndex);
-    return NO_ERROR;
-}
-
 } // namespace
 
 PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backend* backend)
@@ -536,6 +544,10 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
                                               mOpenCLBackend->getPrecision());
     mHydrateExternalKernel = runtime->buildKernel("paged_attention_buf", "pic_page_attention_hydrate_kv", {},
                                                   mOpenCLBackend->getPrecision());
+    mCacheBlendScoreKernel = runtime->buildKernel("paged_attention_buf", "pic_cacheblend_value_score", {},
+                                                  mOpenCLBackend->getPrecision());
+    mCacheBlendTopKKernel = runtime->buildKernel("paged_attention_buf", "pic_cacheblend_topk", {},
+                                                 mOpenCLBackend->getPrecision());
     mRearrangeQKernel = runtime->buildKernel("attention_buf", "rearrange_q", {}, mOpenCLBackend->getPrecision());
     mRearrangeMaskKernel = runtime->buildKernel("attention_buf", "rearrange_mask_shortprefill", {"-DADD_MASK"},
                                                 mOpenCLBackend->getPrecision());
@@ -547,6 +559,8 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
     OPENCL_CHECK_KERNEL_CTOR(mAttentionRowKernel);
     OPENCL_CHECK_KERNEL_CTOR(mPackPagedKVKernel);
     OPENCL_CHECK_KERNEL_CTOR(mHydrateExternalKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mCacheBlendScoreKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mCacheBlendTopKKernel);
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeQKernel);
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeMaskKernel);
     OPENCL_CHECK_KERNEL_CTOR(mSoftmaxKernel);
@@ -581,11 +595,25 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->value.get(), Backend::STATIC));
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->slotTable.get(), Backend::STATIC));
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->sparseQuery.get(), Backend::STATIC));
-    std::vector<int8_t> zerosKey(static_cast<size_t>(maxSlots) * batch * kvHeads * headDim * mBytes);
-    std::vector<int8_t> zerosValue(static_cast<size_t>(batch) * kvHeads * maxSlots * headDim * mBytes);
+    const size_t keyElements = static_cast<size_t>(maxSlots) * batch * kvHeads * headDim;
+    const size_t valueElements = static_cast<size_t>(batch) * kvHeads * maxSlots * headDim;
+    if (keyElements > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        valueElements > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return OUT_OF_MEMORY;
+    }
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
-    queue.enqueueWriteBuffer(openCLBuffer(mCache->key.get()), CL_TRUE, 0, zerosKey.size(), zerosKey.data());
-    queue.enqueueWriteBuffer(openCLBuffer(mCache->value.get()), CL_TRUE, 0, zerosValue.size(), zerosValue.data());
+    uint32_t idx = 0;
+    cl_int ret = CL_SUCCESS;
+    ret |= mZeroKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= mZeroKernel->get().setArg(idx++, static_cast<int>(keyElements));
+    MNN_CHECK_CL_SUCCESS(ret, "setArg zero_paged_key_cache");
+    queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(keyElements), cl::NullRange);
+    idx = 0;
+    ret = CL_SUCCESS;
+    ret |= mZeroKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= mZeroKernel->get().setArg(idx++, static_cast<int>(valueElements));
+    MNN_CHECK_CL_SUCCESS(ret, "setArg zero_paged_value_cache");
+    queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(valueElements), cl::NullRange);
     mCache->maxSlots = maxSlots;
     mCache->batch = batch;
     mCache->kvHeads = kvHeads;
@@ -700,6 +728,36 @@ ErrorCode PagedAttentionBufExecution::ensureExternalTemps(size_t keyElements, si
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::ensureCacheBlendScoreTemps(int scoreCount, int indexCount) {
+    if (scoreCount < 0 || indexCount < 0) {
+        return INVALID_VALUE;
+    }
+    if (scoreCount == 0 && indexCount == 0) {
+        return NO_ERROR;
+    }
+    if (mCacheBlendScores && mCacheBlendIndices && mCacheBlendScoreCount >= scoreCount &&
+        mCacheBlendIndexCount >= indexCount) {
+        return NO_ERROR;
+    }
+    if (scoreCount > 0) {
+        mCacheBlendScores.reset(Tensor::createDevice<float>({scoreCount}));
+        if (!mCacheBlendScores) {
+            return OUT_OF_MEMORY;
+        }
+        OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCacheBlendScores.get(), Backend::STATIC));
+    }
+    if (indexCount > 0) {
+        mCacheBlendIndices.reset(Tensor::createDevice<int>({indexCount}));
+        if (!mCacheBlendIndices) {
+            return OUT_OF_MEMORY;
+        }
+        OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCacheBlendIndices.get(), Backend::STATIC));
+    }
+    mCacheBlendScoreCount = scoreCount;
+    mCacheBlendIndexCount = indexCount;
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, int kvLen) {
     if (mMeta == nullptr || mMeta->external_segments.empty() || mMeta->externalLayerLoaded(layerIndex)) {
         return NO_ERROR;
@@ -711,6 +769,9 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
     for (const auto& segment : mMeta->external_segments) {
         totalTokens += segment.tokenCount;
+        if (segment.tokenCount == 0) {
+            continue;
+        }
         auto layer = segment.layer(layerIndex);
         if (layer == nullptr) {
             MNN_ERROR("OpenCLPagedAttention layer %d missing external PIC KV for cache %s\n", layerIndex,
@@ -739,16 +800,29 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         if (sourceEnd > sourceTokenCount) {
             return INVALID_VALUE;
         }
-        const size_t expectedKey = sourceTokenCount * static_cast<size_t>(mBatch) * mKvNumHead * mHeadDim * mBytes;
-        const size_t expectedValue = static_cast<size_t>(mBatch) * mKvNumHead * sourceTokenCount * mHeadDim * mBytes;
-        auto err = ensureExternalTemps(expectedKey / mBytes, expectedValue / mBytes);
+        const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+        if (segment.logicalStart > maxInt || segment.tokenCount > maxInt || sourceTokenOffset > maxInt ||
+            sourceTokenCount > maxInt) {
+            MNN_ERROR("OpenCLPagedAttention external PIC KV indices exceed int range at layer %d\n", layerIndex);
+            return INVALID_VALUE;
+        }
+        const size_t keyTokenBytes = static_cast<size_t>(mBatch) * mKvNumHead * mHeadDim * mBytes;
+        const size_t keySourceOffsetBytes = sourceTokenOffset * keyTokenBytes;
+        const size_t keySegmentBytes = segment.tokenCount * keyTokenBytes;
+        const size_t valueTokenBytes = static_cast<size_t>(mHeadDim) * mBytes;
+        const size_t valueSegmentBytes = static_cast<size_t>(mBatch) * mKvNumHead * segment.tokenCount *
+                                         valueTokenBytes;
+        auto err = ensureExternalTemps(keySegmentBytes / mBytes, valueSegmentBytes / mBytes);
         if (err != NO_ERROR) {
             return err;
         }
         auto& externalKeyBuffer = openCLBuffer(mExternalKey.get());
         auto& externalValueBuffer = openCLBuffer(mExternalValue.get());
-        if (!_readBinaryFileToSourceCLBuffer(layer->keyPath, externalKeyBuffer, expectedKey, queue) ||
-            !_readBinaryFileToSourceCLBuffer(layer->valuePath, externalValueBuffer, expectedValue, queue)) {
+        if (!_readBinaryFileRangeToSourceCLBuffer(layer->keyPath, keySourceOffsetBytes, externalKeyBuffer,
+                                                  keySegmentBytes, queue) ||
+            !_readExternalValueSegmentToSourceCLBuffer(layer->valuePath, externalValueBuffer, valueSegmentBytes,
+                                                       queue, mBatch, mKvNumHead, sourceTokenCount,
+                                                       sourceTokenOffset, segment.tokenCount, mHeadDim, mBytes)) {
             return INVALID_VALUE;
         }
 
@@ -759,7 +833,13 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         const int oldContext = segment.ropeScalingOriginalMaxPositionEmbeddings > 0
             ? segment.ropeScalingOriginalMaxPositionEmbeddings
             : segment.maxPositionEmbeddings;
-        const int total = static_cast<int>(segment.tokenCount) * mBatch * mKvNumHead * mHeadDim;
+        const size_t totalElements = segment.tokenCount * static_cast<size_t>(mBatch) * mKvNumHead * mHeadDim;
+        if (totalElements > maxInt) {
+            MNN_ERROR("OpenCLPagedAttention external PIC KV hydrate element count exceeds int range at layer %d\n",
+                      layerIndex);
+            return INVALID_VALUE;
+        }
+        const int total = static_cast<int>(totalElements);
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mExternalKey.get()));
@@ -773,8 +853,6 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         ret |= mHydrateExternalKernel->get().setArg(idx++, mCache->maxSlots);
         ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
         ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
-        ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(sourceTokenOffset));
-        ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(sourceTokenCount));
         ret |= mHydrateExternalKernel->get().setArg(idx++, ropeDim);
         ret |= mHydrateExternalKernel->get().setArg(idx++, segment.ropeTheta);
         ret |= mHydrateExternalKernel->get().setArg(idx++, ropeTypeLlama3);
@@ -799,6 +877,120 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int kvLen) {
+    if (mMeta == nullptr || !mMeta->needsCacheBlendScoring(layerIndex)) {
+        return NO_ERROR;
+    }
+    const int picTokenCount = mMeta->cacheblend_score_pic_token_count;
+    const int topK = mMeta->cacheblend_score_top_k;
+    if (picTokenCount < 0 || topK < 0 || topK > picTokenCount ||
+        mMeta->cacheblend_score_pic_start + picTokenCount > kvLen) {
+        return INVALID_VALUE;
+    }
+    if (topK == 0 || picTokenCount == 0) {
+        mMeta->setCacheBlendScoringResult({});
+        return NO_ERROR;
+    }
+    auto err = ensureCacheBlendScoreTemps(picTokenCount, topK);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+    size_t scoreOffset = 0;
+    for (const auto& segment : mMeta->cacheblend_score_segments) {
+        if (segment.tokenCount == 0) {
+            continue;
+        }
+        auto layer = segment.layer(layerIndex);
+        if (layer == nullptr) {
+            return INVALID_VALUE;
+        }
+        const int segBatch = segment.batch > 0 ? segment.batch : mBatch;
+        const int segKvHeads = segment.kvHeads > 0 ? segment.kvHeads : mKvNumHead;
+        const int segHeadDim = segment.headDim > 0 ? segment.headDim : mHeadDim;
+        const int segBytes = segment.dtypeBytes > 0 ? segment.dtypeBytes : mBytes;
+        if (segBatch != mBatch || segKvHeads != mKvNumHead || segHeadDim != mHeadDim || segBytes != mBytes) {
+            return INVALID_VALUE;
+        }
+        const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset
+                                                                  : segment.sourceTokenOffset;
+        const size_t sourceTokenCount = layer->hasSourceOverride && layer->sourceTokenCount > 0
+            ? layer->sourceTokenCount
+            : (segment.sourceTokenCount > 0 ? segment.sourceTokenCount : (sourceTokenOffset + segment.tokenCount));
+        const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+        if (sourceTokenOffset + segment.tokenCount > sourceTokenCount ||
+            segment.logicalStart + segment.tokenCount > static_cast<size_t>(kvLen) ||
+            scoreOffset + segment.tokenCount > static_cast<size_t>(picTokenCount) ||
+            segment.logicalStart > maxInt || segment.tokenCount > maxInt || scoreOffset > maxInt) {
+            return INVALID_VALUE;
+        }
+        const size_t valueTokenBytes = static_cast<size_t>(mHeadDim) * mBytes;
+        const size_t valueSegmentBytes = static_cast<size_t>(mBatch) * mKvNumHead * segment.tokenCount *
+                                         valueTokenBytes;
+        err = ensureExternalTemps(1, valueSegmentBytes / mBytes);
+        if (err != NO_ERROR) {
+            return err;
+        }
+        auto& externalValueBuffer = openCLBuffer(mExternalValue.get());
+        if (!_readExternalValueSegmentToSourceCLBuffer(layer->valuePath, externalValueBuffer, valueSegmentBytes,
+                                                       queue, mBatch, mKvNumHead, sourceTokenCount,
+                                                       sourceTokenOffset, segment.tokenCount, mHeadDim, mBytes)) {
+            return INVALID_VALUE;
+        }
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mExternalValue.get()));
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mBatch);
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mHeadDim);
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mCache->maxSlots);
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
+        ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(scoreOffset));
+        MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_value_score");
+        ret = queue.enqueueNDRangeKernel(mCacheBlendScoreKernel->get(), cl::NullRange,
+                                         cl::NDRange(static_cast<int>(segment.tokenCount)), cl::NullRange);
+        MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_value_score");
+        scoreOffset += segment.tokenCount;
+    }
+    if (scoreOffset != static_cast<size_t>(picTokenCount)) {
+        return INVALID_VALUE;
+    }
+    uint32_t idx = 0;
+    cl_int ret = CL_SUCCESS;
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendIndices.get()));
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, picTokenCount);
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, topK);
+    MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_topk");
+    constexpr int topKLocalSize = 64;
+    ret = queue.enqueueNDRangeKernel(mCacheBlendTopKKernel->get(), cl::NullRange, cl::NDRange(topKLocalSize),
+                                     cl::NDRange(topKLocalSize));
+    MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_topk");
+    std::vector<int> selected(topK);
+    if (queue.enqueueReadBuffer(openCLBuffer(mCacheBlendIndices.get()), CL_TRUE, 0,
+                                static_cast<size_t>(topK) * sizeof(int), selected.data()) != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
+    for (int index : selected) {
+        if (index < 0 || index >= picTokenCount || seen[static_cast<size_t>(index)] != 0) {
+            return INVALID_VALUE;
+        }
+        seen[static_cast<size_t>(index)] = 1;
+    }
+    mMeta->setCacheBlendScoringResult(selected);
+    if (_profilePagedAttention()) {
+        queue.finish();
+        MNN_PRINT("OpenCLPagedAttention profile op=cacheblend_score layer=%d pic_tokens=%d top_k=%d\n",
+                  layerIndex, picTokenCount, topK);
+    }
+    return NO_ERROR;
+}
+
 bool PagedAttentionBufExecution::canUseFastPrefill(const Tensor* mask, int baseLogical, int insertLen, int kvLen,
                                                    bool sparseQuery, bool externalHydrated, int* maskKeyLen) const {
     if (maskKeyLen != nullptr) {
@@ -808,7 +1000,7 @@ bool PagedAttentionBufExecution::canUseFastPrefill(const Tensor* mask, int baseL
         return false;
     }
     const bool hasExternal = !mMeta->external_segments.empty();
-    if ((hasExternal && !externalHydrated) || mMeta->file_flag == KVMeta::PendingWrite) {
+    if (hasExternal && !externalHydrated) {
         return false;
     }
     if (!hasExternal && (baseLogical != 0 || kvLen != insertLen)) {
@@ -1101,6 +1293,11 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         ret |= mCopyKernel->get().setArg(idx++, total);
         MNN_CHECK_CL_SUCCESS(ret, "setArg copy_paged_kv");
         queue.enqueueNDRangeKernel(mCopyKernel->get(), cl::NullRange, cl::NDRange(total), cl::NullRange);
+    }
+
+    err = runCacheBlendScoring(layerIndex, kvLen);
+    if (err != NO_ERROR) {
+        return err;
     }
 
     if (mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite && kvLen > 0) {

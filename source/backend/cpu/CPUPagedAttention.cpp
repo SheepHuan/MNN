@@ -13,6 +13,7 @@
 #include "core/MNNFileUtils.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -320,6 +321,125 @@ static ErrorCode _restoreExternalSegmentsCPU(PagedKVMeta* meta, int layerIndex, 
     return NO_ERROR;
 }
 
+static ErrorCode _runCacheBlendScoringCPU(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
+                                          int bytes, int maxSlots, const std::vector<int>& physicalSlots,
+                                          int kvLen, const int8_t* valueCache) {
+    if (meta == nullptr || !meta->needsCacheBlendScoring(layerIndex)) {
+        return NO_ERROR;
+    }
+    const int picTokenCount = meta->cacheblend_score_pic_token_count;
+    const int topK = meta->cacheblend_score_top_k;
+    if (picTokenCount < 0 || topK < 0 || topK > picTokenCount ||
+        meta->cacheblend_score_pic_start + picTokenCount > kvLen) {
+        return INVALID_VALUE;
+    }
+    if (topK == 0 || picTokenCount == 0) {
+        meta->setCacheBlendScoringResult({});
+        return NO_ERROR;
+    }
+    std::vector<float> scores(static_cast<size_t>(picTokenCount), -std::numeric_limits<float>::max());
+    size_t scoreOffset = 0;
+    const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+    for (const auto& segment : meta->cacheblend_score_segments) {
+        if (segment.tokenCount == 0) {
+            continue;
+        }
+        auto layer = segment.layer(layerIndex);
+        if (layer == nullptr) {
+            return INVALID_VALUE;
+        }
+        const int segBatch = segment.batch > 0 ? segment.batch : batch;
+        const int segKvHeads = segment.kvHeads > 0 ? segment.kvHeads : kvHeads;
+        const int segHeadDim = segment.headDim > 0 ? segment.headDim : headDim;
+        const int segBytes = segment.dtypeBytes > 0 ? segment.dtypeBytes : bytes;
+        if (segBatch != batch || segKvHeads != kvHeads || segHeadDim != headDim || segBytes != bytes) {
+            return INVALID_VALUE;
+        }
+        const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset
+                                                                  : segment.sourceTokenOffset;
+        const size_t sourceTokenCount = layer->hasSourceOverride && layer->sourceTokenCount > 0
+            ? layer->sourceTokenCount
+            : (segment.sourceTokenCount > 0 ? segment.sourceTokenCount : (sourceTokenOffset + segment.tokenCount));
+        if (sourceTokenOffset + segment.tokenCount > sourceTokenCount ||
+            segment.logicalStart + segment.tokenCount > static_cast<size_t>(kvLen) ||
+            scoreOffset + segment.tokenCount > static_cast<size_t>(picTokenCount) ||
+            segment.logicalStart > maxInt || segment.tokenCount > maxInt || scoreOffset > maxInt) {
+            return INVALID_VALUE;
+        }
+        std::vector<int8_t> valueData;
+        if (!_readBinaryFile(layer->valuePath, valueData)) {
+            return INVALID_VALUE;
+        }
+        const size_t valueElements = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * headDim;
+        const size_t cacheElements = static_cast<size_t>(batch) * kvHeads * maxSlots * headDim;
+        if (valueElements > maxInt || cacheElements > maxInt) {
+            return INVALID_VALUE;
+        }
+        const size_t expectedValue = valueElements * bytes;
+        if (valueData.size() < expectedValue) {
+            return INVALID_VALUE;
+        }
+        const float denom = static_cast<float>(std::max(1, batch * kvHeads * headDim));
+        for (size_t local = 0; local < segment.tokenCount; ++local) {
+            const size_t logical = segment.logicalStart + local;
+            if (logical >= physicalSlots.size()) {
+                return INVALID_VALUE;
+            }
+            const int slot = physicalSlots[logical];
+            if (slot < 0 || slot >= maxSlots) {
+                scores[scoreOffset + local] = -std::numeric_limits<float>::max();
+                continue;
+            }
+            const size_t sourceToken = sourceTokenOffset + local;
+            float acc = 0.0f;
+            for (int b = 0; b < batch; ++b) {
+                for (int h = 0; h < kvHeads; ++h) {
+                    const int refBase = ((b * kvHeads + h) * maxSlots + slot) * headDim;
+                    const size_t cachedBase =
+                        (static_cast<size_t>(b * kvHeads + h) * sourceTokenCount + sourceToken) * headDim;
+                    for (int d = 0; d < headDim; ++d) {
+                        acc += std::fabs(_pagedRead(valueCache, refBase + d, bytes) -
+                                         _pagedRead(valueData.data(), static_cast<int>(cachedBase + d), bytes));
+                    }
+                }
+            }
+            scores[scoreOffset + local] = acc / denom;
+        }
+        scoreOffset += segment.tokenCount;
+    }
+    if (scoreOffset != static_cast<size_t>(picTokenCount)) {
+        return INVALID_VALUE;
+    }
+
+    std::vector<int> selected;
+    selected.reserve(topK);
+    std::vector<uint8_t> used(static_cast<size_t>(picTokenCount), 0);
+    for (int rank = 0; rank < topK; ++rank) {
+        float best = -std::numeric_limits<float>::max();
+        int bestIndex = -1;
+        for (int i = 0; i < picTokenCount; ++i) {
+            if (used[static_cast<size_t>(i)] != 0) {
+                continue;
+            }
+            float value = scores[static_cast<size_t>(i)];
+            if (std::isnan(value)) {
+                value = -std::numeric_limits<float>::max();
+            }
+            if (bestIndex < 0 || value > best || (value == best && i < bestIndex)) {
+                best = value;
+                bestIndex = i;
+            }
+        }
+        if (bestIndex < 0) {
+            return INVALID_VALUE;
+        }
+        used[static_cast<size_t>(bestIndex)] = 1;
+        selected.emplace_back(bestIndex);
+    }
+    meta->setCacheBlendScoringResult(selected);
+    return NO_ERROR;
+}
+
 CPUPagedAttention::CPUPagedAttention(Backend* backend, const Op* op) : Execution(backend) {
     auto param = op->main_as_AttentionParam();
     if (param != nullptr) {
@@ -468,6 +588,11 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                 }
             }
         }
+    }
+    auto cacheBlendScore = _runCacheBlendScoringCPU(mMeta, layerIndex, batch, kvHeads, headDim, mBytes,
+                                                    mCache->maxSlots, physicalSlots, kvLen, vCache);
+    if (cacheBlendScore != NO_ERROR) {
+        return cacheBlendScore;
     }
     if (mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite && kvLen > 0) {
         auto prefixDir = static_cast<CPUBackend*>(backend())->getRuntime()->hint().prefixcacheDirPath;

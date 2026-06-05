@@ -168,6 +168,7 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 - 两边使用同一个 prompt 文件、相同 backend / precision / memory / sampler 配置，建议 greedy：`sampler_type=greedy`、`temperature=0.0`、`top_k=1`、`top_p=1.0`。
 - 从各自模型目录执行 demo，确保程序使用相对路径访问 `llm.mnn`、weight、tokenizer 和 `tmp/mnn_cachefile.bin`。
 - 日志至少保存生成文本、退出码、backend fallback 相关行，以及 `[CUDAExecution]` / `CUDAPagedAttention` / `CPUPagedAttention` 等 execution class 线索。
+- 不要用 `--skip_weight` 导出的 PIC/普通模型做输出正确性或性能结论。skip-weight 只能检查图结构；GLM / GLM-Edge 这类 untied embedding 模型如果被误写 `tie_embeddings`，会让 `pic_llm_demo` / `pic_server` 输出 NUL、`APP` 或重复无意义 token。遇到这种现象先检查 `export_args.json` 的 `skip_weight` / `tie_word_embeddings`、`llm_config.json` 的 `tie_embeddings`，再排查 PagedAttention kernel。
 
 Jetson 上已有 Llama 示例通常按下面配对：
 
@@ -267,8 +268,9 @@ PIC chat smoke 重点检查：
 - `/v1/kv/pic_caches` 返回 `type=pic_cache`、非零 `token_count` 和 `text_caches`。
 - `/v1/chat/completions` 返回 OpenAI 风格 `choices[0].message.content` 与 `usage`。
 - `pic_cache.precision_recovery.execution_mode`：`full-reuse` 应为 `native-full-reuse`，`full-compute` 应为 `native-full-compute`，`epic` 应为 `native-epic-sparse-recompute`，`cacheblend` 应为 `native-cacheblend-sparse-recompute`，`kvshare` 应为 `native-kvshare-sparse-recompute`。
-- `epic/cacheblend/kvshare` 应返回 `metadata.native_sparse_recompute_scope=python_prefill_layer_plan`；当 `pic_recompute_score_layer_idx > 0` 时，还应有 `metadata.pre_score_kv_source=full_prompt_reference` 和 `metadata.pre_score_compute_layers=<score_layer_idx>`，表示 score layer 前保持 token 正常计算语义。从 score layer 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
+- `epic/cacheblend/kvshare` 应返回 `metadata.native_sparse_recompute_scope=python_prefill_layer_plan`；当 `pic_recompute_score_layer_idx > 0` 时，还应有 `metadata.pre_score_kv_source=request_pagedcache_full_compute` 和 `metadata.pre_score_compute_layers=<score_layer_idx>`，表示 score layer 前保持 token 正常计算语义，正常 Attention 只把 KV 写入当前请求 PagedCache，不写 scratch `.k/.v`。从 score layer 开始，选中的 PIC token 和 suffix/非复用 KV token 参与计算，其他 PIC 位置直接复用磁盘 KV。
 - `cacheblend` / `delta-v` 的评分来自 score layer full-vs-cached value mean-abs delta；`kvshare` / `delta-a` 当前 MNN C++ 使用 K/V delta influence proxy，metadata 会标注它与 HF Python autograd `attention_output` gradient influence 的差异。
+- 除 `/v1/prefill/text` 构建 text cache 外，PIC chat / scoring 过程不得调用 prefix-cache `PendingWrite`、`setPrefixCacheFile`，不得写 scratch reference `.k/.v`，也不得通过 CPU `readBinaryFile` / `std::vector` 扫描计算 score。cacheblend native scoring 必须在 score layer 直接使用 PagedCache / CUDA / OpenCL device buffer，并在 GPU/CL/CUDA 上完成 top-k；如果该分支缺失，不能标成 `native-cacheblend-sparse-recompute`。
 
 ## 通用 bench 参数
 
@@ -283,6 +285,14 @@ PIC chat smoke 重点检查：
 ```bash
 -p 1024 -n 1 -rep 3 -kv true -load false -c 2 --memory 2
 ```
+
+Prefill-only 性能对比不看 decode。普通 MNN LLM 用 `llm_bench` 时设置 `-n 0`，只读取 JSON 里 `type=prefill` 的 `prompt_len/tps` 并计算 `prefill_s = prompt_len / tps`：
+
+```bash
+"$MNN_ARTIFACT_ROOT/bin/llm_bench" -m "$MODEL_CONFIG" -a <backend> -p <prompt_tokens> -n 0 -rep 3 -load false -j normal_prefill.json
+```
+
+PIC server 的 prefill-only chat 请求设置 `max_tokens=0`。做 cacheblend 预算分析时，同一份 text cache 和 suffix 下同时跑 `full-reuse`、`full-compute`、以及 `cacheblend` 的 `pic_recompute_ratio=0.01/0.05/0.10/0.20/0.30`；报告必须给出 cacheblend 相对 `full-reuse`、PIC `full-compute` 和普通 LLM full-compute prefill 的倍数。多 ratio sweep 不能共享一次 scoring：每个 ratio 必须是独立 `/v1/chat/completions` 请求，独立完成 full-reference / scoring / GPU top-k 选择，并把本次请求自己的 scoring 成本计入 latency。
 
 ## 稳定性脚本
 
@@ -854,7 +864,7 @@ nsys-ui .cache/nsight/llm_bench_cuda_p1024_n1_rep3.nsys-rep
 
 ### Jetson 四模式 Nsight 对比
 
-当用户要比较“正常 LLM、普通 full-compute、PIC LLM full-compute、full-reuse”的计算图/时间线时，在 Jetson 上用同一套 artifact 和模型长度采集，输出统一放到 `.cache/nsight/<run_id>/`。建议先用 `max_tokens=1` 和固定 prompt/token 长度，避免 decode 循环把 prefill 差异淹没。
+当用户要比较“正常 LLM、普通 full-compute、PIC LLM full-compute、full-reuse”的计算图/时间线时，在 Jetson 上用同一套 artifact 和模型长度采集，输出统一放到 `.cache/nsight/<run_id>/`。当前性能口径只看 prefill：普通 `llm_bench` 使用 `-n 0`，PIC server 请求使用 `max_tokens=0`，避免 decode 循环把 prefill 差异淹没。
 
 严格对比时必须记录每个响应的 `usage.prompt_tokens`。`normal_llm` 的 `-p <N>`、`pic_full_compute` / `pic_full_reuse` 的 `prelude + PIC + suffix`、以及 `server_full_compute` 的真实文本 prompt 长度应尽量一致；如果没有原始全文，只能把 `server_full_compute` 当作 no-PIC server 路径 smoke，不要直接和 PIC 594/2312-token 路径下结论。
 
@@ -877,7 +887,7 @@ ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
   test -f "$ART/lib/libMNN_Cuda_Main.so"'
 ```
 
-采集 normal LLM：
+采集 normal LLM prefill：
 
 ```bash
 ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
@@ -888,9 +898,9 @@ ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
   LD_LIBRARY_PATH="$ART/lib:/usr/local/cuda-12.2/targets/aarch64-linux/lib:${LD_LIBRARY_PATH:-}" \
   nsys profile --force-overwrite=true --trace=cuda,nvtx,osrt --sample=process-tree \
     --cuda-memory-usage=true --stats=true \
-    --output="$OUT/normal_llm_p2369_n1" \
-    "$ART/bin/llm_bench" -m "$NORMAL" -a cuda -p 2369 -n 1 -rep 1 -kv true -load false \
-    2>&1 | tee "$OUT/normal_llm_p2369_n1.console.log"'
+    --output="$OUT/normal_llm_p2369_n0" \
+    "$ART/bin/llm_bench" -m "$NORMAL" -a cuda -p 2369 -n 0 -rep 1 -kv true -load false \
+    2>&1 | tee "$OUT/normal_llm_p2369_n0.console.log"'
 ```
 
 采集 `pic_server` 三种请求时，用 `nsys profile` 包住 server 进程，再发送一次 HTTP 请求。`TEXT_META` 指向已经由 `/v1/prefill/text` 生成的 text cache `meta.json`；如果没有现成 cache，先启动一次普通 server 调 `/v1/prefill/text` 构建。
@@ -940,7 +950,7 @@ messages = [
     {"role": "system", "content": "You are concise. Use cached context if present.\n{{pic_cache}}"},
     {"role": "user", "content": "Answer with exactly one token: KV"},
 ]
-payload = {"model": "llama-pic", "messages": messages, "max_tokens": 1, "temperature": 0.0}
+payload = {"model": "llama-pic", "messages": messages, "max_tokens": 0, "temperature": 0.0}
 if mode == "pic_full_compute":
     payload["pic_cache"] = {"id": "nsight-pic-full-compute", "text_cache_refs": [{"meta_path": text_meta}], "selection_algorithm": "full-compute"}
 elif mode == "pic_full_reuse":
