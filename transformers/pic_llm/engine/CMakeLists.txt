@@ -45,6 +45,8 @@ else()
 endif()
 # jinja.cpp template engine (always enabled, header-only)
 target_compile_definitions(pic_llm PRIVATE LLM_USE_JINJA)
+set_property(TARGET pic_llm PROPERTY CXX_STANDARD 17)
+set_property(TARGET pic_llm PROPERTY CXX_STANDARD_REQUIRED ON)
 
 # apply_template demo (uses jinja)
 add_executable(pic_apply_template ${CMAKE_CURRENT_LIST_DIR}/demo/apply_template.cpp)

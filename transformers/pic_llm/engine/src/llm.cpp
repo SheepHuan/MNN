@@ -1160,6 +1160,80 @@ void Llm::generate(int max_token) {
     }
 }
 
+bool Llm::prefill(const std::vector<int>& input_ids) {
+    CHECK_LLM_RUNNING_RET(mContext, false);
+    MNN::Express::ExecutorScope s(mExecutor);
+    beginPagedRequestIfNeeded();
+
+    bool passExecute = false;
+    if(mPrefixCacheMode) {
+        mCallIndex++;
+
+        if(mCallIndex == 1) {
+            passExecute = mIsPrefixFileExist;
+
+            if(!mIsPrefixFileExist) {
+                mMeta->file_name = mPrefixCacheFileName;
+                mMeta->file_flag = KVMeta::PendingWrite;
+            }
+            mPrefixLength = input_ids.size();
+        } else if(mCallIndex == 2) {
+            if(mIsPrefixFileExist) {
+                mMeta->file_name = mPrefixCacheFileName;
+                mMeta->file_flag = KVMeta::PendingRead;
+                mMeta->seqlen_in_disk = mPrefixLength;
+            }
+        }
+    }
+
+    mContext->history_tokens.insert(mContext->history_tokens.end(), input_ids.begin(), input_ids.end());
+    if(!passExecute) {
+        if (0 == mBlockSize || input_ids.size() <= mBlockSize) {
+            auto hidden_states = embedding(input_ids);
+            if(hidden_states == nullptr) {
+                return false;
+            }
+            generate(hidden_states, 0);
+            completePrefixWrite();
+            mContext->prompt_len = static_cast<int>(input_ids.size());
+            return true;
+        }
+        int total_size = static_cast<int>(input_ids.size());
+        int loop_size = UP_DIV(total_size, mBlockSize);
+        for (int i = 0; i < loop_size; i++) {
+            auto start = i * mBlockSize;
+            auto end = (i + 1) * mBlockSize;
+            if (end >= total_size) {
+                end = total_size;
+            }
+            std::vector<int> chunk_ids(input_ids.begin() + start, input_ids.begin() + end);
+            auto input_embeds = embedding(chunk_ids);
+            if(input_embeds == nullptr) {
+                return false;
+            }
+            generate(input_embeds, 0);
+        }
+        completePrefixWrite();
+    } else {
+        updateContext(static_cast<int>(input_ids.size()), 0);
+    }
+
+    mContext->prompt_len = static_cast<int>(input_ids.size());
+    return true;
+}
+
+std::vector<int> Llm::decode(int max_tokens) {
+    CHECK_LLM_RUNNING_RET(mContext, std::vector<int>());
+    if (max_tokens < 0) {
+        max_tokens = mConfig->max_new_tokens();
+    }
+    if (max_tokens > 0) {
+        generate(max_tokens);
+        finishPagedRequestIfNeeded();
+    }
+    return mContext->output_tokens;
+}
+
 std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens) {
     CHECK_LLM_RUNNING_RET(mContext, std::vector<int>());
     MNN::Express::ExecutorScope s(mExecutor);

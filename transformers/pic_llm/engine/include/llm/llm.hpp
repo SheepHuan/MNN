@@ -171,6 +171,8 @@ public:
     void response(MNN::Express::VARP input_embeds, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     virtual void generate_init(std::ostream* os = nullptr, const char* end_with = nullptr);
     void generate(int max_token);
+    bool prefill(const std::vector<int>& input_ids);
+    std::vector<int> decode(int max_new_tokens = -1);
     std::vector<int> generate(const std::vector<int>& input_ids, int max_new_tokens = -1);
     std::vector<int> generate(MNN::Express::VARP input_embeds, int max_tokens = -1);
     bool stoped();

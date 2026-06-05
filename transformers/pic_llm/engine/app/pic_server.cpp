@@ -6,6 +6,7 @@
 #include "pic_server.hpp"
 
 #include "core/PagedKVMeta.hpp"
+#include "perfetto_c.h"
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <system_error>
 #include <utility>
@@ -31,6 +33,146 @@ namespace {
 constexpr const char* kMetaFormat = "kvshare-prefix-cache-meta-v1";
 constexpr const char* kTokensFormat = "kvshare-prefix-cache-tokens-v1";
 constexpr const char* kDefaultPicPlaceholder = "{{pic_cache}}";
+
+struct MnnLlmTraceInfo {
+    std::string algorithm = "full-compute";
+    std::string executionMode = "native-full-compute";
+    double budgetRatio = 0.0;
+    int64_t recomputeBudgetTokens = 0;
+    int64_t promptTotalTokens = 0;
+    int64_t preludeTokens = 0;
+    int64_t picTokens = 0;
+    int64_t suffixTokens = 0;
+    int64_t maxTokens = 0;
+    int64_t scoreLayerIdx = 0;
+    bool hasPicCache = false;
+};
+
+struct MnnLlmPerfettoState {
+    std::once_flag once;
+    PerfettoTeCategory category = {
+        &perfetto_atomic_false,
+        nullptr,
+        {"mnn.llm", "MNN LLM PIC server request stages", nullptr, 0},
+        0,
+    };
+    PerfettoTeRegisteredTrack track = {};
+};
+
+MnnLlmPerfettoState& mnnLlmPerfettoState() {
+    static MnnLlmPerfettoState state;
+    return state;
+}
+
+void ensureMnnLlmPerfetto() {
+    auto& state = mnnLlmPerfettoState();
+    std::call_once(state.once, [&state]() {
+        PerfettoProducerInitArgs args = PERFETTO_PRODUCER_INIT_ARGS_INIT();
+        args.backends = PERFETTO_BACKEND_SYSTEM;
+        args.shmem_size_hint_kb = 4096;
+        PerfettoProducerInit(args);
+        PerfettoTeCategoryRegister(&state.category);
+        PerfettoTeInit();
+        PerfettoTePublishCategories();
+        PerfettoTeNamedTrackRegister(&state.track, "MNN LLM", 1, PerfettoTeGlobalTrackUuid(), true);
+    });
+}
+
+class MnnLlmPerfettoSlice {
+public:
+    MnnLlmPerfettoSlice(const char* phase, const MnnLlmTraceInfo& info) {
+        ensureMnnLlmPerfetto();
+        auto& state = mnnLlmPerfettoState();
+        PERFETTO_TE(state.category,
+                    PERFETTO_TE_SLICE_BEGIN(phase),
+                    PERFETTO_TE_REGISTERED_TRACK(&state.track),
+                    PERFETTO_TE_ARG_STRING("phase", phase),
+                    PERFETTO_TE_ARG_STRING("algorithm", info.algorithm.c_str()),
+                    PERFETTO_TE_ARG_STRING("execution_mode", info.executionMode.c_str()),
+                    PERFETTO_TE_ARG_DOUBLE("budget_ratio", info.budgetRatio),
+                    PERFETTO_TE_ARG_INT64("recompute_budget_tokens", info.recomputeBudgetTokens),
+                    PERFETTO_TE_ARG_INT64("prompt_total_tokens", info.promptTotalTokens),
+                    PERFETTO_TE_ARG_INT64("prelude_token_count", info.preludeTokens),
+                    PERFETTO_TE_ARG_INT64("pic_token_count", info.picTokens),
+                    PERFETTO_TE_ARG_INT64("suffix_token_count", info.suffixTokens),
+                    PERFETTO_TE_ARG_INT64("max_tokens", info.maxTokens),
+                    PERFETTO_TE_ARG_INT64("score_layer_idx", info.scoreLayerIdx),
+                    PERFETTO_TE_ARG_BOOL("has_pic_cache", info.hasPicCache));
+        mActive = true;
+    }
+
+    MnnLlmPerfettoSlice(const MnnLlmPerfettoSlice&) = delete;
+    MnnLlmPerfettoSlice& operator=(const MnnLlmPerfettoSlice&) = delete;
+
+    ~MnnLlmPerfettoSlice() {
+        if (!mActive) {
+            return;
+        }
+        auto& state = mnnLlmPerfettoState();
+        PERFETTO_TE(state.category,
+                    PERFETTO_TE_SLICE_END(),
+                    PERFETTO_TE_REGISTERED_TRACK(&state.track));
+    }
+
+private:
+    bool mActive = false;
+};
+
+std::string traceAlgorithmName(const std::string& algorithm) {
+    if (algorithm == "delta-v") {
+        return "cacheblend";
+    }
+    if (algorithm == "delta-a") {
+        return "kvshare";
+    }
+    return algorithm;
+}
+
+std::string traceExecutionModeForAlgorithm(const std::string& algorithm) {
+    if (algorithm == "full-reuse") {
+        return "native-full-reuse";
+    }
+    if (algorithm == "full-compute") {
+        return "native-full-compute";
+    }
+    if (algorithm == "epic") {
+        return "native-epic-sparse-recompute";
+    }
+    if (algorithm == "cacheblend" || algorithm == "delta-v") {
+        return "native-cacheblend-sparse-recompute";
+    }
+    if (algorithm == "kvshare" || algorithm == "delta-a") {
+        return "native-kvshare-sparse-recompute";
+    }
+    if (algorithm == "explicit") {
+        return "native-explicit-sparse-recompute";
+    }
+    return algorithm;
+}
+
+double traceBudgetRatio(const std::string& algorithm, double requestedRatio) {
+    if (algorithm == "full-reuse") {
+        return 0.0;
+    }
+    if (algorithm == "full-compute") {
+        return 1.0;
+    }
+    return requestedRatio;
+}
+
+int64_t traceRecomputeBudgetTokens(const std::string& algorithm, int picTokenCount, double requestedRatio) {
+    if (algorithm == "full-reuse") {
+        return 0;
+    }
+    if (algorithm == "full-compute") {
+        return picTokenCount;
+    }
+    if (picTokenCount <= 0 || requestedRatio <= 0.0) {
+        return 0;
+    }
+    return std::min<int64_t>(
+        picTokenCount, std::max<int64_t>(1, static_cast<int64_t>(std::ceil(picTokenCount * requestedRatio))));
+}
 
 std::string sanitizeCachePart(const std::string& value) {
     std::string out;
@@ -1596,12 +1738,33 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
     int layerCount = jsonInt(cfg, "layer_nums", 0);
 
     if (!request.contains("pic_cache") || request["pic_cache"].is_null()) {
+        std::string rendered = mLlm->apply_chat_template(messages, true);
+        std::vector<int> inputTokenIds = mLlm->tokenizer_encode(rendered);
+        MnnLlmTraceInfo traceInfo;
+        traceInfo.algorithm = "full-compute";
+        traceInfo.executionMode = "native-full-compute";
+        traceInfo.promptTotalTokens = static_cast<int64_t>(inputTokenIds.size());
+        traceInfo.suffixTokens = static_cast<int64_t>(inputTokenIds.size());
+        traceInfo.maxTokens = maxTokens;
         mLlm->reset();
-        mLlm->response(messages, &sink, "", maxTokens);
+        mLlm->generate_init(&sink, "");
+        {
+            MnnLlmPerfettoSlice prefillSlice("prefill", traceInfo);
+            if (!mLlm->prefill(inputTokenIds)) {
+                error = "Failed to prefill no-PIC chat request";
+                return false;
+            }
+        }
+        if (maxTokens != 0) {
+            MnnLlmPerfettoSlice decodeSlice("decode", traceInfo);
+            outputTokens = mLlm->decode(maxTokens);
+        }
         auto context = mLlm->getContext();
         if (context != nullptr) {
-            outputTokens = context->output_tokens;
-            promptTokens = context->prompt_len;
+            if (maxTokens == 0) {
+                outputTokens = context->output_tokens;
+            }
+            promptTokens = static_cast<int>(inputTokenIds.size());
         }
     } else {
         PreparedPicCache pic;
@@ -1640,76 +1803,123 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             error = "PIC prompt suffix tokenization produced no tokens";
             return false;
         }
-        std::vector<int> nativeSelectedLocalIndices;
-        json scoreMetadata = json::object();
-        bool hasNativeSelectedLocalIndices = false;
-        if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v") {
-            const int effectiveScoreLayer =
-                std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-            std::vector<int> fullPromptForScoring;
-            fullPromptForScoring.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
-            fullPromptForScoring.insert(fullPromptForScoring.end(), preludeTokenIds.begin(),
-                                        preludeTokenIds.end());
-            fullPromptForScoring.insert(fullPromptForScoring.end(), pic.tokenIds.begin(), pic.tokenIds.end());
-            fullPromptForScoring.insert(fullPromptForScoring.end(), suffixTokenIds.begin(),
-                                        suffixTokenIds.end());
+        const int preludeTraceTokens = static_cast<int>(preludeTokenIds.size());
+        const int picTraceTokens = static_cast<int>(pic.tokenIds.size());
+        const int suffixTraceTokens = static_cast<int>(suffixTokenIds.size());
+        MnnLlmTraceInfo traceInfo;
+        traceInfo.algorithm = traceAlgorithmName(pic.selectionAlgorithm);
+        traceInfo.executionMode = traceExecutionModeForAlgorithm(pic.selectionAlgorithm);
+        traceInfo.budgetRatio = traceBudgetRatio(pic.selectionAlgorithm, pic.recomputeRatio);
+        traceInfo.recomputeBudgetTokens =
+            traceRecomputeBudgetTokens(pic.selectionAlgorithm, picTraceTokens, pic.recomputeRatio);
+        traceInfo.promptTotalTokens = preludeTraceTokens + picTraceTokens + suffixTraceTokens;
+        traceInfo.preludeTokens = preludeTraceTokens;
+        traceInfo.picTokens = picTraceTokens;
+        traceInfo.suffixTokens = suffixTraceTokens;
+        traceInfo.maxTokens = maxTokens;
+        traceInfo.scoreLayerIdx = pic.scoreLayerIdx;
+        traceInfo.hasPicCache = true;
+
+        PicExecutionPlan plan;
+        {
+            MnnLlmPerfettoSlice prefillSlice("prefill", traceInfo);
+            std::vector<int> nativeSelectedLocalIndices;
+            json scoreMetadata = json::object();
+            bool hasNativeSelectedLocalIndices = false;
+            if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v") {
+                const int effectiveScoreLayer =
+                    std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
+                std::vector<int> fullPromptForScoring;
+                fullPromptForScoring.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
+                fullPromptForScoring.insert(fullPromptForScoring.end(), preludeTokenIds.begin(),
+                                            preludeTokenIds.end());
+                fullPromptForScoring.insert(fullPromptForScoring.end(), pic.tokenIds.begin(), pic.tokenIds.end());
+                fullPromptForScoring.insert(fullPromptForScoring.end(), suffixTokenIds.begin(),
+                                            suffixTokenIds.end());
+                mLlm->reset();
+                std::ostringstream scoreSink;
+                mLlm->generate_init(&scoreSink, "");
+                if (!mLlm->selectCacheBlendExternalPagedKV(
+                        fullPromptForScoring, pic.segments, static_cast<int>(preludeTokenIds.size()),
+                        static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
+                        nativeSelectedLocalIndices)) {
+                    error = "Native cacheblend score/top-k failed on backend " + runtimeBackend();
+                    return false;
+                }
+                hasNativeSelectedLocalIndices = true;
+                scoreMetadata = {
+                    {"score_layer_idx", effectiveScoreLayer},
+                    {"score_source", "request_full_reference_pagedcache_minus_cached_pic_value"},
+                    {"score_kind", "layer_value_delta_mean_abs"},
+                    {"score_pass", "request_full_reference_pagedcache_no_disk_write"},
+                    {"topk_location", "backend_device"},
+                    {"host_transfer", "selected_local_indices_only"},
+                    {"selected_count", nativeSelectedLocalIndices.size()},
+                };
+            }
+            plan = buildExecutionPlan(
+                pic, static_cast<int>(preludeTokenIds.size()), layerCount,
+                hasNativeSelectedLocalIndices ? &nativeSelectedLocalIndices : nullptr,
+                hasNativeSelectedLocalIndices ? &scoreMetadata : nullptr);
+            traceInfo.executionMode = plan.executionMode;
+            traceInfo.recomputeBudgetTokens = plan.recomputeTokenCount;
+
             mLlm->reset();
-            std::ostringstream scoreSink;
-            mLlm->generate_init(&scoreSink, "");
-            if (!mLlm->selectCacheBlendExternalPagedKV(
-                    fullPromptForScoring, pic.segments, static_cast<int>(preludeTokenIds.size()),
-                    static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
-                    nativeSelectedLocalIndices)) {
-                error = "Native cacheblend score/top-k failed on backend " + runtimeBackend();
-                return false;
-            }
-            hasNativeSelectedLocalIndices = true;
-            scoreMetadata = {
-                {"score_layer_idx", effectiveScoreLayer},
-                {"score_source", "request_full_reference_pagedcache_minus_cached_pic_value"},
-                {"score_kind", "layer_value_delta_mean_abs"},
-                {"score_pass", "request_full_reference_pagedcache_no_disk_write"},
-                {"topk_location", "backend_device"},
-                {"host_transfer", "selected_local_indices_only"},
-                {"selected_count", nativeSelectedLocalIndices.size()},
-            };
-        }
-        PicExecutionPlan plan = buildExecutionPlan(
-            pic, static_cast<int>(preludeTokenIds.size()), layerCount,
-            hasNativeSelectedLocalIndices ? &nativeSelectedLocalIndices : nullptr,
-            hasNativeSelectedLocalIndices ? &scoreMetadata : nullptr);
-        mLlm->reset();
-        mLlm->generate_init(&sink, "");
-        if (plan.fullCompute) {
-            std::vector<int> fullPrompt;
-            fullPrompt.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
-            fullPrompt.insert(fullPrompt.end(), preludeTokenIds.begin(), preludeTokenIds.end());
-            fullPrompt.insert(fullPrompt.end(), pic.tokenIds.begin(), pic.tokenIds.end());
-            fullPrompt.insert(fullPrompt.end(), suffixTokenIds.begin(), suffixTokenIds.end());
-            outputTokens = mLlm->generate(fullPrompt, maxTokens);
-        } else {
-            std::vector<int> firstPrefill;
-            firstPrefill.reserve(preludeTokenIds.size() + plan.prefillPicTokenIds.size());
-            firstPrefill.insert(firstPrefill.end(), preludeTokenIds.begin(), preludeTokenIds.end());
-            firstPrefill.insert(firstPrefill.end(), plan.prefillPicTokenIds.begin(), plan.prefillPicTokenIds.end());
-            if (!firstPrefill.empty()) {
-                mLlm->generate(firstPrefill, 0);
+            mLlm->generate_init(&sink, "");
+            if (plan.fullCompute) {
+                std::vector<int> fullPrompt;
+                fullPrompt.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
+                fullPrompt.insert(fullPrompt.end(), preludeTokenIds.begin(), preludeTokenIds.end());
+                fullPrompt.insert(fullPrompt.end(), pic.tokenIds.begin(), pic.tokenIds.end());
+                fullPrompt.insert(fullPrompt.end(), suffixTokenIds.begin(), suffixTokenIds.end());
+                if (!mLlm->prefill(fullPrompt)) {
+                    error = "Failed to prefill full-compute PIC chat request";
+                    return false;
+                }
             } else {
-                mLlm->beginExternalPagedKVRequest();
+                std::vector<int> firstPrefill;
+                firstPrefill.reserve(preludeTokenIds.size() + plan.prefillPicTokenIds.size());
+                firstPrefill.insert(firstPrefill.end(), preludeTokenIds.begin(), preludeTokenIds.end());
+                firstPrefill.insert(firstPrefill.end(), plan.prefillPicTokenIds.begin(),
+                                    plan.prefillPicTokenIds.end());
+                if (!firstPrefill.empty()) {
+                    if (!mLlm->prefill(firstPrefill)) {
+                        mLlm->finishExternalPagedKVRequest();
+                        error = "Failed to prefill prelude/PIC prefix tokens";
+                        return false;
+                    }
+                } else {
+                    mLlm->beginExternalPagedKVRequest();
+                }
+                if (!plan.externalTokenIds.empty() &&
+                    !mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Failed to append external PIC KV into paged request";
+                    return false;
+                }
+                if (plan.sparseRecompute &&
+                    !mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds)) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Failed to sparse-recompute selected PIC KV tokens";
+                    return false;
+                }
+                if (!mLlm->prefill(suffixTokenIds)) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Failed to prefill PIC prompt suffix tokens";
+                    return false;
+                }
             }
-            if (!plan.externalTokenIds.empty() &&
-                !mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
-                mLlm->finishExternalPagedKVRequest();
-                error = "Failed to append external PIC KV into paged request";
-                return false;
+        }
+        if (maxTokens != 0) {
+            MnnLlmPerfettoSlice decodeSlice("decode", traceInfo);
+            outputTokens = mLlm->decode(maxTokens);
+        } else {
+            auto context = mLlm->getContext();
+            if (context != nullptr) {
+                outputTokens = context->output_tokens;
             }
-            if (plan.sparseRecompute &&
-                !mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds)) {
-                mLlm->finishExternalPagedKVRequest();
-                error = "Failed to sparse-recompute selected PIC KV tokens";
-                return false;
-            }
-            outputTokens = mLlm->generate(suffixTokenIds, maxTokens);
+        }
+        if (!plan.fullCompute) {
             mLlm->finishExternalPagedKVRequest();
         }
         promptTokens = static_cast<int>(suffixTokenIds.size());
