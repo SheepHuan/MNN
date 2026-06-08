@@ -1,9 +1,12 @@
 #include "PagedAttentionExecution.hpp"
 #include "SoftmaxExecution.hpp"
+#include "backend/cuda/core/CUDATools.hpp"
 #include "core/Macro.h"
 #include "core/MNNFileUtils.h"
+#include "core/TensorUtils.hpp"
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -12,16 +15,13 @@
 #include <fstream>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
-#include <unordered_set>
+#include <sstream>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
-
-#if defined(__linux__)
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace MNN {
 namespace CUDA {
@@ -571,7 +571,10 @@ static bool writeBinaryFile(const std::string& path, const std::vector<int8_t>& 
     return os.good();
 }
 
-static bool readBinaryFile(const std::string& path, std::vector<int8_t>& data) {
+static bool readBinaryFileRange(const std::string& path, size_t offsetBytes, void* dst, size_t expectedBytes) {
+    if (dst == nullptr || expectedBytes == 0) {
+        return false;
+    }
     std::ifstream is(path, std::ios::binary | std::ios::ate);
     if (!is.good()) {
         return false;
@@ -580,12 +583,24 @@ static bool readBinaryFile(const std::string& path, std::vector<int8_t>& data) {
     if (size < 0) {
         return false;
     }
-    data.resize(static_cast<size_t>(size));
-    is.seekg(0, std::ios::beg);
-    if (!data.empty()) {
-        is.read(reinterpret_cast<char*>(data.data()), size);
+    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(size));
+    if (offsetBytes > fileBytes || fileBytes - offsetBytes < expectedBytes) {
+        return false;
     }
-    return is.good() || is.eof();
+    is.seekg(static_cast<std::streamoff>(offsetBytes), std::ios::beg);
+    char* cursor = reinterpret_cast<char*>(dst);
+    size_t remaining = expectedBytes;
+    while (remaining > 0) {
+        const auto chunk = static_cast<std::streamsize>(
+            std::min<size_t>(remaining, static_cast<size_t>(std::numeric_limits<std::streamsize>::max())));
+        is.read(cursor, chunk);
+        if (is.gcount() != chunk) {
+            return false;
+        }
+        cursor += chunk;
+        remaining -= static_cast<size_t>(chunk);
+    }
+    return true;
 }
 
 static bool readExternalValueSegment(const std::string& path, std::vector<int8_t>& data, int batch, int kvHeads,
@@ -625,9 +640,58 @@ static bool readExternalValueSegment(const std::string& path, std::vector<int8_t
     return true;
 }
 
+static bool readExternalValueSegmentToPagedCache(const std::string& path, void* valueCacheHost, int batch,
+                                                 int kvHeads, int maxSlots, size_t logicalStart,
+                                                 size_t sourceTokenCount, size_t sourceTokenOffset,
+                                                 size_t tokenCount, int headDim, int bytes) {
+    if (valueCacheHost == nullptr || batch <= 0 || kvHeads <= 0 || maxSlots <= 0 || headDim <= 0 || bytes <= 0 ||
+        tokenCount == 0 || logicalStart + tokenCount > static_cast<size_t>(maxSlots)) {
+        return false;
+    }
+    std::ifstream is(path, std::ios::binary | std::ios::ate);
+    if (!is.good()) {
+        return false;
+    }
+    auto fileSize = is.tellg();
+    if (fileSize < 0) {
+        return false;
+    }
+    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(fileSize));
+    const size_t tokenBytes = static_cast<size_t>(headDim) * bytes;
+    const size_t segmentBytes = tokenCount * tokenBytes;
+    const size_t requiredBytes = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * tokenBytes;
+    if (sourceTokenOffset + tokenCount > sourceTokenCount || fileBytes < requiredBytes) {
+        return false;
+    }
+    auto* dstBase = reinterpret_cast<int8_t*>(valueCacheHost);
+    for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < kvHeads; ++h) {
+            const size_t src = ((static_cast<size_t>(b) * kvHeads + h) * sourceTokenCount +
+                                sourceTokenOffset) * tokenBytes;
+            const size_t dst = ((static_cast<size_t>(b) * kvHeads + h) * static_cast<size_t>(maxSlots) +
+                                logicalStart) * tokenBytes;
+            is.seekg(static_cast<std::streamoff>(src), std::ios::beg);
+            is.read(reinterpret_cast<char*>(dstBase + dst), static_cast<std::streamsize>(segmentBytes));
+            if (is.gcount() != static_cast<std::streamsize>(segmentBytes)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool profilePagedAttention() {
     const char* value = ::getenv("MNN_PAGED_ATTENTION_PROFILE");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static bool nvtxPagedAttention() {
+#ifdef MNN_CUDA_PROFILE
+    const char* value = ::getenv("MNN_PAGED_ATTENTION_NVTX");
+    return value == nullptr || value[0] == '\0' || value[0] != '0';
+#else
+    return false;
+#endif
 }
 
 static uint64_t nowUs() {
@@ -635,37 +699,215 @@ static uint64_t nowUs() {
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-static std::string externalLayerKey(const std::string& keyPath, const std::string& valuePath) {
-    return keyPath + "\n" + valuePath;
+static std::string nvtxLayerRangeName(const char* op, int layerIndex, int queryLen, int insertLen, int kvLen) {
+    std::ostringstream os;
+    os << "CUDAPagedAttention " << op << " layer=" << layerIndex;
+    if (queryLen >= 0) {
+        os << " query=" << queryLen;
+    }
+    if (insertLen >= 0) {
+        os << " insert=" << insertLen;
+    }
+    if (kvLen >= 0) {
+        os << " kv_len=" << kvLen;
+    }
+    return os.str();
 }
 
-static bool adviseFileWillNeed(const std::string& path) {
-#if defined(__linux__) && defined(POSIX_FADV_WILLNEED)
-    int flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-    int fd = ::open(path.c_str(), flags);
-    if (fd < 0) {
-        return false;
-    }
-    struct stat st;
-    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
-        ::close(fd);
-        return false;
-    }
-    int ret = ::posix_fadvise(fd, 0, st.st_size, POSIX_FADV_WILLNEED);
-    ::close(fd);
-    return ret == 0;
+class ScopedNvtxRange {
+public:
+    explicit ScopedNvtxRange(std::string name, bool enabled = true) {
+#ifdef MNN_CUDA_PROFILE
+        mEnabled = enabled;
+        if (mEnabled) {
+            mName = std::move(name);
+            NVTX_PUSH(mName.c_str());
+        }
 #else
-    (void)path;
-    return false;
+        (void)name;
+        (void)enabled;
 #endif
+    }
+    ~ScopedNvtxRange() {
+#ifdef MNN_CUDA_PROFILE
+        if (mEnabled) {
+            NVTX_POP();
+        }
+#endif
+    }
+
+private:
+#ifdef MNN_CUDA_PROFILE
+    bool mEnabled = false;
+    std::string mName;
+#endif
+};
+
+struct ExternalLayerReadSegment {
+    bool ok = false;
+    bool directWritten = false;
+    std::string error;
+    std::vector<int8_t> keyData;
+    std::vector<int8_t> valueData;
+};
+
+struct ExternalLayerReadResult {
+    bool ok = true;
+    int layerIndex = -1;
+    std::string requestKey;
+    std::string error;
+    std::vector<ExternalLayerReadSegment> segments;
+};
+
+struct ExternalLayerReadTask {
+    std::string requestKey;
+    int layerIndex = -1;
+    std::shared_future<std::shared_ptr<ExternalLayerReadResult>> future;
+};
+
+static std::mutex gExternalLayerReadMutex;
+static std::unordered_map<std::string, ExternalLayerReadTask> gExternalLayerReadTasks;
+
+struct CUDAPagedAttention::SharedPagedCache::MappedBuffer {
+    void* host = nullptr;
+    void* device = nullptr;
+    size_t bytes = 0;
+    int deviceId = -1;
+
+    ~MappedBuffer() {
+        if (host == nullptr) {
+            return;
+        }
+        if (deviceId >= 0) {
+            cudaSetDevice(deviceId);
+        }
+        cudaFreeHost(host);
+        host = nullptr;
+        device = nullptr;
+        bytes = 0;
+    }
+};
+
+static bool envFlagEnabled(const char* name, bool defaultValue) {
+    const char* value = ::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    return value[0] != '0';
 }
 
-static std::mutex gExternalLayerPrefetchMutex;
-static std::unordered_set<std::string> gExternalLayerPrefetched;
-static std::vector<std::shared_future<void>> gExternalLayerPrefetchTasks;
+static std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> makeMappedPagedBuffer(size_t bytes,
+                                                                                                  int deviceId) {
+    if (bytes == 0) {
+        return nullptr;
+    }
+    if (deviceId >= 0) {
+        cudaSetDevice(deviceId);
+    }
+    void* host = nullptr;
+    auto err = cudaHostAlloc(&host, bytes, cudaHostAllocMapped | cudaHostAllocPortable);
+    if (err != cudaSuccess || host == nullptr) {
+        return nullptr;
+    }
+    void* device = nullptr;
+    err = cudaHostGetDevicePointer(&device, host, 0);
+    if (err != cudaSuccess || device == nullptr) {
+        cudaFreeHost(host);
+        return nullptr;
+    }
+    auto out = std::make_shared<CUDAPagedAttention::SharedPagedCache::MappedBuffer>();
+    out->host = host;
+    out->device = device;
+    out->bytes = bytes;
+    out->deviceId = deviceId;
+    return out;
+}
+
+static bool shouldUseMappedPagedCache(CUDABackend* backend) {
+    if (backend == nullptr || !envFlagEnabled("MNN_PAGED_ATTENTION_ZERO_COPY_CACHE", true)) {
+        return false;
+    }
+    auto runtime = backend->getCUDARuntime();
+    if (runtime == nullptr) {
+        return false;
+    }
+    return runtime->prop().integrated != 0 || envFlagEnabled("MNN_PAGED_ATTENTION_FORCE_ZERO_COPY_CACHE", false);
+}
+
+struct ExternalLayerMappedTarget {
+    std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> key;
+    std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> value;
+    int batch = 0;
+    int kvHeads = 0;
+    int headDim = 0;
+    int bytes = 0;
+    int maxSlots = 0;
+};
+
+struct ExternalLayerMappedTargetRef {
+    std::weak_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> key;
+    std::weak_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> value;
+    int batch = 0;
+    int kvHeads = 0;
+    int headDim = 0;
+    int bytes = 0;
+    int maxSlots = 0;
+};
+
+static std::mutex gExternalLayerMappedTargetMutex;
+static std::unordered_map<std::string, ExternalLayerMappedTargetRef> gExternalLayerMappedTargets;
+
+static std::string externalLayerMappedTargetKey(const PagedKVMeta* meta, int layerIndex, int batch, int kvHeads,
+                                                int headDim, int bytes) {
+    std::ostringstream os;
+    os << reinterpret_cast<uintptr_t>(meta) << ":" << layerIndex << ":" << batch << ":" << kvHeads << ":"
+       << headDim << ":" << bytes;
+    return os.str();
+}
+
+static void registerExternalLayerMappedTarget(
+    const PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim, int bytes, int maxSlots,
+    const std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer>& key,
+    const std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer>& value) {
+    if (meta == nullptr || layerIndex < 0 || key == nullptr || value == nullptr || key->host == nullptr ||
+        value->host == nullptr || key->device == nullptr || value->device == nullptr) {
+        return;
+    }
+    ExternalLayerMappedTargetRef ref;
+    ref.key = key;
+    ref.value = value;
+    ref.batch = batch;
+    ref.kvHeads = kvHeads;
+    ref.headDim = headDim;
+    ref.bytes = bytes;
+    ref.maxSlots = maxSlots;
+    std::lock_guard<std::mutex> lock(gExternalLayerMappedTargetMutex);
+    gExternalLayerMappedTargets[externalLayerMappedTargetKey(meta, layerIndex, batch, kvHeads, headDim, bytes)] =
+        std::move(ref);
+}
+
+static ExternalLayerMappedTarget lookupExternalLayerMappedTarget(const PagedKVMeta* meta, int layerIndex, int batch,
+                                                                 int kvHeads, int headDim, int bytes) {
+    ExternalLayerMappedTarget target;
+    std::lock_guard<std::mutex> lock(gExternalLayerMappedTargetMutex);
+    auto iter = gExternalLayerMappedTargets.find(
+        externalLayerMappedTargetKey(meta, layerIndex, batch, kvHeads, headDim, bytes));
+    if (iter == gExternalLayerMappedTargets.end()) {
+        return target;
+    }
+    target.key = iter->second.key.lock();
+    target.value = iter->second.value.lock();
+    target.batch = iter->second.batch;
+    target.kvHeads = iter->second.kvHeads;
+    target.headDim = iter->second.headDim;
+    target.bytes = iter->second.bytes;
+    target.maxSlots = iter->second.maxSlots;
+    if (target.key == nullptr || target.value == nullptr) {
+        gExternalLayerMappedTargets.erase(iter);
+        target = ExternalLayerMappedTarget();
+    }
+    return target;
+}
 
 static int lastExternalLayerIndex(const PagedKVMeta* meta) {
     if (meta == nullptr || meta->external_segments.empty()) {
@@ -680,7 +922,149 @@ static int lastExternalLayerIndex(const PagedKVMeta* meta) {
     return last;
 }
 
-static void prefetchExternalLayersFrom(const PagedKVMeta* meta, int startLayer) {
+static int externalLayerReadWindow() {
+    const char* value = ::getenv("MNN_PAGED_ATTENTION_PREFETCH_WINDOW");
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
+    }
+    return std::max(0, std::atoi(value));
+}
+
+static std::string externalLayerRequestKey(const PagedKVMeta* meta, int batch, int kvHeads, int headDim, int bytes,
+                                           int kvLen) {
+    std::ostringstream os;
+    os << reinterpret_cast<uintptr_t>(meta) << ":" << (meta != nullptr ? meta->slot_table_version : 0) << ":"
+       << batch << ":" << kvHeads << ":" << headDim << ":" << bytes << ":" << kvLen;
+    if (meta != nullptr) {
+        for (const auto& segment : meta->external_segments) {
+            os << "|seg:" << segment.cacheName << ":" << segment.logicalStart << ":" << segment.tokenCount << ":"
+               << segment.sourceTokenOffset << ":" << segment.sourceTokenCount;
+            for (const auto& layer : segment.layers) {
+                os << "|layer:" << layer.layerIndex << ":" << layer.keyPath << ":" << layer.valuePath << ":"
+                   << layer.hasSourceOverride << ":" << layer.sourceTokenOffset << ":" << layer.sourceTokenCount;
+            }
+        }
+    }
+    return os.str();
+}
+
+static std::string externalLayerTaskKey(const std::string& requestKey, int layerIndex) {
+    return requestKey + "\n" + std::to_string(layerIndex);
+}
+
+static bool readExternalLayerSegmentCUDA(const PagedKVExternalSegment& segment, int layerIndex, int batch,
+                                         int kvHeads, int headDim, int bytes, int kvLen,
+                                         const ExternalLayerMappedTarget* target,
+                                         ExternalLayerReadSegment& out) {
+    out = ExternalLayerReadSegment();
+    if (segment.tokenCount == 0) {
+        out.ok = true;
+        return true;
+    }
+    auto layer = segment.layer(layerIndex);
+    if (layer == nullptr) {
+        out.error = "missing external PIC KV layer " + std::to_string(layerIndex) + " for cache " + segment.cacheName;
+        return false;
+    }
+    const int segBatch = segment.batch > 0 ? segment.batch : batch;
+    const int segKvHeads = segment.kvHeads > 0 ? segment.kvHeads : kvHeads;
+    const int segHeadDim = segment.headDim > 0 ? segment.headDim : headDim;
+    const int segBytes = segment.dtypeBytes > 0 ? segment.dtypeBytes : bytes;
+    if (segBatch != batch || segKvHeads != kvHeads || segHeadDim != headDim || segBytes != bytes) {
+        out.error = "external PIC KV shape mismatch at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    if (segment.keyRopeState != "canonical_no_rope" || segment.ropePairing != "half") {
+        out.error = "external PIC KV must be canonical_no_rope/half";
+        return false;
+    }
+    if (segment.logicalStart + segment.tokenCount > static_cast<size_t>(kvLen)) {
+        out.error = "external PIC KV range exceeds visible KV length at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset : segment.sourceTokenOffset;
+    const size_t sourceTokenCount = layer->hasSourceOverride && layer->sourceTokenCount > 0
+        ? layer->sourceTokenCount
+        : (segment.sourceTokenCount > 0 ? segment.sourceTokenCount : (sourceTokenOffset + segment.tokenCount));
+    if (sourceTokenOffset + segment.tokenCount > sourceTokenCount) {
+        out.error = "external PIC KV source range is invalid at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (segment.logicalStart > maxInt || segment.tokenCount > maxInt || sourceTokenOffset > maxInt ||
+        sourceTokenCount > maxInt) {
+        out.error = "external PIC KV indices exceed int range at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t keyTokenBytes = static_cast<size_t>(batch) * kvHeads * headDim * bytes;
+    const size_t keySegmentBytes = segment.tokenCount * keyTokenBytes;
+    if (target != nullptr && target->key != nullptr && target->value != nullptr && target->key->host != nullptr &&
+        target->value->host != nullptr && target->batch == batch && target->kvHeads == kvHeads &&
+        target->headDim == headDim && target->bytes == bytes && target->maxSlots >= kvLen &&
+        segment.logicalStart + segment.tokenCount <= static_cast<size_t>(target->maxSlots)) {
+        const size_t keyDstOffset = segment.logicalStart * keyTokenBytes;
+        const size_t keyEnd = keyDstOffset + keySegmentBytes;
+        if (keyEnd > target->key->bytes) {
+            out.error = "mapped external PIC key target is too small at layer " + std::to_string(layerIndex);
+            return false;
+        }
+        if (!readBinaryFileRange(layer->keyPath, sourceTokenOffset * keyTokenBytes,
+                                 reinterpret_cast<int8_t*>(target->key->host) + keyDstOffset, keySegmentBytes)) {
+            out.error = "failed to read external PIC key directly to PagedCache at layer " +
+                        std::to_string(layerIndex);
+            return false;
+        }
+        if (!readExternalValueSegmentToPagedCache(layer->valuePath, target->value->host, batch, kvHeads,
+                                                  target->maxSlots, segment.logicalStart, sourceTokenCount,
+                                                  sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+            out.error = "failed to read external PIC value directly to PagedCache at layer " +
+                        std::to_string(layerIndex);
+            return false;
+        }
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        out.directWritten = true;
+        out.ok = true;
+        return true;
+    }
+    out.keyData.resize(keySegmentBytes);
+    if (!readBinaryFileRange(layer->keyPath, sourceTokenOffset * keyTokenBytes, out.keyData.data(),
+                             keySegmentBytes)) {
+        out.error = "failed to read external PIC key range at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    if (!readExternalValueSegment(layer->valuePath, out.valueData, batch, kvHeads, sourceTokenCount,
+                                  sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+        out.error = "failed to read external PIC value range at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    out.ok = true;
+    return true;
+}
+
+static std::shared_ptr<ExternalLayerReadResult> readExternalLayerCUDA(
+    const PagedKVMeta* meta, std::string requestKey, std::vector<PagedKVExternalSegment> segments, int layerIndex,
+    int batch, int kvHeads, int headDim, int bytes, int kvLen) {
+    ScopedNvtxRange nvtx(nvtxLayerRangeName("pic_async_read", layerIndex, -1, -1, kvLen),
+                         nvtxPagedAttention());
+    auto result = std::make_shared<ExternalLayerReadResult>();
+    result->requestKey = std::move(requestKey);
+    result->layerIndex = layerIndex;
+    result->segments.resize(segments.size());
+    auto target = lookupExternalLayerMappedTarget(meta, layerIndex, batch, kvHeads, headDim, bytes);
+    const bool hasTarget = target.key != nullptr && target.value != nullptr;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (!readExternalLayerSegmentCUDA(segments[i], layerIndex, batch, kvHeads, headDim, bytes, kvLen,
+                                          hasTarget ? &target : nullptr, result->segments[i])) {
+            result->ok = false;
+            result->error = result->segments[i].error;
+            break;
+        }
+    }
+    return result;
+}
+
+static void scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLayer, int batch, int kvHeads,
+                                           int headDim, int bytes, int kvLen) {
     if (meta == nullptr || meta->external_segments.empty()) {
         return;
     }
@@ -688,36 +1072,68 @@ static void prefetchExternalLayersFrom(const PagedKVMeta* meta, int startLayer) 
     if (startLayer < 0 || lastLayer < startLayer) {
         return;
     }
-    std::vector<std::pair<std::string, std::string>> jobs;
+    const int window = externalLayerReadWindow();
+    const int endLayer = window > 0 ? std::min(lastLayer, startLayer + window - 1) : lastLayer;
+    const std::string requestKey = externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
+    const std::string requestPrefix = requestKey + "\n";
+    std::vector<int> layersToSchedule;
     {
-        std::lock_guard<std::mutex> lock(gExternalLayerPrefetchMutex);
-        for (int layerIndex = startLayer; layerIndex <= lastLayer; ++layerIndex) {
+        std::lock_guard<std::mutex> lock(gExternalLayerReadMutex);
+        for (auto it = gExternalLayerReadTasks.begin(); it != gExternalLayerReadTasks.end();) {
+            if (it->first.rfind(requestPrefix, 0) != 0) {
+                it = gExternalLayerReadTasks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (int layerIndex = startLayer; layerIndex <= endLayer; ++layerIndex) {
             if (meta->externalLayerLoaded(layerIndex)) {
                 continue;
             }
-            for (const auto& segment : meta->external_segments) {
-                auto layer = segment.layer(layerIndex);
-                if (layer == nullptr) {
-                    continue;
-                }
-                const auto key = externalLayerKey(layer->keyPath, layer->valuePath);
-                if (gExternalLayerPrefetched.insert(key).second) {
-                    jobs.emplace_back(layer->keyPath, layer->valuePath);
-                }
+            const auto key = externalLayerTaskKey(requestKey, layerIndex);
+            if (gExternalLayerReadTasks.find(key) == gExternalLayerReadTasks.end()) {
+                layersToSchedule.emplace_back(layerIndex);
             }
         }
-    }
-    if (jobs.empty()) {
-        return;
-    }
-    auto future = std::async(std::launch::async, [jobs]() {
-        for (const auto& job : jobs) {
-            (void)adviseFileWillNeed(job.first);
-            (void)adviseFileWillNeed(job.second);
+        auto segments = meta->external_segments;
+        for (int layerIndex : layersToSchedule) {
+            const auto key = externalLayerTaskKey(requestKey, layerIndex);
+            auto future = std::async(std::launch::async,
+                                     [meta, requestKey, segments, layerIndex, batch, kvHeads, headDim, bytes, kvLen]() {
+                                         return readExternalLayerCUDA(meta, requestKey, segments, layerIndex, batch,
+                                                                      kvHeads, headDim, bytes, kvLen);
+                                     }).share();
+            ExternalLayerReadTask task;
+            task.requestKey = requestKey;
+            task.layerIndex = layerIndex;
+            task.future = std::move(future);
+            gExternalLayerReadTasks[key] = std::move(task);
         }
-    }).share();
-    std::lock_guard<std::mutex> lock(gExternalLayerPrefetchMutex);
-    gExternalLayerPrefetchTasks.emplace_back(std::move(future));
+    }
+}
+
+static std::shared_ptr<ExternalLayerReadResult> takeExternalLayerRead(const PagedKVMeta* meta, int layerIndex,
+                                                                      int batch, int kvHeads, int headDim, int bytes,
+                                                                      int kvLen) {
+    if (meta == nullptr || meta->external_segments.empty()) {
+        return nullptr;
+    }
+    const auto requestKey = externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
+    const auto taskKey = externalLayerTaskKey(requestKey, layerIndex);
+    std::shared_future<std::shared_ptr<ExternalLayerReadResult>> future;
+    {
+        std::lock_guard<std::mutex> lock(gExternalLayerReadMutex);
+        auto iter = gExternalLayerReadTasks.find(taskKey);
+        if (iter == gExternalLayerReadTasks.end()) {
+            return nullptr;
+        }
+        future = iter->second.future;
+        gExternalLayerReadTasks.erase(iter);
+    }
+    if (!future.valid()) {
+        return nullptr;
+    }
+    return future.get();
 }
 
 static int ropeDimForExport(const KVMeta* meta, int headDim) {
@@ -748,10 +1164,32 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
         return NO_ERROR;
     }
     const bool profile = profilePagedAttention();
+    const bool nvtx = nvtxPagedAttention();
+    ScopedNvtxRange hydrateNvtx(nvtxLayerRangeName("pic_hydrate", layerIndex, -1, -1, kvLen), nvtx);
     const uint64_t startUs = profile ? nowUs() : 0;
     size_t totalTokens = 0;
-    prefetchExternalLayersFrom(meta, layerIndex + 1);
-    for (const auto& segment : meta->external_segments) {
+    size_t directTokens = 0;
+    size_t fallbackTokens = 0;
+    int directSegments = 0;
+    scheduleExternalLayerReadsFrom(meta, layerIndex + 1, batch, kvHeads, headDim, bytes, kvLen);
+    std::shared_ptr<ExternalLayerReadResult> prefetched;
+    {
+        ScopedNvtxRange waitNvtx(nvtxLayerRangeName("pic_wait_read", layerIndex, -1, -1, kvLen), nvtx);
+        prefetched = takeExternalLayerRead(meta, layerIndex, batch, kvHeads, headDim, bytes, kvLen);
+    }
+    if (prefetched != nullptr && !prefetched->ok) {
+        MNN_ERROR("CUDAPagedAttention async external PIC KV read failed at layer %d: %s\n", layerIndex,
+                  prefetched->error.c_str());
+        return INVALID_VALUE;
+    }
+    if (prefetched != nullptr && prefetched->segments.size() != meta->external_segments.size()) {
+        MNN_ERROR("CUDAPagedAttention async external PIC KV read segment count mismatch at layer %d\n", layerIndex);
+        return INVALID_VALUE;
+    }
+    auto directTarget = lookupExternalLayerMappedTarget(meta, layerIndex, batch, kvHeads, headDim, bytes);
+    const bool hasDirectTarget = directTarget.key != nullptr && directTarget.value != nullptr;
+    for (size_t segmentIndex = 0; segmentIndex < meta->external_segments.size(); ++segmentIndex) {
+        const auto& segment = meta->external_segments[segmentIndex];
         totalTokens += segment.tokenCount;
         auto layer = segment.layer(layerIndex);
         if (layer == nullptr) {
@@ -780,11 +1218,29 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
         if (segment.tokenCount == 0) {
             continue;
         }
-        std::vector<int8_t> keyData;
-        std::vector<int8_t> valueData;
-        if (!readBinaryFile(layer->keyPath, keyData) || !readBinaryFile(layer->valuePath, valueData)) {
-            MNN_ERROR("CUDAPagedAttention failed to read external PIC KV files for layer %d\n", layerIndex);
-            return INVALID_VALUE;
+        ExternalLayerReadSegment syncRead;
+        const ExternalLayerReadSegment* loadedSegment = nullptr;
+        if (prefetched != nullptr) {
+            loadedSegment = &prefetched->segments[segmentIndex];
+            if (!loadedSegment->ok) {
+                MNN_ERROR("CUDAPagedAttention async external PIC KV segment read failed at layer %d: %s\n",
+                          layerIndex, loadedSegment->error.c_str());
+                return INVALID_VALUE;
+            }
+        } else {
+            if (!readExternalLayerSegmentCUDA(segment, layerIndex, batch, kvHeads, headDim, bytes, kvLen,
+                                              hasDirectTarget ? &directTarget : nullptr, syncRead)) {
+                MNN_ERROR("CUDAPagedAttention failed to read external PIC KV files for layer %d: %s\n",
+                          layerIndex, syncRead.error.c_str());
+                return INVALID_VALUE;
+            }
+            loadedSegment = &syncRead;
+        }
+        if (loadedSegment->directWritten) {
+            directTokens += segment.tokenCount;
+            ++directSegments;
+        } else {
+            fallbackTokens += segment.tokenCount;
         }
         const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset
                                                                   : segment.sourceTokenOffset;
@@ -795,16 +1251,12 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
         if (sourceEnd > sourceTokenCount) {
             return INVALID_VALUE;
         }
+        const auto& keyData = loadedSegment->keyData;
+        const auto& valueData = loadedSegment->valueData;
         const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
         if (segment.logicalStart > maxInt || segment.tokenCount > maxInt || sourceTokenOffset > maxInt ||
             sourceTokenCount > maxInt) {
             MNN_ERROR("CUDAPagedAttention external PIC KV indices exceed int range at layer %d\n", layerIndex);
-            return INVALID_VALUE;
-        }
-        const size_t expectedKey = sourceTokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
-        const size_t expectedValue = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * headDim * bytes;
-        if (keyData.size() < expectedKey || valueData.size() < expectedValue) {
-            MNN_ERROR("CUDAPagedAttention external PIC KV file is too small at layer %d\n", layerIndex);
             return INVALID_VALUE;
         }
         for (size_t local = 0; local < segment.tokenCount; ++local) {
@@ -813,29 +1265,40 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
             if (slot < 0 || slot >= maxSlots) {
                 return OUT_OF_MEMORY;
             }
+            if (loadedSegment->directWritten && slot != logical) {
+                MNN_ERROR("CUDAPagedAttention zero-copy PIC cache requires contiguous slots at layer %d\n",
+                          layerIndex);
+                return INVALID_VALUE;
+            }
         }
         const size_t keyTokenBytes = static_cast<size_t>(batch) * kvHeads * headDim * bytes;
-        const size_t keySourceBase = sourceTokenOffset * keyTokenBytes;
         const size_t keySegmentBytes = segment.tokenCount * keyTokenBytes;
-        if (keyWorkspace == nullptr || keyWorkspaceBytes == nullptr) {
-            return INVALID_VALUE;
-        }
-        if (*keyWorkspace == nullptr || *keyWorkspaceBytes < keySegmentBytes) {
-            if (*keyWorkspace != nullptr) {
-                cudaFree(*keyWorkspace);
-                *keyWorkspace = nullptr;
-                *keyWorkspaceBytes = 0;
+        const int8_t* keySourceDevice = nullptr;
+        if (loadedSegment->directWritten) {
+            keySourceDevice = reinterpret_cast<const int8_t*>(keyCacheDevice) +
+                              segment.logicalStart * keyTokenBytes;
+        } else {
+            if (keyData.size() < keySegmentBytes || keyWorkspace == nullptr || keyWorkspaceBytes == nullptr) {
+                MNN_ERROR("CUDAPagedAttention external PIC key segment is too small at layer %d\n", layerIndex);
+                return INVALID_VALUE;
             }
-            auto keyAlloc = cudaMalloc(keyWorkspace, keySegmentBytes);
-            if (keyAlloc != cudaSuccess) {
-                return OUT_OF_MEMORY;
+            if (*keyWorkspace == nullptr || *keyWorkspaceBytes < keySegmentBytes) {
+                if (*keyWorkspace != nullptr) {
+                    cudaFree(*keyWorkspace);
+                    *keyWorkspace = nullptr;
+                    *keyWorkspaceBytes = 0;
+                }
+                auto keyAlloc = cudaMalloc(keyWorkspace, keySegmentBytes);
+                if (keyAlloc != cudaSuccess) {
+                    return OUT_OF_MEMORY;
+                }
+                *keyWorkspaceBytes = keySegmentBytes;
             }
-            *keyWorkspaceBytes = keySegmentBytes;
-        }
-        auto keyCopy = cudaMemcpy(*keyWorkspace, keyData.data() + keySourceBase, keySegmentBytes,
-                                  cudaMemcpyHostToDevice);
-        if (keyCopy != cudaSuccess) {
-            return INVALID_VALUE;
+            auto keyCopy = cudaMemcpy(*keyWorkspace, keyData.data(), keySegmentBytes, cudaMemcpyHostToDevice);
+            if (keyCopy != cudaSuccess) {
+                return INVALID_VALUE;
+            }
+            keySourceDevice = reinterpret_cast<const int8_t*>(*keyWorkspace);
         }
         int ropeDim = segment.ropeDim > 0 ? segment.ropeDim : headDim;
         ropeDim = std::min(ropeDim, headDim);
@@ -854,7 +1317,7 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
         const int blocks = UP_DIV(totalKey, threads);
         if (bytes == 4) {
             hydratePagedKeyKernel<float><<<blocks, threads>>>(
-                reinterpret_cast<const float*>(*keyWorkspace), reinterpret_cast<float*>(keyCacheDevice),
+                reinterpret_cast<const float*>(keySourceDevice), reinterpret_cast<float*>(keyCacheDevice),
                 slotTableDevice, batch, static_cast<int>(segment.tokenCount), kvHeads,
                 headDim, maxSlots, static_cast<int>(segment.logicalStart), ropeDim,
                 segment.ropeTheta > 0.0f ? segment.ropeTheta : 10000.0f, ropeTypeCode(segment),
@@ -863,7 +1326,7 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
                 segment.ropeAttentionScaling > 0.0f ? segment.ropeAttentionScaling : 1.0f, totalKey);
         } else {
             hydratePagedKeyKernel<half><<<blocks, threads>>>(
-                reinterpret_cast<const half*>(*keyWorkspace), reinterpret_cast<half*>(keyCacheDevice),
+                reinterpret_cast<const half*>(keySourceDevice), reinterpret_cast<half*>(keyCacheDevice),
                 slotTableDevice, batch, static_cast<int>(segment.tokenCount), kvHeads,
                 headDim, maxSlots, static_cast<int>(segment.logicalStart), ropeDim,
                 segment.ropeTheta > 0.0f ? segment.ropeTheta : 10000.0f, ropeTypeCode(segment),
@@ -878,25 +1341,18 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
             return INVALID_VALUE;
         }
 
+        if (loadedSegment->directWritten) {
+            continue;
+        }
         if (valueWorkspace == nullptr || valueWorkspaceBytes == nullptr) {
             return INVALID_VALUE;
         }
         const size_t valueTokenBytes = static_cast<size_t>(headDim) * bytes;
         const size_t valueHeadSegmentBytes = segment.tokenCount * valueTokenBytes;
         const size_t valueSegmentBytes = static_cast<size_t>(batch) * kvHeads * valueHeadSegmentBytes;
-        const int8_t* valueUploadPtr = valueData.data();
-        std::vector<int8_t> compactValueData;
-        if (sourceTokenOffset != 0 || segment.tokenCount != sourceTokenCount) {
-            compactValueData.resize(valueSegmentBytes);
-            for (int b = 0; b < batch; ++b) {
-                for (int h = 0; h < kvHeads; ++h) {
-                    const size_t src = ((static_cast<size_t>(b) * kvHeads + h) * sourceTokenCount +
-                                        sourceTokenOffset) * valueTokenBytes;
-                    const size_t dst = (static_cast<size_t>(b) * kvHeads + h) * valueHeadSegmentBytes;
-                    ::memcpy(compactValueData.data() + dst, valueData.data() + src, valueHeadSegmentBytes);
-                }
-            }
-            valueUploadPtr = compactValueData.data();
+        if (valueData.size() < valueSegmentBytes) {
+            MNN_ERROR("CUDAPagedAttention external PIC value segment is too small at layer %d\n", layerIndex);
+            return INVALID_VALUE;
         }
         if (*valueWorkspace == nullptr || *valueWorkspaceBytes < valueSegmentBytes) {
             if (*valueWorkspace != nullptr) {
@@ -910,7 +1366,7 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
             }
             *valueWorkspaceBytes = valueSegmentBytes;
         }
-        auto valueCopy = cudaMemcpy(*valueWorkspace, valueUploadPtr, valueSegmentBytes, cudaMemcpyHostToDevice);
+        auto valueCopy = cudaMemcpy(*valueWorkspace, valueData.data(), valueSegmentBytes, cudaMemcpyHostToDevice);
         if (valueCopy != cudaSuccess) {
             return INVALID_VALUE;
         }
@@ -936,8 +1392,10 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
     meta->markExternalLayerLoaded(layerIndex);
     if (profile) {
         cudaDeviceSynchronize();
-        MNN_PRINT("CUDAPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d us=%llu\n",
-                  layerIndex, static_cast<int>(totalTokens), kvLen,
+        MNN_PRINT("CUDAPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d async_read=%d "
+                  "direct_segments=%d direct_tokens=%d fallback_tokens=%d us=%llu\n",
+                  layerIndex, static_cast<int>(totalTokens), kvLen, prefetched != nullptr ? 1 : 0,
+                  directSegments, static_cast<int>(directTokens), static_cast<int>(fallbackTokens),
                   static_cast<unsigned long long>(nowUs() - startUs));
     }
     return NO_ERROR;
@@ -1165,11 +1623,18 @@ ErrorCode CUDAPagedAttention::ensureCache(int maxSlots, int batch, int kvHeads, 
     if (mCache && mCache->key && mCache->value && mCache->slotTable && mCache->maxSlots == maxSlots &&
         mCache->batch == batch && mCache->kvHeads == kvHeads && mCache->headDim == headDim &&
         mCache->precision == mPrecision) {
+        if (mCache->zeroCopyKV && mLayerIndex >= 0) {
+            registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mPrecision, maxSlots,
+                                              mCache->mappedKey, mCache->mappedValue);
+        }
         return NO_ERROR;
     }
     if (!mCache) {
         mCache.reset(new SharedPagedCache);
     }
+    mCache->mappedKey.reset();
+    mCache->mappedValue.reset();
+    mCache->zeroCopyKV = false;
     if (mPrecision == 4) {
         mCache->key.reset(Tensor::createDevice<float>({maxSlots, batch, kvHeads, headDim}));
         mCache->value.reset(Tensor::createDevice<float>({batch, kvHeads, maxSlots, headDim}));
@@ -1182,11 +1647,38 @@ ErrorCode CUDAPagedAttention::ensureCache(int maxSlots, int batch, int kvHeads, 
     if (!mCache->key || !mCache->value || !mCache->slotTable || !mCache->sparseQuery) {
         return OUT_OF_MEMORY;
     }
-    if (!mCudaBackend->onAcquireBuffer(mCache->key.get(), Backend::STATIC)) {
-        return OUT_OF_MEMORY;
+    const size_t keyBytes = static_cast<size_t>(maxSlots) * batch * kvHeads * headDim * mPrecision;
+    const size_t valueBytes = static_cast<size_t>(batch) * kvHeads * maxSlots * headDim * mPrecision;
+    if (shouldUseMappedPagedCache(mCudaBackend)) {
+        const int deviceId = mCudaBackend->getCUDARuntime()->device_id();
+        auto mappedKey = makeMappedPagedBuffer(keyBytes, deviceId);
+        auto mappedValue = makeMappedPagedBuffer(valueBytes, deviceId);
+        if (mappedKey != nullptr && mappedValue != nullptr) {
+            mCache->mappedKey = std::move(mappedKey);
+            mCache->mappedValue = std::move(mappedValue);
+            mCache->key->buffer().device = reinterpret_cast<uint64_t>(mCache->mappedKey->device);
+            mCache->value->buffer().device = reinterpret_cast<uint64_t>(mCache->mappedValue->device);
+            TensorUtils::getDescribeOrigin(mCache->key.get())->setBackend(mCudaBackend);
+            TensorUtils::getDescribeOrigin(mCache->value.get())->setBackend(mCudaBackend);
+            ::memset(mCache->mappedKey->host, 0, keyBytes);
+            ::memset(mCache->mappedValue->host, 0, valueBytes);
+            mCache->zeroCopyKV = true;
+            if (mLayerIndex >= 0) {
+                registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mPrecision, maxSlots,
+                                                  mCache->mappedKey, mCache->mappedValue);
+            }
+        } else {
+            mCache->mappedKey.reset();
+            mCache->mappedValue.reset();
+        }
     }
-    if (!mCudaBackend->onAcquireBuffer(mCache->value.get(), Backend::STATIC)) {
-        return OUT_OF_MEMORY;
+    if (!mCache->zeroCopyKV) {
+        if (!mCudaBackend->onAcquireBuffer(mCache->key.get(), Backend::STATIC)) {
+            return OUT_OF_MEMORY;
+        }
+        if (!mCudaBackend->onAcquireBuffer(mCache->value.get(), Backend::STATIC)) {
+            return OUT_OF_MEMORY;
+        }
     }
     if (!mCudaBackend->onAcquireBuffer(mCache->slotTable.get(), Backend::STATIC)) {
         return OUT_OF_MEMORY;
@@ -1194,8 +1686,10 @@ ErrorCode CUDAPagedAttention::ensureCache(int maxSlots, int batch, int kvHeads, 
     if (!mCudaBackend->onAcquireBuffer(mCache->sparseQuery.get(), Backend::STATIC)) {
         return OUT_OF_MEMORY;
     }
-    cudaMemset(pagedDevPtr<void>(mCache->key.get()), 0, static_cast<size_t>(maxSlots) * batch * kvHeads * headDim * mPrecision);
-    cudaMemset(pagedDevPtr<void>(mCache->value.get()), 0, static_cast<size_t>(batch) * kvHeads * maxSlots * headDim * mPrecision);
+    if (!mCache->zeroCopyKV) {
+        cudaMemset(pagedDevPtr<void>(mCache->key.get()), 0, keyBytes);
+        cudaMemset(pagedDevPtr<void>(mCache->value.get()), 0, valueBytes);
+    }
     mCache->maxSlots = maxSlots;
     mCache->batch = batch;
     mCache->kvHeads = kvHeads;
@@ -1342,6 +1836,14 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
 
     cudaStream_t stream = 0;
     int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
+    const bool profile = profilePagedAttention();
+    const bool nvtx = nvtxPagedAttention();
+    ScopedNvtxRange layerNvtx(nvtxLayerRangeName("paged_attention_layer", layerIndex, mQuerySeqLen, insertLen, kvLen),
+                              nvtx);
+    if (mCache->zeroCopyKV) {
+        registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mPrecision,
+                                          mCache->maxSlots, mCache->mappedKey, mCache->mappedValue);
+    }
     auto restore = restoreExternalSegmentsCUDA(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mPrecision,
                                                mCache->maxSlots, physicalSlots, kvLen,
                                                pagedDevPtr<void>(mCache->key.get()),
@@ -1353,6 +1855,8 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     }
 
     if (!mIsKVShared && insertLen > 0) {
+        ScopedNvtxRange copyNvtx(nvtxLayerRangeName("copy_current_kv", layerIndex, mQuerySeqLen, insertLen, kvLen),
+                                 nvtx);
         dim3 block(32, 8, 1);
         dim3 grid(UP_DIV(mHeadDim, block.x), UP_DIV(insertLen, block.y), UP_DIV(mBatch * mKvNumHead, block.z));
         if (mPrecision == 4) {
@@ -1473,7 +1977,6 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     mScale = (mMeta && mMeta->attn_scale > 0) ? mMeta->attn_scale : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
     bool useMask = mask != nullptr && mask->elementSize() > 1 && mask->getType().code == halide_type_float;
     int maskElements = useMask ? static_cast<int>(mask->elementSize()) : 0;
-    const bool profile = profilePagedAttention();
     const uint64_t attentionStartUs = profile ? nowUs() : 0;
     if (insertLen > 1) {
         int qSplitNum = 1;
@@ -1485,6 +1988,8 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         const int maxPieceLen = UP_DIV(insertLen, qSplitNum);
         size_t prefillElements = static_cast<size_t>(mBatch) * mNumHead * maxPieceLen * kvLen;
         if (ensurePrefillTemp(prefillElements)) {
+            ScopedNvtxRange prefillNvtx(nvtxLayerRangeName("fast_prefill", layerIndex, mQuerySeqLen, insertLen, kvLen),
+                                        nvtx);
             for (int piece = 0; piece < qSplitNum; ++piece) {
                 const int qStart = piece * maxPieceLen;
                 const int qPieceLen = std::min(maxPieceLen, insertLen - qStart);
@@ -1550,6 +2055,8 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     dim3 grid(insertLen, mNumHead, mBatch);
     int blockSize = 128;
     int sharedBytes = (kvLen + blockSize) * sizeof(float);
+    ScopedNvtxRange genericNvtx(nvtxLayerRangeName("generic_prefill", layerIndex, mQuerySeqLen, insertLen, kvLen),
+                                nvtx);
     if (mPrecision == 4) {
         pagedAttentionKernel<float><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), pagedDevPtr<float>(mCache->value.get()),

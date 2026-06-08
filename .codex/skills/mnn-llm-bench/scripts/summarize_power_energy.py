@@ -11,7 +11,7 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Summarize DF power CSV energy after trimming non-benchmark warmup/cooldown."
+        description="Summarize eperf power CSV energy after trimming non-benchmark warmup/cooldown."
     )
     parser.add_argument(
         "paths",

@@ -20,8 +20,9 @@ Environment:
   MNN_LLM_BENCH_PRECISION    Precision option passed to -c. Defaults to 2.
   MNN_LLM_BENCH_LOAD         loading-time option passed to -load. Defaults to true.
   MNN_LLM_BENCH_MEMORY       --memory value. Defaults to 2.
-  MNN_POWER_API_URL          DF power API. Defaults to http://192.168.101.14:8000.
-  MNN_POWER_SERIAL           DF serial. Defaults to Jetson serial 1A5D43.
+  MNN_POWER_API_URL          eperf power API. Defaults to http://192.168.101.14:8766.
+  MNN_POWER_DEVICE           Power device alias. Defaults to jetson.
+  MNN_POWER_SERIAL           Optional explicit monitor serial. Overrides MNN_POWER_DEVICE.
   MNN_POWER_WARMUP_SEC       Seconds before bench inside power window. Defaults to 10.
   MNN_POWER_COOLDOWN_SEC     Seconds after bench inside power window. Defaults to 10.
   MNN_LLM_BENCH_DRY_RUN      Print checks/commands without rsync, ssh, or power API calls when set to 1.
@@ -69,8 +70,9 @@ THREADS="${MNN_LLM_BENCH_THREADS:-4}"
 PRECISION="${MNN_LLM_BENCH_PRECISION:-2}"
 LOAD_TIME="${MNN_LLM_BENCH_LOAD:-true}"
 MEMORY="${MNN_LLM_BENCH_MEMORY:-2}"
-POWER_API_URL="${MNN_POWER_API_URL:-http://192.168.101.14:8000}"
-POWER_SERIAL="${MNN_POWER_SERIAL:-1A5D43}"
+POWER_API_URL="${MNN_POWER_API_URL:-http://192.168.101.14:8766}"
+POWER_DEVICE="${MNN_POWER_DEVICE:-jetson}"
+POWER_SERIAL="${MNN_POWER_SERIAL:-}"
 POWER_WARMUP_SEC="${MNN_POWER_WARMUP_SEC:-10}"
 POWER_COOLDOWN_SEC="${MNN_POWER_COOLDOWN_SEC:-10}"
 DRY_RUN="${MNN_LLM_BENCH_DRY_RUN:-${MNN_EXPORT_DRY_RUN:-0}}"
@@ -296,6 +298,7 @@ run_power_wrapped_remote_bench() {
 
   set +e
   MNN_POWER_API_URL="${POWER_API_URL}" \
+  MNN_POWER_DEVICE="${POWER_DEVICE}" \
   MNN_POWER_SERIAL="${POWER_SERIAL}" \
   MNN_POWER_OUTPUT_CSV="${power_csv}" \
   "${POWER_SCRIPT}" -- bash -c '

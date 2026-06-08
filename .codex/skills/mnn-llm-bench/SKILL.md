@@ -1,6 +1,6 @@
 ---
 name: mnn-llm-bench
-description: 当用户要求运行 MNN llm_bench、llm_demo、pic_llm_bench 或 pic_llm_demo，测试 CUDA/OpenCL/Vulkan/CPU LLM 推理，对比普通 LLM 与 PIC/PagedAttention 输出，确认 GPU 后端注册、检查 CUDA Execution class 日志、诊断后端回退，或围绕 LLM bench 采集 DF power / Jetson tegrastats 功耗时使用。
+description: 当用户要求运行 MNN llm_bench、llm_demo、pic_llm_bench 或 pic_llm_demo，测试 CUDA/OpenCL/Vulkan/CPU LLM 推理，对比普通 LLM 与 PIC/PagedAttention 输出，确认 GPU 后端注册、检查 CUDA Execution class 日志、诊断后端回退，或围绕 LLM bench 采集 eperf Power API / Jetson tegrastats 功耗时使用。
 metadata:
   short-description: 运行和诊断 MNN llm_bench
 ---
@@ -9,7 +9,7 @@ metadata:
 
 本 Skill 由本 MNN 仓库维护，用于使用本仓库 `.cache/output/mnn/artifacts/<platform>/bin/llm_bench`、`llm_demo`、`pic_llm_bench` 或 `pic_llm_demo` 测试 MNN LLM 模型，也用于启动和验证同一 artifact root 下的 `mls` 或独立 `pic_server` HTTP server。PIC LLM / PagedAttention 导出模型优先使用 `pic_llm_bench`、`pic_llm_demo` 或 `pic_server`，不要混用链接 `libllm.so` 的 `llm_bench` / `llm_demo` 做最终稳定性或输出判断。
 
-功耗采集是本 Skill 的可选 bench 能力：优先使用 DF power API 做跨设备外部功耗采样；需要 Jetson rail 细分时，使用本 Skill 内置的 `tegrastats` 采集脚本。不要再新增或使用独立的 Jetson power skill。
+功耗采集是本 Skill 的可选 bench 能力：优先使用 eperf Power API 做跨设备外部功耗采样；需要 Jetson rail 细分时，使用本 Skill 内置的 `tegrastats` 采集脚本。不要再新增或使用独立的 Jetson power skill。
 
 ## 工作流
 
@@ -286,13 +286,21 @@ PIC chat smoke 重点检查：
 -p 1024 -n 1 -rep 3 -kv true -load false -c 2 --memory 2
 ```
 
-Prefill-only 性能对比不看 decode。普通 MNN LLM 用 `llm_bench` 时设置 `-n 0`，只读取 JSON 里 `type=prefill` 的 `prompt_len/tps` 并计算 `prefill_s = prompt_len / tps`：
+Prefill-only 性能对比不看 decode。加速比里的 full-compute baseline 只能来自普通非 PIC 导出模型：`NORMAL_CONFIG` 必须位于 `.cache/mnn-llm-export/<model>/config*.json`，用 `$MNN_ARTIFACT_ROOT/bin/llm_bench -n 0` 测 normal LLM full-compute prefill。不要用 `.cache/weight/<model>/` 的 PIC/PagedAttention 导出目录，也不要把 `pic_server` 的 `selection_algorithm=full-compute` 当作 normal full-compute baseline。
+
+普通 MNN LLM 用 `llm_bench` 时设置 `-n 0`，只读取 JSON 里 `type=prefill` 的 `prompt_len/tps` 并计算 `prefill_s = prompt_len / tps`：
 
 ```bash
-"$MNN_ARTIFACT_ROOT/bin/llm_bench" -m "$MODEL_CONFIG" -a <backend> -p <prompt_tokens> -n 0 -rep 3 -load false -j normal_prefill.json
+"$MNN_ARTIFACT_ROOT/bin/llm_bench" -m "$NORMAL_CONFIG" -a <backend> -p <prompt_tokens> -n 0 -rep 3 -load false -j normal_prefill.json
 ```
 
-PIC server 的 prefill-only chat 请求设置 `max_tokens=0`。做 cacheblend 预算分析时，同一份 text cache 和 suffix 下同时跑 `full-reuse`、`full-compute`、以及 `cacheblend` 的 `pic_recompute_ratio=0.01/0.05/0.10/0.20/0.30`；报告必须给出 cacheblend 相对 `full-reuse`、PIC `full-compute` 和普通 LLM full-compute prefill 的倍数。多 ratio sweep 不能共享一次 scoring：每个 ratio 必须是独立 `/v1/chat/completions` 请求，独立完成 full-reference / scoring / GPU top-k 选择，并把本次请求自己的 scoring 成本计入 latency。
+PIC server 的 prefill-only chat 请求设置 `max_tokens=0`。PIC server 的 `full-compute` 只作为 PIC/PagedAttention full-compute 参考，用来观察 PagedAttention / PagedCache 路径相对 normal LLM baseline 的实现效率。做 cacheblend 预算分析时，同一份 text cache 和 suffix 下同时跑 `full-reuse`、`full-compute`、以及 `cacheblend` 的 `pic_recompute_ratio=0.01/0.05/0.10/0.20/0.30`；报告必须给出加速比而不是反向耗时倍数：`speedup_vs_normal_full_compute = normal_full_compute_s / algo_s`，可附 `speedup_vs_pic_full_compute_ref = pic_full_compute_s / algo_s` 作为 PagedAttention / PagedCache 参考。不要把 `algo_s / full_compute_s` 这种小于 1 的反向倍数命名为 speedup。多 ratio sweep 不能共享一次 scoring：每个 ratio 必须是独立 `/v1/chat/completions` 请求，独立完成 full-reference / scoring / GPU top-k 选择，并把本次请求自己的 scoring 成本计入 latency。
+
+推荐输出表头：
+
+```text
+context_tokens, algorithm, ratio, algo_s, normal_full_compute_s, speedup_vs_normal_full_compute, pic_full_compute_s, speedup_vs_pic_full_compute_ref
+```
 
 ## 稳定性脚本
 
@@ -355,6 +363,8 @@ MNN_LLM_BENCH_EXTRA_ARGS
 MNN_LLM_BENCH_POWER
 MNN_POWER_DEVICE
 MNN_POWER_API_URL
+MNN_POWER_SERIAL
+MNN_POWER_MONITOR_TYPE
 MNN_POWER_SAMPLE_RATE_HZ
 MNN_POWER_VOLTAGE_MV
 CUDA_LIB_DIR
@@ -362,7 +372,7 @@ CUDA_LIB_DIR
 
 ## Jetson CUDA 多模型 Power Suite
 
-Jetson 上测试普通 MNN LLM CUDA 在不同 prefill 长度下的 DF power 时，使用本 Skill 的多模型 suite：
+Jetson 上测试普通 MNN LLM CUDA 在不同 prefill 长度下的外部功耗时，使用本 Skill 的多模型 suite：
 
 ```bash
 bash .codex/skills/mnn-llm-bench/scripts/run_jetson_cuda_power_suite.sh
@@ -388,8 +398,9 @@ MNN_JETSON_MODEL_ROOT=$MNN_JETSON_REPO/.cache/mnn-llm-export
 MNN_LLM_EXPORT_ROOT=$PWD/.cache/mnn-llm-export
 MODELSCOPE_CACHE_ROOT=$HOME/.cache/modelscope/hub/models
 MNN_LLM_BENCH_CASES="256:1 512:1 1024:1 2048:1 4096:1"
-MNN_POWER_API_URL=http://192.168.101.14:8000
-MNN_POWER_SERIAL=1A5D43
+MNN_POWER_API_URL=http://192.168.101.14:8766
+MNN_POWER_DEVICE=jetson
+MNN_POWER_SERIAL=
 MNN_POWER_WARMUP_SEC=10
 MNN_POWER_COOLDOWN_SEC=10
 ```
@@ -402,7 +413,7 @@ LD_LIBRARY_PATH="$MNN_JETSON_ARTIFACT_ROOT/lib:/usr/local/cuda-12.2/targets/aarc
   -m config.json -a cuda -p <prefill> -n 1 -rep 1 -kv true -load true -c 2 -t 4 --memory 2
 ```
 
-每个 case 的 power 窗口是：启动 DF capture，等待 10 秒，执行远端 bench，bench 结束后再等待 10 秒，然后停止 capture 并保存 CSV。产物保存在：
+每个 case 的 power 窗口是：调用 `POST /v1/power/start` 启动 capture，等待 10 秒，执行远端 bench，bench 结束后再等待 10 秒，调用 `POST /v1/power/stop` 停止 capture，并从返回的 `artifacts.csv.raw_url` 下载 CSV。产物保存在：
 
 ```text
 .cache/logs/llm-bench-power/<timestamp>/manifest.tsv
@@ -417,23 +428,25 @@ MNN_LLM_BENCH_DRY_RUN=1 \
 bash .codex/skills/mnn-llm-bench/scripts/run_jetson_cuda_power_suite.sh
 ```
 
-## DF Power 可选采集
+## eperf Power API 可选采集
 
-当需要测试 `llm_bench` / `pic_llm_bench` 在不同上下文长度下的功耗时，使用 DF power API 作为 bench 可选项。默认 API 和设备序列号固定记录如下：
+当需要测试 `llm_bench` / `pic_llm_bench` 在不同上下文长度下的功耗时，使用 eperf Power API 作为 bench 可选项。默认 API 和当前设备绑定如下：
 
 ```text
-MNN_POWER_API_URL=http://192.168.101.14:8000
-jetson:        1A5D43
-orangepi5plus: C071EB951330
-oneplus13t:    F96FBDBA05B0
+MNN_POWER_API_URL=http://192.168.101.14:8766
+jetson:        df  serial 1A5D43
+orangepi5plus: blu serial F96FBDBA05B0
+oneplus13t:    blu serial C071EB951330
 ```
+
+优先设置 `MNN_POWER_DEVICE=<jetson|orangepi5plus|oneplus13t>`，由 API 的 `/v1/power/list` / binding 解析实际 `monitor.type`、`serial`、`sample_rate_hz` 和 `voltage_mv`。只有临时接入未登记设备或要绕过 device binding 时，才设置 `MNN_POWER_SERIAL=<serial>`，必要时同时设置 `MNN_POWER_MONITOR_TYPE=<df|blu>`。
 
 测量顺序必须是：
 
 1. 先把本次要测的 MNN 产物、模型和脚本推送到目标设备，并确认远端命令可执行。
-2. 再启动 DF power capture 计时。
+2. 再启动 Power API capture 计时。
 3. 立刻执行目标 `llm_bench` / `pic_llm_bench` 推理命令。
-4. 推理命令结束后立刻停止 capture 并下载 CSV。
+4. 推理命令结束后立刻停止 capture，并从 `power.stop` 返回的 `artifacts.csv.raw_url` 下载 CSV。
 
 不要把产物 push、模型同步、首次环境准备、手动等待时间混进功耗窗口。
 
@@ -463,11 +476,11 @@ bash .codex/skills/mnn-llm-bench/scripts/run_llm_bench_stability.sh
 .cache/logs/llm-bench-stability/<timestamp>_<model>_<backend>_p<prompt>_n<decode>_power.csv
 ```
 
-设备名也可直接换成 `jetson` 或 `oneplus13t`；如需临时指定未登记设备，使用 `MNN_POWER_SERIAL=<df-serial>`。
+设备名也可直接换成 `jetson` 或 `oneplus13t`；如需临时指定未登记设备，使用 `MNN_POWER_SERIAL=<serial>`，并在 API 无法仅凭 serial 推断时加 `MNN_POWER_MONITOR_TYPE=<df|blu>`。
 
-### 渲染 DF Power CSV
+### 渲染 Power CSV
 
-DF power CSV 可以直接渲染成 PNG，图像 x 轴是时间秒，y 轴是功耗 W：
+Power API CSV 可以直接渲染成 PNG，图像 x 轴是时间秒，y 轴是功耗 W：
 
 ```bash
 .codex/skills/mnn-llm-bench/scripts/render_power_csv.sh \
@@ -498,7 +511,7 @@ DF power CSV 可以直接渲染成 PNG，图像 x 轴是时间秒，y 轴是功�
 
 ### 计算 Bench 窗口能耗
 
-DF power CSV 采集窗口通常包含前后 warmup/cooldown。计算 `llm_bench` 真实运行时能耗时，先裁掉前后没有运行 bench 的采样段，再对功率积分；单次迭代能耗为：
+Power API CSV 采集窗口通常包含前后 warmup/cooldown。计算 `llm_bench` 真实运行时能耗时，先裁掉前后没有运行 bench 的采样段，再对功率积分；单次迭代能耗为：
 
 ```text
 energy_per_iter_j = bench_energy_j / repeat

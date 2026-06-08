@@ -178,6 +178,8 @@ __kernel void pic_page_attention_hydrate_kv(
     const int max_slots,
     const int logical_start,
     const int token_count,
+    const int key_source_logical_start,
+    const int hydrate_value,
     const int rope_dim_in,
     const float rope_theta,
     const int rope_type_llama3,
@@ -206,13 +208,22 @@ __kernel void pic_page_attention_hydrate_kv(
     if (slot < 0 || slot >= max_slots) {
         return;
     }
-    int source_token = local_index;
+    int source_token = key_source_logical_start + local_index;
     if (source_token < 0 || source_token >= token_count) {
+        if (key_source_logical_start <= 0) {
+            return;
+        }
+        if (source_token >= max_slots) {
+            return;
+        }
+    }
+    int value_source_token = local_index;
+    if (value_source_token < 0 || value_source_token >= token_count) {
         return;
     }
     int key_src_base = ((source_token * batch + b) * kv_heads + h) * head_dim;
     int key_dst_base = ((slot * batch + b) * kv_heads + h) * head_dim;
-    int value_src = ((b * kv_heads + h) * token_count + source_token) * head_dim + d;
+    int value_src = ((b * kv_heads + h) * token_count + value_source_token) * head_dim + d;
     int value_dst = ((b * kv_heads + h) * max_slots + slot) * head_dim + d;
     int rope_dim = min(rope_dim_in > 0 ? rope_dim_in : head_dim, head_dim);
     rope_dim = (rope_dim / 2) * 2;
@@ -239,7 +250,9 @@ __kernel void pic_page_attention_hydrate_kv(
     } else if (d >= rope_dim) {
         key_cache[key_dst_base + d] = source_key[key_src_base + d];
     }
-    value_cache[value_dst] = source_value[value_src];
+    if (hydrate_value != 0) {
+        value_cache[value_dst] = source_value[value_src];
+    }
 }
 
 __kernel void pic_cacheblend_value_score(

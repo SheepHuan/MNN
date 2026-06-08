@@ -10,7 +10,7 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Render DF power CSV files to PNG charts with time on X and power on Y."
+        description="Render eperf power CSV files to PNG charts with time on X and power on Y."
     )
     parser.add_argument("csv", nargs="+", help="Input CSV path(s).")
     parser.add_argument(

@@ -20,15 +20,11 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <unordered_set>
+#include <atomic>
+#include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <vector>
-
-#if defined(__linux__)
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace MNN {
 namespace OpenCL {
@@ -134,37 +130,128 @@ static bool _writeBinaryFile(const std::string& path, const std::vector<int8_t>&
     return os.good();
 }
 
-static std::string _externalLayerKey(const std::string& keyPath, const std::string& valuePath) {
-    return keyPath + "\n" + valuePath;
+struct ExternalLayerReadSegment {
+    bool ok = false;
+    bool directWritten = false;
+    std::string error;
+    std::vector<int8_t> keyData;
+    std::vector<int8_t> valueData;
+};
+
+struct ExternalLayerReadResult {
+    bool ok = true;
+    int layerIndex = -1;
+    std::string requestKey;
+    std::string error;
+    std::vector<ExternalLayerReadSegment> segments;
+};
+
+struct ExternalLayerReadTask {
+    std::string requestKey;
+    int layerIndex = -1;
+    std::shared_future<std::shared_ptr<ExternalLayerReadResult>> future;
+};
+
+static std::mutex gExternalLayerReadMutex;
+static std::unordered_map<std::string, ExternalLayerReadTask> gExternalLayerReadTasks;
+
+static bool _envFlagEnabled(const char* name, bool defaultValue) {
+    const char* value = ::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    return value[0] != '0';
 }
 
-static bool _adviseFileWillNeed(const std::string& path) {
-#if defined(__linux__) && defined(POSIX_FADV_WILLNEED)
-    int flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-    int fd = ::open(path.c_str(), flags);
-    if (fd < 0) {
+static bool _shouldUseDirectPagedCacheOpenCL() {
+    if (!_envFlagEnabled("MNN_PAGED_ATTENTION_ZERO_COPY_CACHE", true)) {
         return false;
     }
-    struct stat st;
-    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
-        ::close(fd);
-        return false;
-    }
-    int ret = ::posix_fadvise(fd, 0, st.st_size, POSIX_FADV_WILLNEED);
-    ::close(fd);
-    return ret == 0;
-#else
-    (void)path;
-    return false;
-#endif
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_CACHE", true);
 }
 
-static std::mutex gExternalLayerPrefetchMutex;
-static std::unordered_set<std::string> gExternalLayerPrefetched;
-static std::vector<std::shared_future<void>> gExternalLayerPrefetchTasks;
+struct ExternalLayerMappedTarget {
+    std::shared_ptr<Tensor> key;
+    std::shared_ptr<Tensor> value;
+    std::shared_ptr<cl::CommandQueue> queue;
+    int batch = 0;
+    int kvHeads = 0;
+    int headDim = 0;
+    int bytes = 0;
+    int maxSlots = 0;
+};
+
+struct ExternalLayerMappedTargetRef {
+    std::weak_ptr<Tensor> key;
+    std::weak_ptr<Tensor> value;
+    std::shared_ptr<cl::CommandQueue> queue;
+    int batch = 0;
+    int kvHeads = 0;
+    int headDim = 0;
+    int bytes = 0;
+    int maxSlots = 0;
+};
+
+static std::mutex gExternalLayerMappedTargetMutex;
+static std::unordered_map<std::string, ExternalLayerMappedTargetRef> gExternalLayerMappedTargets;
+
+static std::string _externalLayerMappedTargetKey(const PagedKVMeta* meta, int layerIndex, int batch, int kvHeads,
+                                                 int headDim, int bytes) {
+    std::ostringstream os;
+    os << reinterpret_cast<uintptr_t>(meta) << ":" << layerIndex << ":" << batch << ":" << kvHeads << ":"
+       << headDim << ":" << bytes;
+    return os.str();
+}
+
+static void _registerExternalLayerMappedTarget(const PagedKVMeta* meta, int layerIndex, int batch, int kvHeads,
+                                               int headDim, int bytes, int maxSlots,
+                                               const std::shared_ptr<Tensor>& key,
+                                               const std::shared_ptr<Tensor>& value,
+                                               cl::CommandQueue& queue) {
+    if (!_shouldUseDirectPagedCacheOpenCL() || meta == nullptr || layerIndex < 0 || key == nullptr ||
+        value == nullptr || key->deviceId() == 0 || value->deviceId() == 0) {
+        return;
+    }
+    ExternalLayerMappedTargetRef ref;
+    ref.key = key;
+    ref.value = value;
+    ref.queue.reset(new cl::CommandQueue(queue));
+    ref.batch = batch;
+    ref.kvHeads = kvHeads;
+    ref.headDim = headDim;
+    ref.bytes = bytes;
+    ref.maxSlots = maxSlots;
+    std::lock_guard<std::mutex> lock(gExternalLayerMappedTargetMutex);
+    gExternalLayerMappedTargets[_externalLayerMappedTargetKey(meta, layerIndex, batch, kvHeads, headDim, bytes)] =
+        std::move(ref);
+}
+
+static ExternalLayerMappedTarget _lookupExternalLayerMappedTarget(const PagedKVMeta* meta, int layerIndex, int batch,
+                                                                  int kvHeads, int headDim, int bytes) {
+    ExternalLayerMappedTarget target;
+    if (!_shouldUseDirectPagedCacheOpenCL()) {
+        return target;
+    }
+    std::lock_guard<std::mutex> lock(gExternalLayerMappedTargetMutex);
+    auto iter = gExternalLayerMappedTargets.find(
+        _externalLayerMappedTargetKey(meta, layerIndex, batch, kvHeads, headDim, bytes));
+    if (iter == gExternalLayerMappedTargets.end()) {
+        return target;
+    }
+    target.key = iter->second.key.lock();
+    target.value = iter->second.value.lock();
+    target.queue = iter->second.queue;
+    target.batch = iter->second.batch;
+    target.kvHeads = iter->second.kvHeads;
+    target.headDim = iter->second.headDim;
+    target.bytes = iter->second.bytes;
+    target.maxSlots = iter->second.maxSlots;
+    if (target.key == nullptr || target.value == nullptr || target.queue == nullptr) {
+        gExternalLayerMappedTargets.erase(iter);
+        target = ExternalLayerMappedTarget();
+    }
+    return target;
+}
 
 static int _lastExternalLayerIndex(const PagedKVMeta* meta) {
     if (meta == nullptr || meta->external_segments.empty()) {
@@ -179,44 +266,34 @@ static int _lastExternalLayerIndex(const PagedKVMeta* meta) {
     return last;
 }
 
-static void _prefetchExternalLayersFrom(const PagedKVMeta* meta, int startLayer) {
-    if (meta == nullptr || meta->external_segments.empty()) {
-        return;
+static int _externalLayerReadWindow() {
+    const char* value = ::getenv("MNN_PAGED_ATTENTION_PREFETCH_WINDOW");
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
     }
-    const int lastLayer = _lastExternalLayerIndex(meta);
-    if (startLayer < 0 || lastLayer < startLayer) {
-        return;
-    }
-    std::vector<std::pair<std::string, std::string>> jobs;
-    {
-        std::lock_guard<std::mutex> lock(gExternalLayerPrefetchMutex);
-        for (int layerIndex = startLayer; layerIndex <= lastLayer; ++layerIndex) {
-            if (meta->externalLayerLoaded(layerIndex)) {
-                continue;
-            }
-            for (const auto& segment : meta->external_segments) {
-                auto layer = segment.layer(layerIndex);
-                if (layer == nullptr) {
-                    continue;
-                }
-                const auto key = _externalLayerKey(layer->keyPath, layer->valuePath);
-                if (gExternalLayerPrefetched.insert(key).second) {
-                    jobs.emplace_back(layer->keyPath, layer->valuePath);
-                }
+    return std::max(0, std::atoi(value));
+}
+
+static std::string _externalLayerRequestKey(const PagedKVMeta* meta, int batch, int kvHeads, int headDim, int bytes,
+                                            int kvLen) {
+    std::ostringstream os;
+    os << reinterpret_cast<uintptr_t>(meta) << ":" << (meta != nullptr ? meta->slot_table_version : 0) << ":"
+       << batch << ":" << kvHeads << ":" << headDim << ":" << bytes << ":" << kvLen;
+    if (meta != nullptr) {
+        for (const auto& segment : meta->external_segments) {
+            os << "|seg:" << segment.cacheName << ":" << segment.logicalStart << ":" << segment.tokenCount << ":"
+               << segment.sourceTokenOffset << ":" << segment.sourceTokenCount;
+            for (const auto& layer : segment.layers) {
+                os << "|layer:" << layer.layerIndex << ":" << layer.keyPath << ":" << layer.valuePath << ":"
+                   << layer.hasSourceOverride << ":" << layer.sourceTokenOffset << ":" << layer.sourceTokenCount;
             }
         }
     }
-    if (jobs.empty()) {
-        return;
-    }
-    auto future = std::async(std::launch::async, [jobs]() {
-        for (const auto& job : jobs) {
-            (void)_adviseFileWillNeed(job.first);
-            (void)_adviseFileWillNeed(job.second);
-        }
-    }).share();
-    std::lock_guard<std::mutex> lock(gExternalLayerPrefetchMutex);
-    gExternalLayerPrefetchTasks.emplace_back(std::move(future));
+    return os.str();
+}
+
+static std::string _externalLayerTaskKey(const std::string& requestKey, int layerIndex) {
+    return requestKey + "\n" + std::to_string(layerIndex);
 }
 
 static bool _readBinaryFileRange(const std::string& path, size_t offsetBytes, void* dst, size_t expectedBytes) {
@@ -251,8 +328,23 @@ static bool _readBinaryFileRange(const std::string& path, size_t offsetBytes, vo
     return true;
 }
 
-static bool _readBinaryFilePrefix(const std::string& path, void* dst, size_t expectedBytes) {
-    return _readBinaryFileRange(path, 0, dst, expectedBytes);
+static bool _readBinaryFileRangeToMappedCLBufferOffset(const std::string& path, size_t fileOffsetBytes,
+                                                       cl::Buffer& buffer, size_t bufferOffsetBytes,
+                                                       size_t expectedBytes, cl::CommandQueue& queue) {
+    if (expectedBytes == 0) {
+        return false;
+    }
+    cl_int error = CL_SUCCESS;
+    void* ptr = queue.enqueueMapBuffer(buffer, CL_TRUE, CL_MAP_WRITE, bufferOffsetBytes, expectedBytes,
+                                       nullptr, nullptr, &error);
+    if (ptr == nullptr || error != CL_SUCCESS) {
+        return false;
+    }
+    bool ok = _readBinaryFileRange(path, fileOffsetBytes, ptr, expectedBytes);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    cl_int unmap = queue.enqueueUnmapMemObject(buffer, ptr);
+    cl_int finish = queue.finish();
+    return ok && unmap == CL_SUCCESS && finish == CL_SUCCESS;
 }
 
 enum class SourceCLReadStatus {
@@ -260,19 +352,6 @@ enum class SourceCLReadStatus {
     MapFailed,
     ReadFailed,
 };
-
-static SourceCLReadStatus _readBinaryFileRangeToMappedCLBuffer(const std::string& path, size_t offsetBytes,
-                                                               cl::Buffer& buffer, size_t expectedBytes,
-                                                               cl::CommandQueue& queue);
-static bool _readBinaryFileRangeToCLBufferFallback(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
-                                                   size_t expectedBytes, cl::CommandQueue& queue);
-static bool _readBinaryFileRangeToSourceCLBuffer(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
-                                                 size_t expectedBytes, cl::CommandQueue& queue);
-
-static SourceCLReadStatus _readBinaryFileToMappedCLBuffer(const std::string& path, cl::Buffer& buffer,
-                                                          size_t expectedBytes, cl::CommandQueue& queue) {
-    return _readBinaryFileRangeToMappedCLBuffer(path, 0, buffer, expectedBytes, queue);
-}
 
 static SourceCLReadStatus _readBinaryFileRangeToMappedCLBuffer(const std::string& path, size_t offsetBytes,
                                                                cl::Buffer& buffer, size_t expectedBytes,
@@ -293,11 +372,6 @@ static SourceCLReadStatus _readBinaryFileRangeToMappedCLBuffer(const std::string
     return unmap == CL_SUCCESS ? SourceCLReadStatus::Success : SourceCLReadStatus::MapFailed;
 }
 
-static bool _readBinaryFileToCLBufferFallback(const std::string& path, cl::Buffer& buffer, size_t expectedBytes,
-                                              cl::CommandQueue& queue) {
-    return _readBinaryFileRangeToCLBufferFallback(path, 0, buffer, expectedBytes, queue);
-}
-
 static bool _readBinaryFileRangeToCLBufferFallback(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
                                                    size_t expectedBytes, cl::CommandQueue& queue) {
     std::vector<int8_t> data(expectedBytes);
@@ -305,11 +379,6 @@ static bool _readBinaryFileRangeToCLBufferFallback(const std::string& path, size
         return false;
     }
     return queue.enqueueWriteBuffer(buffer, CL_TRUE, 0, expectedBytes, data.data()) == CL_SUCCESS;
-}
-
-static bool _readBinaryFileToSourceCLBuffer(const std::string& path, cl::Buffer& buffer, size_t expectedBytes,
-                                            cl::CommandQueue& queue) {
-    return _readBinaryFileRangeToSourceCLBuffer(path, 0, buffer, expectedBytes, queue);
 }
 
 static bool _readBinaryFileRangeToSourceCLBuffer(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
@@ -416,6 +485,246 @@ static bool _readExternalValueSegmentToSourceCLBuffer(
     return _readExternalValueSegmentToCLBufferFallback(path, buffer, expectedBytes, queue, batch, kvHeads,
                                                        sourceTokenCount, sourceTokenOffset, tokenCount, headDim,
                                                        bytes);
+}
+
+static bool _readExternalValueSegmentToPagedCacheOpenCL(
+    const std::string& path, cl::Buffer& valueCache, cl::CommandQueue& queue, int batch, int kvHeads, int maxSlots,
+    size_t logicalStart, size_t sourceTokenCount, size_t sourceTokenOffset, size_t tokenCount, int headDim,
+    int bytes) {
+    if (batch <= 0 || kvHeads <= 0 || maxSlots <= 0 || headDim <= 0 || bytes <= 0 || tokenCount == 0 ||
+        logicalStart + tokenCount > static_cast<size_t>(maxSlots)) {
+        return false;
+    }
+    std::ifstream is(path, std::ios::binary | std::ios::ate);
+    if (!is.good()) {
+        return false;
+    }
+    auto fileSize = is.tellg();
+    if (fileSize < 0) {
+        return false;
+    }
+    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(fileSize));
+    const size_t tokenBytes = static_cast<size_t>(headDim) * bytes;
+    const size_t segmentBytes = tokenCount * tokenBytes;
+    const size_t requiredBytes = static_cast<size_t>(batch) * kvHeads * sourceTokenCount * tokenBytes;
+    const size_t cacheBytes = static_cast<size_t>(batch) * kvHeads * maxSlots * tokenBytes;
+    if (sourceTokenOffset + tokenCount > sourceTokenCount || fileBytes < requiredBytes || cacheBytes == 0) {
+        return false;
+    }
+    cl_int error = CL_SUCCESS;
+    void* ptr = queue.enqueueMapBuffer(valueCache, CL_TRUE, CL_MAP_WRITE, 0, cacheBytes, nullptr, nullptr, &error);
+    if (ptr == nullptr || error != CL_SUCCESS) {
+        return false;
+    }
+    bool ok = true;
+    auto* dstBase = reinterpret_cast<int8_t*>(ptr);
+    for (int b = 0; ok && b < batch; ++b) {
+        for (int h = 0; h < kvHeads; ++h) {
+            const size_t src = ((static_cast<size_t>(b) * kvHeads + h) * sourceTokenCount +
+                                sourceTokenOffset) * tokenBytes;
+            const size_t dst = ((static_cast<size_t>(b) * kvHeads + h) * static_cast<size_t>(maxSlots) +
+                                logicalStart) * tokenBytes;
+            is.seekg(static_cast<std::streamoff>(src), std::ios::beg);
+            is.read(reinterpret_cast<char*>(dstBase + dst), static_cast<std::streamsize>(segmentBytes));
+            if (is.gcount() != static_cast<std::streamsize>(segmentBytes)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    cl_int unmap = queue.enqueueUnmapMemObject(valueCache, ptr);
+    cl_int finish = queue.finish();
+    return ok && unmap == CL_SUCCESS && finish == CL_SUCCESS;
+}
+
+static bool _readExternalLayerSegmentOpenCL(const PagedKVExternalSegment& segment, int layerIndex, int batch,
+                                            int kvHeads, int headDim, int bytes, int kvLen,
+                                            const ExternalLayerMappedTarget* target,
+                                            ExternalLayerReadSegment& out) {
+    out = ExternalLayerReadSegment();
+    if (segment.tokenCount == 0) {
+        out.ok = true;
+        return true;
+    }
+    auto layer = segment.layer(layerIndex);
+    if (layer == nullptr) {
+        out.error = "missing external PIC KV layer " + std::to_string(layerIndex) + " for cache " + segment.cacheName;
+        return false;
+    }
+    const int segBatch = segment.batch > 0 ? segment.batch : batch;
+    const int segKvHeads = segment.kvHeads > 0 ? segment.kvHeads : kvHeads;
+    const int segHeadDim = segment.headDim > 0 ? segment.headDim : headDim;
+    const int segBytes = segment.dtypeBytes > 0 ? segment.dtypeBytes : bytes;
+    if (segBatch != batch || segKvHeads != kvHeads || segHeadDim != headDim || segBytes != bytes) {
+        out.error = "external PIC KV shape mismatch at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    if (segment.keyRopeState != "canonical_no_rope" || segment.ropePairing != "half") {
+        out.error = "external PIC KV must be canonical_no_rope/half";
+        return false;
+    }
+    if (segment.logicalStart + segment.tokenCount > static_cast<size_t>(kvLen)) {
+        out.error = "external PIC KV range exceeds visible KV length at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t sourceTokenOffset = layer->hasSourceOverride ? layer->sourceTokenOffset : segment.sourceTokenOffset;
+    const size_t sourceTokenCount = layer->hasSourceOverride && layer->sourceTokenCount > 0
+        ? layer->sourceTokenCount
+        : (segment.sourceTokenCount > 0 ? segment.sourceTokenCount : (sourceTokenOffset + segment.tokenCount));
+    if (sourceTokenOffset + segment.tokenCount > sourceTokenCount) {
+        out.error = "external PIC KV source range is invalid at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t maxInt = static_cast<size_t>(std::numeric_limits<int>::max());
+    if (segment.logicalStart > maxInt || segment.tokenCount > maxInt || sourceTokenOffset > maxInt ||
+        sourceTokenCount > maxInt) {
+        out.error = "external PIC KV indices exceed int range at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t keyTokenBytes = static_cast<size_t>(batch) * kvHeads * headDim * bytes;
+    const size_t keySegmentBytes = segment.tokenCount * keyTokenBytes;
+    const bool requireDirect = _shouldUseDirectPagedCacheOpenCL();
+    const bool targetOk = target != nullptr && target->key != nullptr && target->value != nullptr &&
+        target->queue != nullptr && target->batch == batch && target->kvHeads == kvHeads &&
+        target->headDim == headDim && target->bytes == bytes && target->maxSlots >= kvLen &&
+        segment.logicalStart + segment.tokenCount <= static_cast<size_t>(target->maxSlots);
+    if (requireDirect && !targetOk) {
+        out.error = "OpenCL direct PagedCache target unavailable at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    if (targetOk) {
+        auto& keyBuffer = openCLBuffer(target->key.get());
+        auto& valueBuffer = openCLBuffer(target->value.get());
+        const size_t keyDstOffset = segment.logicalStart * keyTokenBytes;
+        const bool directKeyOk = _readBinaryFileRangeToMappedCLBufferOffset(
+            layer->keyPath, sourceTokenOffset * keyTokenBytes, keyBuffer, keyDstOffset, keySegmentBytes,
+            *target->queue);
+        const bool directValueOk = directKeyOk &&
+            _readExternalValueSegmentToPagedCacheOpenCL(layer->valuePath, valueBuffer, *target->queue, batch,
+                                                        kvHeads, target->maxSlots, segment.logicalStart,
+                                                        sourceTokenCount, sourceTokenOffset, segment.tokenCount,
+                                                        headDim, bytes);
+        if (directKeyOk && directValueOk) {
+            out.directWritten = true;
+            out.ok = true;
+            return true;
+        }
+        if (requireDirect) {
+            out.error = "OpenCL direct map read into PagedCache failed at layer " + std::to_string(layerIndex);
+            return false;
+        }
+    }
+    out.keyData.resize(keySegmentBytes);
+    if (!_readBinaryFileRange(layer->keyPath, sourceTokenOffset * keyTokenBytes, out.keyData.data(),
+                              keySegmentBytes)) {
+        out.error = "failed to read external PIC key range at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    const size_t valueTokenBytes = static_cast<size_t>(headDim) * bytes;
+    const size_t valueSegmentBytes = static_cast<size_t>(batch) * kvHeads * segment.tokenCount * valueTokenBytes;
+    out.valueData.resize(valueSegmentBytes);
+    if (!_readExternalValueSegment(layer->valuePath, out.valueData.data(), valueSegmentBytes, batch, kvHeads,
+                                   sourceTokenCount, sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+        out.error = "failed to read external PIC value range at layer " + std::to_string(layerIndex);
+        return false;
+    }
+    out.ok = true;
+    return true;
+}
+
+static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
+    const PagedKVMeta* meta, std::string requestKey, std::vector<PagedKVExternalSegment> segments, int layerIndex,
+    int batch, int kvHeads, int headDim, int bytes, int kvLen) {
+    auto result = std::make_shared<ExternalLayerReadResult>();
+    result->requestKey = std::move(requestKey);
+    result->layerIndex = layerIndex;
+    result->segments.resize(segments.size());
+    auto target = _lookupExternalLayerMappedTarget(meta, layerIndex, batch, kvHeads, headDim, bytes);
+    const bool hasTarget = target.key != nullptr && target.value != nullptr && target.queue != nullptr;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (!_readExternalLayerSegmentOpenCL(segments[i], layerIndex, batch, kvHeads, headDim, bytes, kvLen,
+                                            hasTarget ? &target : nullptr,
+                                            result->segments[i])) {
+            result->ok = false;
+            result->error = result->segments[i].error;
+            break;
+        }
+    }
+    return result;
+}
+
+static void _scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLayer, int batch, int kvHeads,
+                                            int headDim, int bytes, int kvLen) {
+    if (meta == nullptr || meta->external_segments.empty()) {
+        return;
+    }
+    const int lastLayer = _lastExternalLayerIndex(meta);
+    if (startLayer < 0 || lastLayer < startLayer) {
+        return;
+    }
+    const int window = _externalLayerReadWindow();
+    const int endLayer = window > 0 ? std::min(lastLayer, startLayer + window - 1) : lastLayer;
+    const std::string requestKey = _externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
+    const std::string requestPrefix = requestKey + "\n";
+    std::vector<int> layersToSchedule;
+    {
+        std::lock_guard<std::mutex> lock(gExternalLayerReadMutex);
+        for (auto it = gExternalLayerReadTasks.begin(); it != gExternalLayerReadTasks.end();) {
+            if (it->first.rfind(requestPrefix, 0) != 0) {
+                it = gExternalLayerReadTasks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (int layerIndex = startLayer; layerIndex <= endLayer; ++layerIndex) {
+            if (meta->externalLayerLoaded(layerIndex)) {
+                continue;
+            }
+            const auto key = _externalLayerTaskKey(requestKey, layerIndex);
+            if (gExternalLayerReadTasks.find(key) == gExternalLayerReadTasks.end()) {
+                layersToSchedule.emplace_back(layerIndex);
+            }
+        }
+        auto segments = meta->external_segments;
+        for (int layerIndex : layersToSchedule) {
+            const auto key = _externalLayerTaskKey(requestKey, layerIndex);
+            auto future = std::async(std::launch::async,
+                                     [meta, requestKey, segments, layerIndex, batch, kvHeads, headDim, bytes, kvLen]() {
+                                         return _readExternalLayerOpenCL(meta, requestKey, segments, layerIndex,
+                                                                         batch, kvHeads, headDim, bytes, kvLen);
+                                     }).share();
+            ExternalLayerReadTask task;
+            task.requestKey = requestKey;
+            task.layerIndex = layerIndex;
+            task.future = std::move(future);
+            gExternalLayerReadTasks[key] = std::move(task);
+        }
+    }
+}
+
+static std::shared_ptr<ExternalLayerReadResult> _takeExternalLayerRead(const PagedKVMeta* meta, int layerIndex,
+                                                                       int batch, int kvHeads, int headDim, int bytes,
+                                                                       int kvLen) {
+    if (meta == nullptr || meta->external_segments.empty()) {
+        return nullptr;
+    }
+    const auto requestKey = _externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
+    const auto taskKey = _externalLayerTaskKey(requestKey, layerIndex);
+    std::shared_future<std::shared_ptr<ExternalLayerReadResult>> future;
+    {
+        std::lock_guard<std::mutex> lock(gExternalLayerReadMutex);
+        auto iter = gExternalLayerReadTasks.find(taskKey);
+        if (iter == gExternalLayerReadTasks.end()) {
+            return nullptr;
+        }
+        future = iter->second.future;
+        gExternalLayerReadTasks.erase(iter);
+    }
+    if (!future.valid()) {
+        return nullptr;
+    }
+    return future.get();
 }
 
 static int _ropeDimForExport(const PagedKVMeta* meta, int headDim) {
@@ -574,6 +883,11 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     if (mCache && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery &&
         mCache->maxSlots == maxSlots && mCache->batch == batch && mCache->kvHeads == kvHeads &&
         mCache->headDim == headDim && mCache->bytes == mBytes) {
+        if (mLayerIndex >= 0) {
+            _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
+                                               mCache->key, mCache->value,
+                                               mOpenCLBackend->getOpenCLRuntime()->commandQueue());
+        }
         return NO_ERROR;
     }
     if (!mCache) {
@@ -614,6 +928,9 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     ret |= mZeroKernel->get().setArg(idx++, static_cast<int>(valueElements));
     MNN_CHECK_CL_SUCCESS(ret, "setArg zero_paged_value_cache");
     queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(valueElements), cl::NullRange);
+    if (_shouldUseDirectPagedCacheOpenCL()) {
+        queue.finish();
+    }
     mCache->maxSlots = maxSlots;
     mCache->batch = batch;
     mCache->kvHeads = kvHeads;
@@ -621,6 +938,11 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     mCache->bytes = mBytes;
     mCache->slotTableVersion = -1;
     mCache->slotTableLength = 0;
+    if (mLayerIndex >= 0) {
+        _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
+                                           mCache->key, mCache->value,
+                                           mOpenCLBackend->getOpenCLRuntime()->commandQueue());
+    }
     return NO_ERROR;
 }
 
@@ -765,9 +1087,26 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     const bool profile = _profilePagedAttention();
     const uint64_t startUs = profile ? _nowUs() : 0;
     size_t totalTokens = 0;
-    _prefetchExternalLayersFrom(mMeta, layerIndex + 1);
+    size_t directTokens = 0;
+    size_t fallbackTokens = 0;
+    int directSegments = 0;
+    _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    auto prefetched = _takeExternalLayerRead(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    if (prefetched != nullptr && !prefetched->ok) {
+        MNN_ERROR("OpenCLPagedAttention async external PIC KV read failed at layer %d: %s\n", layerIndex,
+                  prefetched->error.c_str());
+        return INVALID_VALUE;
+    }
+    if (prefetched != nullptr && prefetched->segments.size() != mMeta->external_segments.size()) {
+        MNN_ERROR("OpenCLPagedAttention async external PIC KV read segment count mismatch at layer %d\n", layerIndex);
+        return INVALID_VALUE;
+    }
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
-    for (const auto& segment : mMeta->external_segments) {
+    auto directTarget = _lookupExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes);
+    const bool hasDirectTarget = directTarget.key != nullptr && directTarget.value != nullptr &&
+                                 directTarget.queue != nullptr;
+    for (size_t segmentIndex = 0; segmentIndex < mMeta->external_segments.size(); ++segmentIndex) {
+        const auto& segment = mMeta->external_segments[segmentIndex];
         totalTokens += segment.tokenCount;
         if (segment.tokenCount == 0) {
             continue;
@@ -812,18 +1151,75 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         const size_t valueTokenBytes = static_cast<size_t>(mHeadDim) * mBytes;
         const size_t valueSegmentBytes = static_cast<size_t>(mBatch) * mKvNumHead * segment.tokenCount *
                                          valueTokenBytes;
-        auto err = ensureExternalTemps(keySegmentBytes / mBytes, valueSegmentBytes / mBytes);
-        if (err != NO_ERROR) {
-            return err;
+        ExternalLayerReadSegment syncRead;
+        const ExternalLayerReadSegment* loadedSegment = nullptr;
+        if (prefetched != nullptr) {
+            loadedSegment = &prefetched->segments[segmentIndex];
+            if (!loadedSegment->ok) {
+                MNN_ERROR("OpenCLPagedAttention async external PIC KV segment read failed at layer %d: %s\n",
+                          layerIndex, loadedSegment->error.c_str());
+                return INVALID_VALUE;
+            }
+        } else {
+            if (!_readExternalLayerSegmentOpenCL(segment, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen,
+                                                hasDirectTarget ? &directTarget : nullptr, syncRead)) {
+                MNN_ERROR("OpenCLPagedAttention failed to read external PIC KV files for layer %d: %s\n",
+                          layerIndex, syncRead.error.c_str());
+                return INVALID_VALUE;
+            }
+            loadedSegment = &syncRead;
         }
-        auto& externalKeyBuffer = openCLBuffer(mExternalKey.get());
-        auto& externalValueBuffer = openCLBuffer(mExternalValue.get());
-        if (!_readBinaryFileRangeToSourceCLBuffer(layer->keyPath, keySourceOffsetBytes, externalKeyBuffer,
-                                                  keySegmentBytes, queue) ||
-            !_readExternalValueSegmentToSourceCLBuffer(layer->valuePath, externalValueBuffer, valueSegmentBytes,
-                                                       queue, mBatch, mKvNumHead, sourceTokenCount,
-                                                       sourceTokenOffset, segment.tokenCount, mHeadDim, mBytes)) {
-            return INVALID_VALUE;
+
+        cl::Buffer* sourceKeyBuffer = nullptr;
+        cl::Buffer* sourceValueBuffer = nullptr;
+        int keySourceLogicalStart = 0;
+        int hydrateValue = 1;
+        if (loadedSegment != nullptr && loadedSegment->directWritten) {
+            for (size_t local = 0; local < segment.tokenCount; ++local) {
+                const int logical = static_cast<int>(segment.logicalStart + local);
+                const int slot = mMeta != nullptr ? mMeta->physicalSlot(logical) : logical;
+                if (slot != logical) {
+                    MNN_ERROR("OpenCLPagedAttention zero-copy PIC cache requires contiguous slots at layer %d\n",
+                              layerIndex);
+                    return INVALID_VALUE;
+                }
+            }
+            sourceKeyBuffer = &openCLBuffer(mCache->key.get());
+            sourceValueBuffer = &openCLBuffer(mCache->value.get());
+            keySourceLogicalStart = static_cast<int>(segment.logicalStart);
+            hydrateValue = 0;
+            directTokens += segment.tokenCount;
+            ++directSegments;
+        } else {
+            fallbackTokens += segment.tokenCount;
+            auto err = ensureExternalTemps(keySegmentBytes / mBytes, valueSegmentBytes / mBytes);
+            if (err != NO_ERROR) {
+                return err;
+            }
+            auto& externalKeyBuffer = openCLBuffer(mExternalKey.get());
+            auto& externalValueBuffer = openCLBuffer(mExternalValue.get());
+            if (loadedSegment != nullptr) {
+                if (loadedSegment->keyData.size() < keySegmentBytes ||
+                    loadedSegment->valueData.size() < valueSegmentBytes) {
+                    return INVALID_VALUE;
+                }
+                if (queue.enqueueWriteBuffer(externalKeyBuffer, CL_TRUE, 0, keySegmentBytes,
+                                             loadedSegment->keyData.data()) != CL_SUCCESS ||
+                    queue.enqueueWriteBuffer(externalValueBuffer, CL_TRUE, 0, valueSegmentBytes,
+                                             loadedSegment->valueData.data()) != CL_SUCCESS) {
+                    return INVALID_VALUE;
+                }
+            } else {
+                if (!_readBinaryFileRangeToSourceCLBuffer(layer->keyPath, keySourceOffsetBytes, externalKeyBuffer,
+                                                          keySegmentBytes, queue) ||
+                    !_readExternalValueSegmentToSourceCLBuffer(
+                        layer->valuePath, externalValueBuffer, valueSegmentBytes, queue, mBatch, mKvNumHead,
+                        sourceTokenCount, sourceTokenOffset, segment.tokenCount, mHeadDim, mBytes)) {
+                    return INVALID_VALUE;
+                }
+            }
+            sourceKeyBuffer = &externalKeyBuffer;
+            sourceValueBuffer = &externalValueBuffer;
         }
 
         int ropeDim = segment.ropeDim > 0 ? segment.ropeDim : mHeadDim;
@@ -842,8 +1238,8 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         const int total = static_cast<int>(totalElements);
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
-        ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mExternalKey.get()));
-        ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mExternalValue.get()));
+        ret |= mHydrateExternalKernel->get().setArg(idx++, *sourceKeyBuffer);
+        ret |= mHydrateExternalKernel->get().setArg(idx++, *sourceValueBuffer);
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
@@ -853,6 +1249,8 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         ret |= mHydrateExternalKernel->get().setArg(idx++, mCache->maxSlots);
         ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
         ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
+        ret |= mHydrateExternalKernel->get().setArg(idx++, keySourceLogicalStart);
+        ret |= mHydrateExternalKernel->get().setArg(idx++, hydrateValue);
         ret |= mHydrateExternalKernel->get().setArg(idx++, ropeDim);
         ret |= mHydrateExternalKernel->get().setArg(idx++, segment.ropeTheta);
         ret |= mHydrateExternalKernel->get().setArg(idx++, ropeTypeLlama3);
@@ -867,11 +1265,13 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         queue.enqueueNDRangeKernel(mHydrateExternalKernel->get(), cl::NullRange, cl::NDRange(total), cl::NullRange);
     }
     mMeta->markExternalLayerLoaded(layerIndex);
-    _prefetchExternalLayersFrom(mMeta, layerIndex + 1);
+    _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
     if (profile) {
         queue.finish();
-        MNN_PRINT("OpenCLPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d us=%llu\n",
-                  layerIndex, static_cast<int>(totalTokens), kvLen,
+        MNN_PRINT("OpenCLPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d async_read=%d "
+                  "direct_segments=%d direct_tokens=%d fallback_tokens=%d us=%llu\n",
+                  layerIndex, static_cast<int>(totalTokens), kvLen, prefetched != nullptr ? 1 : 0,
+                  directSegments, static_cast<int>(directTokens), static_cast<int>(fallbackTokens),
                   static_cast<unsigned long long>(_nowUs() - startUs));
     }
     return NO_ERROR;
@@ -1265,6 +1665,8 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     }
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
     int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
+    _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, mCache->maxSlots,
+                                       mCache->key, mCache->value, queue);
     if (mMeta != nullptr && !mMeta->external_segments.empty() && !mMeta->externalLayerLoaded(layerIndex)) {
         auto hydrate = hydrateExternalSegments(layerIndex, kvLen);
         if (hydrate != NO_ERROR) {

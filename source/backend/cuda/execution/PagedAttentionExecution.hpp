@@ -13,10 +13,13 @@ namespace CUDA {
 class CUDAPagedAttention : public Execution {
 public:
     struct SharedPagedCache {
+        struct MappedBuffer;
         std::shared_ptr<Tensor> key;       // [max_slots, B, H_kv, D]
         std::shared_ptr<Tensor> value;     // [B, H_kv, max_slots, D]
         std::shared_ptr<Tensor> slotTable; // [max_slots], int32
         std::shared_ptr<Tensor> sparseQuery; // [max_slots], int32 logical indices for sparse recompute
+        std::shared_ptr<MappedBuffer> mappedKey;
+        std::shared_ptr<MappedBuffer> mappedValue;
         int maxSlots = 0;
         int batch = 0;
         int kvHeads = 0;
@@ -24,6 +27,7 @@ public:
         int precision = 4;
         int slotTableVersion = -1;
         int slotTableLength = 0;
+        bool zeroCopyKV = false;
     };
 
     CUDAPagedAttention(Backend* backend, const MNN::Op* op);

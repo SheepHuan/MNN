@@ -4,6 +4,7 @@ find_package(CUDA ${CUDA_MIN_VERSION})
 set (EXTRA_LIBS "")
 if(MNN_CUDA_PROFILE)
     set(EXTRA_LIBS  -lnvToolsExt)
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -DMNN_CUDA_PROFILE")
 endif()
 
 if(CUDA_FOUND)

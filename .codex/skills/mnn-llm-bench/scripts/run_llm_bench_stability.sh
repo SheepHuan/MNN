@@ -20,11 +20,11 @@ Environment:
   MNN_LLM_BENCH_LOAD           loading-time option passed to -load. Defaults to true.
   MNN_LLM_BENCH_MEMORY         Optional --memory value. Defaults unset.
   MNN_LLM_BENCH_EXTRA_ARGS     Extra arguments appended to every bench invocation.
-  MNN_LLM_BENCH_POWER          Set to 1 to wrap each case with DF power capture.
+  MNN_LLM_BENCH_POWER          Set to 1 to wrap each case with eperf power capture.
   MNN_POWER_DEVICE             jetson, orangepi5plus, oneplus13t, or explicit serial.
-  MNN_POWER_API_URL            DF power API. Defaults to http://192.168.101.14:8000.
-  MNN_POWER_SAMPLE_RATE_HZ     Defaults to 2000.
-  MNN_POWER_VOLTAGE_MV         Defaults to 4200.
+  MNN_POWER_API_URL            eperf power API. Defaults to http://192.168.101.14:8766.
+  MNN_POWER_SAMPLE_RATE_HZ     Optional sample rate. Defaults to API binding/device defaults.
+  MNN_POWER_VOLTAGE_MV         Optional voltage. Defaults to API binding/device defaults.
   CUDA_LIB_DIR                 CUDA lib64 directory. Auto-detected from nvcc when unset.
   MNN_LLM_BENCH_DRY_RUN        Print resolved commands without running when set to 1.
   MNN_EXPORT_DRY_RUN           Also accepted as a dry-run switch when MNN_LLM_BENCH_DRY_RUN is unset.
@@ -255,7 +255,7 @@ SUMMARY_LOG="${LOG_DIR}/${STAMP}_${MODEL_NAME}_${BACKEND}_summary.log"
   echo "load_time: ${LOAD_TIME}"
   echo "power_capture: ${POWER_CAPTURE}"
   echo "power_device: ${POWER_DEVICE}"
-  echo "power_api_url: ${MNN_POWER_API_URL:-http://192.168.101.14:8000}"
+  echo "power_api_url: ${MNN_POWER_API_URL:-http://192.168.101.14:8766}"
   echo "summary_log: ${SUMMARY_LOG}"
 } | tee "${SUMMARY_LOG}"
 

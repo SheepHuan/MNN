@@ -134,6 +134,8 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
 
 `max_tokens=0` 是 prefill-only 请求：服务端应完成 prelude / PIC hydrate / sparse recompute / suffix prefill，但不生成第一个 decode token，也不把 decode 或采样时间计入结果。不要把 `max_tokens=1` 的首 token输出或额外 next-logits forward 混入这组数据。
 
+full-compute baseline 的命名必须严格区分：加速比的 `full-compute baseline` 只能是普通非 PIC 导出模型，用 `.cache/mnn-llm-export/<model>/config*.json` 配 `$ART/bin/llm_bench -n 0` 测出来的 normal LLM full-compute prefill。PIC server 的 `selection_algorithm=full-compute` 不是加速比 baseline；它只作为 PIC/PagedAttention full-compute 参考，用来衡量当前 PagedAttention / PagedCache 路径相对 normal LLM 的实现开销。报告中不要把 PIC server full-compute 简写成 normal full-compute 或 full-compute baseline。
+
 请求隔离由客户端显式 `/reset` 完成，不要在 CUDA/OpenCL PagedAttention backend 里按请求自动清整块 PagedCache；backend 级清理会影响 decode/continuous 状态和性能。数据集 bench、ratio sweep、手工 smoke 在每个独立 infer 前调用：
 
 ```bash
@@ -163,18 +165,27 @@ cacheblend 30%          selection_algorithm=cacheblend, pic_recompute_ratio=0.30
 报告时不要只列 cacheblend 自身耗时；必须同时给出：
 
 ```text
-normal LLM full-compute prefill baseline
+normal LLM full-compute prefill baseline  仅此项作为加速比 baseline
 PIC full-reuse prefill latency
-PIC full-compute prefill latency
+PIC full-compute prefill latency          仅作为 PagedAttention / PagedCache 实现效率参考
 cacheblend 各 ratio prefill latency
-cacheblend / full-reuse 倍数
-cacheblend / PIC full-compute 倍数
-cacheblend / normal LLM full-compute 倍数
+normal full-compute / full-reuse speedup
+normal full-compute / cacheblend speedup
+PIC full-compute / full-reuse speedup     仅作为 PagedAttention / PagedCache 参考
+PIC full-compute / cacheblend speedup     仅作为 PagedAttention / PagedCache 参考
+```
+
+输出表格的加速比列一律按 `full_compute_latency / algo_latency` 计算，让大于 1 的数表示更快。主加速比必须使用普通 LLM full-compute baseline：`speedup_vs_normal_full_compute = normal_full_compute_s / algo_s`。可额外给出 PIC 参考加速比：`speedup_vs_pic_full_compute_ref = pic_full_compute_s / algo_s`，但它只能说明相对 PIC/PagedAttention full-compute 路径节省了多少，不能替代 normal baseline。不要在主表中输出 `algo_s / full_compute_s` 这种小于 1 的反向倍数并称为 speedup。
+
+推荐表头：
+
+```text
+context_tokens, algorithm, ratio, algo_s, normal_full_compute_s, speedup_vs_normal_full_compute, pic_full_compute_s, speedup_vs_pic_full_compute_ref
 ```
 
 报告里如果写“同一份 text cache / suffix”，只表示输入条件对齐；不表示多个 ratio 共享一次 scoring。若脚本做了多 ratio sweep，必须确认每个 ratio 的 HTTP 请求、metadata 和计时都是独立记录。
 
-普通 MNN LLM baseline 用真实普通导出模型目录跑 `llm_bench`，建议用同等 prompt token 长度并设 `-n 0`：
+普通 MNN LLM baseline 用真实普通导出模型目录跑 `llm_bench`，建议用同等 prompt token 长度并设 `-n 0`。`NORMAL_CONFIG` 必须来自 `.cache/mnn-llm-export/<model>/`，不能来自 `.cache/weight/<model>/` 的 PIC/PagedAttention 导出目录：
 
 ```bash
 "$ART/bin/llm_bench" -m "$NORMAL_CONFIG" -a cuda -p <prompt_tokens> -n 0 -rep 3 -load false -j normal_prefill.json
