@@ -58,6 +58,7 @@ private:
     std::shared_ptr<KernelWrap> mAttentionRowKernel;
     std::shared_ptr<KernelWrap> mPackPagedKVKernel;
     std::shared_ptr<KernelWrap> mHydrateExternalKernel;
+    std::shared_ptr<KernelWrap> mExportCanonicalKeyKernel;
     std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
     std::shared_ptr<KernelWrap> mCacheBlendTopKKernel;
     std::shared_ptr<KernelWrap> mRearrangeQKernel;

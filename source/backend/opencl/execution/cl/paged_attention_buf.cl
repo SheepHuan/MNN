@@ -255,6 +255,71 @@ __kernel void pic_page_attention_hydrate_kv(
     }
 }
 
+__kernel void export_canonical_paged_key(
+    __global const FLOAT* key_cache, // [max_slots, batch, kv_heads, head_dim]
+    __global FLOAT* key_out,         // [kv_len, batch, kv_heads, head_dim]
+    __global const int* slot_table,
+    const int batch,
+    const int kv_len,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots,
+    const int rope_dim_in,
+    const float rope_theta,
+    const int rope_type_llama3,
+    const float rope_scaling_factor,
+    const float rope_scaling_low_freq_factor,
+    const float rope_scaling_high_freq_factor,
+    const int rope_scaling_original_max_position_embeddings,
+    const int max_position_embeddings,
+    const float rope_attention_scaling,
+    const int total) {
+    int index = get_global_id(0);
+    if (index >= total) {
+        return;
+    }
+    int d = index % head_dim;
+    int t = index / head_dim;
+    int h = t % kv_heads;
+    t = t / kv_heads;
+    int b = t % batch;
+    int logical = t / batch;
+    if (logical >= kv_len) {
+        return;
+    }
+    int slot = slot_table[logical];
+    if (slot < 0 || slot >= max_slots) {
+        return;
+    }
+    int src_base = ((slot * batch + b) * kv_heads + h) * head_dim;
+    int dst = ((logical * batch + b) * kv_heads + h) * head_dim + d;
+    float out = (float)key_cache[src_base + d];
+    int rope_dim = min(rope_dim_in > 0 ? rope_dim_in : head_dim, head_dim);
+    rope_dim = (rope_dim / 2) * 2;
+    if (rope_dim > 0 && d < rope_dim) {
+        int rope_half = rope_dim / 2;
+        int pair = d < rope_half ? d : d - rope_half;
+        float inv_freq = paged_rope_inv_freq(
+            rope_theta > 0.0f ? rope_theta : 10000.0f,
+            rope_type_llama3,
+            max(rope_scaling_factor, 1.0f),
+            max(rope_scaling_low_freq_factor, 1.0e-6f),
+            max(rope_scaling_high_freq_factor, 1.0e-6f),
+            rope_scaling_original_max_position_embeddings > 0 ? rope_scaling_original_max_position_embeddings
+                                                              : max_position_embeddings,
+            pair,
+            rope_dim);
+        float angle = (float)logical * inv_freq;
+        float c = cos(angle);
+        float s = sin(angle);
+        float y0 = (float)key_cache[src_base + pair];
+        float y1 = (float)key_cache[src_base + pair + rope_half];
+        float inv_scale = rope_attention_scaling > 0.0f ? 1.0f / rope_attention_scaling : 1.0f;
+        out = d < rope_half ? (y0 * c + y1 * s) * inv_scale : (y1 * c - y0 * s) * inv_scale;
+    }
+    key_out[dst] = (FLOAT)out;
+}
+
 __kernel void pic_cacheblend_value_score(
     __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
     __global const FLOAT* cached_value,          // [batch, kv_heads, token_count, head_dim]

@@ -61,6 +61,18 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 
 `--skip_weight` 导出的模型只用于检查导出流程和图结构，不作为正确性或性能测试产物。尤其 GLM / GLM-Edge 这类 `tie_word_embeddings=false` 的模型，不能因为 skip-weight skeleton 里的空/meta tensor 看起来相等就把 `tie_word_embeddings` / `tie_embeddings` 写成 true；正确性测试必须使用真实 embedding 文件和完整 `llm.mnn.weight`。历史上 OrangePi GLM PIC skiptest 产物曾因为错误 tied embedding 和 EOF 后 lm_head offset 输出 NUL/`APP`，修复后的判据是普通/PIC demo 都能输出自然语言，再进入 PIC server full-compute/full-reuse/cacheblend/epic 测试。
 
+## PIC/PagedAttention 当前实现思路与关键设计
+
+当前实现把 PIC/PagedAttention 明确分成两条边界：持久 text cache 构建边界和请求内推理边界。`POST /v1/prefill/text` 是唯一允许把文档 KV 写成持久 `.k/.v` 的入口；后续 chat、full-reference、scoring、sparse recompute 都围绕当前请求的 PagedCache、slot table 和 backend device buffer 执行，不再生成 chat/scoring scratch `.k/.v`，也不通过读盘临时 reference 来绕过 PagedCache。
+
+持久 KV 使用 backend 无关的 raw 表示：每层 key/value 分文件保存，旁边的 `.json` sidecar 记录真实 `batch/kv_heads/head_dim/dtype_bytes`、layout 和 RoPE 状态。写盘前 key 被规范化成 `canonical_no_rope`，value 保持原布局；hydrate 到请求 PagedCache 时，CPU/CUDA/OpenCL PagedAttention 按当前 logical slot 对 key 重新施加 RoPE，再写入 paged KV slots。这样同一份 text cache 可以安全复用于不同请求、不同 suffix 和不同 logical position。
+
+运行时以 PagedCache 作为唯一真实 KV 交换层。`full-compute` 计算 prelude + PIC tokens + suffix，并把当前请求 K/V 写入 PagedCache 后再由 PagedAttention 从 slot table 读回；`full-reuse` 只 hydrate 持久 PIC KV 并计算 suffix，不做 scoring、不做 sparse recompute，也不默认重算最后一个 PIC token；`epic`、`cacheblend`、`kvshare` 都是 sparse prefill：在请求内完成 reference/scoring/top-k 选择，然后只重算被选中的 PIC token，其余 PIC KV 由持久 cache hydrate 得到。
+
+scoring 设计上坚持“请求内 native”语义。`cacheblend` / `delta-v` 使用 score layer 上 full-reference value 与 cached PIC value 的差异选 top-ratio token；`kvshare` / `delta-a` 复用 sparse prefill plan，但当前 C++ 侧没有 HF autograd，评分使用 full-vs-cached K/V delta influence proxy，并在 metadata 中明确标注和 Python `attention_output` gradient influence 的差异。CPU backend 可以在 host 侧计算 score/top-k，但数据源仍必须来自当前请求 PagedCache/slot table 与持久 cache；CUDA/OpenCL backend 的目标是设备侧完成 scoring 和 top-k，只把 compact indices/少量 metadata 暴露给 CPU 调度。
+
+性能评估也按这条数据流拆解。baseline 是普通 MNN LLM 的 full-compute prefill；PIC full-compute 要先对齐普通 full-compute；full-reuse 的成本应主要剩下磁盘读取、hydrate、PagedCache 写入和 suffix prefill；cacheblend/epic/kvshare 的每个 ratio 都是独立请求，延迟必须包含本次请求自己的 full-reference/scoring/top-k、hydrate、sparse recompute 和 suffix prefill，不能跨 ratio 或跨请求复用 score vector 或 recompute indices。
+
 ## PIC Server 约定
 
 `transformers/pic_llm/engine/app/pic_server.cpp` 是 MNN PIC 自维护的独立 HTTP server，不依赖 `mls`。构建产物名固定为 `pic_server`，由 `.codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh` 安装到 artifact root 的 `bin/` 下。
