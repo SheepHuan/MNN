@@ -25,6 +25,11 @@ if(NOT MNN_CUDA)
   list(REMOVE_ITEM Files ${CudaBenchOpFiles})
 endif()
 
+if(NOT MNN_OPENCL)
+  file(GLOB_RECURSE OpenCLBenchOpFiles ${CMAKE_CURRENT_LIST_DIR}/bench_ops/opencl/*.cpp)
+  list(REMOVE_ITEM Files ${OpenCLBenchOpFiles})
+endif()
+
 add_executable(run_test.out ${Files})
 if(MNN_CUDA)
   find_package(CUDA 8.0 REQUIRED)
