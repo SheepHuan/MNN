@@ -11,7 +11,6 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
-#include <unordered_set>
 
 #include "prompt_cache_utils.hpp"
 #include <MNN/AutoTime.hpp>
@@ -163,7 +162,7 @@ void Llm::setRuntimeHint(std::shared_ptr<Express::Executor::RuntimeManager> &rtg
     rtg->setHint(MNN::Interpreter::MMAP_FILE_SIZE, mConfig->mmap_size());
 }
 
-void Llm::initRuntime() {
+std::shared_ptr<Express::Executor::RuntimeManager> Llm::createRuntimeManagerForCurrentConfig() {
     ScheduleConfig config;
     BackendConfig cpuBackendConfig;
     config.type      = backend_type_convert(mConfig->backend_type());
@@ -189,25 +188,34 @@ void Llm::initRuntime() {
     }
     config.backendConfig = &cpuBackendConfig;
 
-    mRuntimeManager.reset(Executor::RuntimeManager::createRuntimeManager(config));
-    setRuntimeHint(mRuntimeManager);
+    std::shared_ptr<Express::Executor::RuntimeManager> runtimeManager(
+        Executor::RuntimeManager::createRuntimeManager(config));
+    if (runtimeManager == nullptr) {
+        return nullptr;
+    }
+    setRuntimeHint(runtimeManager);
 
 #if DEBUG_MODE == 1
-    mRuntimeManager->setMode(MNN::Interpreter::Session_Debug);
+    runtimeManager->setMode(MNN::Interpreter::Session_Debug);
     _initTimeTrace();
 #endif
 #if DEBUG_MODE == 2
-    mRuntimeManager->setMode(MNN::Interpreter::Session_Debug);
+    runtimeManager->setMode(MNN::Interpreter::Session_Debug);
     _initTensorStatic();
 #endif
 #if DEBUG_MODE == 3
-    mRuntimeManager->setMode(MNN::Interpreter::Session_Debug);
+    runtimeManager->setMode(MNN::Interpreter::Session_Debug);
     _initDebug();
 #endif
     // get linear input thresholds and max values
     if (mConfig->config_.value("enable_debug", false)) {
-        mRuntimeManager->setMode(MNN::Interpreter::Session_Debug);
+        runtimeManager->setMode(MNN::Interpreter::Session_Debug);
     }
+    return runtimeManager;
+}
+
+void Llm::initRuntime() {
+    mRuntimeManager = createRuntimeManagerForCurrentConfig();
 }
 
 static bool canSpecDecode(std::shared_ptr<Express::Module> module) {
@@ -310,6 +318,10 @@ bool Llm::load() {
     MNN::Express::ExecutorScope s(mExecutor);
     Timer _t;
     initRuntime();
+    if (mRuntimeManager == nullptr) {
+        MNN_ERROR("[Error]: Failed to initialize runtime manager.\n");
+        return false;
+    }
     // init module status
     // 1. load vocab
     mTokenizer.reset(Tokenizer::createTokenizer(tokenizer_path));
@@ -635,10 +647,23 @@ std::shared_ptr<Module> Llm::getCacheBlendScoreModule(int scoreLayerIdx) {
     if (mConfig->has_ple()) {
         inputNames.emplace_back("ple_embeddings");
     }
-    mRuntimeManager->setExternalFile(mConfig->llm_weight());
+    auto runtimeManager = mRuntimeManager;
+    if (mConfig->backend_type() == "opencl") {
+        if (mCacheBlendScoreRuntimeManager == nullptr) {
+            mCacheBlendScoreRuntimeManager = createRuntimeManagerForCurrentConfig();
+            if (mCacheBlendScoreRuntimeManager == nullptr) {
+                MNN_ERROR("Failed to create isolated OpenCL runtime for cacheblend score module\n");
+                return nullptr;
+            }
+            MNN_PRINT("OpenCL cacheblend score-layer module uses an isolated runtime manager\n");
+        }
+        runtimeManager = mCacheBlendScoreRuntimeManager;
+        runtimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
+    }
+    runtimeManager->setExternalFile(mConfig->llm_weight());
     std::shared_ptr<Module> module(Module::load(inputNames, {scoreOutputName}, mConfig->llm_model().c_str(),
-                                                mRuntimeManager, &moduleConfig));
-    mRuntimeManager->setExternalFile("");
+                                                runtimeManager, &moduleConfig));
+    runtimeManager->setExternalFile("");
     if (module == nullptr) {
         MNN_ERROR("Failed to load cacheblend score-layer module for layer %d output %s\n",
                   scoreLayerIdx, scoreOutputName.c_str());
@@ -653,11 +678,12 @@ bool Llm::runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, 
     if (fullPromptTokenIds.empty()) {
         return false;
     }
+    MNN::Express::ExecutorScope s(mExecutor);
     auto scoreModule = getCacheBlendScoreModule(scoreLayerIdx);
     if (scoreModule == nullptr) {
         return false;
     }
-    MNN::Express::ExecutorScope s(mExecutor);
+    scoreModule->clearCache();
     auto hiddenStates = embedding(fullPromptTokenIds);
     if (hiddenStates == nullptr) {
         return false;
@@ -696,6 +722,18 @@ bool Llm::runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, 
         mMeta->sync();
     }
     updateContext(seqLen, 0);
+    if (mConfig->backend_type() == "opencl") {
+        outputs.clear();
+        hiddenStates = nullptr;
+        attentionMask = nullptr;
+        positionIds = nullptr;
+        this->inputsEmbeds = nullptr;
+        this->attentionMask = nullptr;
+        this->positionIds = nullptr;
+        this->mPleInput = nullptr;
+        this->mTextEmbedsForPle = nullptr;
+        MNN::Express::ExecutorScope::Current()->gc(Executor::PART);
+    }
     return true;
 }
 
@@ -1635,6 +1673,7 @@ Llm::~Llm() {
 #endif
     mGenerateParam.reset();
     mModule.reset();
+    mCacheBlendScoreRuntimeManager.reset();
     mRuntimeManager.reset();
     mProcessorRuntimeManager.reset();
     mExecutor.reset();
@@ -1660,9 +1699,23 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     mCallIndex = 0;
     mPrefixCacheMode = true;
 
-    mIsPrefixFileExist = true;
+    const int configuredLayerNums = mConfig->layer_nums();
+    int layersToCheck = configuredLayerNums;
+    if (layersToCheck <= 0) {
+        layersToCheck = 0;
+        for (int i = 0;; ++i) {
+            auto base = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" +
+                        std::to_string(i);
+            if (!MNNFileExist((base + "_sync.k").c_str()) || !MNNFileExist((base + "_sync.v").c_str())) {
+                break;
+            }
+            ++layersToCheck;
+        }
+    }
+
+    mIsPrefixFileExist = layersToCheck > 0;
     // check kvcache, validate file existence
-    for(int i = 0; i < mConfig->layer_nums(); i++) {
+    for(int i = 0; i < layersToCheck; i++) {
         auto k_file = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i) + "_sync.k";
         if(!MNNFileExist(k_file.c_str())) {
             mIsPrefixFileExist = false;
@@ -1682,7 +1735,7 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     if (mIsPrefixFileExist) {
         size_t refKeySize = 0;
         size_t refValueSize = 0;
-        for (int i = 0; i < mConfig->layer_nums(); i++) {
+        for (int i = 0; i < layersToCheck; i++) {
             auto base = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i);
             auto k_data = base + ".k";
             auto v_data = base + ".v";
@@ -1728,7 +1781,8 @@ bool Llm::setPrefixCacheFile(const std::string& filename, int flag) {
     // MNNRemoveFile is a no-op on non-existent files, so this is safe to run
     // unconditionally whenever mIsPrefixFileExist is false.
     if (!mIsPrefixFileExist) {
-        for (int i = 0; i < mConfig->layer_nums(); i++) {
+        int layersToClean = configuredLayerNums > 0 ? configuredLayerNums : layersToCheck;
+        for (int i = 0; i < layersToClean; i++) {
             auto base = MNNFilePathConcat(mConfig->prefix_cache_path(), mPrefixCacheFileName) + "_" + std::to_string(i);
             MNNRemoveFile((base + ".k").c_str());
             MNNRemoveFile((base + ".v").c_str());
@@ -1763,7 +1817,18 @@ void Llm::completePrefixWrite() {
     mMeta->layer_index = 0;
     // Create sync files to mark prefix cache as valid
     auto prefixDir = mConfig->prefix_cache_path();
-    for (int i = 0; i < mConfig->layer_nums(); i++) {
+    int layersToMark = mConfig->layer_nums();
+    if (layersToMark <= 0) {
+        layersToMark = 0;
+        for (int i = 0;; ++i) {
+            auto base = MNNFilePathConcat(prefixDir, mPrefixCacheFileName) + "_" + std::to_string(i);
+            if (!MNNFileExist((base + ".k").c_str()) || !MNNFileExist((base + ".v").c_str())) {
+                break;
+            }
+            ++layersToMark;
+        }
+    }
+    for (int i = 0; i < layersToMark; i++) {
         auto base = MNNFilePathConcat(prefixDir, mPrefixCacheFileName) + "_" + std::to_string(i);
         auto k_file = base + ".k";
         if (MNNFileExist(k_file.c_str())) {

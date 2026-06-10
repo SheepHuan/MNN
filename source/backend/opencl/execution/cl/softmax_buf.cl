@@ -228,5 +228,87 @@ __kernel void softmax_v4_buf(GLOBAL_SIZE_3_DIMS
     for(int i = 0; i < dim; i++){
         vstore4(CONVERT_FLOAT4(exp(CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)) - maxValue) / sumValue), 0, output+offset+i*inside);
     }
+	#endif
+}
+
+__kernel void softmax_v4_sparse_buf(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *input,
+                              __global FLOAT *output,
+                              __global const int *sparse_query,
+                              __private const int inside,
+                              __private const int outside,
+                              __private const int dim,
+                              __private const int query_seq_len,
+                              __private const int q_start,
+                              __private const int q_piece_len) {
+
+    const int x = get_global_id(0);
+    const int y = get_global_id(1); // inside / 4
+    const int z = get_global_id(2); // outside
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int y4 = y << 2;
+    const int q0 = q_start + y4;
+    const int q1 = q0 + 1;
+    const int q2 = q0 + 2;
+    const int q3 = q0 + 3;
+    const int ql0 = (y4 < q_piece_len && q0 < query_seq_len) ? sparse_query[q0] : -1;
+    const int ql1 = (y4 + 1 < q_piece_len && q1 < query_seq_len) ? sparse_query[q1] : -1;
+    const int ql2 = (y4 + 2 < q_piece_len && q2 < query_seq_len) ? sparse_query[q2] : -1;
+    const int ql3 = (y4 + 3 < q_piece_len && q3 < query_seq_len) ? sparse_query[q3] : -1;
+    const int max_ql = max(max(ql0, ql1), max(ql2, ql3));
+    const int active_dim = min(max(max_ql + 1, 0), dim);
+    if (active_dim <= 0) {
+        return;
+    }
+
+    const int offset = z * dim * inside + y4;
+#if SOFTMAX_LOCAL_SIZE >= 4
+    int lid = get_local_id(0);
+    COMPUTE_FLOAT4 local sum_mnn[SOFTMAX_LOCAL_SIZE];
+    COMPUTE_FLOAT4 local max_mnn[SOFTMAX_LOCAL_SIZE];
+
+    COMPUTE_FLOAT4 maxValue = (COMPUTE_FLOAT4)-FLT_MAX;
+    for (int i = lid; i < active_dim; i+=SOFTMAX_LOCAL_SIZE) {
+        maxValue = fmax(maxValue, CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)));
+    }
+
+    max_mnn[lid] = maxValue;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for(int i = SOFTMAX_LOCAL_SIZE/2; i > 0; i /= 2){
+        if (lid < i)
+            max_mnn[lid] = fmax(max_mnn[lid], max_mnn[lid + i]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    maxValue = max_mnn[0];
+
+    COMPUTE_FLOAT4 sumValue = (COMPUTE_FLOAT4)0;
+    for (int i = lid; i < active_dim; i+=SOFTMAX_LOCAL_SIZE) {
+        sumValue += exp(CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)) - maxValue);
+    }
+    sum_mnn[lid] = sumValue;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for(int i = SOFTMAX_LOCAL_SIZE/2; i > 0; i /= 2){
+        if (lid < i)
+            sum_mnn[lid] = sum_mnn[lid] + sum_mnn[lid + i];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    sumValue = sum_mnn[0];
+    for(int i = lid; i < active_dim; i+=SOFTMAX_LOCAL_SIZE){
+        vstore4(CONVERT_FLOAT4(exp(CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)) - maxValue) / sumValue), 0, output+offset+i*inside);
+    }
+#else
+    COMPUTE_FLOAT4 maxValue = (COMPUTE_FLOAT4)-FLT_MAX;
+    for (int i = 0; i < active_dim; i++) {
+        maxValue = fmax(maxValue, CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)));
+    }
+
+    COMPUTE_FLOAT4 sumValue = (COMPUTE_FLOAT4)0;
+    for (int i = 0; i < active_dim; i++) {
+        sumValue += exp(CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)) - maxValue);
+    }
+    for(int i = 0; i < active_dim; i++){
+        vstore4(CONVERT_FLOAT4(exp(CONVERT_COMPUTE_FLOAT4(vload4(0, input+offset+i*inside)) - maxValue) / sumValue), 0, output+offset+i*inside);
+    }
 #endif
 }

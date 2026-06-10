@@ -12,3 +12,14 @@ Llama-3.2-3B-Instruct@jetson-cuda,epic,0.05,1.481764,1021.080,7.842
 Llama-3.2-3B-Instruct@jetson-cuda,epic,0.10,1.964083,770.334,5.916
 Llama-3.2-3B-Instruct@jetson-cuda,epic,0.20,2.939275,514.753,3.954
 Llama-3.2-3B-Instruct@jetson-cuda,epic,0.30,3.815419,396.549,3.046
+Llama-3.2-3B-Instruct@orangepi-opencl-current,full-reuse,full,3.384229,421.957,9.866
+Llama-3.2-3B-Instruct@orangepi-opencl-current,full-compute,full,40.761572,35.033,0.819
+Llama-3.2-3B-Instruct@orangepi-opencl-current,cacheblend,0.30,80.762617,17.681,0.413
+Llama-3.2-3B-Instruct@orangepi-opencl-current,cacheblend,0.40,92.435876,15.449,0.361
+Llama-3.2-3B-Instruct@orangepi-opencl-current,cacheblend,0.50,119.121095,11.988,0.280
+Llama-3.2-3B-Instruct@orangepi-opencl,full-reuse,0,3.486284,409.605,9.477
+Llama-3.2-3B-Instruct@orangepi-opencl,full-compute,full,37.980855,37.598,0.870
+Llama-3.2-3B-Instruct@orangepi-opencl,normal-full-compute,full,33.041143,43.219,1.000
+Llama-3.2-3B-Instruct@orangepi-opencl,cacheblend,0.30,34.230328,41.717,0.965
+Llama-3.2-3B-Instruct@orangepi-opencl,cacheblend,0.40,31.881342,44.791,1.036
+Llama-3.2-3B-Instruct@orangepi-opencl,cacheblend,0.50,38.027881,37.551,0.869

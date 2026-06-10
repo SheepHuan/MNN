@@ -220,6 +220,7 @@ protected:
     Express::VARP mTextEmbedsForPle; // Pure text embeddings for PLE projection
     std::shared_ptr<Sampler> mSampler;
     std::shared_ptr<Express::Executor::RuntimeManager> mRuntimeManager, mProcessorRuntimeManager;
+    std::shared_ptr<Express::Executor::RuntimeManager> mCacheBlendScoreRuntimeManager;
     std::shared_ptr<Express::Module> mModule;
     /**
      key: <seq_len, all_logists>
@@ -256,6 +257,7 @@ private:
     std::vector<int> mValidBlockSize;
     bool beginPagedRequestIfNeeded();
     void finishPagedRequestIfNeeded();
+    std::shared_ptr<Express::Executor::RuntimeManager> createRuntimeManagerForCurrentConfig();
     std::shared_ptr<Express::Module> cloneModuleWithRuntime(const Express::Module* module);
     std::shared_ptr<Express::Module> getCacheBlendScoreModule(int scoreLayerIdx);
     bool runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, int scoreLayerIdx);

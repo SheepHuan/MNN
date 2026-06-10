@@ -141,6 +141,67 @@ __kernel void pack_paged_kv_prefill(GLOBAL_SIZE_3_DIMS
     vstore4(v3, 0, packed_value + value_offset + head_dim_pack * 3);
 }
 
+__kernel void pack_paged_k_prefill(GLOBAL_SIZE_3_DIMS
+    __global const FLOAT* key_cache,      // [max_slots, batch, kv_heads, head_dim]
+    __global FLOAT* packed_key,           // [batch * kv_heads, head_dim_pack, kv_len_pack]
+    __global const int* slot_table,
+    const int batch,
+    const int kv_len,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots) {
+    const int x = get_global_id(0); // kv token / 4
+    const int y = get_global_id(1); // head dim / 4
+    int z = get_global_id(2);       // batch * kv_heads
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int logical4 = x << 2;
+    const int dim4 = y << 2;
+    const int head_dim_pack = ((head_dim + 3) / 4) * 4;
+    const int kv_len_pack = ((kv_len + 3) / 4) * 4;
+    const int b = z / kv_heads;
+    const int h = z - b * kv_heads;
+
+    FLOAT4 k0 = (FLOAT4)0;
+    FLOAT4 k1 = (FLOAT4)0;
+    FLOAT4 k2 = (FLOAT4)0;
+    FLOAT4 k3 = (FLOAT4)0;
+
+    if (dim4 < head_dim) {
+        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
+        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
+        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
+        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        if (slot0 >= 0 && slot0 < max_slots) {
+            k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (slot1 >= 0 && slot1 < max_slots) {
+            k1 = vload4(0, key_cache + ((slot1 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (slot2 >= 0 && slot2 < max_slots) {
+            k2 = vload4(0, key_cache + ((slot2 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (slot3 >= 0 && slot3 < max_slots) {
+            k3 = vload4(0, key_cache + ((slot3 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (dim4 + 3 >= head_dim) {
+            if (dim4 + 1 >= head_dim) {
+                k0.yzw = (FLOAT3)0; k1.yzw = (FLOAT3)0; k2.yzw = (FLOAT3)0; k3.yzw = (FLOAT3)0;
+            } else if (dim4 + 2 >= head_dim) {
+                k0.zw = (FLOAT2)0; k1.zw = (FLOAT2)0; k2.zw = (FLOAT2)0; k3.zw = (FLOAT2)0;
+            } else {
+                k0.w = (FLOAT)0; k1.w = (FLOAT)0; k2.w = (FLOAT)0; k3.w = (FLOAT)0;
+            }
+        }
+    }
+
+    const int key_offset = (z * head_dim_pack + dim4) * kv_len_pack + logical4;
+    vstore4((FLOAT4)(k0.s0, k1.s0, k2.s0, k3.s0), 0, packed_key + key_offset);
+    vstore4((FLOAT4)(k0.s1, k1.s1, k2.s1, k3.s1), 0, packed_key + key_offset + kv_len_pack);
+    vstore4((FLOAT4)(k0.s2, k1.s2, k2.s2, k3.s2), 0, packed_key + key_offset + kv_len_pack * 2);
+    vstore4((FLOAT4)(k0.s3, k1.s3, k2.s3, k3.s3), 0, packed_key + key_offset + kv_len_pack * 3);
+}
+
 static inline float paged_rope_inv_freq(
     const float theta,
     const int rope_type_llama3,

@@ -40,15 +40,18 @@ private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
     ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int insertLen);
-    ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen);
+    ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
+    ErrorCode ensureSparseFastKernels();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
     ErrorCode runCacheBlendScoring(int layerIndex, int kvLen);
     bool canUseFastPrefill(const Tensor* mask, int baseLogical, int insertLen, int kvLen, bool sparseQuery,
                            bool externalHydrated, int* maskKeyLen) const;
+    bool canUseSparseFastPrefill(const Tensor* mask, int insertLen, int kvLen, bool externalHydrated) const;
     ErrorCode runFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                              int maskKeyLen);
+    ErrorCode runSparseFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen);
 
     OpenCLBackend* mOpenCLBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -57,6 +60,7 @@ private:
     std::shared_ptr<KernelWrap> mAttentionKernel;
     std::shared_ptr<KernelWrap> mAttentionRowKernel;
     std::shared_ptr<KernelWrap> mPackPagedKVKernel;
+    std::shared_ptr<KernelWrap> mPackPagedKeyKernel;
     std::shared_ptr<KernelWrap> mHydrateExternalKernel;
     std::shared_ptr<KernelWrap> mExportCanonicalKeyKernel;
     std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
@@ -64,8 +68,11 @@ private:
     std::shared_ptr<KernelWrap> mRearrangeQKernel;
     std::shared_ptr<KernelWrap> mRearrangeMaskKernel;
     std::shared_ptr<KernelWrap> mQKKernel;
+    std::shared_ptr<KernelWrap> mSparseQKKernel;
     std::shared_ptr<KernelWrap> mSoftmaxKernel;
+    std::shared_ptr<KernelWrap> mSparseSoftmaxKernel;
     std::shared_ptr<KernelWrap> mQKVKernel;
+    std::shared_ptr<KernelWrap> mSparseQKVKernel;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
     std::shared_ptr<Tensor> mTempK;
@@ -93,6 +100,11 @@ private:
     int mNewKvSeqLen = 0;
     int mFastSeqLen = 0;
     int mFastKvLen = 0;
+    int mFastQChunkLen = 0;
+    int mSparseKernelGroupSize = 0;
+    bool mFastStaticWorkspace = false;
+    bool mFastKernelStatic = false;
+    bool mFastKernelSparse = false;
     float mScale = 1.0f;
 };
 

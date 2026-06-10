@@ -15,10 +15,12 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <system_error>
@@ -195,6 +197,19 @@ std::string sanitizeCachePart(const std::string& value) {
 
 std::string jsonEscape(const std::string& value) {
     return json(value).dump();
+}
+
+int envInt(const char* name, int fallback = 0) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || parsed <= 0 || parsed > std::numeric_limits<int>::max()) {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
 }
 
 uint32_t sha256RotateRight(uint32_t value, int bits) {
@@ -1279,8 +1294,17 @@ bool PicServer::load() {
     std::error_code ec;
     mConfig.kvCacheDir = absoluteString(mConfig.kvCacheDir);
     fs::create_directories(mConfig.kvCacheDir, ec);
-    std::string config = std::string("{\"tmp_path\":\"tmp\",\"prefix_cache_path\":") +
-                         jsonEscape(mConfig.kvCacheDir) + "}";
+    json runtimeConfig = {
+        {"tmp_path", "tmp"},
+        {"prefix_cache_path", mConfig.kvCacheDir},
+    };
+    const int pagedKvLimit = envInt("MNN_PIC_SERVER_PAGED_KV_MAX_TOKENS", 0);
+    if (pagedKvLimit > 0) {
+        runtimeConfig["paged_kv_max_tokens"] = pagedKvLimit;
+        runtimeConfig["max_all_tokens"] = pagedKvLimit;
+        std::cout << "PIC server test override: paged_kv_max_tokens=" << pagedKvLimit << "\n";
+    }
+    std::string config = runtimeConfig.dump();
     mLlm->set_config(config);
     if (!mLlm->load()) {
         std::cerr << "Failed to load LLM from " << mConfig.configPath << "\n";
@@ -1491,6 +1515,12 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     auto tokenIds = mLlm->tokenizer_encode(content);
     if (tokenIds.empty()) {
         error = "Text tokenization produced no tokens";
+        return false;
+    }
+    const int textCacheTokenLimit = envInt("MNN_PIC_SERVER_MAX_TEXT_CACHE_TOKENS", 0);
+    if (textCacheTokenLimit > 0 && static_cast<int>(tokenIds.size()) > textCacheTokenLimit) {
+        error = "Text cache token count " + std::to_string(tokenIds.size()) +
+                " exceeds MNN_PIC_SERVER_MAX_TEXT_CACHE_TOKENS=" + std::to_string(textCacheTokenLimit);
         return false;
     }
     const std::string contentSha256 = sha256Hex(content);
@@ -1740,6 +1770,12 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
     if (!request.contains("pic_cache") || request["pic_cache"].is_null()) {
         std::string rendered = mLlm->apply_chat_template(messages, true);
         std::vector<int> inputTokenIds = mLlm->tokenizer_encode(rendered);
+        const int prefillTokenLimit = envInt("MNN_PIC_SERVER_MAX_PREFILL_TOKENS", 0);
+        if (prefillTokenLimit > 0 && static_cast<int>(inputTokenIds.size()) > prefillTokenLimit) {
+            error = "Chat prefill token count " + std::to_string(inputTokenIds.size()) +
+                    " exceeds MNN_PIC_SERVER_MAX_PREFILL_TOKENS=" + std::to_string(prefillTokenLimit);
+            return false;
+        }
         MnnLlmTraceInfo traceInfo;
         traceInfo.algorithm = "full-compute";
         traceInfo.executionMode = "native-full-compute";
@@ -1806,13 +1842,20 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         const int preludeTraceTokens = static_cast<int>(preludeTokenIds.size());
         const int picTraceTokens = static_cast<int>(pic.tokenIds.size());
         const int suffixTraceTokens = static_cast<int>(suffixTokenIds.size());
+        const int totalPrefillTokens = preludeTraceTokens + picTraceTokens + suffixTraceTokens;
+        const int prefillTokenLimit = envInt("MNN_PIC_SERVER_MAX_PREFILL_TOKENS", 0);
+        if (prefillTokenLimit > 0 && totalPrefillTokens > prefillTokenLimit) {
+            error = "PIC prefill token count " + std::to_string(totalPrefillTokens) +
+                    " exceeds MNN_PIC_SERVER_MAX_PREFILL_TOKENS=" + std::to_string(prefillTokenLimit);
+            return false;
+        }
         MnnLlmTraceInfo traceInfo;
         traceInfo.algorithm = traceAlgorithmName(pic.selectionAlgorithm);
         traceInfo.executionMode = traceExecutionModeForAlgorithm(pic.selectionAlgorithm);
         traceInfo.budgetRatio = traceBudgetRatio(pic.selectionAlgorithm, pic.recomputeRatio);
         traceInfo.recomputeBudgetTokens =
             traceRecomputeBudgetTokens(pic.selectionAlgorithm, picTraceTokens, pic.recomputeRatio);
-        traceInfo.promptTotalTokens = preludeTraceTokens + picTraceTokens + suffixTraceTokens;
+        traceInfo.promptTotalTokens = totalPrefillTokens;
         traceInfo.preludeTokens = preludeTraceTokens;
         traceInfo.picTokens = picTraceTokens;
         traceInfo.suffixTokens = suffixTraceTokens;
@@ -1873,6 +1916,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 fullPrompt.insert(fullPrompt.end(), pic.tokenIds.begin(), pic.tokenIds.end());
                 fullPrompt.insert(fullPrompt.end(), suffixTokenIds.begin(), suffixTokenIds.end());
                 if (!mLlm->prefill(fullPrompt)) {
+                    mLlm->finishExternalPagedKVRequest();
                     error = "Failed to prefill full-compute PIC chat request";
                     return false;
                 }
@@ -1919,9 +1963,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 outputTokens = context->output_tokens;
             }
         }
-        if (!plan.fullCompute) {
-            mLlm->finishExternalPagedKVRequest();
-        }
+        mLlm->finishExternalPagedKVRequest();
         promptTokens = static_cast<int>(suffixTokenIds.size());
         preludeTokensCount = static_cast<int>(preludeTokenIds.size());
         picTokensCount = static_cast<int>(pic.tokenIds.size());

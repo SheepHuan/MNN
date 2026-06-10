@@ -62,6 +62,8 @@ struct ExternalLayerReadSegment {
     bool ok = false;
     bool directWritten = false;
     std::string error;
+    std::vector<int8_t> keyData;
+    std::vector<int8_t> valueData;
 };
 
 struct ExternalLayerReadResult {
@@ -89,11 +91,135 @@ static bool _envFlagEnabled(const char* name, bool defaultValue) {
     return value[0] != '0';
 }
 
-static bool _shouldUseDirectPagedCacheOpenCL() {
+static bool _legacyB863976OpenCL() {
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_LEGACY_B863976", false);
+}
+
+static int _envIntValue(const char* name, int defaultValue) {
+    const char* value = ::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value) {
+        return defaultValue;
+    }
+    parsed = std::max<long>(std::numeric_limits<int>::min(), std::min<long>(std::numeric_limits<int>::max(), parsed));
+    return static_cast<int>(parsed);
+}
+
+static int _prefillQChunkLen(int seqLen, int kvLen, int batch, int numHeads, int layerCount) {
+    if (seqLen <= 0 || kvLen <= 0 || batch <= 0 || numHeads <= 0) {
+        return 0;
+    }
+    int chunk = _envIntValue("MNN_PAGED_ATTENTION_OPENCL_PREFILL_Q_CHUNK", -1);
+    if (chunk == 0) {
+        return seqLen;
+    }
+    if (chunk < 0) {
+        const int maxAutoChunk = std::max(1, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_PREFILL_Q_CHUNK_MAX", 512));
+        const int budgetMb = std::max(64, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_PREFILL_QK_BUDGET_MB", 5120));
+        layerCount = std::max(1, layerCount);
+        const size_t bytesPerQuery =
+            static_cast<size_t>(2) * static_cast<size_t>(kvLen) * static_cast<size_t>(numHeads) *
+            static_cast<size_t>(batch) * sizeof(float);
+        const size_t budgetBytes = static_cast<size_t>(budgetMb) * 1024 * 1024;
+        int budgetChunk = maxAutoChunk;
+        if (bytesPerQuery > 0) {
+            budgetChunk = static_cast<int>(
+                std::max<size_t>(1, budgetBytes / (bytesPerQuery * static_cast<size_t>(layerCount))));
+        }
+        chunk = std::min(seqLen, std::min(maxAutoChunk, budgetChunk));
+    }
+    chunk = std::max(1, std::min(chunk, seqLen));
+    if (chunk < seqLen) {
+        chunk = ((chunk + 3) / 4) * 4;
+    }
+    return std::max(1, std::min(chunk, seqLen));
+}
+
+static size_t _fastPrefillScratchBytes(int seqLen, int kvLen, int batch, int numHeads, int kvHeads, int headDim,
+                                       int qChunkLen) {
+    const int seqPack = ROUND_UP(seqLen, 4);
+    const int qChunkPack = ROUND_UP(std::max(1, std::min(qChunkLen, seqLen)), 4);
+    const int kvPack = ROUND_UP(kvLen, 4);
+    const int headPack4 = ROUND_UP(headDim, 4);
+    const int headPack8 = ROUND_UP(headDim, 8);
+    const size_t elemBytes = sizeof(float);
+    size_t bytes = 0;
+    bytes += static_cast<size_t>(seqPack) * headPack4 * numHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(kvPack) * headPack4 * kvHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(kvPack) * headPack8 * kvHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(seqPack) * kvPack * batch * elemBytes;
+    bytes += static_cast<size_t>(qChunkPack) * kvLen * numHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(qChunkPack) * kvLen * numHeads * batch * elemBytes;
+    return bytes;
+}
+
+static bool _useStaticFullPrefill(int seqLen, int kvLen, int batch, int numHeads, int kvHeads, int headDim) {
+    if (seqLen <= 0 || kvLen <= 0 || batch <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0) {
+        return false;
+    }
+    if (_envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DISABLE_STATIC_FAST_PREFILL", false)) {
+        return false;
+    }
+    const int forcedChunk = _envIntValue("MNN_PAGED_ATTENTION_OPENCL_PREFILL_Q_CHUNK", -1);
+    if (forcedChunk > 0 && forcedChunk < seqLen) {
+        return false;
+    }
+    const int maxStaticTokens =
+        std::max(0, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_STATIC_PREFILL_MAX_TOKENS", 2048));
+    if (maxStaticTokens == 0 || seqLen > maxStaticTokens || kvLen > maxStaticTokens) {
+        return false;
+    }
+    const int budgetMb =
+        std::max(64, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_STATIC_PREFILL_BUDGET_MB", 1024));
+    const size_t budgetBytes = static_cast<size_t>(budgetMb) * 1024 * 1024;
+    return _fastPrefillScratchBytes(seqLen, kvLen, batch, numHeads, kvHeads, headDim, seqLen) <= budgetBytes;
+}
+
+static bool _allowDirectPagedCacheOpenCL() {
+    if (_legacyB863976OpenCL()) {
+        return false;
+    }
     if (!_envFlagEnabled("MNN_PAGED_ATTENTION_ZERO_COPY_CACHE", true)) {
         return false;
     }
-    return _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_CACHE", true);
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_CACHE", false) ||
+        _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_CACHE_AUTO", false);
+}
+
+static bool _requireDirectPagedCacheOpenCL() {
+    if (_legacyB863976OpenCL()) {
+        return false;
+    }
+    if (!_envFlagEnabled("MNN_PAGED_ATTENTION_ZERO_COPY_CACHE", true)) {
+        return false;
+    }
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_CACHE", false);
+}
+
+static bool _shouldUseDirectPagedCacheOpenCL() {
+    return _allowDirectPagedCacheOpenCL();
+}
+
+static bool _slotTableIsIdentity(const PagedKVMeta* meta, int requiredSlots) {
+    if (requiredSlots <= 0) {
+        return false;
+    }
+    if (meta == nullptr) {
+        return true;
+    }
+    if (meta->request_base != 0 || static_cast<int>(meta->slot_table_host.size()) < requiredSlots) {
+        return false;
+    }
+    for (int i = 0; i < requiredSlots; ++i) {
+        if (meta->slot_table_host[i] != i) {
+            return false;
+        }
+    }
+    return true;
 }
 
 struct ExternalLayerMappedTarget {
@@ -195,9 +321,9 @@ static int _lastExternalLayerIndex(const PagedKVMeta* meta) {
 static int _externalLayerReadWindow() {
     const char* value = ::getenv("MNN_PAGED_ATTENTION_PREFETCH_WINDOW");
     if (value == nullptr || value[0] == '\0') {
-        return 0;
+        return -1;
     }
-    return std::max(0, std::atoi(value));
+    return std::atoi(value);
 }
 
 static std::string _externalLayerRequestKey(const PagedKVMeta* meta, int batch, int kvHeads, int headDim, int bytes,
@@ -279,6 +405,52 @@ enum class SourceCLReadStatus {
     ReadFailed,
 };
 
+static SourceCLReadStatus _readBinaryFileRangeToMappedCLBuffer(const std::string& path, size_t offsetBytes,
+                                                               cl::Buffer& buffer, size_t expectedBytes,
+                                                               cl::CommandQueue& queue) {
+    if (expectedBytes == 0) {
+        return SourceCLReadStatus::ReadFailed;
+    }
+    cl_int error = CL_SUCCESS;
+    void* ptr = queue.enqueueMapBuffer(buffer, CL_TRUE, CL_MAP_WRITE, 0, expectedBytes, nullptr, nullptr, &error);
+    if (ptr == nullptr || error != CL_SUCCESS) {
+        return SourceCLReadStatus::MapFailed;
+    }
+    bool ok = _readBinaryFileRange(path, offsetBytes, ptr, expectedBytes);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    cl_int unmap = queue.enqueueUnmapMemObject(buffer, ptr);
+    cl_int finish = queue.finish();
+    if (!ok) {
+        return SourceCLReadStatus::ReadFailed;
+    }
+    return unmap == CL_SUCCESS && finish == CL_SUCCESS ? SourceCLReadStatus::Success : SourceCLReadStatus::MapFailed;
+}
+
+static bool _readBinaryFileRangeToCLBufferFallback(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
+                                                   size_t expectedBytes, cl::CommandQueue& queue) {
+    std::vector<int8_t> data(expectedBytes);
+    if (!_readBinaryFileRange(path, offsetBytes, data.data(), expectedBytes)) {
+        return false;
+    }
+    return queue.enqueueWriteBuffer(buffer, CL_TRUE, 0, expectedBytes, data.data()) == CL_SUCCESS;
+}
+
+static bool _readBinaryFileRangeToSourceCLBuffer(const std::string& path, size_t offsetBytes, cl::Buffer& buffer,
+                                                 size_t expectedBytes, cl::CommandQueue& queue) {
+    auto status = _readBinaryFileRangeToMappedCLBuffer(path, offsetBytes, buffer, expectedBytes, queue);
+    if (status == SourceCLReadStatus::Success) {
+        return true;
+    }
+    if (status == SourceCLReadStatus::ReadFailed) {
+        return false;
+    }
+    static std::once_flag fallbackOnce;
+    std::call_once(fallbackOnce, []() {
+        MNN_PRINT("OpenCLPagedAttention: mapped source CL buffer unavailable, fallback to enqueueWriteBuffer\n");
+    });
+    return _readBinaryFileRangeToCLBufferFallback(path, offsetBytes, buffer, expectedBytes, queue);
+}
+
 static bool _readExternalValueSegment(const std::string& path, void* dst, size_t expectedBytes, int batch,
                                       int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset,
                                       size_t tokenCount, int headDim, int bytes) {
@@ -331,10 +503,22 @@ static SourceCLReadStatus _readExternalValueSegmentToMappedCLBuffer(
     bool ok = _readExternalValueSegment(path, ptr, expectedBytes, batch, kvHeads, sourceTokenCount,
                                         sourceTokenOffset, tokenCount, headDim, bytes);
     auto unmap = queue.enqueueUnmapMemObject(buffer, ptr);
+    auto finish = queue.finish();
     if (!ok) {
         return SourceCLReadStatus::ReadFailed;
     }
-    return unmap == CL_SUCCESS ? SourceCLReadStatus::Success : SourceCLReadStatus::MapFailed;
+    return unmap == CL_SUCCESS && finish == CL_SUCCESS ? SourceCLReadStatus::Success : SourceCLReadStatus::MapFailed;
+}
+
+static bool _readExternalValueSegmentToCLBufferFallback(
+    const std::string& path, cl::Buffer& buffer, size_t expectedBytes, cl::CommandQueue& queue, int batch,
+    int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset, size_t tokenCount, int headDim, int bytes) {
+    std::vector<int8_t> data(expectedBytes);
+    if (!_readExternalValueSegment(path, data.data(), expectedBytes, batch, kvHeads, sourceTokenCount,
+                                   sourceTokenOffset, tokenCount, headDim, bytes)) {
+        return false;
+    }
+    return queue.enqueueWriteBuffer(buffer, CL_TRUE, 0, expectedBytes, data.data()) == CL_SUCCESS;
 }
 
 static bool _readExternalValueSegmentToSourceCLBuffer(
@@ -343,7 +527,19 @@ static bool _readExternalValueSegmentToSourceCLBuffer(
     auto status = _readExternalValueSegmentToMappedCLBuffer(path, buffer, expectedBytes, queue, batch, kvHeads,
                                                             sourceTokenCount, sourceTokenOffset, tokenCount, headDim,
                                                             bytes);
-    return status == SourceCLReadStatus::Success;
+    if (status == SourceCLReadStatus::Success) {
+        return true;
+    }
+    if (status == SourceCLReadStatus::ReadFailed) {
+        return false;
+    }
+    static std::once_flag fallbackOnce;
+    std::call_once(fallbackOnce, []() {
+        MNN_PRINT("OpenCLPagedAttention: mapped value segment CL buffer unavailable, fallback to enqueueWriteBuffer\n");
+    });
+    return _readExternalValueSegmentToCLBufferFallback(path, buffer, expectedBytes, queue, batch, kvHeads,
+                                                       sourceTokenCount, sourceTokenOffset, tokenCount, headDim,
+                                                       bytes);
 }
 
 static bool _readExternalValueSegmentToPagedCacheOpenCL(
@@ -446,33 +642,51 @@ static bool _readExternalLayerSegmentOpenCL(const PagedKVExternalSegment& segmen
     }
     const size_t keyTokenBytes = static_cast<size_t>(batch) * kvHeads * headDim * bytes;
     const size_t keySegmentBytes = segment.tokenCount * keyTokenBytes;
+    const bool requireDirect = _requireDirectPagedCacheOpenCL();
     const bool targetOk = target != nullptr && target->key != nullptr && target->value != nullptr &&
         target->queue != nullptr && target->batch == batch && target->kvHeads == kvHeads &&
         target->headDim == headDim && target->bytes == bytes && target->maxSlots >= kvLen &&
         segment.logicalStart + segment.tokenCount <= static_cast<size_t>(target->maxSlots);
-    if (!targetOk) {
-        out.error = "OpenCL external PIC KV requires direct mapped PagedCache at layer " +
-                    std::to_string(layerIndex);
+    if (requireDirect && !targetOk) {
+        out.error = "OpenCL direct PagedCache target unavailable at layer " + std::to_string(layerIndex);
         return false;
     }
-    auto& keyBuffer = openCLBuffer(target->key.get());
-    auto& valueBuffer = openCLBuffer(target->value.get());
-    const size_t keyDstOffset = segment.logicalStart * keyTokenBytes;
-    if (!_readBinaryFileRangeToMappedCLBufferOffset(layer->keyPath, sourceTokenOffset * keyTokenBytes,
-                                                    keyBuffer, keyDstOffset, keySegmentBytes, *target->queue)) {
-        out.error = "failed to read external PIC key directly to OpenCL PagedCache at layer " +
-                    std::to_string(layerIndex);
+    if (targetOk) {
+        auto& keyBuffer = openCLBuffer(target->key.get());
+        auto& valueBuffer = openCLBuffer(target->value.get());
+        const size_t keyDstOffset = segment.logicalStart * keyTokenBytes;
+        const bool directKeyOk = _readBinaryFileRangeToMappedCLBufferOffset(
+            layer->keyPath, sourceTokenOffset * keyTokenBytes, keyBuffer, keyDstOffset, keySegmentBytes,
+            *target->queue);
+        const bool directValueOk = directKeyOk &&
+            _readExternalValueSegmentToPagedCacheOpenCL(layer->valuePath, valueBuffer, *target->queue, batch,
+                                                        kvHeads, target->maxSlots, segment.logicalStart,
+                                                        sourceTokenCount, sourceTokenOffset, segment.tokenCount,
+                                                        headDim, bytes);
+        if (directKeyOk && directValueOk) {
+            out.directWritten = true;
+            out.ok = true;
+            return true;
+        }
+        if (requireDirect) {
+            out.error = "OpenCL direct map read into PagedCache failed at layer " + std::to_string(layerIndex);
+            return false;
+        }
+    }
+    out.keyData.resize(keySegmentBytes);
+    if (!_readBinaryFileRange(layer->keyPath, sourceTokenOffset * keyTokenBytes, out.keyData.data(),
+                              keySegmentBytes)) {
+        out.error = "failed to read external PIC key range at layer " + std::to_string(layerIndex);
         return false;
     }
-    if (!_readExternalValueSegmentToPagedCacheOpenCL(layer->valuePath, valueBuffer, *target->queue, batch,
-                                                     kvHeads, target->maxSlots, segment.logicalStart,
-                                                     sourceTokenCount, sourceTokenOffset, segment.tokenCount,
-                                                     headDim, bytes)) {
-        out.error = "failed to read external PIC value directly to OpenCL PagedCache at layer " +
-                    std::to_string(layerIndex);
+    const size_t valueTokenBytes = static_cast<size_t>(headDim) * bytes;
+    const size_t valueSegmentBytes = static_cast<size_t>(batch) * kvHeads * segment.tokenCount * valueTokenBytes;
+    out.valueData.resize(valueSegmentBytes);
+    if (!_readExternalValueSegment(layer->valuePath, out.valueData.data(), valueSegmentBytes, batch, kvHeads,
+                                   sourceTokenCount, sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+        out.error = "failed to read external PIC value range at layer " + std::to_string(layerIndex);
         return false;
     }
-    out.directWritten = true;
     out.ok = true;
     return true;
 }
@@ -500,6 +714,9 @@ static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
 
 static void _scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLayer, int batch, int kvHeads,
                                             int headDim, int bytes, int kvLen) {
+    if (_legacyB863976OpenCL()) {
+        return;
+    }
     if (meta == nullptr || meta->external_segments.empty()) {
         return;
     }
@@ -508,6 +725,9 @@ static void _scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLa
         return;
     }
     const int window = _externalLayerReadWindow();
+    if (window == 0) {
+        return;
+    }
     const int endLayer = window > 0 ? std::min(lastLayer, startLayer + window - 1) : lastLayer;
     const std::string requestKey = _externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
     const std::string requestPrefix = requestKey + "\n";
@@ -628,6 +848,8 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
                                                mOpenCLBackend->getPrecision());
     mPackPagedKVKernel = runtime->buildKernel("paged_attention_buf", "pack_paged_kv_prefill", {},
                                               mOpenCLBackend->getPrecision());
+    mPackPagedKeyKernel = runtime->buildKernel("paged_attention_buf", "pack_paged_k_prefill", {},
+                                               mOpenCLBackend->getPrecision());
     mHydrateExternalKernel = runtime->buildKernel("paged_attention_buf", "pic_page_attention_hydrate_kv", {},
                                                   mOpenCLBackend->getPrecision());
     mExportCanonicalKeyKernel = runtime->buildKernel("paged_attention_buf", "export_canonical_paged_key", {},
@@ -641,11 +863,14 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
                                                 mOpenCLBackend->getPrecision());
     mSoftmaxKernel = runtime->buildKernel("softmax_buf", "softmax_v4_buf", {"-DSOFTMAX_LOCAL_SIZE=64"},
                                           mOpenCLBackend->getPrecision());
+    mSparseSoftmaxKernel = runtime->buildKernel("softmax_buf", "softmax_v4_sparse_buf",
+                                                {"-DSOFTMAX_LOCAL_SIZE=64"}, mOpenCLBackend->getPrecision());
     mZeroKernel = runtime->buildKernel("paged_attention_buf", "zero_output", {}, mOpenCLBackend->getPrecision());
     OPENCL_CHECK_KERNEL_CTOR(mCopyKernel);
     OPENCL_CHECK_KERNEL_CTOR(mAttentionKernel);
     OPENCL_CHECK_KERNEL_CTOR(mAttentionRowKernel);
     OPENCL_CHECK_KERNEL_CTOR(mPackPagedKVKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mPackPagedKeyKernel);
     OPENCL_CHECK_KERNEL_CTOR(mHydrateExternalKernel);
     OPENCL_CHECK_KERNEL_CTOR(mExportCanonicalKeyKernel);
     OPENCL_CHECK_KERNEL_CTOR(mCacheBlendScoreKernel);
@@ -653,6 +878,7 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeQKernel);
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeMaskKernel);
     OPENCL_CHECK_KERNEL_CTOR(mSoftmaxKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mSparseSoftmaxKernel);
     OPENCL_CHECK_KERNEL_CTOR(mZeroKernel);
 }
 
@@ -663,7 +889,7 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     if (mCache && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery &&
         mCache->maxSlots == maxSlots && mCache->batch == batch && mCache->kvHeads == kvHeads &&
         mCache->headDim == headDim && mCache->bytes == mBytes) {
-        if (mLayerIndex >= 0) {
+        if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
             _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
                                                mCache->key, mCache->value,
                                                mOpenCLBackend->getOpenCLRuntime()->commandQueue());
@@ -718,7 +944,7 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     mCache->bytes = mBytes;
     mCache->slotTableVersion = -1;
     mCache->slotTableLength = 0;
-    if (mLayerIndex >= 0) {
+    if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
         _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
                                            mCache->key, mCache->value,
                                            mOpenCLBackend->getOpenCLRuntime()->commandQueue());
@@ -769,35 +995,78 @@ ErrorCode PagedAttentionBufExecution::syncSparseQuery(int insertLen) {
     return NO_ERROR;
 }
 
-ErrorCode PagedAttentionBufExecution::ensureFastPrefillTemps(int seqLen, int kvLen) {
-    if (seqLen <= 0 || kvLen <= 0) {
+ErrorCode PagedAttentionBufExecution::ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen,
+                                                             bool staticWorkspace) {
+    if (seqLen <= 0 || kvLen <= 0 || qChunkLen <= 0) {
         return INVALID_VALUE;
     }
-    if (mTempQ && mTempK && mTempV && mTempMask && mTempQK && mTempSoftmax &&
-        mFastSeqLen == seqLen && mFastKvLen == kvLen) {
+    qChunkLen = staticWorkspace ? seqLen : std::min(qChunkLen, seqLen);
+    if (!(mTempQ && mTempK && mTempV && mTempMask && mTempQK && mTempSoftmax &&
+          mFastSeqLen == seqLen && mFastKvLen == kvLen && mFastQChunkLen == qChunkLen &&
+          mFastStaticWorkspace == staticWorkspace)) {
+        const int seqPack = ROUND_UP(seqLen, 4);
+        const int qChunkPack = ROUND_UP(qChunkLen, 4);
+        const int kvPack = ROUND_UP(kvLen, 4);
+        const int headPack4 = ROUND_UP(mHeadDim, 4);
+        const int headPack8 = ROUND_UP(mHeadDim, 8);
+        mTempQ.reset(Tensor::createDevice<float>({seqPack * headPack4 * mNumHead * mBatch}));
+        mTempK.reset(Tensor::createDevice<float>({kvPack * headPack4 * mKvNumHead * mBatch}));
+        mTempV.reset(Tensor::createDevice<float>({kvPack * headPack8 * mKvNumHead * mBatch}));
+        mTempMask.reset(Tensor::createDevice<float>({seqPack * kvPack * mBatch}));
+        mTempQK.reset(Tensor::createDevice<float>({qChunkPack * kvLen * mNumHead * mBatch}));
+        mTempSoftmax.reset(Tensor::createDevice<float>({qChunkPack * kvLen * mNumHead * mBatch}));
+        if (!mTempQ || !mTempK || !mTempV || !mTempMask || !mTempQK || !mTempSoftmax) {
+            return OUT_OF_MEMORY;
+        }
+        mFastSeqLen = seqLen;
+        mFastKvLen = kvLen;
+        mFastQChunkLen = qChunkLen;
+        mFastStaticWorkspace = staticWorkspace;
+        if (staticWorkspace) {
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQ.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempK.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempV.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempMask.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQK.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempSoftmax.get(), Backend::STATIC));
+        }
+    }
+    if (staticWorkspace) {
         return NO_ERROR;
     }
-    const int seqPack = ROUND_UP(seqLen, 4);
-    const int kvPack = ROUND_UP(kvLen, 4);
-    const int headPack4 = ROUND_UP(mHeadDim, 4);
-    const int headPack8 = ROUND_UP(mHeadDim, 8);
-    mTempQ.reset(Tensor::createDevice<float>({seqPack * headPack4 * mNumHead * mBatch}));
-    mTempK.reset(Tensor::createDevice<float>({kvPack * headPack4 * mKvNumHead * mBatch}));
-    mTempV.reset(Tensor::createDevice<float>({kvPack * headPack8 * mKvNumHead * mBatch}));
-    mTempMask.reset(Tensor::createDevice<float>({seqPack * kvPack * mBatch}));
-    mTempQK.reset(Tensor::createDevice<float>({seqPack * kvLen * mNumHead * mBatch}));
-    mTempSoftmax.reset(Tensor::createDevice<float>({seqPack * kvLen * mNumHead * mBatch}));
-    if (!mTempQ || !mTempK || !mTempV || !mTempMask || !mTempQK || !mTempSoftmax) {
-        return OUT_OF_MEMORY;
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQ.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempK.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempV.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempSoftmax.get(), Backend::DYNAMIC_IN_EXECUTION));
+    mOpenCLBackend->onReleaseBuffer(mTempQ.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempK.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempV.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempSoftmax.get(), Backend::DYNAMIC_IN_EXECUTION);
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureSparseFastKernels() {
+    if (mHeadDim <= 0 || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
     }
-    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQ.get(), Backend::STATIC));
-    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempK.get(), Backend::STATIC));
-    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempV.get(), Backend::STATIC));
-    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempMask.get(), Backend::STATIC));
-    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQK.get(), Backend::STATIC));
-    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempSoftmax.get(), Backend::STATIC));
-    mFastSeqLen = seqLen;
-    mFastKvLen = kvLen;
+    const int groupSize = mNumHead / mKvNumHead;
+    if (mSparseQKKernel && mSparseQKVKernel && mSparseKernelGroupSize == groupSize) {
+        return NO_ERROR;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    mSparseQKKernel = runtime->buildKernel("attention_buf", "matmul_qk_sparse_prefill_piece",
+                                           {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                           mOpenCLBackend->getPrecision());
+    mSparseQKVKernel = runtime->buildKernel("attention_buf", "matmul_qkv_sparse_prefill_piece",
+                                            {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                            mOpenCLBackend->getPrecision());
+    OPENCL_CHECK_KERNEL(mSparseQKKernel);
+    OPENCL_CHECK_KERNEL(mSparseQKVKernel);
+    mSparseKernelGroupSize = groupSize;
     return NO_ERROR;
 }
 
@@ -868,9 +1137,14 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     const uint64_t startUs = profile ? _nowUs() : 0;
     size_t totalTokens = 0;
     size_t directTokens = 0;
+    size_t fallbackTokens = 0;
     int directSegments = 0;
-    _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
-    auto prefetched = _takeExternalLayerRead(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    const bool legacy = _legacyB863976OpenCL();
+    if (!legacy) {
+        _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    }
+    auto prefetched = legacy ? nullptr
+                             : _takeExternalLayerRead(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
     if (prefetched != nullptr && !prefetched->ok) {
         MNN_ERROR("OpenCLPagedAttention async external PIC KV read failed at layer %d: %s\n", layerIndex,
                   prefetched->error.c_str());
@@ -924,6 +1198,12 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
             MNN_ERROR("OpenCLPagedAttention external PIC KV indices exceed int range at layer %d\n", layerIndex);
             return INVALID_VALUE;
         }
+        const size_t keyTokenBytes = static_cast<size_t>(mBatch) * mKvNumHead * mHeadDim * mBytes;
+        const size_t keySourceOffsetBytes = sourceTokenOffset * keyTokenBytes;
+        const size_t keySegmentBytes = segment.tokenCount * keyTokenBytes;
+        const size_t valueTokenBytes = static_cast<size_t>(mHeadDim) * mBytes;
+        const size_t valueSegmentBytes = static_cast<size_t>(mBatch) * mKvNumHead * segment.tokenCount *
+                                         valueTokenBytes;
         ExternalLayerReadSegment syncRead;
         const ExternalLayerReadSegment* loadedSegment = nullptr;
         if (prefetched != nullptr) {
@@ -942,27 +1222,58 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
             }
             loadedSegment = &syncRead;
         }
-        if (loadedSegment == nullptr || !loadedSegment->directWritten) {
-            MNN_ERROR("OpenCLPagedAttention external PIC KV requires direct mapped PagedCache at layer %d\n",
-                      layerIndex);
-            return INVALID_VALUE;
-        }
 
-        for (size_t local = 0; local < segment.tokenCount; ++local) {
-            const int logical = static_cast<int>(segment.logicalStart + local);
-            const int slot = mMeta != nullptr ? mMeta->physicalSlot(logical) : logical;
-            if (slot != logical) {
-                MNN_ERROR("OpenCLPagedAttention zero-copy PIC cache requires contiguous slots at layer %d\n",
-                          layerIndex);
-                return INVALID_VALUE;
+        cl::Buffer* sourceKeyBuffer = nullptr;
+        cl::Buffer* sourceValueBuffer = nullptr;
+        int keySourceLogicalStart = 0;
+        int hydrateValue = 1;
+        if (loadedSegment != nullptr && loadedSegment->directWritten) {
+            for (size_t local = 0; local < segment.tokenCount; ++local) {
+                const int logical = static_cast<int>(segment.logicalStart + local);
+                const int slot = mMeta != nullptr ? mMeta->physicalSlot(logical) : logical;
+                if (slot != logical) {
+                    MNN_ERROR("OpenCLPagedAttention zero-copy PIC cache requires contiguous slots at layer %d\n",
+                              layerIndex);
+                    return INVALID_VALUE;
+                }
             }
+            sourceKeyBuffer = &openCLBuffer(mCache->key.get());
+            sourceValueBuffer = &openCLBuffer(mCache->value.get());
+            keySourceLogicalStart = static_cast<int>(segment.logicalStart);
+            hydrateValue = 0;
+            directTokens += segment.tokenCount;
+            ++directSegments;
+        } else {
+            fallbackTokens += segment.tokenCount;
+            auto err = ensureExternalTemps(keySegmentBytes / mBytes, valueSegmentBytes / mBytes);
+            if (err != NO_ERROR) {
+                return err;
+            }
+            auto& externalKeyBuffer = openCLBuffer(mExternalKey.get());
+            auto& externalValueBuffer = openCLBuffer(mExternalValue.get());
+            if (loadedSegment != nullptr) {
+                if (loadedSegment->keyData.size() < keySegmentBytes ||
+                    loadedSegment->valueData.size() < valueSegmentBytes) {
+                    return INVALID_VALUE;
+                }
+                if (queue.enqueueWriteBuffer(externalKeyBuffer, CL_TRUE, 0, keySegmentBytes,
+                                             loadedSegment->keyData.data()) != CL_SUCCESS ||
+                    queue.enqueueWriteBuffer(externalValueBuffer, CL_TRUE, 0, valueSegmentBytes,
+                                             loadedSegment->valueData.data()) != CL_SUCCESS) {
+                    return INVALID_VALUE;
+                }
+            } else {
+                if (!_readBinaryFileRangeToSourceCLBuffer(layer->keyPath, keySourceOffsetBytes, externalKeyBuffer,
+                                                          keySegmentBytes, queue) ||
+                    !_readExternalValueSegmentToSourceCLBuffer(
+                        layer->valuePath, externalValueBuffer, valueSegmentBytes, queue, mBatch, mKvNumHead,
+                        sourceTokenCount, sourceTokenOffset, segment.tokenCount, mHeadDim, mBytes)) {
+                    return INVALID_VALUE;
+                }
+            }
+            sourceKeyBuffer = &externalKeyBuffer;
+            sourceValueBuffer = &externalValueBuffer;
         }
-        auto& sourceKeyBuffer = openCLBuffer(mCache->key.get());
-        auto& sourceValueBuffer = openCLBuffer(mCache->value.get());
-        const int keySourceLogicalStart = static_cast<int>(segment.logicalStart);
-        const int hydrateValue = 0;
-        directTokens += segment.tokenCount;
-        ++directSegments;
 
         int ropeDim = segment.ropeDim > 0 ? segment.ropeDim : mHeadDim;
         ropeDim = std::min(ropeDim, mHeadDim);
@@ -980,8 +1291,8 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         const int total = static_cast<int>(totalElements);
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
-        ret |= mHydrateExternalKernel->get().setArg(idx++, sourceKeyBuffer);
-        ret |= mHydrateExternalKernel->get().setArg(idx++, sourceValueBuffer);
+        ret |= mHydrateExternalKernel->get().setArg(idx++, *sourceKeyBuffer);
+        ret |= mHydrateExternalKernel->get().setArg(idx++, *sourceValueBuffer);
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
         ret |= mHydrateExternalKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
@@ -1007,13 +1318,16 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         queue.enqueueNDRangeKernel(mHydrateExternalKernel->get(), cl::NullRange, cl::NDRange(total), cl::NullRange);
     }
     mMeta->markExternalLayerLoaded(layerIndex);
-    _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    if (!legacy) {
+        _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    }
     if (profile) {
         queue.finish();
         MNN_PRINT("OpenCLPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d async_read=%d "
-                  "direct_segments=%d direct_tokens=%d us=%llu\n",
+                  "direct_segments=%d direct_tokens=%d fallback_tokens=%d us=%llu\n",
                   layerIndex, static_cast<int>(totalTokens), kvLen, prefetched != nullptr ? 1 : 0,
-                  directSegments, static_cast<int>(directTokens), static_cast<unsigned long long>(_nowUs() - startUs));
+                  directSegments, static_cast<int>(directTokens), static_cast<int>(fallbackTokens),
+                  static_cast<unsigned long long>(_nowUs() - startUs));
     }
     return NO_ERROR;
 }
@@ -1147,6 +1461,9 @@ bool PagedAttentionBufExecution::canUseFastPrefill(const Tensor* mask, int baseL
     if (!hasExternal && !sparseQuery && (baseLogical != 0 || kvLen != insertLen)) {
         return false;
     }
+    if (sparseQuery) {
+        return false;
+    }
     if (baseLogical < 0 || insertLen != mQuerySeqLen || insertLen <= 1 || kvLen < insertLen) {
         return false;
     }
@@ -1174,6 +1491,313 @@ bool PagedAttentionBufExecution::canUseFastPrefill(const Tensor* mask, int baseL
     return false;
 }
 
+bool PagedAttentionBufExecution::canUseSparseFastPrefill(const Tensor* mask, int insertLen, int kvLen,
+                                                         bool externalHydrated) const {
+    if (_legacyB863976OpenCL()) {
+        return false;
+    }
+    if (_envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DISABLE_SPARSE_FAST_PREFILL", false)) {
+        return false;
+    }
+    if (mIsKVShared || mMeta == nullptr || !mMeta->sparse_query_active || !externalHydrated) {
+        return false;
+    }
+    if (insertLen != mQuerySeqLen || insertLen <= 1 || kvLen <= 0) {
+        return false;
+    }
+    if (mHeadDim <= 0 || mHeadDim % 8 != 0 || mNumHead % mKvNumHead != 0) {
+        return false;
+    }
+    if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < insertLen) {
+        return false;
+    }
+    if (mask != nullptr && mask->elementSize() > 1) {
+        return false;
+    }
+    return mCache && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery;
+}
+
+ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Tensor*>& inputs,
+                                                           const std::vector<Tensor*>& outputs, int kvLen) {
+    auto query = inputs[0];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t rearrangeUs = 0;
+    uint64_t packUs = 0;
+    uint64_t qkUs = 0;
+    uint64_t softmaxUs = 0;
+    uint64_t qkvUs = 0;
+    uint64_t qkRectTiles = 0;
+    uint64_t qkActiveTiles = 0;
+    const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
+    bool staticWorkspace = _useStaticFullPrefill(mQuerySeqLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
+    int qChunkLen = staticWorkspace ? mQuerySeqLen
+                                    : _prefillQChunkLen(mQuerySeqLen, kvLen, mBatch, mNumHead, layerCount);
+    const int sparseQChunkLimit = _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FAST_Q_CHUNK", 64);
+    if (sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
+        qChunkLen = std::max(4, std::min(mQuerySeqLen, ((sparseQChunkLimit + 3) / 4) * 4));
+    }
+    auto err = ensureFastPrefillTemps(mQuerySeqLen, kvLen, qChunkLen, staticWorkspace);
+    if (err != NO_ERROR && staticWorkspace) {
+        static std::once_flag fallbackOnce;
+        std::call_once(fallbackOnce, []() {
+            MNN_PRINT("OpenCLPagedAttention: static sparse fast prefill workspace unavailable, fallback to q-split\n");
+        });
+        mTempQ.reset();
+        mTempK.reset();
+        mTempV.reset();
+        mTempMask.reset();
+        mTempQK.reset();
+        mTempSoftmax.reset();
+        mFastSeqLen = 0;
+        mFastKvLen = 0;
+        mFastQChunkLen = 0;
+        mFastStaticWorkspace = false;
+        staticWorkspace = false;
+        qChunkLen = _prefillQChunkLen(mQuerySeqLen, kvLen, mBatch, mNumHead, layerCount);
+        err = ensureFastPrefillTemps(mQuerySeqLen, kvLen, qChunkLen, false);
+    }
+    if (err != NO_ERROR) {
+        return err;
+    }
+    err = ensureSparseFastKernels();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto run3D = [&](const std::shared_ptr<KernelWrap>& kernel, std::vector<uint32_t> gws,
+                    const std::string& kernelName, const std::string& programName) {
+        auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
+        auto lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, kernelName, kernel,
+                                    mOpenCLBackend->getCLTuneLevel(), programName).first;
+        gws[0] = ROUND_UP(gws[0], std::max((uint32_t)1, lws[0]));
+        gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
+        gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
+        run3DKernelDefault(kernel, gws, lws, runtime);
+    };
+
+    auto tempBuffer = [&](Tensor* tensor) -> cl::Buffer& {
+        return staticWorkspace ? openCLBuffer(tensor) : openCLDeferBuffer(tensor);
+    };
+
+    const int kvPack = ROUND_UP(kvLen, 4);
+    const int headPack4 = ROUND_UP(mHeadDim, 4);
+    const int headPack8 = ROUND_UP(mHeadDim, 8);
+    const float scale = (mMeta && mMeta->attn_scale > 0)
+        ? mMeta->attn_scale
+        : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
+    const bool directValuePrefill = _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL", false) &&
+        mCache != nullptr && mCache->value != nullptr && mCache->maxSlots >= kvLen &&
+        _slotTableIsIdentity(mMeta, kvLen);
+    cl::Buffer& qkvValueBuffer = directValuePrefill ? openCLBuffer(mCache->value.get()) : tempBuffer(mTempV.get());
+    const int qkvValueMaxLen = directValuePrefill ? mCache->maxSlots : kvPack;
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    std::vector<uint32_t> gws;
+
+    idx = 0;
+    gws = {static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)), static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
+           static_cast<uint32_t>(mNumHead * mBatch)};
+    ret |= mRearrangeQKernel->get().setArg(idx++, gws[0]);
+    ret |= mRearrangeQKernel->get().setArg(idx++, gws[1]);
+    ret |= mRearrangeQKernel->get().setArg(idx++, gws[2]);
+    ret |= mRearrangeQKernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= mRearrangeQKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+    ret |= mRearrangeQKernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= mRearrangeQKernel->get().setArg(idx++, mHeadDim);
+    ret |= mRearrangeQKernel->get().setArg(idx++, mNumHead);
+    MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast rearrange_q");
+    uint64_t opStartUs = profileDetail ? _nowUs() : 0;
+    run3D(mRearrangeQKernel, gws, "rearrange_q", "attention_buf");
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        rearrangeUs += _nowUs() - opStartUs;
+    }
+
+    idx = 0;
+    gws = {static_cast<uint32_t>(UP_DIV(kvLen, 4)), static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
+           static_cast<uint32_t>(mKvNumHead * mBatch)};
+    ret = CL_SUCCESS;
+    opStartUs = profileDetail ? _nowUs() : 0;
+    if (directValuePrefill) {
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[0]);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[1]);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[2]);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, mBatch);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, kvLen);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, mHeadDim);
+        ret |= mPackPagedKeyKernel->get().setArg(idx++, mCache->maxSlots);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg sparse pack_paged_k_prefill");
+        run3D(mPackPagedKeyKernel, gws, "pack_paged_k_prefill", "paged_attention_buf");
+    } else {
+        ret |= mPackPagedKVKernel->get().setArg(idx++, gws[0]);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, gws[1]);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, gws[2]);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mPackPagedKVKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+        ret |= mPackPagedKVKernel->get().setArg(idx++, tempBuffer(mTempV.get()));
+        ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= mPackPagedKVKernel->get().setArg(idx++, mBatch);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, kvLen);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, mHeadDim);
+        ret |= mPackPagedKVKernel->get().setArg(idx++, mCache->maxSlots);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg sparse pack_paged_kv_prefill");
+        run3D(mPackPagedKVKernel, gws, "pack_paged_kv_prefill", "paged_attention_buf");
+    }
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        packUs += _nowUs() - opStartUs;
+    }
+
+    int qSplitNum = UP_DIV(mQuerySeqLen, qChunkLen);
+    for (int piece = 0; piece < qSplitNum; ++piece) {
+        const int qStart = piece * qChunkLen;
+        const int qPieceLen = std::min(qChunkLen, mQuerySeqLen - qStart);
+        if (qPieceLen <= 0) {
+            continue;
+        }
+        const int qPiecePack = ROUND_UP(qPieceLen, 4);
+        int pieceMaxLogical = -1;
+        if (mMeta != nullptr &&
+            static_cast<int>(mMeta->sparse_query_logical_indices.size()) >= qStart + qPieceLen) {
+            for (int qi = 0; qi < qPieceLen; ++qi) {
+                pieceMaxLogical = std::max(pieceMaxLogical, mMeta->sparse_query_logical_indices[qStart + qi]);
+            }
+        } else {
+            pieceMaxLogical = kvLen - 1;
+        }
+        const int activeKvLen = std::max(1, std::min(kvLen, pieceMaxLogical + 1));
+        if (profileDetail) {
+            qkRectTiles += static_cast<uint64_t>(UP_DIV(qPieceLen, 4)) * UP_DIV(activeKvLen, 4);
+            if (mMeta != nullptr &&
+                static_cast<int>(mMeta->sparse_query_logical_indices.size()) >= qStart + qPieceLen) {
+                for (int qLocal4 = 0; qLocal4 < qPieceLen; qLocal4 += 4) {
+                    int q4MaxLogical = -1;
+                    const int qGroupLen = std::min(4, qPieceLen - qLocal4);
+                    for (int qi = 0; qi < qGroupLen; ++qi) {
+                        q4MaxLogical = std::max(q4MaxLogical,
+                                                mMeta->sparse_query_logical_indices[qStart + qLocal4 + qi]);
+                    }
+                    qkActiveTiles += UP_DIV(std::max(0, std::min(kvLen, q4MaxLogical + 1)), 4);
+                }
+            } else {
+                qkActiveTiles += static_cast<uint64_t>(UP_DIV(qPieceLen, 4)) * UP_DIV(activeKvLen, 4);
+            }
+        }
+
+        idx = 0;
+        gws = {static_cast<uint32_t>(UP_DIV(qPieceLen, 4)), static_cast<uint32_t>(UP_DIV(activeKvLen, 4)),
+               static_cast<uint32_t>(mNumHead * mBatch)};
+        ret = CL_SUCCESS;
+        ret |= mSparseQKKernel->get().setArg(idx++, gws[0]);
+        ret |= mSparseQKKernel->get().setArg(idx++, gws[1]);
+        ret |= mSparseQKKernel->get().setArg(idx++, gws[2]);
+        ret |= mSparseQKKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+        ret |= mSparseQKKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+        ret |= mSparseQKKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= mSparseQKKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+        ret |= mSparseQKKernel->get().setArg(idx++, scale);
+        ret |= mSparseQKKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mSparseQKKernel->get().setArg(idx++, qStart);
+        ret |= mSparseQKKernel->get().setArg(idx++, qPieceLen);
+        ret |= mSparseQKKernel->get().setArg(idx++, activeKvLen);
+        ret |= mSparseQKKernel->get().setArg(idx++, kvPack);
+        ret |= mSparseQKKernel->get().setArg(idx++, mNumHead);
+        ret |= mSparseQKKernel->get().setArg(idx++, headPack4);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast matmul_qk_sparse_prefill_piece");
+        opStartUs = profileDetail ? _nowUs() : 0;
+        run3D(mSparseQKKernel, gws, "matmul_qk_sparse_prefill_piece", "attention_buf");
+        if (profileDetail) {
+            runtime->commandQueue().finish();
+            qkUs += _nowUs() - opStartUs;
+        }
+
+        idx = 0;
+        gws = {64u, static_cast<uint32_t>(UP_DIV(qPiecePack, 4)), static_cast<uint32_t>(mNumHead * mBatch)};
+        ret = CL_SUCCESS;
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[0]);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[1]);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[2]);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, qPiecePack);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, mNumHead * mBatch);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, activeKvLen);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, qStart);
+        ret |= mSparseSoftmaxKernel->get().setArg(idx++, qPieceLen);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast softmax");
+        opStartUs = profileDetail ? _nowUs() : 0;
+        run3DKernelDefault(mSparseSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
+        if (profileDetail) {
+            runtime->commandQueue().finish();
+            softmaxUs += _nowUs() - opStartUs;
+        }
+
+        idx = 0;
+        gws = {static_cast<uint32_t>(UP_DIV(mHeadDim, 8)), static_cast<uint32_t>(UP_DIV(qPieceLen, 4)),
+               static_cast<uint32_t>(mNumHead * mBatch)};
+        ret = CL_SUCCESS;
+        ret |= mSparseQKVKernel->get().setArg(idx++, gws[0]);
+        ret |= mSparseQKVKernel->get().setArg(idx++, gws[1]);
+        ret |= mSparseQKVKernel->get().setArg(idx++, gws[2]);
+        ret |= mSparseQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+        ret |= mSparseQKVKernel->get().setArg(idx++, qkvValueBuffer);
+        ret |= mSparseQKVKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= mSparseQKVKernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= mSparseQKVKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mSparseQKVKernel->get().setArg(idx++, qStart);
+        ret |= mSparseQKVKernel->get().setArg(idx++, qPieceLen);
+        ret |= mSparseQKVKernel->get().setArg(idx++, activeKvLen);
+        ret |= mSparseQKVKernel->get().setArg(idx++, qkvValueMaxLen);
+        ret |= mSparseQKVKernel->get().setArg(idx++, mNumHead);
+        ret |= mSparseQKVKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mSparseQKVKernel->get().setArg(idx++, headPack8);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast matmul_qkv_sparse_prefill_piece");
+        opStartUs = profileDetail ? _nowUs() : 0;
+        run3D(mSparseQKVKernel, gws, "matmul_qkv_sparse_prefill_piece", "attention_buf");
+        if (profileDetail) {
+            runtime->commandQueue().finish();
+            qkvUs += _nowUs() - opStartUs;
+        }
+    }
+    if (profile) {
+        runtime->commandQueue().finish();
+        int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
+        const uint64_t totalUs = _nowUs() - startUs;
+        if (profileDetail) {
+            MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
+                      "query=%d kv_len=%d q_chunk=%d q_split=%d static=%d us=%llu "
+                      "rearrange_us=%llu pack_us=%llu qk_us=%llu softmax_us=%llu qkv_us=%llu "
+                      "qk_rect_tiles=%llu qk_active_tiles=%llu\n",
+                      layerIndex, mQuerySeqLen, kvLen, qChunkLen, qSplitNum, staticWorkspace ? 1 : 0,
+                      static_cast<unsigned long long>(totalUs),
+                      static_cast<unsigned long long>(rearrangeUs),
+                      static_cast<unsigned long long>(packUs),
+                      static_cast<unsigned long long>(qkUs),
+                      static_cast<unsigned long long>(softmaxUs),
+                      static_cast<unsigned long long>(qkvUs),
+                      static_cast<unsigned long long>(qkRectTiles),
+                      static_cast<unsigned long long>(qkActiveTiles));
+        } else {
+            MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
+                      "query=%d kv_len=%d q_chunk=%d q_split=%d static=%d us=%llu\n",
+                      layerIndex, mQuerySeqLen, kvLen, qChunkLen, qSplitNum, staticWorkspace ? 1 : 0,
+                      static_cast<unsigned long long>(totalUs));
+        }
+    }
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>& inputs,
                                                      const std::vector<Tensor*>& outputs, int kvLen, int maskKeyLen) {
     if (maskKeyLen <= 0 || maskKeyLen > kvLen) {
@@ -1185,20 +1809,50 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const bool profile = _profilePagedAttention();
     const uint64_t startUs = profile ? _nowUs() : 0;
-    auto err = ensureFastPrefillTemps(mQuerySeqLen, kvLen);
+    const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
+    const bool legacy = _legacyB863976OpenCL();
+    bool staticWorkspace = legacy ||
+        _useStaticFullPrefill(mQuerySeqLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
+    int qChunkLen = staticWorkspace ? mQuerySeqLen
+                                    : _prefillQChunkLen(mQuerySeqLen, kvLen, mBatch, mNumHead, layerCount);
+    auto err = ensureFastPrefillTemps(mQuerySeqLen, kvLen, qChunkLen, staticWorkspace);
+    if (err != NO_ERROR && staticWorkspace && !legacy) {
+        static std::once_flag fallbackOnce;
+        std::call_once(fallbackOnce, []() {
+            MNN_PRINT("OpenCLPagedAttention: static fast prefill workspace unavailable, fallback to q-split\n");
+        });
+        mTempQ.reset();
+        mTempK.reset();
+        mTempV.reset();
+        mTempMask.reset();
+        mTempQK.reset();
+        mTempSoftmax.reset();
+        mFastSeqLen = 0;
+        mFastKvLen = 0;
+        mFastQChunkLen = 0;
+        mFastStaticWorkspace = false;
+        staticWorkspace = false;
+        qChunkLen = _prefillQChunkLen(mQuerySeqLen, kvLen, mBatch, mNumHead, layerCount);
+        err = ensureFastPrefillTemps(mQuerySeqLen, kvLen, qChunkLen, false);
+    }
     if (err != NO_ERROR) {
         return err;
     }
-    if (!mQKKernel || !mQKVKernel) {
+    if (!mQKKernel || !mQKVKernel || mFastKernelStatic != staticWorkspace || mFastKernelSparse) {
         const int groupSize = mNumHead / mKvNumHead;
-        mQKKernel = runtime->buildKernel("attention_buf", "matmul_qk_div_mask_prefill",
+        mQKKernel = runtime->buildKernel("attention_buf",
+                                         staticWorkspace ? "matmul_qk_div_mask_prefill"
+                                                         : "matmul_qk_div_mask_prefill_piece",
                                          {"-DADD_MASK", "-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                                          mOpenCLBackend->getPrecision());
-        mQKVKernel = runtime->buildKernel("attention_buf", "matmul_qkv_prefill",
+        mQKVKernel = runtime->buildKernel("attention_buf",
+                                          staticWorkspace ? "matmul_qkv_prefill" : "matmul_qkv_prefill_piece",
                                           {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                                           mOpenCLBackend->getPrecision());
         OPENCL_CHECK_KERNEL(mQKKernel);
         OPENCL_CHECK_KERNEL(mQKVKernel);
+        mFastKernelStatic = staticWorkspace;
+        mFastKernelSparse = false;
     }
     auto run3D = [&](const std::shared_ptr<KernelWrap>& kernel, std::vector<uint32_t> gws,
                     const std::string& kernelName, const std::string& programName) {
@@ -1209,6 +1863,10 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
         gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
         gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
         run3DKernelDefault(kernel, gws, lws, runtime);
+    };
+
+    auto tempBuffer = [&](Tensor* tensor) -> cl::Buffer& {
+        return staticWorkspace ? openCLBuffer(tensor) : openCLDeferBuffer(tensor);
     };
 
     const int seqPack = ROUND_UP(mQuerySeqLen, 4);
@@ -1229,7 +1887,7 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
     ret |= mRearrangeQKernel->get().setArg(idx++, gws[1]);
     ret |= mRearrangeQKernel->get().setArg(idx++, gws[2]);
     ret |= mRearrangeQKernel->get().setArg(idx++, openCLBuffer(query));
-    ret |= mRearrangeQKernel->get().setArg(idx++, openCLBuffer(mTempQ.get()));
+    ret |= mRearrangeQKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
     ret |= mRearrangeQKernel->get().setArg(idx++, mQuerySeqLen);
     ret |= mRearrangeQKernel->get().setArg(idx++, mHeadDim);
     ret |= mRearrangeQKernel->get().setArg(idx++, mNumHead);
@@ -1245,8 +1903,8 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
     ret |= mPackPagedKVKernel->get().setArg(idx++, gws[2]);
     ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
     ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
-    ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mTempK.get()));
-    ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mTempV.get()));
+    ret |= mPackPagedKVKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+    ret |= mPackPagedKVKernel->get().setArg(idx++, tempBuffer(mTempV.get()));
     ret |= mPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
     ret |= mPackPagedKVKernel->get().setArg(idx++, mBatch);
     ret |= mPackPagedKVKernel->get().setArg(idx++, kvLen);
@@ -1264,71 +1922,142 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
     ret |= mRearrangeMaskKernel->get().setArg(idx++, gws[1]);
     ret |= mRearrangeMaskKernel->get().setArg(idx++, gws[2]);
     ret |= mRearrangeMaskKernel->get().setArg(idx++, openCLBuffer(mask));
-    ret |= mRearrangeMaskKernel->get().setArg(idx++, openCLBuffer(mTempMask.get()));
+    ret |= mRearrangeMaskKernel->get().setArg(idx++, tempBuffer(mTempMask.get()));
     ret |= mRearrangeMaskKernel->get().setArg(idx++, mQuerySeqLen);
     ret |= mRearrangeMaskKernel->get().setArg(idx++, maskKeyLen);
     MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast rearrange_mask_shortprefill");
     run3D(mRearrangeMaskKernel, gws, "rearrange_mask_shortprefill", "attention_buf");
 
-    idx = 0;
-    gws = {static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)), static_cast<uint32_t>(UP_DIV(kvLen, 4)),
-           static_cast<uint32_t>(mNumHead * mBatch)};
-    ret = CL_SUCCESS;
-    ret |= mQKKernel->get().setArg(idx++, gws[0]);
-    ret |= mQKKernel->get().setArg(idx++, gws[1]);
-    ret |= mQKKernel->get().setArg(idx++, gws[2]);
-    ret |= mQKKernel->get().setArg(idx++, openCLBuffer(mTempQ.get()));
-    ret |= mQKKernel->get().setArg(idx++, openCLBuffer(mTempK.get()));
-    ret |= mQKKernel->get().setArg(idx++, openCLBuffer(mTempMask.get()));
-    ret |= mQKKernel->get().setArg(idx++, openCLBuffer(mTempQK.get()));
-    ret |= mQKKernel->get().setArg(idx++, scale);
-    ret |= mQKKernel->get().setArg(idx++, mQuerySeqLen);
-    ret |= mQKKernel->get().setArg(idx++, maskKeyLen);
-    ret |= mQKKernel->get().setArg(idx++, kvLen);
-    ret |= mQKKernel->get().setArg(idx++, kvPack);
-    ret |= mQKKernel->get().setArg(idx++, mNumHead);
-    ret |= mQKKernel->get().setArg(idx++, headPack4);
-    MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qk_div_mask_prefill");
-    run3D(mQKKernel, gws, "matmul_qk_div_mask_prefill", "attention_buf");
+    int qSplitNum = 1;
+    if (staticWorkspace) {
+        idx = 0;
+        gws = {static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)), static_cast<uint32_t>(UP_DIV(kvLen, 4)),
+               static_cast<uint32_t>(mNumHead * mBatch)};
+        ret = CL_SUCCESS;
+        ret |= mQKKernel->get().setArg(idx++, gws[0]);
+        ret |= mQKKernel->get().setArg(idx++, gws[1]);
+        ret |= mQKKernel->get().setArg(idx++, gws[2]);
+        ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+        ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+        ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempMask.get()));
+        ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+        ret |= mQKKernel->get().setArg(idx++, scale);
+        ret |= mQKKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mQKKernel->get().setArg(idx++, maskKeyLen);
+        ret |= mQKKernel->get().setArg(idx++, kvLen);
+        ret |= mQKKernel->get().setArg(idx++, kvPack);
+        ret |= mQKKernel->get().setArg(idx++, mNumHead);
+        ret |= mQKKernel->get().setArg(idx++, headPack4);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qk_div_mask_prefill");
+        run3D(mQKKernel, gws, "matmul_qk_div_mask_prefill", "attention_buf");
 
-    idx = 0;
-    gws = {64u, static_cast<uint32_t>(UP_DIV(seqPack, 4)), static_cast<uint32_t>(mNumHead * mBatch)};
-    ret = CL_SUCCESS;
-    ret |= mSoftmaxKernel->get().setArg(idx++, gws[0]);
-    ret |= mSoftmaxKernel->get().setArg(idx++, gws[1]);
-    ret |= mSoftmaxKernel->get().setArg(idx++, gws[2]);
-    ret |= mSoftmaxKernel->get().setArg(idx++, openCLBuffer(mTempQK.get()));
-    ret |= mSoftmaxKernel->get().setArg(idx++, openCLBuffer(mTempSoftmax.get()));
-    ret |= mSoftmaxKernel->get().setArg(idx++, seqPack);
-    ret |= mSoftmaxKernel->get().setArg(idx++, mNumHead * mBatch);
-    ret |= mSoftmaxKernel->get().setArg(idx++, kvLen);
-    MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast softmax");
-    run3DKernelDefault(mSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
+        idx = 0;
+        gws = {64u, static_cast<uint32_t>(UP_DIV(seqPack, 4)), static_cast<uint32_t>(mNumHead * mBatch)};
+        ret = CL_SUCCESS;
+        ret |= mSoftmaxKernel->get().setArg(idx++, gws[0]);
+        ret |= mSoftmaxKernel->get().setArg(idx++, gws[1]);
+        ret |= mSoftmaxKernel->get().setArg(idx++, gws[2]);
+        ret |= mSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+        ret |= mSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+        ret |= mSoftmaxKernel->get().setArg(idx++, seqPack);
+        ret |= mSoftmaxKernel->get().setArg(idx++, mNumHead * mBatch);
+        ret |= mSoftmaxKernel->get().setArg(idx++, kvLen);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast softmax");
+        run3DKernelDefault(mSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
 
-    idx = 0;
-    gws = {static_cast<uint32_t>(UP_DIV(mHeadDim, 8)), static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)),
-           static_cast<uint32_t>(mNumHead * mBatch)};
-    ret = CL_SUCCESS;
-    ret |= mQKVKernel->get().setArg(idx++, gws[0]);
-    ret |= mQKVKernel->get().setArg(idx++, gws[1]);
-    ret |= mQKVKernel->get().setArg(idx++, gws[2]);
-    ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(mTempSoftmax.get()));
-    ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(mTempV.get()));
-    ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(output));
-    ret |= mQKVKernel->get().setArg(idx++, mQuerySeqLen);
-    ret |= mQKVKernel->get().setArg(idx++, kvLen);
-    ret |= mQKVKernel->get().setArg(idx++, kvPack);
-    ret |= mQKVKernel->get().setArg(idx++, mNumHead);
-    ret |= mQKVKernel->get().setArg(idx++, mKvNumHead);
-    ret |= mQKVKernel->get().setArg(idx++, headPack8);
-    MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qkv_prefill");
-    run3D(mQKVKernel, gws, "matmul_qkv_prefill", "attention_buf");
+        idx = 0;
+        gws = {static_cast<uint32_t>(UP_DIV(mHeadDim, 8)), static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)),
+               static_cast<uint32_t>(mNumHead * mBatch)};
+        ret = CL_SUCCESS;
+        ret |= mQKVKernel->get().setArg(idx++, gws[0]);
+        ret |= mQKVKernel->get().setArg(idx++, gws[1]);
+        ret |= mQKVKernel->get().setArg(idx++, gws[2]);
+        ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+        ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempV.get()));
+        ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= mQKVKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mQKVKernel->get().setArg(idx++, kvLen);
+        ret |= mQKVKernel->get().setArg(idx++, kvPack);
+        ret |= mQKVKernel->get().setArg(idx++, mNumHead);
+        ret |= mQKVKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mQKVKernel->get().setArg(idx++, headPack8);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qkv_prefill");
+        run3D(mQKVKernel, gws, "matmul_qkv_prefill", "attention_buf");
+    } else {
+        qSplitNum = UP_DIV(mQuerySeqLen, qChunkLen);
+        for (int piece = 0; piece < qSplitNum; ++piece) {
+            const int qStart = piece * qChunkLen;
+            const int qPieceLen = std::min(qChunkLen, mQuerySeqLen - qStart);
+            if (qPieceLen <= 0) {
+                continue;
+            }
+            const int qPiecePack = ROUND_UP(qPieceLen, 4);
+
+            idx = 0;
+            gws = {static_cast<uint32_t>(UP_DIV(qPieceLen, 4)), static_cast<uint32_t>(UP_DIV(kvLen, 4)),
+                   static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mQKKernel->get().setArg(idx++, gws[0]);
+            ret |= mQKKernel->get().setArg(idx++, gws[1]);
+            ret |= mQKKernel->get().setArg(idx++, gws[2]);
+            ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+            ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+            ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempMask.get()));
+            ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+            ret |= mQKKernel->get().setArg(idx++, scale);
+            ret |= mQKKernel->get().setArg(idx++, mQuerySeqLen);
+            ret |= mQKKernel->get().setArg(idx++, qStart);
+            ret |= mQKKernel->get().setArg(idx++, qPieceLen);
+            ret |= mQKKernel->get().setArg(idx++, maskKeyLen);
+            ret |= mQKKernel->get().setArg(idx++, kvLen);
+            ret |= mQKKernel->get().setArg(idx++, kvPack);
+            ret |= mQKKernel->get().setArg(idx++, mNumHead);
+            ret |= mQKKernel->get().setArg(idx++, headPack4);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qk_div_mask_prefill_piece");
+            run3D(mQKKernel, gws, "matmul_qk_div_mask_prefill_piece", "attention_buf");
+
+            idx = 0;
+            gws = {64u, static_cast<uint32_t>(UP_DIV(qPiecePack, 4)), static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mSoftmaxKernel->get().setArg(idx++, gws[0]);
+            ret |= mSoftmaxKernel->get().setArg(idx++, gws[1]);
+            ret |= mSoftmaxKernel->get().setArg(idx++, gws[2]);
+            ret |= mSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+            ret |= mSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+            ret |= mSoftmaxKernel->get().setArg(idx++, qPiecePack);
+            ret |= mSoftmaxKernel->get().setArg(idx++, mNumHead * mBatch);
+            ret |= mSoftmaxKernel->get().setArg(idx++, kvLen);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast softmax");
+            run3DKernelDefault(mSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
+
+            idx = 0;
+            gws = {static_cast<uint32_t>(UP_DIV(mHeadDim, 8)), static_cast<uint32_t>(UP_DIV(qPieceLen, 4)),
+                   static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mQKVKernel->get().setArg(idx++, gws[0]);
+            ret |= mQKVKernel->get().setArg(idx++, gws[1]);
+            ret |= mQKVKernel->get().setArg(idx++, gws[2]);
+            ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+            ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempV.get()));
+            ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= mQKVKernel->get().setArg(idx++, mQuerySeqLen);
+            ret |= mQKVKernel->get().setArg(idx++, qStart);
+            ret |= mQKVKernel->get().setArg(idx++, qPieceLen);
+            ret |= mQKVKernel->get().setArg(idx++, kvLen);
+            ret |= mQKVKernel->get().setArg(idx++, kvPack);
+            ret |= mQKVKernel->get().setArg(idx++, mNumHead);
+            ret |= mQKVKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mQKVKernel->get().setArg(idx++, headPack8);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qkv_prefill_piece");
+            run3D(mQKVKernel, gws, "matmul_qkv_prefill_piece", "attention_buf");
+        }
+    }
     if (profile) {
         runtime->commandQueue().finish();
         int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
         MNN_PRINT("OpenCLPagedAttention profile op=prefill_attention_fast_qk_softmax_qkv layer=%d query=%d kv_len=%d "
-                  "mask_key_len=%d us=%llu\n",
-                  layerIndex, mQuerySeqLen, kvLen, maskKeyLen,
+                  "mask_key_len=%d q_chunk=%d q_split=%d static=%d us=%llu\n",
+                  layerIndex, mQuerySeqLen, kvLen, maskKeyLen, qChunkLen, qSplitNum, staticWorkspace ? 1 : 0,
                   static_cast<unsigned long long>(_nowUs() - startUs));
     }
     return NO_ERROR;
@@ -1349,6 +2078,12 @@ ErrorCode PagedAttentionBufExecution::onResize(const std::vector<Tensor*>& input
     mNewKvSeqLen = key->length(1);
     if (mHeadDim <= 0 || mKvNumHead <= 0 || mNumHead % mKvNumHead != 0) {
         return INVALID_VALUE;
+    }
+    if (!_legacyB863976OpenCL()) {
+        auto sparseKernelErr = ensureSparseFastKernels();
+        if (sparseKernelErr != NO_ERROR) {
+            return sparseKernelErr;
+        }
     }
     mQKKernel.reset();
     mQKVKernel.reset();
@@ -1407,8 +2142,10 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     }
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
     int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
-    _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, mCache->maxSlots,
-                                       mCache->key, mCache->value, queue);
+    if (!_legacyB863976OpenCL()) {
+        _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, mCache->maxSlots,
+                                           mCache->key, mCache->value, queue);
+    }
     if (mMeta != nullptr && !mMeta->external_segments.empty() && !mMeta->externalLayerLoaded(layerIndex)) {
         auto hydrate = hydrateExternalSegments(layerIndex, kvLen);
         if (hydrate != NO_ERROR) {
@@ -1543,9 +2280,15 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     if (canUseFastPrefill(mask, baseLogical, insertLen, kvLen, sparseQuery, externalHydrated, &fastMaskKeyLen)) {
         return runFastPrefill(inputs, outputs, kvLen, fastMaskKeyLen);
     }
-    const bool benchForceV2Kernel = _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
-    const bool v2RowKernelSupported = mHeadDim <= 256;
-    const bool useV2RowKernel = benchForceV2Kernel && v2RowKernelSupported;
+    if (canUseSparseFastPrefill(mask, insertLen, kvLen, externalHydrated)) {
+        return runSparseFastPrefill(inputs, outputs, kvLen);
+    }
+    const bool benchForceRowKernel = _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_ROW_KERNEL", false) ||
+        _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
+    const bool disableRowKernel = _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DISABLE_ROW_KERNEL", false);
+    const bool rowKernelSupported = mHeadDim <= 256;
+    const bool useRowKernel = rowKernelSupported && !disableRowKernel &&
+        ((sparseQuery && insertLen >= 1) || benchForceRowKernel);
     const bool profileGeneric = _profilePagedAttention();
     const uint64_t genericStartUs = profileGeneric ? _nowUs() : 0;
     const int outputElements = mBatch * mQuerySeqLen * mNumHead * mHeadDim;
@@ -1557,7 +2300,7 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         MNN_CHECK_CL_SUCCESS(ret, "setArg zero_output");
         queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(outputElements), cl::NullRange);
     }
-    if (useV2RowKernel) {
+    if (useRowKernel) {
         const int totalRows = mBatch * insertLen * mNumHead;
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
@@ -1631,18 +2374,8 @@ bool PagedAttentionBufExecution::onClone(Backend* bn, const Op* op, Execution** 
     }
     auto tmp = new PagedAttentionBufExecution(op, bn);
     tmp->mCache = mCache;
-    tmp->mMeta = mMeta;
-    tmp->mLayerIndex = mLayerIndex;
-    tmp->mKVSharedLayerIndex = mKVSharedLayerIndex;
-    tmp->mIsKVShared = mIsKVShared;
-    tmp->mBytes = mBytes;
-    tmp->mBatch = mBatch;
-    tmp->mQuerySeqLen = mQuerySeqLen;
-    tmp->mNumHead = mNumHead;
-    tmp->mHeadDim = mHeadDim;
-    tmp->mKvNumHead = mKvNumHead;
-    tmp->mNewKvSeqLen = mNewKvSeqLen;
-    tmp->mScale = mScale;
+    auto param = op->main_as_AttentionParam();
+    tmp->mIsKVShared = param != nullptr && param->kv_shared_layer_index() >= 0;
     *dst = tmp;
     return true;
 }
