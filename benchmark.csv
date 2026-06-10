@@ -1,0 +1,14 @@
+model_name,mode,buget,latency_s,effective_tps,speedup_vs_normal
+Llama-3.2-3B-Instruct@jetson-cuda,normal-full-compute,full,11.620447,130.202,1.000
+Llama-3.2-3B-Instruct@jetson-cuda,full-reuse,0,0.777268,1946.561,14.950
+Llama-3.2-3B-Instruct@jetson-cuda,full-compute,full,10.974923,137.860,1.059
+Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.01,2.090345,723.804,5.559
+Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.05,2.145238,705.283,5.417
+Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.10,2.625409,576.291,4.426
+Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.20,3.630116,416.791,3.201
+Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.30,4.523063,334.508,2.569
+Llama-3.2-3B-Instruct@jetson-cuda,epic,0.01,1.069722,1414.386,10.863
+Llama-3.2-3B-Instruct@jetson-cuda,epic,0.05,1.481764,1021.080,7.842
+Llama-3.2-3B-Instruct@jetson-cuda,epic,0.10,1.964083,770.334,5.916
+Llama-3.2-3B-Instruct@jetson-cuda,epic,0.20,2.939275,514.753,3.954
+Llama-3.2-3B-Instruct@jetson-cuda,epic,0.30,3.815419,396.549,3.046

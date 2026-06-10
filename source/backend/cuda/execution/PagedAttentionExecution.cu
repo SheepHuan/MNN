@@ -918,40 +918,6 @@ static bool envFlagEnabled(const char* name, bool defaultValue) {
     return value[0] != '0';
 }
 
-static bool envValueEquals(const char* value, const char* expected) {
-    return value != nullptr && expected != nullptr && std::strcmp(value, expected) == 0;
-}
-
-static bool routeLogPagedAttention() {
-    return envFlagEnabled("MNN_PAGED_ATTENTION_ROUTE_LOG", false);
-}
-
-struct PagedAttentionV2Route {
-    bool useV2 = false;
-    const char* reason = "unset";
-};
-
-static PagedAttentionV2Route chooseRowCompressedMaskV2Route() {
-    PagedAttentionV2Route route;
-    const char* impl = ::getenv("MNN_PAGED_ATTENTION_IMPL");
-    if (impl == nullptr || impl[0] == '\0' || envValueEquals(impl, "v1")) {
-        route.reason = "impl_v1";
-        return route;
-    }
-    if (envValueEquals(impl, "v2")) {
-        route.useV2 = true;
-        route.reason = "forced_v2";
-        return route;
-    }
-    if (envValueEquals(impl, "auto")) {
-        route.useV2 = true;
-        route.reason = "auto_v2";
-        return route;
-    }
-    route.reason = "unknown_impl";
-    return route;
-}
-
 static std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> makeMappedPagedBuffer(size_t bytes,
                                                                                                   int deviceId) {
     if (bytes == 0) {
@@ -2054,30 +2020,10 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     bool useMask = mask != nullptr && mask->elementSize() > 1 && mask->getType().code == halide_type_float;
     int maskElements = useMask ? static_cast<int>(mask->elementSize()) : 0;
     const uint64_t attentionStartUs = profile ? nowUs() : 0;
-    auto v2Route = chooseRowCompressedMaskV2Route();
-    if (routeLogPagedAttention() && !v2Route.useV2 && v2Route.reason != nullptr &&
-        !envValueEquals(v2Route.reason, "impl_v1")) {
-        MNN_PRINT("CUDAPagedAttention route layer=%d impl=v1 reason=%s query=%d insert=%d kv_len=%d "
-                  "sparse=%d mask=%d\n",
-                  layerIndex, v2Route.reason, mQuerySeqLen, insertLen, kvLen, sparseQuery ? 1 : 0, maskElements);
-    }
-    const bool shortQueryProfitable = insertLen <= 1;
-    const bool benchForceV2Kernel = v2Route.useV2 && envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
-    const bool useV2Kernel = v2Route.useV2 && (benchForceV2Kernel || shortQueryProfitable);
-    if (routeLogPagedAttention() && v2Route.useV2 && !useV2Kernel) {
-        MNN_PRINT("CUDAPagedAttention route layer=%d impl=v1 reason=v2_qlen_above_profitable_threshold query=%d insert=%d "
-                  "kv_len=%d sparse=%d mask=%d\n",
-                  layerIndex, mQuerySeqLen, insertLen, kvLen, sparseQuery ? 1 : 0, maskElements);
-    }
-    if (useV2Kernel) {
+    const bool benchForceV2Kernel = envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
+    if (benchForceV2Kernel) {
         const int v2BlockSize = 128;
         const int v2SharedBytes = (mHeadDim * 2 + v2BlockSize * 2) * static_cast<int>(sizeof(float));
-        if (routeLogPagedAttention()) {
-            MNN_PRINT("CUDAPagedAttention route layer=%d impl=v2 mode=row_compressed_mask reason=%s query=%d insert=%d "
-                      "kv_len=%d sparse=%d mask=%d\n",
-                      layerIndex, benchForceV2Kernel ? "bench_force_v2_kernel" : v2Route.reason, mQuerySeqLen,
-                      insertLen, kvLen, sparseQuery ? 1 : 0, maskElements);
-        }
         ScopedNvtxRange v2Nvtx(nvtxLayerRangeName("paged_attention_v2_row_compressed_mask", layerIndex,
                                                   mQuerySeqLen, insertLen, kvLen), nvtx);
         dim3 v2Grid(insertLen, mNumHead, mBatch);

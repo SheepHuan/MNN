@@ -89,40 +89,6 @@ static bool _envFlagEnabled(const char* name, bool defaultValue) {
     return value[0] != '0';
 }
 
-static bool _envValueEquals(const char* value, const char* expected) {
-    return value != nullptr && expected != nullptr && std::strcmp(value, expected) == 0;
-}
-
-static bool _routeLogPagedAttention() {
-    return _envFlagEnabled("MNN_PAGED_ATTENTION_ROUTE_LOG", false);
-}
-
-struct PagedAttentionV2Route {
-    bool useV2 = false;
-    const char* reason = "unset";
-};
-
-static PagedAttentionV2Route _choosePagedAttentionV2Route() {
-    PagedAttentionV2Route route;
-    const char* impl = ::getenv("MNN_PAGED_ATTENTION_IMPL");
-    if (impl == nullptr || impl[0] == '\0' || _envValueEquals(impl, "v1")) {
-        route.reason = "impl_v1";
-        return route;
-    }
-    if (_envValueEquals(impl, "v2")) {
-        route.useV2 = true;
-        route.reason = "forced_v2";
-        return route;
-    }
-    if (_envValueEquals(impl, "auto")) {
-        route.useV2 = true;
-        route.reason = "auto_v2";
-        return route;
-    }
-    route.reason = "unknown_impl";
-    return route;
-}
-
 static bool _shouldUseDirectPagedCacheOpenCL() {
     if (!_envFlagEnabled("MNN_PAGED_ATTENTION_ZERO_COPY_CACHE", true)) {
         return false;
@@ -1577,27 +1543,9 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     if (canUseFastPrefill(mask, baseLogical, insertLen, kvLen, sparseQuery, externalHydrated, &fastMaskKeyLen)) {
         return runFastPrefill(inputs, outputs, kvLen, fastMaskKeyLen);
     }
-    const auto v2Route = _choosePagedAttentionV2Route();
-    if (_routeLogPagedAttention() && !v2Route.useV2 && v2Route.reason != nullptr &&
-        !_envValueEquals(v2Route.reason, "impl_v1")) {
-        MNN_PRINT("OpenCLPagedAttention route layer=%d impl=v1 reason=%s query=%d insert=%d kv_len=%d "
-                  "sparse=%d mask=%d\n",
-                  layerIndex, v2Route.reason, mQuerySeqLen, insertLen, kvLen, sparseQuery ? 1 : 0, maskElements);
-    }
-    const bool shortQueryProfitable = insertLen <= 1;
-    const bool benchForceV2Kernel =
-        v2Route.useV2 && _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
+    const bool benchForceV2Kernel = _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
     const bool v2RowKernelSupported = mHeadDim <= 256;
-    const bool useV2RowKernel =
-        v2Route.useV2 && v2RowKernelSupported && (benchForceV2Kernel || shortQueryProfitable);
-    if (_routeLogPagedAttention() && v2Route.useV2 && !useV2RowKernel) {
-        MNN_PRINT("OpenCLPagedAttention route layer=%d impl=v1 reason=%s query=%d insert=%d kv_len=%d "
-                  "sparse=%d mask=%d\n",
-                  layerIndex,
-                  v2RowKernelSupported ? "v2_qlen_above_profitable_threshold"
-                                       : "v2_head_dim_above_row_kernel_limit",
-                  mQuerySeqLen, insertLen, kvLen, sparseQuery ? 1 : 0, maskElements);
-    }
+    const bool useV2RowKernel = benchForceV2Kernel && v2RowKernelSupported;
     const bool profileGeneric = _profilePagedAttention();
     const uint64_t genericStartUs = profileGeneric ? _nowUs() : 0;
     const int outputElements = mBatch * mQuerySeqLen * mNumHead * mHeadDim;
@@ -1610,12 +1558,6 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(outputElements), cl::NullRange);
     }
     if (useV2RowKernel) {
-        if (_routeLogPagedAttention()) {
-            MNN_PRINT("OpenCLPagedAttention route layer=%d impl=v2 mode=row reason=%s query=%d insert=%d "
-                      "kv_len=%d sparse=%d mask=%d\n",
-                      layerIndex, benchForceV2Kernel ? "bench_force_v2_kernel" : v2Route.reason, mQuerySeqLen,
-                      insertLen, kvLen, sparseQuery ? 1 : 0, maskElements);
-        }
         const int totalRows = mBatch * insertLen * mNumHead;
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;

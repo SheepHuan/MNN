@@ -369,16 +369,13 @@ static std::vector<BenchCase> pagedAttentionV1V2RatioCases() {
 static bool runPagedAttentionV1V2Case(const BenchCase& c) {
     struct ImplCase {
         const char* label;
-        const char* impl;
         const char* forceV2Kernel;
     };
     const ImplCase impls[] = {
-        {"v1", "v1", nullptr},
-        {"v2_kernel", "v2", "1"},
-        {"v2_route", "v2", nullptr},
+        {"v1", nullptr},
+        {"v2_kernel", "1"},
     };
     for (auto impl : impls) {
-        ScopedEnvVar implEnv("MNN_PAGED_ATTENTION_IMPL", impl.impl);
         ScopedEnvVar forceEnv("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", impl.forceV2Kernel);
         float avgMs = 0.0f;
         if (!measurePagedAttentionCase(c, &avgMs)) {
