@@ -7,7 +7,7 @@ from typing import Optional, List
 from utils.config import LlmConfig
 from utils.tokenizer import LlmTokenizer
 from utils.model_mapper import ModelMapper
-from utils.transformers import Embedding, Rotary, Decoder, Lm
+from utils.transformers import Embedding, Rotary, Decoder, Lm, _pic_gather_rows
 
 class LlmModel(PreTrainedModel):
     config_class = LlmConfig
@@ -70,6 +70,8 @@ class LlmModel(PreTrainedModel):
         if args is not None:
             config.paged_attention = getattr(args, 'paged_attention', False)
             config.paged_kv_max_tokens = getattr(args, 'paged_kv_max_tokens', 0)
+            config.pic_recompute_budget = bool(getattr(args, 'pic_recompute_budget', True))
+            config.pic_recompute_score_layer_idx = max(0, getattr(args, 'pic_recompute_score_layer_idx', 1))
         model_type = config.model_type
         model_class = cls.get_model_class(model_type)
 
@@ -300,6 +302,7 @@ class LlmModel(PreTrainedModel):
                 attention_mask: torch.Tensor,
                 position_ids: torch.Tensor,
                 logits_index: torch.Tensor = torch.tensor([-1], dtype=torch.int32),
+                pic_recompute_budget: torch.Tensor = None,
                 deepstack_embeds: torch.Tensor = None,
                 ple_embeddings: torch.Tensor = None
                 ):
@@ -352,6 +355,13 @@ class LlmModel(PreTrainedModel):
             if self.args and self.args.test and rotary_pos_emb_full.dtype != hidden_states.dtype:
                 rotary_pos_emb_full = rotary_pos_emb_full.type(hidden_states.dtype)
 
+        use_pic_recompute_budget = (
+            bool(getattr(self.config, 'pic_recompute_budget', False)) and
+            pic_recompute_budget is not None
+        )
+        pic_score_layer_idx = int(getattr(self.config, 'pic_recompute_score_layer_idx', 1))
+        active_indices = None
+
         # KV sharing cache (gemma4: layers 15-34 share KV with layers 13/14)
         shared_kv_cache = {}
         for i in range(len(self.blocks)):
@@ -369,6 +379,8 @@ class LlmModel(PreTrainedModel):
                 layer_attention_mask = attention_mask[int(is_sliding)]
             else:
                 layer_attention_mask = attention_mask
+            if active_indices is not None and i > pic_score_layer_idx and layer_attention_mask.dim() >= 3:
+                layer_attention_mask = _pic_gather_rows(layer_attention_mask, active_indices, -2)
 
             # gemma4: use different rotary for full vs sliding layers
             if rotary_pos_emb_full is not None and not (hasattr(self.config, 'sliding_attn_layers') and i in self.config.sliding_attn_layers):
@@ -378,8 +390,26 @@ class LlmModel(PreTrainedModel):
 
             # Set per-layer input for PLE
             if per_layer_inputs is not None:
-                self.blocks[i]._per_layer_input = per_layer_inputs[:, :, i, :]
-            hidden_states = self.blocks[i](hidden_states, layer_rotary, layer_attention_mask)
+                layer_per_input = per_layer_inputs[:, :, i, :]
+                if active_indices is not None and i > pic_score_layer_idx:
+                    layer_per_input = _pic_gather_rows(layer_per_input, active_indices, 1)
+                self.blocks[i]._per_layer_input = layer_per_input
+            block_result = self.blocks[i](
+                hidden_states,
+                layer_rotary,
+                layer_attention_mask,
+                pic_recompute_budget=pic_recompute_budget if use_pic_recompute_budget and i == pic_score_layer_idx else None,
+                pic_emit_indices=use_pic_recompute_budget and i == pic_score_layer_idx,
+                pic_sparse_attention=use_pic_recompute_budget and active_indices is not None and i > pic_score_layer_idx,
+            )
+            if isinstance(block_result, tuple):
+                hidden_states, active_indices = block_result
+            else:
+                hidden_states = block_result
+            if active_indices is not None and i == pic_score_layer_idx:
+                rotary_pos_emb = _pic_gather_rows(rotary_pos_emb, active_indices, 2)
+                if rotary_pos_emb_full is not None:
+                    rotary_pos_emb_full = _pic_gather_rows(rotary_pos_emb_full, active_indices, 2)
             if deepstack_embeds is not None and i in range(deepstack_embeds.shape[0]):
                 hidden_states += deepstack_embeds[i]
 

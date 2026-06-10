@@ -301,6 +301,17 @@ std::string sha256Hex(const std::string& value) {
     return os.str();
 }
 
+std::string tokenIdsDigestInput(const std::vector<int>& tokenIds) {
+    std::ostringstream os;
+    for (size_t i = 0; i < tokenIds.size(); ++i) {
+        if (i > 0) {
+            os << ",";
+        }
+        os << tokenIds[i];
+    }
+    return os.str();
+}
+
 bool looksLikeFilePath(const std::string& value) {
     std::string candidate = value;
     candidate.erase(candidate.begin(), std::find_if(candidate.begin(), candidate.end(), [](unsigned char ch) {
@@ -405,6 +416,12 @@ struct PreparedTextCache {
     MNN::PagedKVExternalSegment segment;
 };
 
+struct ExplicitCacheTokenSpan {
+    int promptStart = -1;
+    int sourceStart = 0;
+    int tokenCount = 0;
+};
+
 struct PreparedPicCache {
     std::string id;
     std::string cacheName;
@@ -414,6 +431,8 @@ struct PreparedPicCache {
     int scoreLayerIdx = 1;
     std::vector<int> explicitLogicalIndices;
     std::vector<int> explicitPicLocalIndices;
+    std::vector<int> fullPromptTokenIds;
+    std::vector<ExplicitCacheTokenSpan> promptSpans;
     std::vector<int> tokenIds;
     json textCaches = json::array();
     std::vector<MNN::PagedKVExternalSegment> segments;
@@ -515,6 +534,101 @@ std::vector<int> jsonIntVector(const json& value) {
         }
     }
     return out;
+}
+
+bool jsonIntAlias(const json& j, const std::vector<const char*>& keys, int& value) {
+    for (const auto* key : keys) {
+        if (j.contains(key) && j[key].is_number_integer()) {
+            value = j[key].get<int>();
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<int> jsonIntVectorAlias(const json& j, const std::vector<const char*>& keys) {
+    for (const auto* key : keys) {
+        if (j.contains(key)) {
+            return jsonIntVector(j[key]);
+        }
+    }
+    return {};
+}
+
+bool parseExplicitCacheTokenSpans(const json& request, std::vector<ExplicitCacheTokenSpan>& spans,
+                                  std::string& error) {
+    spans.clear();
+    const json* spanArray = nullptr;
+    for (const auto* key : {"doc_cache_spans", "pic_token_spans", "cache_token_spans"}) {
+        if (request.contains(key)) {
+            spanArray = &request[key];
+            break;
+        }
+    }
+    if (spanArray != nullptr) {
+        if (!spanArray->is_array() || spanArray->empty()) {
+            error = "doc_cache_spans/pic_token_spans must be a non-empty array";
+            return false;
+        }
+        for (const auto& item : *spanArray) {
+            if (!item.is_object()) {
+                error = "Each doc_cache_spans item must be an object";
+                return false;
+            }
+            ExplicitCacheTokenSpan span;
+            if (!jsonIntAlias(item, {"prompt_start", "pic_token_start", "doc_token_start", "logical_start"},
+                              span.promptStart)) {
+                error = "Each doc cache span needs prompt_start";
+                return false;
+            }
+            jsonIntAlias(item, {"source_start", "source_token_start", "cache_token_start",
+                                "pic_source_token_start"},
+                         span.sourceStart);
+            if (!jsonIntAlias(item, {"token_count", "pic_token_count", "doc_token_count", "count"},
+                              span.tokenCount)) {
+                error = "Each doc cache span needs token_count";
+                return false;
+            }
+            spans.emplace_back(span);
+        }
+        return true;
+    }
+
+    auto indices = jsonIntVectorAlias(request, {"doc_token_indices", "pic_token_indices"});
+    if (!indices.empty()) {
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+        for (size_t i = 1; i < indices.size(); ++i) {
+            if (indices[i] != indices[i - 1] + 1) {
+                error = "doc_token_indices/pic_token_indices must be one contiguous span";
+                return false;
+            }
+        }
+        ExplicitCacheTokenSpan span;
+        span.promptStart = indices.front();
+        span.tokenCount = static_cast<int>(indices.size());
+        jsonIntAlias(request, {"source_start", "source_token_start", "cache_token_start", "pic_source_token_start"},
+                     span.sourceStart);
+        spans.emplace_back(span);
+        return true;
+    }
+
+    ExplicitCacheTokenSpan span;
+    const bool hasStart =
+        jsonIntAlias(request, {"prompt_start", "pic_token_start", "doc_token_start", "logical_start"},
+                     span.promptStart);
+    jsonIntAlias(request, {"source_start", "source_token_start", "cache_token_start", "pic_source_token_start"},
+                 span.sourceStart);
+    const bool hasCount =
+        jsonIntAlias(request, {"token_count", "pic_token_count", "doc_token_count", "count"}, span.tokenCount);
+    if (hasStart || hasCount) {
+        if (!hasStart || !hasCount) {
+            error = "Explicit doc cache token mapping needs both prompt_start and token_count";
+            return false;
+        }
+        spans.emplace_back(span);
+    }
+    return true;
 }
 
 bool isSupportedPicAlgorithm(const std::string& algorithm) {
@@ -652,7 +766,10 @@ bool normalizeChatCompletionBatchRequest(
             }
             break;
         }
-        if (!explicitBatch && payload.contains("messages")) {
+        if (!explicitBatch &&
+            (payload.contains("messages") || payload.contains("full_prompt_token_ids") ||
+             payload.contains("prompt_token_ids") || payload.contains("input_token_ids") ||
+             payload.contains("pic_cache"))) {
             requests.emplace_back(payload);
         }
     }
@@ -774,7 +891,9 @@ bool existingCacheMatches(const fs::path& metaPath, const std::string& contentSh
         return false;
     }
     auto source = meta.value("source", json::object());
-    if (!source.is_object() || source.value("content_sha256", "") != contentSha256) {
+    const std::string storedSourceSha =
+        source.is_object() ? source.value("token_ids_sha256", source.value("content_sha256", "")) : "";
+    if (!source.is_object() || storedSourceSha != contentSha256) {
         return false;
     }
     auto kvLayout = meta.value("kv_layout", json::object());
@@ -1018,6 +1137,11 @@ bool preparePicCacheFromRequest(const std::string& kvCacheDir, const std::string
     prepared.scoreLayerIdx = std::max(0, jsonInt(request, "pic_recompute_score_layer_idx", defaultScoreLayer));
     prepared.explicitLogicalIndices = jsonIntVector(request.value("pic_recompute_logical_indices", json::array()));
     prepared.explicitPicLocalIndices = jsonIntVector(request.value("pic_recompute_pic_local_indices", json::array()));
+    prepared.fullPromptTokenIds = jsonIntVectorAlias(
+        request, {"full_prompt_token_ids", "prompt_token_ids", "input_token_ids"});
+    if (!parseExplicitCacheTokenSpans(request, prepared.promptSpans, error)) {
+        return false;
+    }
 
     std::vector<TextCacheRef> refs;
     if (!parseTextCacheRefs(request, refs, error)) {
@@ -1050,21 +1174,26 @@ bool preparePicCacheFromRequest(const std::string& kvCacheDir, const std::string
     return true;
 }
 
-std::vector<MNN::PagedKVExternalSegment> sliceExternalSegments(
-    const std::vector<MNN::PagedKVExternalSegment>& segments, size_t skipTokens) {
+std::vector<MNN::PagedKVExternalSegment> sliceExternalSegmentsRange(
+    const std::vector<MNN::PagedKVExternalSegment>& segments, size_t sourceStart, size_t tokenCount) {
     std::vector<MNN::PagedKVExternalSegment> out;
+    if (tokenCount == 0) {
+        return out;
+    }
+    const size_t sourceEnd = sourceStart + tokenCount;
     size_t cursor = 0;
     for (const auto& segment : segments) {
-        size_t begin = cursor;
-        size_t end = cursor + segment.tokenCount;
+        const size_t begin = cursor;
+        const size_t end = cursor + segment.tokenCount;
         cursor = end;
-        if (skipTokens >= end) {
+        if (sourceEnd <= begin || sourceStart >= end) {
             continue;
         }
+        const size_t overlapBegin = std::max(sourceStart, begin);
+        const size_t overlapEnd = std::min(sourceEnd, end);
         auto sliced = segment;
-        size_t localSkip = skipTokens > begin ? skipTokens - begin : 0;
-        sliced.sourceTokenOffset += localSkip;
-        sliced.tokenCount -= localSkip;
+        sliced.sourceTokenOffset += overlapBegin - begin;
+        sliced.tokenCount = overlapEnd - overlapBegin;
         if (sliced.tokenCount > 0) {
             out.emplace_back(std::move(sliced));
         }
@@ -1072,17 +1201,101 @@ std::vector<MNN::PagedKVExternalSegment> sliceExternalSegments(
     return out;
 }
 
-bool startsWithTokenPrefix(const std::vector<int>& tokens, const std::vector<int>& prefix) {
-    return !prefix.empty() && tokens.size() >= prefix.size() &&
-           std::equal(prefix.begin(), prefix.end(), tokens.begin());
+size_t externalSegmentTokenCount(const std::vector<MNN::PagedKVExternalSegment>& segments) {
+    size_t count = 0;
+    for (const auto& segment : segments) {
+        count += segment.tokenCount;
+    }
+    return count;
 }
 
-size_t trimLeadingTokenPrefix(std::vector<int>& tokens, const std::vector<int>& prefix) {
-    if (!startsWithTokenPrefix(tokens, prefix)) {
-        return 0;
+bool applyExplicitPicPromptMapping(PreparedPicCache& pic,
+                                   std::vector<int>& preludeTokenIds,
+                                   std::vector<int>& suffixTokenIds,
+                                   std::vector<int>& fullPromptTokenIds,
+                                   json& tokenMapping,
+                                   std::string& error) {
+    if (pic.fullPromptTokenIds.empty()) {
+        error = "PIC chat request must provide full_prompt_token_ids/prompt_token_ids; segmented placeholder tokenization is disabled";
+        return false;
     }
-    tokens.erase(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(prefix.size()));
-    return prefix.size();
+    if (pic.promptSpans.empty()) {
+        error = "PIC chat request must explicitly mark doc cache tokens with doc_cache_spans, pic_token_start/token_count, or pic_token_indices";
+        return false;
+    }
+    auto spans = pic.promptSpans;
+    std::sort(spans.begin(), spans.end(), [](const ExplicitCacheTokenSpan& lhs,
+                                             const ExplicitCacheTokenSpan& rhs) {
+        return lhs.promptStart < rhs.promptStart;
+    });
+    const auto sourceTokenIds = pic.tokenIds;
+    const auto sourceSegments = pic.segments;
+    const int fullTokenCount = static_cast<int>(pic.fullPromptTokenIds.size());
+    const int sourceTokenCount = static_cast<int>(sourceTokenIds.size());
+    if (fullTokenCount <= 0 || sourceTokenCount <= 0) {
+        error = "Explicit PIC token mapping got empty full prompt or text cache tokens";
+        return false;
+    }
+
+    const int picStart = spans.front().promptStart;
+    int promptCursor = picStart;
+    std::vector<int> mappedTokenIds;
+    std::vector<MNN::PagedKVExternalSegment> mappedSegments;
+    tokenMapping = json::array();
+    for (const auto& span : spans) {
+        if (span.promptStart < 0 || span.sourceStart < 0 || span.tokenCount <= 0) {
+            error = "Doc cache span values must be non-negative and token_count must be positive";
+            return false;
+        }
+        if (span.promptStart != promptCursor) {
+            error = "Doc cache spans must form one contiguous prompt region for the current PIC graph path";
+            return false;
+        }
+        if (span.promptStart + span.tokenCount > fullTokenCount) {
+            error = "Doc cache span exceeds full_prompt_token_ids length";
+            return false;
+        }
+        if (span.sourceStart + span.tokenCount > sourceTokenCount) {
+            error = "Doc cache span exceeds persistent text cache token_ids length";
+            return false;
+        }
+        for (int i = 0; i < span.tokenCount; ++i) {
+            const int promptToken = pic.fullPromptTokenIds[span.promptStart + i];
+            const int sourceToken = sourceTokenIds[span.sourceStart + i];
+            if (promptToken != sourceToken) {
+                error = "Doc cache span token mismatch at prompt index " +
+                        std::to_string(span.promptStart + i) + ": prompt token " +
+                        std::to_string(promptToken) + " != cache source token " +
+                        std::to_string(sourceToken);
+                return false;
+            }
+        }
+        auto rangeSegments = sliceExternalSegmentsRange(
+            sourceSegments, static_cast<size_t>(span.sourceStart), static_cast<size_t>(span.tokenCount));
+        if (externalSegmentTokenCount(rangeSegments) != static_cast<size_t>(span.tokenCount)) {
+            error = "Failed to map doc cache token span onto persistent KV segment files";
+            return false;
+        }
+        mappedTokenIds.insert(mappedTokenIds.end(),
+                              sourceTokenIds.begin() + span.sourceStart,
+                              sourceTokenIds.begin() + span.sourceStart + span.tokenCount);
+        mappedSegments.insert(mappedSegments.end(), rangeSegments.begin(), rangeSegments.end());
+        tokenMapping.push_back({
+            {"prompt_start", span.promptStart},
+            {"source_start", span.sourceStart},
+            {"token_count", span.tokenCount},
+        });
+        promptCursor += span.tokenCount;
+    }
+
+    preludeTokenIds.assign(pic.fullPromptTokenIds.begin(),
+                           pic.fullPromptTokenIds.begin() + picStart);
+    suffixTokenIds.assign(pic.fullPromptTokenIds.begin() + promptCursor,
+                          pic.fullPromptTokenIds.end());
+    fullPromptTokenIds = pic.fullPromptTokenIds;
+    pic.tokenIds = std::move(mappedTokenIds);
+    pic.segments = std::move(mappedSegments);
+    return true;
 }
 
 PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeTokenCount, int layerCount,
@@ -1391,7 +1604,7 @@ void PicServer::handleReset(const httplib::Request&, httplib::Response& res) {
     writeJson(res, json({
         {"status", "ok"},
         {"scope", "llm_request_state"},
-        {"cleared", json::array({"prefix_cache_mode", "external_paged_request", "context_history"})},
+        {"cleared", json::array({"prefix_cache_mode", "paged_pic_request", "context_history"})},
     }), 200, -1);
 }
 
@@ -1486,15 +1699,17 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
         error = "Text cache request requires non-empty string field `id`";
         return false;
     }
-    if (!request.contains("content") || !request["content"].is_string() ||
-        request["content"].get<std::string>().empty()) {
-        error = "Text cache request requires non-empty string field `content`";
+    const bool hasContent = request.contains("content") && request["content"].is_string() &&
+                            !request["content"].get<std::string>().empty();
+    const bool hasExplicitTokenIds = request.contains("token_ids") && request["token_ids"].is_array();
+    if (!hasContent && !hasExplicitTokenIds) {
+        error = "Text cache request requires non-empty `content` or explicit non-empty `token_ids`";
         return false;
     }
 
     const std::string id = request["id"].get<std::string>();
-    const std::string content = request["content"].get<std::string>();
-    if (looksLikeFilePath(content)) {
+    const std::string content = hasContent ? request["content"].get<std::string>() : "";
+    if (hasContent && looksLikeFilePath(content)) {
         error = "`content` must be the actual text body, not a filesystem path";
         return false;
     }
@@ -1512,9 +1727,15 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
         pathJoinForMNN(pathJoinForMNN(pathJoinForMNN("objects", backend), cacheName), "layers"),
         cacheName);
 
-    auto tokenIds = mLlm->tokenizer_encode(content);
+    std::vector<int> tokenIds;
+    if (hasExplicitTokenIds) {
+        tokenIds = jsonIntVector(request["token_ids"]);
+    } else {
+        tokenIds = mLlm->tokenizer_encode(content);
+    }
     if (tokenIds.empty()) {
-        error = "Text tokenization produced no tokens";
+        error = hasExplicitTokenIds ? "Text cache token_ids must be a non-empty integer array"
+                                    : "Text tokenization produced no tokens";
         return false;
     }
     const int textCacheTokenLimit = envInt("MNN_PIC_SERVER_MAX_TEXT_CACHE_TOKENS", 0);
@@ -1523,9 +1744,10 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
                 " exceeds MNN_PIC_SERVER_MAX_TEXT_CACHE_TOKENS=" + std::to_string(textCacheTokenLimit);
         return false;
     }
-    const std::string contentSha256 = sha256Hex(content);
+    const std::string sourceSha256 = hasExplicitTokenIds ? sha256Hex(tokenIdsDigestInput(tokenIds))
+                                                        : sha256Hex(content);
 
-    if (!force && existingCacheMatches(metaPath, contentSha256, tokenIds)) {
+    if (!force && existingCacheMatches(metaPath, sourceSha256, tokenIds)) {
         response = readJsonFile(metaPath);
         response["cache_hit"] = true;
         response["cache_status"] = "reused";
@@ -1607,7 +1829,11 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
         {"token_ids_path", absoluteString(tokensPath)},
         {"token_count", tokenIds.size()},
         {"token_ids", tokenIds},
-        {"source", {{"kind", "inline"}, {"content_sha256", contentSha256}}},
+        {"source", hasExplicitTokenIds
+            ? json({{"kind", hasContent ? "inline_tokens_with_text" : "inline_tokens"},
+                    {"token_ids_sha256", sourceSha256},
+                    {"content_sha256", hasContent ? sha256Hex(content) : ""}})
+            : json({{"kind", "inline"}, {"content_sha256", sourceSha256}})},
         {"backend", backend},
         {"attention_mode", jsonBool(cfg, "paged_attention", false) ? "paged" : "standard"},
         {"layer_count", layerCount},
@@ -1739,18 +1965,25 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 requestedModel;
         return false;
     }
-    if (!request.contains("messages") || !request["messages"].is_array() || request["messages"].empty()) {
-        error = "messages must be a non-empty array";
-        return false;
-    }
+    const auto requestTokenIds =
+        jsonIntVectorAlias(request, {"full_prompt_token_ids", "prompt_token_ids", "input_token_ids"});
     MNN::Transformer::ChatMessages messages;
-    for (const auto& item : request["messages"]) {
-        if (!item.is_object() || !item.contains("role") || !item["role"].is_string() ||
-            !item.contains("content") || !item["content"].is_string()) {
-            error = "Each message must contain string role/content";
+    if (request.contains("messages")) {
+        if (!request["messages"].is_array() || request["messages"].empty()) {
+            error = "messages must be a non-empty array when provided";
             return false;
         }
-        messages.emplace_back(item["role"].get<std::string>(), item["content"].get<std::string>());
+        for (const auto& item : request["messages"]) {
+            if (!item.is_object() || !item.contains("role") || !item["role"].is_string() ||
+                !item.contains("content") || !item["content"].is_string()) {
+                error = "Each message must contain string role/content";
+                return false;
+            }
+            messages.emplace_back(item["role"].get<std::string>(), item["content"].get<std::string>());
+        }
+    } else if (requestTokenIds.empty()) {
+        error = "Chat completion request needs messages or explicit full_prompt_token_ids/prompt_token_ids";
+        return false;
     }
     int maxTokens = jsonInt(request, "max_tokens", -1);
     if (maxTokens < -1) {
@@ -1768,8 +2001,11 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
     int layerCount = jsonInt(cfg, "layer_nums", 0);
 
     if (!request.contains("pic_cache") || request["pic_cache"].is_null()) {
-        std::string rendered = mLlm->apply_chat_template(messages, true);
-        std::vector<int> inputTokenIds = mLlm->tokenizer_encode(rendered);
+        std::vector<int> inputTokenIds = requestTokenIds;
+        if (inputTokenIds.empty()) {
+            std::string rendered = mLlm->apply_chat_template(messages, true);
+            inputTokenIds = mLlm->tokenizer_encode(rendered);
+        }
         const int prefillTokenLimit = envInt("MNN_PIC_SERVER_MAX_PREFILL_TOKENS", 0);
         if (prefillTokenLimit > 0 && static_cast<int>(inputTokenIds.size()) > prefillTokenLimit) {
             error = "Chat prefill token count " + std::to_string(inputTokenIds.size()) +
@@ -1792,6 +2028,15 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             }
         }
         if (maxTokens != 0) {
+            if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                auto context = mLlm->getContext();
+                std::fprintf(stderr, "PIC server decode debug branch=no_pic max_tokens=%d status=%d current=%d "
+                                     "output_tokens=%d\n",
+                             maxTokens, context != nullptr ? static_cast<int>(context->status) : -999,
+                             context != nullptr ? context->current_token : -999,
+                             context != nullptr ? static_cast<int>(context->output_tokens.size()) : -1);
+                std::fflush(stderr);
+            }
             MnnLlmPerfettoSlice decodeSlice("decode", traceInfo);
             outputTokens = mLlm->decode(maxTokens);
         }
@@ -1809,31 +2054,20 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         }
         std::vector<int> preludeTokenIds;
         std::vector<int> suffixTokenIds;
-        const std::string promptProtocol = "chat-template-placeholder-v1";
-        std::string rendered = mLlm->apply_chat_template(messages, true);
         std::string placeholder = pic.placeholder.empty() ? kDefaultPicPlaceholder : pic.placeholder;
-        auto placeholderPos = rendered.find(placeholder);
-        if (placeholderPos == std::string::npos) {
-            error = "pic_cache chat request must include placeholder `" + placeholder +
-                "` in messages content; legacy implicit PIC insertion is not supported";
+        const std::string promptProtocol = "explicit-full-prompt-token-span-v1";
+        if (pic.fullPromptTokenIds.empty()) {
+            pic.fullPromptTokenIds = requestTokenIds;
+        }
+        if (pic.promptSpans.empty() &&
+            !parseExplicitCacheTokenSpans(request, pic.promptSpans, error)) {
             return false;
         }
-        auto preludeText = rendered.substr(0, placeholderPos);
-        auto suffixText = rendered.substr(placeholderPos + placeholder.size());
-        if (!preludeText.empty()) {
-            preludeTokenIds = mLlm->tokenizer_encode(preludeText);
-        }
-        suffixTokenIds = mLlm->tokenizer_encode(suffixText);
-        const auto emptyPrefix = mLlm->tokenizer_encode("");
-        size_t trimmedPicPrefix = 0;
-        if (!preludeTokenIds.empty()) {
-            trimmedPicPrefix = trimLeadingTokenPrefix(pic.tokenIds, emptyPrefix);
-            if (trimmedPicPrefix > 0) {
-                pic.segments = sliceExternalSegments(pic.segments, trimmedPicPrefix);
-            }
-        }
-        if (!preludeTokenIds.empty() || !pic.tokenIds.empty()) {
-            trimLeadingTokenPrefix(suffixTokenIds, emptyPrefix);
+        std::vector<int> fullPromptTokenIds;
+        json explicitTokenMapping = json::array();
+        if (!applyExplicitPicPromptMapping(pic, preludeTokenIds, suffixTokenIds,
+                                           fullPromptTokenIds, explicitTokenMapping, error)) {
+            return false;
         }
         if (suffixTokenIds.empty()) {
             error = "PIC prompt suffix tokenization produced no tokens";
@@ -1869,21 +2103,73 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             std::vector<int> nativeSelectedLocalIndices;
             json scoreMetadata = json::object();
             bool hasNativeSelectedLocalIndices = false;
-            if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v") {
+            bool graphBoundaryPrefillDone = false;
+            const bool graphBoundaryEnabled =
+                jsonBool(modelConfig(), "pic_recompute_budget", false) &&
+                (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v" ||
+                 pic.selectionAlgorithm == "epic");
+            if (graphBoundaryEnabled && pic.selectionAlgorithm == "epic") {
                 const int effectiveScoreLayer =
                     std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-                std::vector<int> fullPromptForScoring;
-                fullPromptForScoring.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
-                fullPromptForScoring.insert(fullPromptForScoring.end(), preludeTokenIds.begin(),
-                                            preludeTokenIds.end());
-                fullPromptForScoring.insert(fullPromptForScoring.end(), pic.tokenIds.begin(), pic.tokenIds.end());
-                fullPromptForScoring.insert(fullPromptForScoring.end(), suffixTokenIds.begin(),
-                                            suffixTokenIds.end());
+                const int recompute = picTraceTokens <= 0 || pic.recomputeRatio <= 0.0
+                    ? 0
+                    : std::min(picTraceTokens,
+                               std::max(1, static_cast<int>(std::ceil(picTraceTokens * pic.recomputeRatio))));
+                nativeSelectedLocalIndices.clear();
+                for (int i = 0; i < recompute; ++i) {
+                    nativeSelectedLocalIndices.emplace_back(i);
+                }
+                mLlm->reset();
+                mLlm->generate_init(&sink, "");
+                if (!mLlm->prefillFixedGraphExternalPagedKV(
+                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
+                        static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, nativeSelectedLocalIndices)) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Native graph-level epic prefill failed on backend " + runtimeBackend();
+                    return false;
+                }
+                graphBoundaryPrefillDone = true;
+                scoreMetadata = {
+                    {"score_layer_idx", effectiveScoreLayer},
+                    {"score_source", "fixed_pic_head_contiguous_tokens"},
+                    {"score_kind", "pic_head_fixed_ratio"},
+                    {"score_pass", "not_required_graph_boundary"},
+                    {"graph_boundary", "score_layer_pic_score_attention"},
+                    {"selected_count", nativeSelectedLocalIndices.size()},
+                };
+            } else if (graphBoundaryEnabled) {
+                const int effectiveScoreLayer =
+                    std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
+                mLlm->reset();
+                mLlm->generate_init(&sink, "");
+                if (!mLlm->prefillCacheBlendGraphExternalPagedKV(
+                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
+                        static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
+                        nativeSelectedLocalIndices)) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Native graph-level cacheblend score/top-k failed on backend " + runtimeBackend();
+                    return false;
+                }
+                graphBoundaryPrefillDone = true;
+                hasNativeSelectedLocalIndices = true;
+                scoreMetadata = {
+                    {"score_layer_idx", effectiveScoreLayer},
+                    {"score_source", "request_full_reference_pagedcache_minus_cached_pic_value"},
+                    {"score_kind", "layer_value_delta_mean_abs"},
+                    {"score_pass", "request_full_prompt_graph_boundary"},
+                    {"topk_location", "backend_device"},
+                    {"host_transfer", "selected_local_indices_only"},
+                    {"graph_boundary", "score_layer_pic_score_attention"},
+                    {"selected_count", nativeSelectedLocalIndices.size()},
+                };
+            } else if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v") {
+                const int effectiveScoreLayer =
+                    std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
                 mLlm->reset();
                 std::ostringstream scoreSink;
                 mLlm->generate_init(&scoreSink, "");
                 if (!mLlm->selectCacheBlendExternalPagedKV(
-                        fullPromptForScoring, pic.segments, static_cast<int>(preludeTokenIds.size()),
+                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
                         nativeSelectedLocalIndices)) {
                     error = "Native cacheblend score/top-k failed on backend " + runtimeBackend();
@@ -1904,23 +2190,34 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 pic, static_cast<int>(preludeTokenIds.size()), layerCount,
                 hasNativeSelectedLocalIndices ? &nativeSelectedLocalIndices : nullptr,
                 hasNativeSelectedLocalIndices ? &scoreMetadata : nullptr);
+            if (graphBoundaryPrefillDone) {
+                plan.executionMode = pic.selectionAlgorithm == "epic" ? "native-epic-graph-boundary"
+                                                                      : "native-cacheblend-graph-boundary";
+                plan.sparseRecompute = false;
+                plan.metadata["native_sparse_recompute_scope"] = "exported_graph_score_layer_boundary";
+                plan.metadata["graph_level_boundary"] = true;
+            }
             traceInfo.executionMode = plan.executionMode;
             traceInfo.recomputeBudgetTokens = plan.recomputeTokenCount;
 
-            mLlm->reset();
-            mLlm->generate_init(&sink, "");
-            if (plan.fullCompute) {
-                std::vector<int> fullPrompt;
-                fullPrompt.reserve(preludeTokenIds.size() + pic.tokenIds.size() + suffixTokenIds.size());
-                fullPrompt.insert(fullPrompt.end(), preludeTokenIds.begin(), preludeTokenIds.end());
-                fullPrompt.insert(fullPrompt.end(), pic.tokenIds.begin(), pic.tokenIds.end());
-                fullPrompt.insert(fullPrompt.end(), suffixTokenIds.begin(), suffixTokenIds.end());
-                if (!mLlm->prefill(fullPrompt)) {
+            if (!graphBoundaryPrefillDone) {
+                mLlm->reset();
+                mLlm->generate_init(&sink, "");
+            }
+            if (!graphBoundaryPrefillDone && plan.fullCompute) {
+                if (!mLlm->prefill(fullPromptTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
                     error = "Failed to prefill full-compute PIC chat request";
                     return false;
                 }
-            } else {
+                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                    auto context = mLlm->getContext();
+                    std::fprintf(stderr, "PIC server prefill debug step=full_compute status=%d all_seq=%d\n",
+                                 context != nullptr ? static_cast<int>(context->status) : -999,
+                                 context != nullptr ? context->all_seq_len : -1);
+                    std::fflush(stderr);
+                }
+            } else if (!graphBoundaryPrefillDone) {
                 std::vector<int> firstPrefill;
                 firstPrefill.reserve(preludeTokenIds.size() + plan.prefillPicTokenIds.size());
                 firstPrefill.insert(firstPrefill.end(), preludeTokenIds.begin(), preludeTokenIds.end());
@@ -1932,29 +2229,73 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                         error = "Failed to prefill prelude/PIC prefix tokens";
                         return false;
                     }
+                    if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                        auto context = mLlm->getContext();
+                        std::fprintf(stderr, "PIC server prefill debug step=first_prefill status=%d all_seq=%d "
+                                             "tokens=%d\n",
+                                     context != nullptr ? static_cast<int>(context->status) : -999,
+                                     context != nullptr ? context->all_seq_len : -1,
+                                     static_cast<int>(firstPrefill.size()));
+                        std::fflush(stderr);
+                    }
                 } else {
                     mLlm->beginExternalPagedKVRequest();
                 }
                 if (!plan.externalTokenIds.empty() &&
                     !mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to append external PIC KV into paged request";
+                    error = "Failed to bind persistent PIC cache source into current request PagedCache";
                     return false;
                 }
+                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                    auto context = mLlm->getContext();
+                    std::fprintf(stderr, "PIC server prefill debug step=bind_pic_source status=%d all_seq=%d "
+                                         "tokens=%d\n",
+                                 context != nullptr ? static_cast<int>(context->status) : -999,
+                                 context != nullptr ? context->all_seq_len : -1,
+                                 static_cast<int>(plan.externalTokenIds.size()));
+                    std::fflush(stderr);
+                }
                 if (plan.sparseRecompute &&
-                    !mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds)) {
+                    !mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds,
+                                                    plan.scoreLayerIdx)) {
                     mLlm->finishExternalPagedKVRequest();
                     error = "Failed to sparse-recompute selected PIC KV tokens";
                     return false;
+                }
+                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr && plan.sparseRecompute) {
+                    auto context = mLlm->getContext();
+                    std::fprintf(stderr, "PIC server prefill debug step=sparse_recompute status=%d all_seq=%d\n",
+                                 context != nullptr ? static_cast<int>(context->status) : -999,
+                                 context != nullptr ? context->all_seq_len : -1);
+                    std::fflush(stderr);
                 }
                 if (!mLlm->prefill(suffixTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
                     error = "Failed to prefill PIC prompt suffix tokens";
                     return false;
                 }
+                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                    auto context = mLlm->getContext();
+                    std::fprintf(stderr, "PIC server prefill debug step=suffix status=%d all_seq=%d tokens=%d\n",
+                                 context != nullptr ? static_cast<int>(context->status) : -999,
+                                 context != nullptr ? context->all_seq_len : -1,
+                                 static_cast<int>(suffixTokenIds.size()));
+                    std::fflush(stderr);
+                }
             }
         }
         if (maxTokens != 0) {
+            if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                auto context = mLlm->getContext();
+                std::fprintf(stderr, "PIC server decode debug branch=pic max_tokens=%d execution=%s status=%d "
+                                     "current=%d output_tokens=%d\n",
+                             maxTokens, traceInfo.executionMode.c_str(),
+                             context != nullptr ? static_cast<int>(context->status) : -999,
+                             context != nullptr ? context->current_token : -999,
+                             context != nullptr ? static_cast<int>(context->output_tokens.size()) : -1);
+                std::fflush(stderr);
+            }
             MnnLlmPerfettoSlice decodeSlice("decode", traceInfo);
             outputTokens = mLlm->decode(maxTokens);
         } else {
@@ -1991,6 +2332,9 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             {"prompt_token_count", promptTokens},
             {"text_caches", pic.textCaches},
             {"prompt_protocol", promptProtocol},
+            {"token_alignment", "explicit_request_verified"},
+            {"full_prompt_token_count", fullPromptTokenIds.size()},
+            {"doc_cache_token_mapping", explicitTokenMapping},
             {"placeholder", placeholder},
             {"selection_algorithm", pic.selectionAlgorithm},
             {"pic_recompute_ratio", pic.recomputeRatio},

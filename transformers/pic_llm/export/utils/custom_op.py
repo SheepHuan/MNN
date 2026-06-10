@@ -69,7 +69,8 @@ class FusedAttention(torch.nn.Module):
 
 class PagedAttentionOp(torch.autograd.Function):
     @staticmethod
-    def symbolic(g, query, key, value, attention_mask, output_dim, kv_cache, name, layer_index, kv_shared_layer_index):
+    def symbolic(g, query, key, value, attention_mask, output_dim, kv_cache, name, layer_index, kv_shared_layer_index,
+                 op_type):
         kwargs = {
             "output_dim_i": output_dim,
             "kv_cache_i": kv_cache,
@@ -81,12 +82,43 @@ class PagedAttentionOp(torch.autograd.Function):
         out_sizes = _get_tensor_sizes(query)
         out_sizes[-1] = output_dim
         output_type = query.type().with_sizes(out_sizes)
-        return g.op("LlmExporter::PagedAttention", query, key, value, attention_mask, **kwargs).setType(output_type)
+        return g.op(f"LlmExporter::{op_type}", query, key, value, attention_mask, **kwargs).setType(output_type)
 
     @staticmethod
-    def forward(ctx, query, key, value, attention_mask, output_dim, kv_cache, name, layer_index, kv_shared_layer_index):
+    def forward(ctx, query, key, value, attention_mask, output_dim, kv_cache, name, layer_index, kv_shared_layer_index,
+                op_type):
         out_shape = list(query.shape)[:2] + [output_dim]
         return query.new_zeros(out_shape)
+
+class PagedAttentionWithBudgetOp(torch.autograd.Function):
+    @staticmethod
+    def symbolic(g, query, key, value, attention_mask, recompute_budget, output_dim, kv_cache, name,
+                 layer_index, kv_shared_layer_index, op_type):
+        kwargs = {
+            "output_dim_i": output_dim,
+            "kv_cache_i": kv_cache,
+            "name_s": name,
+            "layer_index_i": layer_index,
+            "kv_shared_layer_index_i": kv_shared_layer_index,
+        }
+        from torch.onnx.symbolic_helper import _get_tensor_sizes
+        query_sizes = _get_tensor_sizes(query)
+        out_sizes = list(query_sizes)
+        out_sizes[1] = None
+        out_sizes[-1] = output_dim
+        output_type = query.type().with_sizes(out_sizes)
+        index_type = recompute_budget.type().with_sizes([None])
+        attn, active_indices = g.op(f"LlmExporter::{op_type}", query, key, value, attention_mask,
+                                    recompute_budget, **kwargs, outputs=2)
+        return attn.setType(output_type), active_indices.setType(index_type)
+
+    @staticmethod
+    def forward(ctx, query, key, value, attention_mask, recompute_budget, output_dim, kv_cache, name,
+                layer_index, kv_shared_layer_index, op_type):
+        budget_value = int(recompute_budget.reshape(-1)[0].item())
+        out_shape = [query.shape[0], budget_value, output_dim]
+        active_indices = torch.arange(budget_value, dtype=torch.int32, device=query.device)
+        return query.new_zeros(out_shape), active_indices
 
 class PagedAttention(torch.nn.Module):
     def __init__(self, hidden_size, kv_cache, name, layer_index=-1, kv_shared_layer_index=-1):
@@ -97,8 +129,13 @@ class PagedAttention(torch.nn.Module):
         self.layer_index = layer_index
         self.kv_shared_layer_index = kv_shared_layer_index
 
-    def forward(self, query, key, value, attention_mask):
-        return PagedAttentionOp.apply(query, key, value, attention_mask, self.hidden_size, self.kv_cache, self.name, self.layer_index, self.kv_shared_layer_index)
+    def forward(self, query, key, value, attention_mask, recompute_budget=None, op_type='PagedAttention'):
+        if recompute_budget is not None:
+            return PagedAttentionWithBudgetOp.apply(query, key, value, attention_mask, recompute_budget,
+                                                    self.hidden_size, self.kv_cache, self.name, self.layer_index,
+                                                    self.kv_shared_layer_index, op_type)
+        return PagedAttentionOp.apply(query, key, value, attention_mask, self.hidden_size, self.kv_cache, self.name,
+                                      self.layer_index, self.kv_shared_layer_index, op_type)
 
 class MoEOp(torch.autograd.Function):
     @staticmethod

@@ -103,6 +103,8 @@ class LlmExporter(torch.nn.Module):
             'attention_mask': 'float', # Will be determined by model later
             'attention_type': self.config.attention_type,
             'paged_attention': bool(getattr(self.args, 'paged_attention', False)),
+            'pic_recompute_budget': bool(getattr(self.args, 'pic_recompute_budget', True)),
+            'pic_recompute_score_layer_idx': max(0, getattr(self.args, 'pic_recompute_score_layer_idx', 1)),
             'is_mrope': self.model.rotary.is_mrope
         }
         for key in [
@@ -482,6 +484,7 @@ class LlmExporter(torch.nn.Module):
         # For export onnx, don't need image or audio's embedding
         input_ids = model.embedding(input_ids)
         logits_index = torch.tensor([-1], dtype=torch.int32)
+        pic_recompute_budget = torch.tensor([seq_len], dtype=torch.int32)
         if hasattr(model, 'talker') and model.talker is not None:
             output_names = ['logits', 'hidden_states', 'talker_embeds']
         else:
@@ -492,10 +495,12 @@ class LlmExporter(torch.nn.Module):
             # add deepstack_embeds input
             deepstack_embeds = torch.randn(3, 1, self.config.hidden_size)
             onnx_export(
-                model, (input_ids, attention_mask, position_ids, logits_index, deepstack_embeds),
+                model, (input_ids, attention_mask, position_ids, logits_index,
+                        pic_recompute_budget, deepstack_embeds),
                 onnx_model,
                 input_names=[
-                    'input_ids', 'attention_mask', 'position_ids', 'logits_index', 'deepstack_embeds'
+                    'input_ids', 'attention_mask', 'position_ids', 'logits_index',
+                    'pic_recompute_budget', 'deepstack_embeds'
                 ],
                 output_names=output_names,
                 dynamic_axes=self.model_dynamic_axes)
@@ -507,10 +512,12 @@ class LlmExporter(torch.nn.Module):
             ple_embeddings = model.embed_tokens_per_layer(raw_ids)
             self.model_dynamic_axes['ple_embeddings'] = {1: 'seq_len'}
             onnx_export(
-                model, (input_ids, attention_mask, position_ids, logits_index, None, ple_embeddings),
+                model, (input_ids, attention_mask, position_ids, logits_index,
+                        pic_recompute_budget, None, ple_embeddings),
                 onnx_model,
                 input_names=[
-                    'input_ids', 'attention_mask', 'position_ids', 'logits_index', 'ple_embeddings'
+                    'input_ids', 'attention_mask', 'position_ids', 'logits_index',
+                    'pic_recompute_budget', 'ple_embeddings'
                 ],
                 output_names=output_names,
                 dynamic_axes=self.model_dynamic_axes)
@@ -518,10 +525,10 @@ class LlmExporter(torch.nn.Module):
 
         # export to onnx
         onnx_export(
-            model, (input_ids, attention_mask, position_ids, logits_index),
+            model, (input_ids, attention_mask, position_ids, logits_index, pic_recompute_budget),
             onnx_model,
             input_names=[
-                'input_ids', 'attention_mask', 'position_ids', 'logits_index'
+                'input_ids', 'attention_mask', 'position_ids', 'logits_index', 'pic_recompute_budget'
             ],
             output_names=output_names,
             dynamic_axes=self.model_dynamic_axes)
@@ -868,6 +875,9 @@ def build_args(parser):
     parser.add_argument('--paged_attention', dest='paged_attention', action='store_true', default=True, help='Export full attention as MNN PagedAttention, default is True.')
     parser.add_argument('--no_paged_attention', dest='paged_attention', action='store_false', help='Export full attention as the original MNN Attention op.')
     parser.add_argument('--paged_kv_max_tokens', type=int, default=0, help='Preallocated paged KV slot count. 0 means use max_all_tokens at runtime.')
+    parser.add_argument('--pic_recompute_budget', dest='pic_recompute_budget', action='store_true', default=True, help='Expose PIC sparse recompute budget as a scalar graph input, default is True.')
+    parser.add_argument('--no_pic_recompute_budget', dest='pic_recompute_budget', action='store_false', help='Export without graph-level PIC recompute budget input.')
+    parser.add_argument('--pic_recompute_score_layer_idx', type=int, default=1, help='Static score-layer boundary where PIC sparse recompute gathers compact active rows.')
     # omni quant
     parser.add_argument('--omni_epochs', type=int, default=20, help='OmniQuant 优化的轮数')
     parser.add_argument('--omni_lr', type=float, default=5e-3, help='OmniQuant 的学习率')

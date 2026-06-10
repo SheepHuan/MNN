@@ -1841,10 +1841,18 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         mMeta->beginRequest(std::max(mNewKvSeqLen, mQuerySeqLen));
     }
 
+    int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
+    if (mMeta != nullptr && mMeta->sparseQueryBlockedBeforeLayer(layerIndex)) {
+        MNN_ERROR("CUDAPagedAttention layer %d received sparse query before sparse_start_layer=%d. "
+                  "Run full prompt until the score layer, crop active hidden states, then resume sparse.\n",
+                  layerIndex, mMeta->sparse_query_start_layer_idx);
+        return INVALID_VALUE;
+    }
+
     int reverse = reverseCount(mMeta);
     int baseLogical = 0;
     int insertLen = mNewKvSeqLen;
-    bool sparseQuery = mMeta != nullptr && mMeta->sparse_query_active;
+    bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
     if (mMeta != nullptr) {
         size_t kept = mMeta->previous >= mMeta->remove ? (mMeta->previous - mMeta->remove) : 0;
         baseLogical = static_cast<int>(kept) + reverse;
@@ -1879,7 +1887,6 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     }
 
     cudaStream_t stream = 0;
-    int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
     const bool profile = profilePagedAttention();
     const bool nvtx = nvtxPagedAttention();
     ScopedNvtxRange layerNvtx(nvtxLayerRangeName("paged_attention_layer_total", layerIndex, mQuerySeqLen, insertLen,

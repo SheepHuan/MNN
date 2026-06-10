@@ -18,6 +18,7 @@
 #include "MNN_generated.h"
 #include "core/FileLoader.hpp"
 #include "core/OpCommonUtils.hpp"
+#include <cstdlib>
 
 namespace MNN {
 namespace Express {
@@ -137,10 +138,13 @@ static std::vector<std::shared_ptr<BufferStorage>> preRearrangeWeights( // NOLIN
             }
             case MNN::OpType_Attention:
             case MNN::OpType_PagedAttention:
+            case MNN::OpType_PicScoreAttention:
+            case MNN::OpType_PicSparseAttention:
             case MNN::OpType_LinearAttention:
             {
                 // KV Cache sharing: clone from source Attention's execution instead of creating new
-                if ((op->type() == OpType_Attention || op->type() == OpType_PagedAttention) &&
+                if ((op->type() == OpType_Attention || op->type() == OpType_PagedAttention ||
+                     op->type() == OpType_PicScoreAttention || op->type() == OpType_PicSparseAttention) &&
                     op->main_type() == OpParameter_AttentionParam) {
                     auto param = op->main_as_AttentionParam();
                     int kvSharedIdx = param ? param->kv_shared_layer_index() : -1;
@@ -169,7 +173,8 @@ static std::vector<std::shared_ptr<BufferStorage>> preRearrangeWeights( // NOLIN
                     break;
                 }
                 // Register Attention execution for KV Cache sharing
-                if ((op->type() == OpType_Attention || op->type() == OpType_PagedAttention) &&
+                if ((op->type() == OpType_Attention || op->type() == OpType_PagedAttention ||
+                     op->type() == OpType_PicScoreAttention || op->type() == OpType_PicSparseAttention) &&
                     op->main_type() == OpParameter_AttentionParam) {
                     auto param = op->main_as_AttentionParam();
                     int layerIndex = param ? param->layer_index() : -1;
@@ -630,6 +635,12 @@ std::vector<Express::VARP> StaticModule::onForward(const std::vector<Express::VA
     }
     if (NO_ERROR != code) {
         FUNC_PRINT(code);
+        if (::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+            MNN_PRINT("PIC module debug StaticModule forward failed code=%d inputs=%d outputs=%d run_resize=%d "
+                      "run_compute=%d\n",
+                      static_cast<int>(code), static_cast<int>(inputs.size()),
+                      static_cast<int>(mResource->mOutputNumbers), runResize ? 1 : 0, runCompute ? 1 : 0);
+        }
         return {};
     }
     if (!runResize) {

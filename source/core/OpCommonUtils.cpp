@@ -515,6 +515,8 @@ bool OpCommonUtils::opCompabilityForLowp(const Op* op, int bytes) {
         case OpType_Attention:
         case OpType_LinearAttention:
         case OpType_PagedAttention:
+        case OpType_PicScoreAttention:
+        case OpType_PicSparseAttention:
         case OpType_LayerNorm:
         case OpType_Softmax:
         case OpType_Plugin:

@@ -6,6 +6,21 @@ from typing import Optional, Tuple
 from .model_mapper import ModelMapper
 from .custom_op import FusedAttention, PagedAttention, MoE, FusedLinearAttention
 
+def _pic_indices(indices):
+    if indices is None:
+        return None
+    if indices.dim() > 1:
+        indices = indices.reshape(-1)
+    return indices.to(dtype=torch.long)
+
+def _pic_gather_rows(tensor, indices, dim):
+    indices = _pic_indices(indices)
+    if tensor is None or indices is None:
+        return tensor
+    if dim < 0:
+        dim += tensor.dim()
+    return torch.index_select(tensor, dim, indices)
+
 class Embedding(torch.nn.Module):
     def __init__(self, embed, config):
         super().__init__()
@@ -167,6 +182,9 @@ class Attention(torch.nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
+        pic_recompute_budget: Optional[torch.Tensor] = None,
+        pic_emit_indices: bool = False,
+        pic_sparse_attention: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         bsz, q_len, _ = hidden_states.size()
         query_states = self.q_proj(hidden_states)
@@ -225,10 +243,30 @@ class Attention(torch.nn.Module):
             key_states = self.qk_norm(key_states)
 
         if self.export_fused_attn and torch.onnx.is_in_onnx_export():
-            attn_output = self.fused_attn(query_states, key_states, value_states, attention_mask)
+            attention_op_type = 'PagedAttention'
+            if self.use_paged_attention:
+                if pic_emit_indices and pic_recompute_budget is not None:
+                    attention_op_type = 'PicScoreAttention'
+                elif pic_sparse_attention:
+                    attention_op_type = 'PicSparseAttention'
+            if pic_emit_indices and self.use_paged_attention and pic_recompute_budget is not None:
+                attn_output, active_indices = self.fused_attn(
+                    query_states, key_states, value_states, attention_mask, pic_recompute_budget,
+                    op_type=attention_op_type)
+            else:
+                if self.use_paged_attention:
+                    attn_output = self.fused_attn(query_states, key_states, value_states, attention_mask,
+                                                  op_type=attention_op_type)
+                else:
+                    attn_output = self.fused_attn(query_states, key_states, value_states, attention_mask)
+                active_indices = None
             if gate is not None:
+                if active_indices is not None:
+                    gate = _pic_gather_rows(gate, active_indices, 1)
                 attn_output = attn_output * torch.sigmoid(gate)
             attn_output = self.o_proj(attn_output)
+            if active_indices is not None:
+                return attn_output, active_indices
             return attn_output
 
         # kv cache
@@ -1277,6 +1315,9 @@ class Decoder(torch.nn.Module):
         hidden_states: torch.Tensor,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        pic_recompute_budget: Optional[torch.Tensor] = None,
+        pic_emit_indices: bool = False,
+        pic_sparse_attention: bool = False,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         hidden_states = hidden_states.view(1, -1, self.hidden_size)
         residual = hidden_states
@@ -1284,17 +1325,32 @@ class Decoder(torch.nn.Module):
         norm_hidden_states = hidden_states
 
         # Self Attention or Linear Attention
+        active_indices = None
         if self.layer_type == 'full_attention':
-            hidden_states = self.self_attn(
+            attn_result = self.self_attn(
                 hidden_states=hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
                 attention_mask=attention_mask,
+                pic_recompute_budget=pic_recompute_budget,
+                pic_emit_indices=pic_emit_indices,
+                pic_sparse_attention=pic_sparse_attention,
             )
+            if isinstance(attn_result, tuple):
+                hidden_states, active_indices = attn_result
+            else:
+                hidden_states = attn_result
         elif self.layer_type == 'linear_attention':
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
             )
+
+        if active_indices is not None:
+            residual = _pic_gather_rows(residual, active_indices, 1)
+            norm_hidden_states = _pic_gather_rows(norm_hidden_states, active_indices, 1)
+            per_layer_input = getattr(self, '_per_layer_input', None)
+            if per_layer_input is not None:
+                self._per_layer_input = _pic_gather_rows(per_layer_input, active_indices, 1)
 
         # Fully Connected
         if not hasattr(self, 'post_attention_layernorm'):
@@ -1380,6 +1436,8 @@ class Decoder(torch.nn.Module):
         if hasattr(self, 'layer_scalar') and self.layer_scalar is not None:
             hidden_states = hidden_states * self.layer_scalar
 
+        if active_indices is not None:
+            return hidden_states, active_indices
         return hidden_states
 
 class Lm(torch.nn.Module):

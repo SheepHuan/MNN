@@ -29,7 +29,7 @@ __kernel void copy_paged_kv(
     __global const int* sparse_query,
     const int batch,
     const int new_kv_len,
-    const int insert_len,
+    const int kv_write_len,
     const int kv_heads,
     const int head_dim,
     const int base_logical,
@@ -44,8 +44,8 @@ __kernel void copy_paged_kv(
     int t = index / head_dim;
     int h = t % kv_heads;
     t = t / kv_heads;
-    int l = t % insert_len;
-    int b = t / insert_len;
+    int l = t % kv_write_len;
+    int b = t / kv_write_len;
     int logical = sparse_active ? sparse_query[l] : (base_logical + l);
     if (logical < 0) {
         return;
@@ -383,13 +383,15 @@ __kernel void export_canonical_paged_key(
 
 __kernel void pic_cacheblend_value_score(
     __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
-    __global const FLOAT* cached_value,          // [batch, kv_heads, token_count, head_dim]
+    __global const FLOAT* cached_value_cache,    // [batch, kv_heads, cached_max_slots, head_dim]
     __global const int* slot_table,
     __global float* scores,
     const int batch,
     const int kv_heads,
     const int head_dim,
     const int max_slots,
+    const int cached_max_slots,
+    const int cached_slot_start,
     const int logical_start,
     const int token_count,
     const int score_offset) {
@@ -403,7 +405,8 @@ __kernel void pic_cacheblend_value_score(
         return;
     }
     int slot = slot_table[logical];
-    if (slot < 0 || slot >= max_slots) {
+    int cached_slot = cached_slot_start + token_local;
+    if (slot < 0 || slot >= max_slots || cached_slot < 0 || cached_slot >= cached_max_slots) {
         scores[score_offset + token_local] = -3.4028234663852886e+38f;
         return;
     }
@@ -411,9 +414,9 @@ __kernel void pic_cacheblend_value_score(
     for (int b = 0; b < batch; ++b) {
         for (int h = 0; h < kv_heads; ++h) {
             int ref_base = ((b * kv_heads + h) * max_slots + slot) * head_dim;
-            int cached_base = ((b * kv_heads + h) * token_count + token_local) * head_dim;
+            int cached_base = ((b * kv_heads + h) * cached_max_slots + cached_slot) * head_dim;
             for (int d = 0; d < head_dim; ++d) {
-                acc += fabs((float)reference_value_cache[ref_base + d] - (float)cached_value[cached_base + d]);
+                acc += fabs((float)reference_value_cache[ref_base + d] - (float)cached_value_cache[cached_base + d]);
             }
         }
     }
@@ -491,7 +494,8 @@ __kernel void paged_attention_row(
     const int mask_elements,
     const int batch,
     const int query_len,
-    const int insert_len,
+    const int output_len,
+    const int attn_len,
     const int num_heads,
     const int kv_heads,
     const int head_dim,
@@ -500,6 +504,7 @@ __kernel void paged_attention_row(
     const int max_slots,
     const float scale,
     const int sparse_active,
+    const int query_rows_are_full,
     const int total) {
     int index = get_global_id(0);
     if (index >= total) {
@@ -507,11 +512,12 @@ __kernel void paged_attention_row(
     }
     int h = index % num_heads;
     int t = index / num_heads;
-    int q = t % insert_len;
-    int b = t / insert_len;
+    int q = t % attn_len;
+    int b = t / attn_len;
     int group = num_heads / kv_heads;
     int kv_head = h / group;
     int q_logical = sparse_active ? sparse_query[q] : (base_logical + q);
+    int q_row = query_rows_are_full ? q_logical : q;
     int valid_len = min(kv_len, q_logical + 1);
     if (valid_len <= 0 || head_dim > 256) {
         return;
@@ -525,16 +531,17 @@ __kernel void paged_attention_row(
         }
         float score = 0.0f;
         for (int d = 0; d < head_dim; ++d) {
-            int q_offset = ((b * query_len + q) * num_heads + h) * head_dim + d;
+            int q_offset = ((b * query_len + q_row) * num_heads + h) * head_dim + d;
             int k_offset = ((slot * batch + b) * kv_heads + kv_head) * head_dim + d;
             score += (float)query[q_offset] * (float)key_cache[k_offset];
         }
         score *= scale;
         if (mask_elements > 1) {
-            int mask_cols = mask_elements >= insert_len * kv_len ? kv_len : insert_len;
+            int mask_cols = mask_elements >= attn_len * kv_len ? kv_len : attn_len;
             int gap = kv_len - mask_cols;
             int col = k - gap;
-            int mask_index = q * mask_cols + col;
+            int mask_row = query_rows_are_full ? q_logical : q;
+            int mask_index = mask_row * mask_cols + col;
             if (col >= 0 && col < mask_cols && mask_index >= 0 && mask_index < mask_elements) {
                 score += (float)mask[mask_index];
             }
@@ -554,16 +561,17 @@ __kernel void paged_attention_row(
         }
         float score = 0.0f;
         for (int d = 0; d < head_dim; ++d) {
-            int q_offset = ((b * query_len + q) * num_heads + h) * head_dim + d;
+            int q_offset = ((b * query_len + q_row) * num_heads + h) * head_dim + d;
             int k_offset = ((slot * batch + b) * kv_heads + kv_head) * head_dim + d;
             score += (float)query[q_offset] * (float)key_cache[k_offset];
         }
         score *= scale;
         if (mask_elements > 1) {
-            int mask_cols = mask_elements >= insert_len * kv_len ? kv_len : insert_len;
+            int mask_cols = mask_elements >= attn_len * kv_len ? kv_len : attn_len;
             int gap = kv_len - mask_cols;
             int col = k - gap;
-            int mask_index = q * mask_cols + col;
+            int mask_row = query_rows_are_full ? q_logical : q;
+            int mask_index = mask_row * mask_cols + col;
             if (col >= 0 && col < mask_cols && mask_index >= 0 && mask_index < mask_elements) {
                 score += (float)mask[mask_index];
             }
@@ -577,7 +585,7 @@ __kernel void paged_attention_row(
     }
     float inv_sum = sum > 0.0f ? 1.0f / sum : 0.0f;
     for (int d = 0; d < head_dim; ++d) {
-        output[((b * query_len + q) * num_heads + h) * head_dim + d] = (FLOAT)(acc[d] * inv_sum);
+        output[((b * output_len + q) * num_heads + h) * head_dim + d] = (FLOAT)(acc[d] * inv_sum);
     }
 }
 
@@ -592,7 +600,8 @@ __kernel void paged_attention(
     const int mask_elements,
     const int batch,
     const int query_len,
-    const int insert_len,
+    const int output_len,
+    const int attn_len,
     const int num_heads,
     const int kv_heads,
     const int head_dim,
@@ -601,6 +610,7 @@ __kernel void paged_attention(
     const int max_slots,
     const float scale,
     const int sparse_active,
+    const int query_rows_are_full,
     const int total) {
     int index = get_global_id(0);
     if (index >= total) {
@@ -610,14 +620,15 @@ __kernel void paged_attention(
     int t = index / head_dim;
     int h = t % num_heads;
     t = t / num_heads;
-    int q = t % insert_len;
-    int b = t / insert_len;
+    int q = t % attn_len;
+    int b = t / attn_len;
     int group = num_heads / kv_heads;
     int kv_head = h / group;
     int q_logical = sparse_active ? sparse_query[q] : (base_logical + q);
+    int q_row = query_rows_are_full ? q_logical : q;
     int valid_len = min(kv_len, q_logical + 1);
     if (valid_len <= 0) {
-        output[((b * query_len + q) * num_heads + h) * head_dim + d] = (FLOAT)0;
+        output[((b * output_len + q) * num_heads + h) * head_dim + d] = (FLOAT)0;
         return;
     }
 
@@ -626,16 +637,17 @@ __kernel void paged_attention(
         int slot = slot_table[k];
         float score = 0.0f;
         for (int kd = 0; kd < head_dim; ++kd) {
-            int q_offset = ((b * query_len + q) * num_heads + h) * head_dim + kd;
+            int q_offset = ((b * query_len + q_row) * num_heads + h) * head_dim + kd;
             int k_offset = ((slot * batch + b) * kv_heads + kv_head) * head_dim + kd;
             score += (float)query[q_offset] * (float)key_cache[k_offset];
         }
         score *= scale;
         if (mask_elements > 1) {
-            int mask_cols = mask_elements >= insert_len * kv_len ? kv_len : insert_len;
+            int mask_cols = mask_elements >= attn_len * kv_len ? kv_len : attn_len;
             int gap = kv_len - mask_cols;
             int col = k - gap;
-            int mask_index = q * mask_cols + col;
+            int mask_row = query_rows_are_full ? q_logical : q;
+            int mask_index = mask_row * mask_cols + col;
             if (col >= 0 && col < mask_cols && mask_index >= 0 && mask_index < mask_elements) {
                 score += (float)mask[mask_index];
             }
@@ -649,16 +661,17 @@ __kernel void paged_attention(
         int slot = slot_table[k];
         float score = 0.0f;
         for (int kd = 0; kd < head_dim; ++kd) {
-            int q_offset = ((b * query_len + q) * num_heads + h) * head_dim + kd;
+            int q_offset = ((b * query_len + q_row) * num_heads + h) * head_dim + kd;
             int k_offset = ((slot * batch + b) * kv_heads + kv_head) * head_dim + kd;
             score += (float)query[q_offset] * (float)key_cache[k_offset];
         }
         score *= scale;
         if (mask_elements > 1) {
-            int mask_cols = mask_elements >= insert_len * kv_len ? kv_len : insert_len;
+            int mask_cols = mask_elements >= attn_len * kv_len ? kv_len : attn_len;
             int gap = kv_len - mask_cols;
             int col = k - gap;
-            int mask_index = q * mask_cols + col;
+            int mask_row = query_rows_are_full ? q_logical : q;
+            int mask_index = mask_row * mask_cols + col;
             if (col >= 0 && col < mask_cols && mask_index >= 0 && mask_index < mask_elements) {
                 score += (float)mask[mask_index];
             }
@@ -668,5 +681,5 @@ __kernel void paged_attention(
         acc += weight * (float)value_cache[v_offset];
         sum += weight;
     }
-    output[((b * query_len + q) * num_heads + h) * head_dim + d] = (FLOAT)(sum > 0.0f ? acc / sum : 0.0f);
+    output[((b * output_len + q) * num_heads + h) * head_dim + d] = (FLOAT)(sum > 0.0f ? acc / sum : 0.0f);
 }

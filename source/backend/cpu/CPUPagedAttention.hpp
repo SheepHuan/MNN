@@ -36,6 +36,7 @@ private:
 
     int mLayerIndex = -1;
     int mKVSharedLayerIndex = -1;
+    int mPicAttentionMode = 0; // 0: full, 1: score layer, 2: sparse layer
     bool mIsKVShared = false;
     int mBytes = 4;
     float mScale = 1.0f;

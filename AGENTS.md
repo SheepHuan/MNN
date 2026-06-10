@@ -13,6 +13,7 @@ MNN 专属 Codex skills 由本目录维护：
 .codex/skills/mnn-llm-export/SKILL.md  导出 MNN LLM 或 prefixllm 模型
 .codex/skills/mnn-ops-bench/SKILL.md  CUDA 单算子精度/性能测试
 .codex/skills/mnn-opt-ops/SKILL.md  CPU/CUDA 算子优化和 Jetson 验证流程
+.codex/skills/mnn-opencl-pic-attention/SKILL.md  OpenCL PIC/PagedAttention attention 计算优化与 score layer/sparse 边界分析
 .codex/skills/mnn-pic-benchmark/SKILL.md  本机交叉编译 MNN PIC server 产物、推到 Jetson 启服务，并从本机跑数据集 benchmark
 .codex/skills/mnn-support-new-llm/SKILL.md  在 transformers/pic_llm 中适配新 LLM 模型
 ```
@@ -41,6 +42,7 @@ git status --short
 - 新增或扩展 MNN 算子、schema/op type/shape/backend/注册表、`PrefixAttention`：读 `.codex/skills/mnn-add-new-op/SKILL.md`。
 - CUDA 单算子 direct-op 精度/性能测试、`test/bench_ops/cuda` 或 CUDA event kernel 耗时统计：读 `.codex/skills/mnn-ops-bench/SKILL.md`。
 - CPU/CUDA 算子性能优化、分析算子慢因，或在本机交叉编译产物并推到 Jetson 验证：读 `.codex/skills/mnn-opt-ops/SKILL.md`。
+- OpenCL PIC/PagedAttention attention 计算优化、OrangePi OpenCL cacheblend/epic/kvshare sparse prefill、score layer 前后 full compute 与 sparse compute 边界分析、`PagedAttentionBufExecution.cpp` / `attention_buf.cl` / `softmax_buf.cl` 逐层热点定位：读 `.codex/skills/mnn-opencl-pic-attention/SKILL.md`。
 - 从 ModelScope 或 Hugging Face/Transformers 格式模型导出 MNN LLM、PIC LLM PagedAttention 或 PrefixLLM/PrefixAttention 模型：读 `.codex/skills/mnn-llm-export/SKILL.md`。
 - 运行 `llm_bench` / `llm_demo` / `pic_llm_bench` / `pic_llm_demo`、测试 CUDA/OpenCL/Vulkan/CPU LLM 推理、比较普通 MNN LLM 与 PIC/PagedAttention LLM 输出、确认 GPU 后端注册、检查 execution class 日志、排查后端回退，或围绕 LLM bench 采集 DF power / Jetson `tegrastats` 功耗：读 `.codex/skills/mnn-llm-bench/SKILL.md`。
 - 本机交叉编译 MNN `pic_server` / `libpic_llm` / CUDA artifact，推送到 Jetson，远端启动 MNN PIC server，并从本机运行 `impl/pic_bench/cli.py` 数据集 benchmark 向 Jetson 发请求：读 `.codex/skills/mnn-pic-benchmark/SKILL.md`。

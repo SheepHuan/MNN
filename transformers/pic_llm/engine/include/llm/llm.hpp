@@ -159,11 +159,21 @@ public:
     void clearPrefixCacheFile();
     bool beginExternalPagedKVRequest();
     bool appendExternalPagedKV(const std::vector<int>& token_ids, const std::vector<MNN::PagedKVExternalSegment>& segments);
-    bool recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids);
+    bool recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids,
+                                  int sparse_start_layer_idx = 0);
     bool selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
                                          const std::vector<MNN::PagedKVExternalSegment>& segments,
                                          int pic_start, int pic_token_count, int score_layer_idx,
                                          double recompute_ratio, std::vector<int>& selected_local_indices);
+    bool prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                               const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                               int pic_start, int pic_token_count, int score_layer_idx,
+                                               double recompute_ratio,
+                                               std::vector<int>& selected_local_indices);
+    bool prefillFixedGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                          const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                          int pic_start, int pic_token_count, int score_layer_idx,
+                                          const std::vector<int>& selected_local_indices);
     void finishExternalPagedKVRequest();
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::string& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
@@ -232,6 +242,7 @@ protected:
     std::map<int, std::shared_ptr<Express::Module>> mCacheBlendScoreModulePool;
     const Express::Module* mBaseModule = nullptr;
     Express::VARP inputsEmbeds, attentionMask, positionIds;
+    Express::VARP mPicRecomputeBudget;
     std::vector<Express::VARP> mAttentionMaskVarVec, mPositionIdsVarVec;
     Express::VARP logitsAllIdx, logitsLastIdx;
     int mSeqLenIndex = 0;

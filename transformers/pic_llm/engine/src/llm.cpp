@@ -11,6 +11,8 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <cstdlib>
+#include <cstdio>
 
 #include "prompt_cache_utils.hpp"
 #include <MNN/AutoTime.hpp>
@@ -57,6 +59,24 @@ static MNNForwardType backend_type_convert(const std::string& type_str) {
 template <typename T>
 static inline VARP _var(std::vector<T> vec, const std::vector<int> &dims) {
     return _Const(vec.data(), dims, NHWC, halide_type_of<T>());
+}
+
+static inline int _picRecomputeBudgetValue(PagedKVMeta* paged, int seqLen) {
+    int budget = std::max(0, seqLen);
+    if (paged != nullptr && paged->sparse_query_active && !paged->sparse_query_logical_indices.empty()) {
+        budget = static_cast<int>(paged->sparse_query_logical_indices.size());
+    } else if (paged != nullptr) {
+        budget = paged->graphActiveBudget(seqLen);
+    }
+    return budget;
+}
+
+static inline VARP _picRecomputeBudgetVar(PagedKVMeta* paged, int seqLen, bool enabled) {
+    if (!enabled) {
+        return nullptr;
+    }
+    const int budget = _picRecomputeBudgetValue(paged, seqLen);
+    return _var<int>(std::vector<int>{budget}, {1});
 }
 
 Llm* Llm::createLLM(const std::string& config_path) {
@@ -284,7 +304,8 @@ static std::string findPagedAttentionOutputName(const std::string& modelPath, in
     auto tensorNames = net->tensorName();
     for (int i = 0; i < ops->size(); ++i) {
         auto op = ops->GetAs<MNN::Op>(i);
-        if (op == nullptr || op->type() != MNN::OpType_PagedAttention) {
+        if (op == nullptr ||
+            (op->type() != MNN::OpType_PagedAttention && op->type() != MNN::OpType_PicScoreAttention)) {
             continue;
         }
         auto param = op->main_as_AttentionParam();
@@ -369,6 +390,9 @@ bool Llm::load() {
     }
     // load single model
     std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids", "logits_index"};
+    if (mConfig->has_pic_recompute_budget()) {
+        inputNames.emplace_back("pic_recompute_budget");
+    }
     std::vector<std::string> outputNames {"logits"};
     if (mConfig->has_talker()) {
         outputNames.emplace_back("talker_embeds");
@@ -431,7 +455,7 @@ bool Llm::load() {
         // attentiion mask var
         {
             // Mask: lower triangular
-           if (mConfig->backend_type() == "cpu" && mValidBlockSize.empty()) {
+           if (mConfig->backend_type() == "cpu" && mValidBlockSize.empty() && !mConfig->has_pic_recompute_budget()) {
                mAttentionMaskVarVec[i] = _Input({}, NCHW, halide_type_of<float>());
                auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
                ptr[0] = 0;
@@ -559,7 +583,7 @@ bool Llm::beginExternalPagedKVRequest() {
 bool Llm::appendExternalPagedKV(const std::vector<int>& token_ids,
                                 const std::vector<MNN::PagedKVExternalSegment>& segments) {
     if (!mConfig->paged_attention()) {
-        MNN_ERROR("External paged KV requires paged_attention=true\n");
+        MNN_ERROR("Persistent PIC cache source binding requires paged_attention=true\n");
         return false;
     }
     auto paged = static_cast<PagedKVMeta*>(mMeta.get());
@@ -574,12 +598,12 @@ bool Llm::appendExternalPagedKV(const std::vector<int>& token_ids,
         segmentTokens += segment.tokenCount;
     }
     if (segmentTokens != token_ids.size()) {
-        MNN_ERROR("External paged KV token mismatch, token_ids=%d segment_tokens=%d\n",
+        MNN_ERROR("Persistent PIC cache source token mismatch, token_ids=%d segment_tokens=%d\n",
                   static_cast<int>(token_ids.size()), static_cast<int>(segmentTokens));
         return false;
     }
     if (!paged->appendExternalSegments(segments, token_ids.size())) {
-        MNN_ERROR("External paged KV exceeds request capacity, current=%d add=%d capacity=%d\n",
+        MNN_ERROR("Persistent PIC cache source exceeds request PagedCache capacity, current=%d add=%d capacity=%d\n",
                   paged->logical_length, static_cast<int>(token_ids.size()), paged->request_capacity);
         return false;
     }
@@ -588,22 +612,23 @@ bool Llm::appendExternalPagedKV(const std::vector<int>& token_ids,
     return true;
 }
 
-bool Llm::recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids) {
+bool Llm::recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids,
+                                   int sparse_start_layer_idx) {
     if (!mConfig->paged_attention()) {
-        MNN_ERROR("Sparse external KV recompute requires paged_attention=true\n");
+        MNN_ERROR("Sparse PIC recompute requires paged_attention=true\n");
         return false;
     }
     if (logical_indices.empty()) {
         return true;
     }
     if (logical_indices.size() != token_ids.size()) {
-        MNN_ERROR("Sparse external KV recompute mismatch, logical_indices=%d token_ids=%d\n",
+        MNN_ERROR("Sparse PIC recompute mismatch, logical_indices=%d token_ids=%d\n",
                   static_cast<int>(logical_indices.size()), static_cast<int>(token_ids.size()));
         return false;
     }
     auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-    if (paged == nullptr || !paged->beginSparseQuery(logical_indices)) {
-        MNN_ERROR("Sparse external KV recompute failed to bind logical indices\n");
+    if (paged == nullptr || !paged->beginSparseQuery(logical_indices, sparse_start_layer_idx)) {
+        MNN_ERROR("Sparse PIC recompute failed to bind logical indices\n");
         return false;
     }
     auto oldStatus = mContext->status;
@@ -641,6 +666,9 @@ std::shared_ptr<Module> Llm::getCacheBlendScoreModule(int scoreLayerIdx) {
         moduleConfig.base = mBaseModule;
     }
     std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids", "logits_index"};
+    if (mConfig->has_pic_recompute_budget()) {
+        inputNames.emplace_back("pic_recompute_budget");
+    }
     if (mConfig->has_deepstack()) {
         inputNames.emplace_back("deepstack_embeds");
     }
@@ -704,6 +732,11 @@ bool Llm::runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, 
         extraArgs.push_back(mPleInput);
     }
     std::vector<Express::VARP> inputs {hiddenStates, attentionMask, positionIds, logitsLastIdx};
+    auto picBudget = _picRecomputeBudgetVar(mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get()) : nullptr, seqLen,
+                                            mConfig->has_pic_recompute_budget());
+    if (picBudget.get() != nullptr) {
+        inputs.emplace_back(picBudget);
+    }
     inputs.insert(inputs.end(), extraArgs.begin(), extraArgs.end());
     auto outputs = scoreModule->onForward(inputs);
     if (outputs.empty() || outputs[0] == nullptr) {
@@ -730,6 +763,7 @@ bool Llm::runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, 
         this->inputsEmbeds = nullptr;
         this->attentionMask = nullptr;
         this->positionIds = nullptr;
+        this->mPicRecomputeBudget = nullptr;
         this->mPleInput = nullptr;
         this->mTextEmbedsForPle = nullptr;
         MNN::Express::ExecutorScope::Current()->gc(Executor::PART);
@@ -791,6 +825,116 @@ bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_to
         mContext->status = oldStatus;
     }
     return ready && static_cast<int>(selected_local_indices.size()) == topK;
+}
+
+bool Llm::prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                                const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                                int pic_start, int pic_token_count, int score_layer_idx,
+                                                double recompute_ratio,
+                                                std::vector<int>& selected_local_indices) {
+    selected_local_indices.clear();
+    if (!mConfig->paged_attention() || full_prompt_token_ids.empty()) {
+        return false;
+    }
+    if (!mConfig->has_pic_recompute_budget()) {
+        MNN_ERROR("Graph-level cacheblend prefill requires pic_recompute_budget input\n");
+        return false;
+    }
+    if (pic_start < 0 || pic_token_count < 0 || score_layer_idx < 0 ||
+        pic_start + pic_token_count > static_cast<int>(full_prompt_token_ids.size())) {
+        return false;
+    }
+    int topK = 0;
+    if (pic_token_count > 0 && recompute_ratio > 0.0) {
+        topK = std::min(pic_token_count,
+                        std::max(1, static_cast<int>(std::ceil(pic_token_count * recompute_ratio))));
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return false;
+    }
+    beginPagedRequestIfNeeded();
+    std::vector<PagedKVExternalSegment> boundSegments;
+    boundSegments.reserve(segments.size());
+    size_t cursor = 0;
+    for (auto segment : segments) {
+        segment.logicalStart = static_cast<size_t>(pic_start) + cursor;
+        cursor += segment.tokenCount;
+        boundSegments.emplace_back(std::move(segment));
+    }
+    if (cursor != static_cast<size_t>(pic_token_count)) {
+        MNN_ERROR("Graph-level cacheblend segment token mismatch, segments=%d pic_tokens=%d\n",
+                  static_cast<int>(cursor), pic_token_count);
+        return false;
+    }
+    if (!paged->bindExternalSegments(boundSegments, static_cast<int>(full_prompt_token_ids.size()))) {
+        MNN_ERROR("Graph-level cacheblend failed to bind persistent PIC cache source segments\n");
+        return false;
+    }
+    paged->external_hydrate_start_layer_idx = score_layer_idx + 1;
+    if (!paged->beginCacheBlendScoring(pic_start, pic_token_count, score_layer_idx, topK, segments)) {
+        MNN_ERROR("Graph-level cacheblend failed to start score-layer scoring\n");
+        return false;
+    }
+    const bool ok = prefill(full_prompt_token_ids);
+    const bool ready = paged->cacheblend_score_ready;
+    if (ready) {
+        selected_local_indices = paged->cacheblend_score_selected_local_indices;
+    }
+    paged->finishCacheBlendScoring();
+    paged->finishSparseQuery();
+    if (!ok || !ready || static_cast<int>(selected_local_indices.size()) != topK) {
+        return false;
+    }
+    return true;
+}
+
+bool Llm::prefillFixedGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                           const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                           int pic_start, int pic_token_count, int score_layer_idx,
+                                           const std::vector<int>& selected_local_indices) {
+    if (!mConfig->paged_attention() || full_prompt_token_ids.empty()) {
+        return false;
+    }
+    if (!mConfig->has_pic_recompute_budget()) {
+        MNN_ERROR("Fixed graph-level PIC prefill requires pic_recompute_budget input\n");
+        return false;
+    }
+    if (pic_start < 0 || pic_token_count < 0 || score_layer_idx < 0 ||
+        pic_start + pic_token_count > static_cast<int>(full_prompt_token_ids.size())) {
+        return false;
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return false;
+    }
+    beginPagedRequestIfNeeded();
+    std::vector<PagedKVExternalSegment> boundSegments;
+    boundSegments.reserve(segments.size());
+    size_t cursor = 0;
+    for (auto segment : segments) {
+        segment.logicalStart = static_cast<size_t>(pic_start) + cursor;
+        cursor += segment.tokenCount;
+        boundSegments.emplace_back(std::move(segment));
+    }
+    if (cursor != static_cast<size_t>(pic_token_count)) {
+        MNN_ERROR("Fixed graph-level PIC segment token mismatch, segments=%d pic_tokens=%d\n",
+                  static_cast<int>(cursor), pic_token_count);
+        return false;
+    }
+    if (!paged->bindExternalSegments(boundSegments, static_cast<int>(full_prompt_token_ids.size()))) {
+        MNN_ERROR("Fixed graph-level PIC failed to bind persistent PIC cache source segments\n");
+        return false;
+    }
+    paged->external_hydrate_start_layer_idx = score_layer_idx + 1;
+    if (!paged->beginPicGraphActivePlan(pic_start, pic_token_count, score_layer_idx, selected_local_indices)) {
+        MNN_ERROR("Fixed graph-level PIC failed to bind active rows\n");
+        return false;
+    }
+    const bool ok = prefill(full_prompt_token_ids);
+    paged->finishPicGraphActivePlan();
+    paged->finishSparseQuery();
+    return ok;
 }
 
 void Llm::finishExternalPagedKVRequest() {
@@ -872,16 +1016,37 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mGenerateParam->validLogitSize = 0;
     mGenerateParam->validLogitStart = 0;
     std::vector<Express::VARP> inputs {hiddenState, mask, inputPos, logitsIndex};
+    auto picBudget = _picRecomputeBudgetVar(mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get()) : nullptr, seqLen,
+                                            mConfig->has_pic_recompute_budget());
+    if (picBudget.get() != nullptr) {
+        inputs.emplace_back(picBudget);
+        mPicRecomputeBudget = picBudget;
+    }
     inputs.insert(inputs.end(), extraArgs.begin(), extraArgs.end());
     std::vector<Express::VARP> outputs = selectModule->onForward(inputs);
 
     if (outputs.empty()) {
+        if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+            std::fprintf(stderr, "PIC forward debug outputs empty seq_len=%d add=%d all_seq=%d gen_seq=%d\n",
+                         seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len);
+            std::fflush(stderr);
+        }
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return outputs;
     }
     // Validate output VARP and readMap
-    for (auto o : outputs) {
+    for (size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
+        auto o = outputs[outputIndex];
         if(nullptr == o || nullptr == o->readMap<float>()) {
+            if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                auto info = nullptr != o ? o->getInfo() : nullptr;
+                std::fprintf(stderr,
+                             "PIC forward debug invalid output index=%d null=%d info=%p seq_len=%d add=%d "
+                             "all_seq=%d gen_seq=%d\n",
+                             static_cast<int>(outputIndex), o == nullptr ? 1 : 0, info, seqLen,
+                             static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len);
+                std::fflush(stderr);
+            }
             mContext->status = LlmStatus::INTERNAL_ERROR;
             return outputs;
         }
@@ -1114,6 +1279,7 @@ void Llm::reset() {
     mContext->audio_input_s = 0.0f;
     mMeta->remove = mMeta->previous;
     finishPagedRequestIfNeeded();
+    mPicRecomputeBudget = nullptr;
     mCachedPromptText.clear();
 }
 
@@ -1265,9 +1431,39 @@ std::vector<int> Llm::decode(int max_tokens) {
     if (max_tokens < 0) {
         max_tokens = mConfig->max_new_tokens();
     }
+    const bool decodeDebug = std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr;
+    if (decodeDebug) {
+        std::fprintf(stderr,
+                     "PIC decode debug before max=%d status=%d current=%d output_tokens=%d gen_seq=%d all_seq=%d "
+                     "param_outputs=%d valid_start=%d valid_size=%d\n",
+                     max_tokens, static_cast<int>(mContext->status), mContext->current_token,
+                     static_cast<int>(mContext->output_tokens.size()), mContext->gen_seq_len,
+                     mContext->all_seq_len, static_cast<int>(mGenerateParam->outputs.size()),
+                     mGenerateParam->validLogitStart, mGenerateParam->validLogitSize);
+        std::fflush(stderr);
+    }
+    if (mConfig->paged_attention()) {
+        auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        if (paged != nullptr) {
+            paged->finishSparseQuery();
+            paged->finishCacheBlendScoring();
+            paged->finishPicGraphActivePlan();
+        }
+    }
+    if (max_tokens > 0 && mContext->output_tokens.empty() && mContext->current_token >= 0 &&
+        mTokenizer->is_stop(mContext->current_token)) {
+        mContext->current_token = -1;
+    }
     if (max_tokens > 0) {
         generate(max_tokens);
         finishPagedRequestIfNeeded();
+    }
+    if (decodeDebug) {
+        std::fprintf(stderr, "PIC decode debug after status=%d current=%d output_tokens=%d gen_seq=%d all_seq=%d\n",
+                     static_cast<int>(mContext->status), mContext->current_token,
+                     static_cast<int>(mContext->output_tokens.size()), mContext->gen_seq_len,
+                     mContext->all_seq_len);
+        std::fflush(stderr);
     }
     return mContext->output_tokens;
 }
@@ -1910,7 +2106,7 @@ VARP Llm::gen_attention_mask(int seq_len) {
     MNN::Express::ExecutorScope s(mExecutor);
     if (mConfig->paged_attention()) {
         auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-        if (paged != nullptr && paged->sparse_query_active) {
+        if (paged != nullptr && paged->sparse_query_active && !mConfig->has_pic_recompute_budget()) {
             attentionMask = _Input({}, NCHW, halide_type_of<float>());
             auto ptr = attentionMask->writeMap<float>();
             ptr[0] = 0.0f;
@@ -1965,7 +2161,7 @@ VARP Llm::gen_attention_mask(int seq_len) {
         }
 
         // Mask: lower triangular
-       if (mConfig->backend_type() == "cpu" && mValidBlockSize.empty()) { // Now only cpu supports using lower triangular to opt the attention performance
+       if (mConfig->backend_type() == "cpu" && mValidBlockSize.empty() && !mConfig->has_pic_recompute_budget()) { // Now only cpu supports using lower triangular to opt the attention performance
            attentionMask = _Input({}, NCHW, halide_type_of<float>());
            auto ptr = attentionMask->writeMap<float>();
            ptr[0] = 0;
@@ -2033,7 +2229,7 @@ VARP Llm::gen_position_ids(int seq_len) {
         bool is_glm2 = mConfig->attention_mask() == "glm2";
         if (mConfig->paged_attention()) {
             auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-            if (paged != nullptr && paged->sparse_query_active) {
+            if (paged != nullptr && paged->sparse_query_active && !mConfig->has_pic_recompute_budget()) {
                 if (mConfig->is_mrope()) {
                     positionIds = _Input({3, seq_len}, NCHW, halide_type_of<int>());
                     auto ptr = positionIds->writeMap<int>();

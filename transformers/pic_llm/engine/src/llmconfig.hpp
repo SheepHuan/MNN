@@ -8,6 +8,7 @@
 #ifndef LLMCONFIG_Hpp
 #define LLMCONFIG_Hpp
 
+#include <algorithm>
 #include <vector>
 #include <unordered_map>
 #include <cstdlib>
@@ -165,6 +166,14 @@ public:
 
     bool paged_attention() const {
         return config_.value("paged_attention", false);
+    }
+
+    bool has_pic_recompute_budget() const {
+        return config_.value("pic_recompute_budget", false);
+    }
+
+    int pic_recompute_score_layer_idx() const {
+        return std::max(0, config_.value("pic_recompute_score_layer_idx", 1));
     }
 
     int paged_kv_max_tokens() const {

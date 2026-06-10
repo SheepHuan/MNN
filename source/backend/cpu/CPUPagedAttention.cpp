@@ -13,6 +13,7 @@
 #include "core/MNNFileUtils.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -20,6 +21,10 @@
 #include <vector>
 
 namespace MNN {
+
+static inline bool _picDebugEnabled() {
+    return std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr;
+}
 
 static inline float _pagedRead(const int8_t* ptr, int index, int bytes) {
 #ifdef __aarch64__
@@ -70,6 +75,47 @@ static inline float _readFloatMask(const Tensor* mask, int q, int logicalK, int 
         return 0.0f;
     }
     return _pagedRead(mask->host<int8_t>(), idx, bytes);
+}
+
+static ErrorCode _emitActiveIndicesCPU(PagedKVMeta* meta, int layerIndex, int kvLen, Tensor* output,
+                                       bool activateRows) {
+    if (output == nullptr) {
+        return NO_ERROR;
+    }
+    const int budget = static_cast<int>(output->elementSize());
+    std::vector<int> active;
+    if (activateRows && meta != nullptr) {
+        active = meta->buildBudgetActiveLogicalIndices(kvLen, budget);
+    }
+    if (active.empty() && budget > 0) {
+        const int count = std::min(kvLen, budget);
+        active.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            active.emplace_back(i);
+        }
+    }
+    if (static_cast<int>(active.size()) != budget) {
+        MNN_ERROR("CPUPagedAttention layer %d active index count mismatch, budget=%d active=%d\n",
+                  layerIndex, budget, static_cast<int>(active.size()));
+        return INVALID_VALUE;
+    }
+    if (activateRows && meta != nullptr && !active.empty() && !meta->activatePicRows(active, layerIndex, kvLen)) {
+        return INVALID_VALUE;
+    }
+    auto ptr = output->host<int32_t>();
+    if (ptr != nullptr && !active.empty()) {
+        ::memcpy(ptr, active.data(), active.size() * sizeof(int32_t));
+    }
+    if (_picDebugEnabled()) {
+        int first = active.empty() ? -1 : active.front();
+        int second = active.size() > 1 ? active[1] : -1;
+        int last = active.empty() ? -1 : active.back();
+        std::fprintf(stderr,
+                     "CPU PA active layer=%d budget=%d kvLen=%d activate=%d first=%d second=%d last=%d\n",
+                     layerIndex, budget, kvLen, activateRows ? 1 : 0, first, second, last);
+        std::fflush(stderr);
+    }
+    return NO_ERROR;
 }
 
 static bool _writeBinaryFile(const std::string& path, const std::vector<int8_t>& data) {
@@ -441,6 +487,11 @@ static ErrorCode _runCacheBlendScoringCPU(PagedKVMeta* meta, int layerIndex, int
 }
 
 CPUPagedAttention::CPUPagedAttention(Backend* backend, const Op* op) : Execution(backend) {
+    if (op != nullptr && op->type() == OpType_PicScoreAttention) {
+        mPicAttentionMode = 1;
+    } else if (op != nullptr && op->type() == OpType_PicSparseAttention) {
+        mPicAttentionMode = 2;
+    }
     auto param = op->main_as_AttentionParam();
     if (param != nullptr) {
         mLayerIndex = param->layer_index();
@@ -514,10 +565,24 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
 
     int batch = query->length(0);
     int queryLen = query->length(1);
+    int attnLen = output->length(1);
     int numHeads = query->length(2);
     int headDim = query->length(3);
     int newKvLen = key->length(1);
     int kvHeads = key->length(2);
+    if (_picDebugEnabled()) {
+        std::fprintf(stderr,
+                     "CPU PA dims layer=%d opMode=%d q=[%d,%d,%d,%d] k=[%d,%d,%d,%d] "
+                     "v=[%d,%d,%d,%d] out=[%d,%d,%d,%d] maskElems=%d metaPrev=%zu metaAdd=%zu metaRemove=%zu\n",
+                     mLayerIndex, mPicAttentionMode, query->length(0), query->length(1), query->length(2),
+                     query->length(3), key->length(0), key->length(1), key->length(2), key->length(3),
+                     value->length(0), value->length(1), value->length(2), value->length(3),
+                     output->length(0), output->length(1), output->length(2), output->length(3),
+                     mask != nullptr ? static_cast<int>(mask->elementSize()) : 0,
+                     mMeta != nullptr ? mMeta->previous : 0, mMeta != nullptr ? mMeta->add : 0,
+                     mMeta != nullptr ? mMeta->remove : 0);
+        std::fflush(stderr);
+    }
     if (batch != key->length(0) || batch != value->length(0) || kvHeads <= 0 || numHeads % kvHeads != 0) {
         return INVALID_VALUE;
     }
@@ -525,23 +590,47 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         mMeta->beginRequest(std::max(newKvLen, queryLen));
     }
 
+    int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
+    if (mMeta != nullptr && mMeta->sparseQueryBlockedBeforeLayer(layerIndex)) {
+        MNN_ERROR("CPUPagedAttention layer %d received sparse query before sparse_start_layer=%d. "
+                  "Run full prompt until the score layer, crop active hidden states, then resume sparse.\n",
+                  layerIndex, mMeta->sparse_query_start_layer_idx);
+        return INVALID_VALUE;
+    }
+
     int reverse = _reverseCount(mMeta);
     int baseLogical = 0;
-    int insertLen = newKvLen;
-    bool sparseQuery = mMeta != nullptr && mMeta->sparse_query_active;
+    int kvInsertLen = newKvLen;
+    const bool picRuntimeActive = mMeta != nullptr &&
+        (mMeta->sparse_query_active || mMeta->cacheblend_score_active || mMeta->pic_graph_active_plan_ready);
+    const int effectivePicAttentionMode = picRuntimeActive ? mPicAttentionMode : 0;
+    bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
+    const bool scoreAttention = effectivePicAttentionMode == 1;
+    if (scoreAttention) {
+        sparseQuery = false;
+    }
     if (mMeta != nullptr) {
         size_t kept = mMeta->previous >= mMeta->remove ? (mMeta->previous - mMeta->remove) : 0;
         baseLogical = static_cast<int>(kept) + reverse;
-        insertLen = mMeta->add > 0 ? static_cast<int>(std::min<size_t>(mMeta->add, newKvLen)) : newKvLen;
+        kvInsertLen = mMeta->add > 0 ? static_cast<int>(std::min<size_t>(mMeta->add, newKvLen)) : newKvLen;
     }
-    insertLen = std::min(insertLen, queryLen);
     if (sparseQuery) {
-        if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < insertLen) {
+        if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+            return INVALID_VALUE;
+        }
+        if (newKvLen < attnLen) {
+            MNN_ERROR("CPUPagedAttention layer %d sparse K/V rows %d smaller than active attention rows %d\n",
+                      layerIndex, newKvLen, attnLen);
             return INVALID_VALUE;
         }
         baseLogical = 0;
+        kvInsertLen = attnLen;
+    } else if (effectivePicAttentionMode == 2) {
+        MNN_ERROR("CPU PicSparseAttention layer %d requires active sparse rows from PicScoreAttention\n",
+                  layerIndex);
+        return INVALID_VALUE;
     }
-    int kvLen = sparseQuery ? std::max(0, mMeta->logical_length) : (baseLogical + insertLen);
+    int kvLen = sparseQuery ? std::max(0, mMeta->logical_length) : (baseLogical + kvInsertLen);
     if (kvLen > mCache->maxSlots) {
         MNN_ERROR("CPUPagedAttention layer %d needs %d slots, cache capacity is %d\n", mLayerIndex, kvLen,
                   mCache->maxSlots);
@@ -565,7 +654,6 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         }
         physicalSlots[k] = slot;
     }
-    int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
     auto restore = _restoreExternalSegmentsCPU(mMeta, layerIndex, batch, kvHeads, headDim, mBytes,
                                                mCache->maxSlots, physicalSlots, kvLen, kCache, vCache);
     if (restore != NO_ERROR) {
@@ -573,7 +661,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     }
     if (!mIsKVShared) {
         for (int b = 0; b < batch; ++b) {
-            for (int l = 0; l < insertLen; ++l) {
+            for (int l = 0; l < kvInsertLen; ++l) {
                 int logical = sparseQuery ? mMeta->sparseLogicalIndex(l) : (baseLogical + l);
                 if (logical < 0 || logical >= kvLen) {
                     return INVALID_VALUE;
@@ -593,6 +681,21 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                                                     mCache->maxSlots, physicalSlots, kvLen, vCache);
     if (cacheBlendScore != NO_ERROR) {
         return cacheBlendScore;
+    }
+    if (outputs.size() > 1) {
+        auto emit = _emitActiveIndicesCPU(mMeta, layerIndex, kvLen, outputs[1], scoreAttention);
+        if (emit != NO_ERROR) {
+            return emit;
+        }
+        sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
+        attnLen = output->length(1);
+        if (sparseQuery) {
+            if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+                return INVALID_VALUE;
+            }
+            baseLogical = 0;
+            kvLen = std::max(0, mMeta->logical_length);
+        }
     }
     if (mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite && kvLen > 0) {
         auto prefixDir = static_cast<CPUBackend*>(backend())->getRuntime()->hint().prefixcacheDirPath;
@@ -630,7 +733,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         }
     }
     ::memset(output->host<int8_t>(), 0, output->elementSize() * mBytes);
-    if (insertLen <= 0 || kvLen <= 0) {
+    if (attnLen <= 0 || kvLen <= 0) {
         return NO_ERROR;
     }
 
@@ -639,16 +742,18 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     const auto qInput = query->host<int8_t>();
     auto outPtr = output->host<int8_t>();
     int threadNum = static_cast<CPUBackend*>(backend())->threadNumber();
-    int totalWork = batch * insertLen * numHeads;
+    const bool queryRowsAreFull = scoreAttention && sparseQuery && queryLen > attnLen;
+    int totalWork = batch * attnLen * numHeads;
     MNN_CONCURRENCY_BEGIN(tId, threadNum) {
         std::vector<float> scores(kvLen);
         for (int index = (int)tId; index < totalWork; index += threadNum) {
             int h = index % numHeads;
             int tmp = index / numHeads;
-            int q = tmp % insertLen;
-            int b = tmp / insertLen;
+            int q = tmp % attnLen;
+            int b = tmp / attnLen;
             int kvHead = h / group;
             int qLogical = sparseQuery ? mMeta->sparseLogicalIndex(q) : (baseLogical + q);
+            int qRow = queryRowsAreFull ? qLogical : q;
             int validLen = std::min(kvLen, qLogical + 1);
             float maxScore = -std::numeric_limits<float>::infinity();
             for (int k = 0; k < validLen; ++k) {
@@ -656,7 +761,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                 float score = 0.0f;
                 if (mBytes == 4) {
                     const float* qPtr = reinterpret_cast<const float*>(qInput) +
-                        ((b * queryLen + q) * numHeads + h) * headDim;
+                        ((b * queryLen + qRow) * numHeads + h) * headDim;
                     const float* kPtr = reinterpret_cast<const float*>(kCache) +
                         ((slot * batch + b) * kvHeads + kvHead) * headDim;
                     for (int d = 0; d < headDim; ++d) {
@@ -664,12 +769,14 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                     }
                 } else {
                     for (int d = 0; d < headDim; ++d) {
-                        int qOffset = ((b * queryLen + q) * numHeads + h) * headDim + d;
+                        int qOffset = ((b * queryLen + qRow) * numHeads + h) * headDim + d;
                         int kOffset = ((slot * batch + b) * kvHeads + kvHead) * headDim + d;
                         score += _pagedRead(qInput, qOffset, mBytes) * _pagedRead(kCache, kOffset, mBytes);
                     }
                 }
-                score = score * mScale + _readFloatMask(mask, q, k, insertLen, kvLen, mBytes);
+                score = score * mScale +
+                        _readFloatMask(mask, queryRowsAreFull ? qLogical : q, k,
+                                       queryRowsAreFull ? queryLen : attnLen, kvLen, mBytes);
                 scores[k] = score;
                 maxScore = std::max(maxScore, score);
             }
@@ -690,7 +797,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                     float v = mBytes == 4 ? reinterpret_cast<const float*>(vCache)[vOffset] : _pagedRead(vCache, vOffset, mBytes);
                     acc += scores[k] * invSum * v;
                 }
-                int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
+                int outOffset = (b * attnLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
                 if (mBytes == 4) {
                     reinterpret_cast<float*>(outPtr)[outOffset] = acc;
                 } else {
@@ -724,6 +831,8 @@ public:
 };
 
 REGISTER_CPU_OP_CREATOR_TRANSFORMER(CPUPagedAttentionCreator, OpType_PagedAttention);
+REGISTER_CPU_OP_CREATOR_TRANSFORMER(CPUPagedAttentionCreator, OpType_PicScoreAttention);
+REGISTER_CPU_OP_CREATOR_TRANSFORMER(CPUPagedAttentionCreator, OpType_PicSparseAttention);
 
 } // namespace MNN
 

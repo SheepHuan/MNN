@@ -395,8 +395,8 @@ class MNNConverter:
             return self.rebuild_linear(op, graph)
         if op_type == 'FusedAttention':
             return self.rebuild_attnention(op, graph)
-        if op_type == 'PagedAttention':
-            return self.rebuild_attnention(op, graph, 'PagedAttention')
+        if op_type in ('PagedAttention', 'PicScoreAttention', 'PicSparseAttention'):
+            return self.rebuild_attnention(op, graph, op_type)
         if op_type == 'FusedLinearAttention':
             return self.rebuild_linear_attnention(op, graph)
         if op_type == "LayerNorm":

@@ -39,19 +39,21 @@ public:
 private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
     ErrorCode syncSlotTable(int requiredSlots);
-    ErrorCode syncSparseQuery(int insertLen);
+    ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
     ErrorCode ensureSparseFastKernels();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
     ErrorCode runCacheBlendScoring(int layerIndex, int kvLen);
-    bool canUseFastPrefill(const Tensor* mask, int baseLogical, int insertLen, int kvLen, bool sparseQuery,
+    bool canUseFastPrefill(const Tensor* mask, int baseLogical, int attnLen, int kvLen, bool sparseQuery,
                            bool externalHydrated, int* maskKeyLen) const;
-    bool canUseSparseFastPrefill(const Tensor* mask, int insertLen, int kvLen, bool externalHydrated) const;
+    bool canUseSparseFastPrefill(const Tensor* mask, int attnLen, int kvLen, bool externalHydrated,
+                                 bool queryRowsAreFull) const;
     ErrorCode runFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                              int maskKeyLen);
-    ErrorCode runSparseFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen);
+    ErrorCode runSparseFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
+                                   int attnLen, bool queryRowsAreFull);
 
     OpenCLBackend* mOpenCLBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -66,6 +68,7 @@ private:
     std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
     std::shared_ptr<KernelWrap> mCacheBlendTopKKernel;
     std::shared_ptr<KernelWrap> mRearrangeQKernel;
+    std::shared_ptr<KernelWrap> mRearrangeSparseQKernel;
     std::shared_ptr<KernelWrap> mRearrangeMaskKernel;
     std::shared_ptr<KernelWrap> mQKKernel;
     std::shared_ptr<KernelWrap> mSparseQKKernel;
@@ -90,6 +93,7 @@ private:
     int mCacheBlendIndexCount = 0;
     int mLayerIndex = -1;
     int mKVSharedLayerIndex = -1;
+    int mPicAttentionMode = 0; // 0: full, 1: score layer, 2: sparse layer
     bool mIsKVShared = false;
     int mBytes = 4;
     int mBatch = 0;

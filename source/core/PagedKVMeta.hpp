@@ -64,10 +64,15 @@ struct PagedKVMeta : public KVMeta {
     int request_capacity = 0;
     int logical_length = 0;
     int slot_table_version = 0;
+    int external_hydrate_start_layer_idx = 0;
     std::vector<int> slot_table_host;
     std::vector<PagedKVExternalSegment> external_segments;
     std::vector<int> external_loaded_layers;
     bool sparse_query_active = false;
+    int sparse_query_start_layer_idx = 0;
+    bool pic_active_rows = false;
+    int pic_active_start_layer_idx = 0;
+    int pic_active_count = 0;
     std::vector<int> sparse_query_logical_indices;
     bool cacheblend_score_active = false;
     bool cacheblend_score_ready = false;
@@ -77,6 +82,11 @@ struct PagedKVMeta : public KVMeta {
     int cacheblend_score_top_k = 0;
     std::vector<PagedKVExternalSegment> cacheblend_score_segments;
     std::vector<int> cacheblend_score_selected_local_indices;
+    bool pic_graph_active_plan_ready = false;
+    int pic_graph_score_layer_idx = -1;
+    int pic_graph_pic_start = 0;
+    int pic_graph_pic_token_count = 0;
+    std::vector<int> pic_graph_selected_local_indices;
 
     void beginRequest(int capacity) {
         request_active = true;
@@ -90,11 +100,17 @@ struct PagedKVMeta : public KVMeta {
         n_reserve = 0;
         reserve = nullptr;
         reserveHost.clear();
+        external_hydrate_start_layer_idx = 0;
         external_segments.clear();
         external_loaded_layers.clear();
         sparse_query_active = false;
+        sparse_query_start_layer_idx = 0;
+        pic_active_rows = false;
+        pic_active_start_layer_idx = 0;
+        pic_active_count = 0;
         sparse_query_logical_indices.clear();
         finishCacheBlendScoring();
+        finishPicGraphActivePlan();
         slot_table_host.resize(request_capacity);
         for (int i = 0; i < request_capacity; ++i) {
             slot_table_host[i] = request_base + i;
@@ -104,11 +120,17 @@ struct PagedKVMeta : public KVMeta {
 
     void finishRequest() {
         request_active = false;
+        external_hydrate_start_layer_idx = 0;
         external_segments.clear();
         external_loaded_layers.clear();
         sparse_query_active = false;
+        sparse_query_start_layer_idx = 0;
+        pic_active_rows = false;
+        pic_active_start_layer_idx = 0;
+        pic_active_count = 0;
         sparse_query_logical_indices.clear();
         finishCacheBlendScoring();
+        finishPicGraphActivePlan();
     }
 
     bool appendExternalSegments(const std::vector<PagedKVExternalSegment>& segments, size_t tokenCount) {
@@ -135,6 +157,32 @@ struct PagedKVMeta : public KVMeta {
         return true;
     }
 
+    bool bindExternalSegments(const std::vector<PagedKVExternalSegment>& segments, int logicalLength) {
+        if (!request_active || logicalLength < 0) {
+            return false;
+        }
+        if (!ensureLogicalCapacity(static_cast<size_t>(logicalLength))) {
+            return false;
+        }
+        external_segments.clear();
+        external_segments.reserve(segments.size());
+        for (const auto& segment : segments) {
+            const size_t end = segment.logicalStart + segment.tokenCount;
+            if (end > static_cast<size_t>(logicalLength)) {
+                external_segments.clear();
+                return false;
+            }
+            external_segments.emplace_back(segment);
+        }
+        external_loaded_layers.clear();
+        logical_length = logicalLength;
+        return true;
+    }
+
+    bool shouldHydrateExternalLayer(int layerIndex) const {
+        return !external_segments.empty() && layerIndex >= external_hydrate_start_layer_idx;
+    }
+
     bool externalLayerLoaded(int layerIndex) const {
         return std::find(external_loaded_layers.begin(), external_loaded_layers.end(), layerIndex) !=
                external_loaded_layers.end();
@@ -146,7 +194,7 @@ struct PagedKVMeta : public KVMeta {
         }
     }
 
-    bool beginSparseQuery(const std::vector<int>& logicalIndices) {
+    bool beginSparseQuery(const std::vector<int>& logicalIndices, int sparseStartLayerIdx = 0) {
         if (!request_active || logicalIndices.empty()) {
             return false;
         }
@@ -156,12 +204,20 @@ struct PagedKVMeta : public KVMeta {
             }
         }
         sparse_query_active = true;
+        sparse_query_start_layer_idx = std::max(0, sparseStartLayerIdx);
+        pic_active_rows = true;
+        pic_active_start_layer_idx = sparse_query_start_layer_idx;
+        pic_active_count = static_cast<int>(logicalIndices.size());
         sparse_query_logical_indices = logicalIndices;
         return true;
     }
 
     void finishSparseQuery() {
         sparse_query_active = false;
+        sparse_query_start_layer_idx = 0;
+        pic_active_rows = false;
+        pic_active_start_layer_idx = 0;
+        pic_active_count = 0;
         sparse_query_logical_indices.clear();
         add = 0;
         remove = 0;
@@ -175,6 +231,154 @@ struct PagedKVMeta : public KVMeta {
             return -1;
         }
         return sparse_query_logical_indices[queryIndex];
+    }
+
+    bool sparseQueryActiveForLayer(int layerIndex) const {
+        return sparse_query_active && layerIndex >= sparse_query_start_layer_idx;
+    }
+
+    bool sparseQueryBlockedBeforeLayer(int layerIndex) const {
+        return sparse_query_active && layerIndex < sparse_query_start_layer_idx;
+    }
+
+    bool picActiveRowsForLayer(int layerIndex) const {
+        return pic_active_rows && layerIndex >= pic_active_start_layer_idx && pic_active_count > 0;
+    }
+
+    int picActiveLogicalIndex(int activeIndex) const {
+        if (!pic_active_rows || activeIndex < 0 ||
+            activeIndex >= static_cast<int>(sparse_query_logical_indices.size())) {
+            return -1;
+        }
+        return sparse_query_logical_indices[activeIndex];
+    }
+
+    std::vector<int> buildCacheBlendActiveLogicalIndices(int kvLen) const {
+        std::vector<int> active;
+        if (kvLen <= 0 || cacheblend_score_pic_start < 0 || cacheblend_score_pic_token_count < 0) {
+            return active;
+        }
+        const int picStart = cacheblend_score_pic_start;
+        const int picEnd = std::min(kvLen, picStart + cacheblend_score_pic_token_count);
+        active.reserve(static_cast<size_t>(kvLen - cacheblend_score_pic_token_count) +
+                       cacheblend_score_selected_local_indices.size());
+        for (int logical = 0; logical < std::min(picStart, kvLen); ++logical) {
+            active.emplace_back(logical);
+        }
+        std::vector<int> selected = cacheblend_score_selected_local_indices;
+        std::sort(selected.begin(), selected.end());
+        selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+        for (int local : selected) {
+            const int logical = picStart + local;
+            if (logical >= picStart && logical < picEnd) {
+                active.emplace_back(logical);
+            }
+        }
+        for (int logical = picEnd; logical < kvLen; ++logical) {
+            active.emplace_back(logical);
+        }
+        return active;
+    }
+
+    std::vector<int> buildPicGraphActiveLogicalIndices(int kvLen) const {
+        std::vector<int> active;
+        if (!pic_graph_active_plan_ready || kvLen <= 0 || pic_graph_pic_start < 0 ||
+            pic_graph_pic_token_count < 0) {
+            return active;
+        }
+        const int picStart = pic_graph_pic_start;
+        const int picEnd = std::min(kvLen, picStart + pic_graph_pic_token_count);
+        active.reserve(static_cast<size_t>(kvLen - pic_graph_pic_token_count) +
+                       pic_graph_selected_local_indices.size());
+        for (int logical = 0; logical < std::min(picStart, kvLen); ++logical) {
+            active.emplace_back(logical);
+        }
+        std::vector<int> selected = pic_graph_selected_local_indices;
+        std::sort(selected.begin(), selected.end());
+        selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+        for (int local : selected) {
+            const int logical = picStart + local;
+            if (logical >= picStart && logical < picEnd) {
+                active.emplace_back(logical);
+            }
+        }
+        for (int logical = picEnd; logical < kvLen; ++logical) {
+            active.emplace_back(logical);
+        }
+        return active;
+    }
+
+    std::vector<int> buildBudgetActiveLogicalIndices(int kvLen, int budget) const {
+        std::vector<int> active;
+        if (kvLen <= 0 || budget <= 0) {
+            return active;
+        }
+        if (pic_graph_active_plan_ready && pic_graph_score_layer_idx >= 0) {
+            active = buildPicGraphActiveLogicalIndices(kvLen);
+            if (!active.empty()) {
+                return active;
+            }
+        }
+        if (cacheblend_score_ready && cacheblend_score_layer_idx >= 0) {
+            active = buildCacheBlendActiveLogicalIndices(kvLen);
+            if (!active.empty()) {
+                return active;
+            }
+        }
+        const int count = std::min(kvLen, budget);
+        active.reserve(count);
+        for (int logical = 0; logical < count; ++logical) {
+            active.emplace_back(logical);
+        }
+        return active;
+    }
+
+    bool activatePicRows(const std::vector<int>& logicalIndices, int sparseStartLayerIdx, int kvLen) {
+        logical_length = std::max(logical_length, kvLen);
+        return beginSparseQuery(logicalIndices, sparseStartLayerIdx);
+    }
+
+    bool beginPicGraphActivePlan(int picStart, int picTokenCount, int scoreLayerIdx,
+                                 const std::vector<int>& selectedLocalIndices) {
+        if (!request_active || picStart < 0 || picTokenCount < 0 || scoreLayerIdx < 0) {
+            return false;
+        }
+        std::vector<int> selected;
+        selected.reserve(selectedLocalIndices.size());
+        for (int local : selectedLocalIndices) {
+            if (local >= 0 && local < picTokenCount) {
+                selected.emplace_back(local);
+            }
+        }
+        std::sort(selected.begin(), selected.end());
+        selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+        pic_graph_active_plan_ready = true;
+        pic_graph_score_layer_idx = scoreLayerIdx;
+        pic_graph_pic_start = picStart;
+        pic_graph_pic_token_count = picTokenCount;
+        pic_graph_selected_local_indices = std::move(selected);
+        return true;
+    }
+
+    void finishPicGraphActivePlan() {
+        pic_graph_active_plan_ready = false;
+        pic_graph_score_layer_idx = -1;
+        pic_graph_pic_start = 0;
+        pic_graph_pic_token_count = 0;
+        pic_graph_selected_local_indices.clear();
+    }
+
+    int graphActiveBudget(int seqLen) const {
+        if (pic_graph_active_plan_ready && pic_graph_pic_token_count >= 0) {
+            const int compact = seqLen - pic_graph_pic_token_count +
+                                static_cast<int>(pic_graph_selected_local_indices.size());
+            return std::max(0, std::min(seqLen, compact));
+        }
+        if (cacheblend_score_active && cacheblend_score_pic_token_count >= 0) {
+            const int compact = seqLen - cacheblend_score_pic_token_count + cacheblend_score_top_k;
+            return std::max(0, std::min(seqLen, compact));
+        }
+        return seqLen;
     }
 
     bool beginCacheBlendScoring(int picStart, int picTokenCount, int scoreLayerIdx, int topK,
