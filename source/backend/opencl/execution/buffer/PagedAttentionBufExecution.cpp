@@ -114,6 +114,146 @@ static int _envIntValue(const char* name, int defaultValue) {
     return static_cast<int>(parsed);
 }
 
+struct SparsePrefillPiece {
+    SparsePrefillPiece() = default;
+    SparsePrefillPiece(int qStartValue, int qLenValue, int activeKvLenValue)
+        : qStart(qStartValue), qLen(qLenValue), activeKvLen(activeKvLenValue) {
+    }
+    int qStart = 0;
+    int qLen = 0;
+    int activeKvLen = 0;
+};
+
+static std::vector<SparsePrefillPiece> _buildFixedSparsePieces(const std::vector<int>& logicalIndices, int activeLen,
+                                                               int kvLen, int qChunkLen) {
+    std::vector<SparsePrefillPiece> pieces;
+    if (activeLen <= 0 || kvLen <= 0 || qChunkLen <= 0) {
+        return pieces;
+    }
+    pieces.reserve(static_cast<size_t>(UP_DIV(activeLen, qChunkLen)));
+    for (int qStart = 0; qStart < activeLen; qStart += qChunkLen) {
+        const int qPieceLen = std::min(qChunkLen, activeLen - qStart);
+        int pieceMaxLogical = -1;
+        if (static_cast<int>(logicalIndices.size()) >= qStart + qPieceLen) {
+            for (int qi = 0; qi < qPieceLen; ++qi) {
+                pieceMaxLogical = std::max(pieceMaxLogical, logicalIndices[static_cast<size_t>(qStart + qi)]);
+            }
+        } else {
+            pieceMaxLogical = kvLen - 1;
+        }
+        pieces.push_back({qStart, qPieceLen, std::max(1, std::min(kvLen, pieceMaxLogical + 1))});
+    }
+    return pieces;
+}
+
+static std::vector<SparsePrefillPiece> _buildRangeAwareSparsePieces(const std::vector<int>& logicalIndices,
+                                                                    int activeLen, int kvLen, int qChunkLen) {
+    if (!_envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FAST_RANGE_PIECES", true) ||
+        activeLen <= 0 || kvLen <= 0 || qChunkLen <= 4 ||
+        static_cast<int>(logicalIndices.size()) < activeLen) {
+        return _buildFixedSparsePieces(logicalIndices, activeLen, kvLen, qChunkLen);
+    }
+    const int groupCount = UP_DIV(activeLen, 4);
+    const int maxGroupsPerPiece = std::max(1, qChunkLen / 4);
+    const int basePieces = std::max(1, UP_DIV(activeLen, qChunkLen));
+    const int pieceMultiplier =
+        std::max(1, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FAST_RANGE_PIECE_MULTIPLIER", 2));
+    const int maxPiecesEnv =
+        std::max(1, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FAST_RANGE_MAX_PIECES", 32));
+    const int maxPieces = std::min(groupCount, std::min(maxPiecesEnv, std::max(basePieces, basePieces * pieceMultiplier)));
+    const uint64_t launchPenalty =
+        static_cast<uint64_t>(std::max(0, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FAST_RANGE_LAUNCH_PENALTY_TILES", 96)));
+    if (maxPieces <= basePieces) {
+        return _buildFixedSparsePieces(logicalIndices, activeLen, kvLen, qChunkLen);
+    }
+
+    std::vector<int> groupMaxLogical(static_cast<size_t>(groupCount), -1);
+    for (int group = 0; group < groupCount; ++group) {
+        const int qStart = group * 4;
+        const int qLen = std::min(4, activeLen - qStart);
+        for (int qi = 0; qi < qLen; ++qi) {
+            groupMaxLogical[static_cast<size_t>(group)] =
+                std::max(groupMaxLogical[static_cast<size_t>(group)],
+                         logicalIndices[static_cast<size_t>(qStart + qi)]);
+        }
+    }
+
+    const uint64_t inf = std::numeric_limits<uint64_t>::max() / 4;
+    std::vector<std::vector<uint64_t>> dp(static_cast<size_t>(maxPieces + 1),
+                                         std::vector<uint64_t>(static_cast<size_t>(groupCount + 1), inf));
+    std::vector<std::vector<int>> prev(static_cast<size_t>(maxPieces + 1),
+                                       std::vector<int>(static_cast<size_t>(groupCount + 1), -1));
+    dp[0][0] = 0;
+    for (int piece = 1; piece <= maxPieces; ++piece) {
+        for (int end = 1; end <= groupCount; ++end) {
+            int maxLogical = -1;
+            const int startMin = std::max(0, end - maxGroupsPerPiece);
+            for (int start = end - 1; start >= startMin; --start) {
+                maxLogical = std::max(maxLogical, groupMaxLogical[static_cast<size_t>(start)]);
+                if (dp[static_cast<size_t>(piece - 1)][static_cast<size_t>(start)] == inf) {
+                    continue;
+                }
+                const int activeKvLen = std::max(1, std::min(kvLen, maxLogical + 1));
+                const uint64_t cost =
+                    dp[static_cast<size_t>(piece - 1)][static_cast<size_t>(start)] +
+                    static_cast<uint64_t>(end - start) * static_cast<uint64_t>(UP_DIV(activeKvLen, 4)) +
+                    (piece > 1 ? launchPenalty : 0);
+                if (cost < dp[static_cast<size_t>(piece)][static_cast<size_t>(end)]) {
+                    dp[static_cast<size_t>(piece)][static_cast<size_t>(end)] = cost;
+                    prev[static_cast<size_t>(piece)][static_cast<size_t>(end)] = start;
+                }
+            }
+        }
+    }
+
+    int bestPieces = basePieces;
+    uint64_t bestCost = inf;
+    for (int piece = basePieces; piece <= maxPieces; ++piece) {
+        const auto cost = dp[static_cast<size_t>(piece)][static_cast<size_t>(groupCount)];
+        if (cost < bestCost) {
+            bestCost = cost;
+            bestPieces = piece;
+        }
+    }
+    if (bestCost == inf) {
+        return _buildFixedSparsePieces(logicalIndices, activeLen, kvLen, qChunkLen);
+    }
+
+    std::vector<int> boundaries;
+    int cursor = groupCount;
+    for (int piece = bestPieces; piece > 0; --piece) {
+        const int start = prev[static_cast<size_t>(piece)][static_cast<size_t>(cursor)];
+        if (start < 0) {
+            return _buildFixedSparsePieces(logicalIndices, activeLen, kvLen, qChunkLen);
+        }
+        boundaries.emplace_back(cursor);
+        cursor = start;
+    }
+    boundaries.emplace_back(0);
+    std::reverse(boundaries.begin(), boundaries.end());
+
+    std::vector<SparsePrefillPiece> pieces;
+    pieces.reserve(static_cast<size_t>(bestPieces));
+    for (int i = 0; i < bestPieces; ++i) {
+        const int groupStart = boundaries[static_cast<size_t>(i)];
+        const int groupEnd = boundaries[static_cast<size_t>(i + 1)];
+        const int qStart = groupStart * 4;
+        const int qLen = std::min(activeLen - qStart, (groupEnd - groupStart) * 4);
+        if (qLen <= 0) {
+            continue;
+        }
+        int maxLogical = -1;
+        for (int group = groupStart; group < groupEnd; ++group) {
+            maxLogical = std::max(maxLogical, groupMaxLogical[static_cast<size_t>(group)]);
+        }
+        pieces.push_back({qStart, qLen, std::max(1, std::min(kvLen, maxLogical + 1))});
+    }
+    if (pieces.empty()) {
+        return _buildFixedSparsePieces(logicalIndices, activeLen, kvLen, qChunkLen);
+    }
+    return pieces;
+}
+
 static int _prefillQChunkLen(int seqLen, int kvLen, int batch, int numHeads, int layerCount) {
     if (seqLen <= 0 || kvLen <= 0 || batch <= 0 || numHeads <= 0) {
         return 0;
@@ -245,8 +385,9 @@ static size_t _picCacheSourceSlotCount(const PagedKVMeta* meta) {
     if (meta == nullptr) {
         return 0;
     }
-    return std::max(_segmentTokenCount(meta->external_segments),
-                    _segmentTokenCount(meta->cacheblend_score_segments));
+    return std::max({meta->external_source_slot_reserve,
+                     _segmentTokenCount(meta->external_segments),
+                     _segmentTokenCount(meta->cacheblend_score_segments)});
 }
 
 struct ExternalLayerMappedTarget {
@@ -343,6 +484,25 @@ static int _lastExternalLayerIndex(const PagedKVMeta* meta) {
         }
     }
     return last;
+}
+
+static int _externalLayerRequiredSlots(const PagedKVMeta* meta, int kvLen) {
+    const size_t sourceSlots = _picCacheSourceSlotCount(meta);
+    if (sourceSlots == 0) {
+        return kvLen;
+    }
+    const int sourceBase = _picCacheSourceSlotBase(meta, kvLen);
+    if (sourceSlots > static_cast<size_t>(std::numeric_limits<int>::max() - sourceBase)) {
+        return std::numeric_limits<int>::max();
+    }
+    return std::max(kvLen, sourceBase + static_cast<int>(sourceSlots));
+}
+
+static bool _externalLayerTargetReady(const ExternalLayerMappedTarget& target, int batch, int kvHeads, int headDim,
+                                      int bytes, int requiredSlots) {
+    return target.key != nullptr && target.value != nullptr && target.queue != nullptr &&
+        target.batch == batch && target.kvHeads == kvHeads && target.headDim == headDim &&
+        target.bytes == bytes && target.maxSlots >= requiredSlots;
 }
 
 static int _externalLayerReadWindow() {
@@ -818,13 +978,13 @@ static bool _readExternalLayerSegmentOpenCL(const PagedKVMeta* meta, const Paged
 
 static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
     const PagedKVMeta* meta, std::string requestKey, std::vector<PagedKVExternalSegment> segments, int layerIndex,
-    int batch, int kvHeads, int headDim, int bytes, int kvLen) {
+    int batch, int kvHeads, int headDim, int bytes, int kvLen, ExternalLayerMappedTarget target) {
     auto result = std::make_shared<ExternalLayerReadResult>();
     result->requestKey = std::move(requestKey);
     result->layerIndex = layerIndex;
     result->segments.resize(segments.size());
-    auto target = _lookupExternalLayerMappedTarget(meta, layerIndex, batch, kvHeads, headDim, bytes);
-    const bool hasTarget = target.key != nullptr && target.value != nullptr && target.queue != nullptr;
+    const bool hasTarget = _externalLayerTargetReady(
+        target, batch, kvHeads, headDim, bytes, _externalLayerRequiredSlots(meta, kvLen));
     int sourceSlotCursor = _picCacheSourceSlotBase(meta, kvLen);
     for (size_t i = 0; i < segments.size(); ++i) {
         const int sourceSlotStart = sourceSlotCursor;
@@ -852,6 +1012,7 @@ static void _scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLa
     if (startLayer < 0 || lastLayer < startLayer) {
         return;
     }
+    const int requiredSlots = _externalLayerRequiredSlots(meta, kvLen);
     const int window = _externalLayerReadWindow();
     if (window == 0) {
         return;
@@ -859,7 +1020,7 @@ static void _scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLa
     const int endLayer = window > 0 ? std::min(lastLayer, startLayer + window - 1) : lastLayer;
     const std::string requestKey = _externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
     const std::string requestPrefix = requestKey + "\n";
-    std::vector<int> layersToSchedule;
+    std::vector<std::pair<int, ExternalLayerMappedTarget>> layersToSchedule;
     {
         std::lock_guard<std::mutex> lock(gExternalLayerReadMutex);
         for (auto it = gExternalLayerReadTasks.begin(); it != gExternalLayerReadTasks.end();) {
@@ -875,16 +1036,24 @@ static void _scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLa
             }
             const auto key = _externalLayerTaskKey(requestKey, layerIndex);
             if (gExternalLayerReadTasks.find(key) == gExternalLayerReadTasks.end()) {
-                layersToSchedule.emplace_back(layerIndex);
+                auto target = _lookupExternalLayerMappedTarget(meta, layerIndex, batch, kvHeads, headDim, bytes);
+                if (!_externalLayerTargetReady(target, batch, kvHeads, headDim, bytes, requiredSlots)) {
+                    break;
+                }
+                layersToSchedule.emplace_back(layerIndex, std::move(target));
             }
         }
         auto segments = meta->external_segments;
-        for (int layerIndex : layersToSchedule) {
+        for (const auto& item : layersToSchedule) {
+            const int layerIndex = item.first;
+            auto target = item.second;
             const auto key = _externalLayerTaskKey(requestKey, layerIndex);
             auto future = std::async(std::launch::async,
-                                     [meta, requestKey, segments, layerIndex, batch, kvHeads, headDim, bytes, kvLen]() {
+                                     [meta, requestKey, segments, layerIndex, batch, kvHeads, headDim, bytes, kvLen,
+                                      target]() {
                                          return _readExternalLayerOpenCL(meta, requestKey, segments, layerIndex,
-                                                                         batch, kvHeads, headDim, bytes, kvLen);
+                                                                         batch, kvHeads, headDim, bytes, kvLen,
+                                                                         target);
                                      }).share();
             ExternalLayerReadTask task;
             task.requestKey = requestKey;
@@ -952,7 +1121,8 @@ static bool _writeShapeFile(const std::string& path, int batch, int kvHeads, int
        << "  \"rope_scaling_high_freq_factor\": " << (meta != nullptr ? meta->rope_scaling_high_freq_factor : 4.0f) << ",\n"
        << "  \"rope_scaling_original_max_position_embeddings\": "
        << (meta != nullptr ? meta->rope_scaling_original_max_position_embeddings : 0) << ",\n"
-       << "  \"max_position_embeddings\": " << (meta != nullptr ? meta->max_position_embeddings : 0) << "\n"
+       << "  \"max_position_embeddings\": " << (meta != nullptr ? meta->max_position_embeddings : 0) << ",\n"
+       << "  \"rope_attention_scaling\": " << (meta != nullptr ? meta->rope_attention_scaling : 1.0f) << "\n"
        << "}\n";
     return os.good();
 }
@@ -1242,7 +1412,7 @@ ErrorCode PagedAttentionBufExecution::ensureSparseFastKernels() {
         return INVALID_VALUE;
     }
     const int groupSize = mNumHead / mKvNumHead;
-    if (mSparseQKKernel && mSparseQKVKernel && mSparseKernelGroupSize == groupSize) {
+    if (mSparseQKKernel && mSparseQKVKernel && mSparseSoftmaxQKVKernel && mSparseKernelGroupSize == groupSize) {
         return NO_ERROR;
     }
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
@@ -1252,8 +1422,12 @@ ErrorCode PagedAttentionBufExecution::ensureSparseFastKernels() {
     mSparseQKVKernel = runtime->buildKernel("attention_buf", "matmul_qkv_sparse_prefill_piece",
                                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                                             mOpenCLBackend->getPrecision());
+    mSparseSoftmaxQKVKernel = runtime->buildKernel("attention_buf", "matmul_softmax_qkv_sparse_prefill_piece",
+                                                   {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                                   mOpenCLBackend->getPrecision());
     OPENCL_CHECK_KERNEL(mSparseQKKernel);
     OPENCL_CHECK_KERNEL(mSparseQKVKernel);
+    OPENCL_CHECK_KERNEL(mSparseSoftmaxQKVKernel);
     mSparseKernelGroupSize = groupSize;
     return NO_ERROR;
 }
@@ -1328,8 +1502,10 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     size_t fallbackTokens = 0;
     int directSegments = 0;
     const bool legacy = _legacyB863976OpenCL();
-    if (!legacy) {
-        _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+    if (!legacy && mCache != nullptr && mCache->key != nullptr && mCache->value != nullptr) {
+        _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes,
+                                           mCache->maxSlots, mCache->key, mCache->value, queue);
     }
     auto prefetched = legacy ? nullptr
                              : _takeExternalLayerRead(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
@@ -1343,7 +1519,6 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
                   layerIndex);
         return INVALID_VALUE;
     }
-    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
     auto directTarget = _lookupExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes);
     const bool hasDirectTarget = directTarget.key != nullptr && directTarget.value != nullptr &&
                                  directTarget.queue != nullptr;
@@ -1502,9 +1677,6 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         queue.enqueueNDRangeKernel(mHydrateExternalKernel->get(), cl::NullRange, cl::NDRange(total), cl::NullRange);
     }
     mMeta->markExternalLayerLoaded(layerIndex);
-    if (!legacy) {
-        _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
-    }
     if (profile) {
         queue.finish();
         MNN_PRINT("OpenCLPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d async_read=%d "
@@ -1520,6 +1692,13 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
     if (mMeta == nullptr || !mMeta->needsCacheBlendScoring(layerIndex)) {
         return NO_ERROR;
     }
+    const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t readUs = 0;
+    uint64_t scoreKernelUs = 0;
+    uint64_t topKUs = 0;
+    uint64_t readbackUs = 0;
     const int picTokenCount = mMeta->cacheblend_score_pic_token_count;
     const int topK = mMeta->cacheblend_score_top_k;
     if (picTokenCount < 0 || topK < 0 || topK > picTokenCount ||
@@ -1571,11 +1750,16 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
             return OUT_OF_MEMORY;
         }
         auto& cacheValueBuffer = openCLBuffer(mCache->value.get());
+        uint64_t opStartUs = profileDetail ? _nowUs() : 0;
         if (!_readExternalValueSegmentToPagedCacheOpenCL(
                 layer->valuePath, cacheValueBuffer, queue, mBatch, mKvNumHead, mCache->maxSlots,
                 static_cast<size_t>(sourceSlotStart), sourceTokenCount, sourceTokenOffset, segment.tokenCount,
                 mHeadDim, mBytes)) {
             return INVALID_VALUE;
+        }
+        if (profileDetail) {
+            queue.finish();
+            readUs += _nowUs() - opStartUs;
         }
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
@@ -1593,9 +1777,14 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
         ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
         ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(scoreOffset));
         MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_value_score");
+        opStartUs = profileDetail ? _nowUs() : 0;
         ret = queue.enqueueNDRangeKernel(mCacheBlendScoreKernel->get(), cl::NullRange,
                                          cl::NDRange(static_cast<int>(segment.tokenCount)), cl::NullRange);
         MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_value_score");
+        if (profileDetail) {
+            queue.finish();
+            scoreKernelUs += _nowUs() - opStartUs;
+        }
         scoreOffset += segment.tokenCount;
     }
     if (scoreOffset != static_cast<size_t>(picTokenCount)) {
@@ -1608,14 +1797,23 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
     ret |= mCacheBlendTopKKernel->get().setArg(idx++, picTokenCount);
     ret |= mCacheBlendTopKKernel->get().setArg(idx++, topK);
     MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_topk");
-    constexpr int topKLocalSize = 64;
+    constexpr int topKLocalSize = 256;
+    uint64_t opStartUs = profileDetail ? _nowUs() : 0;
     ret = queue.enqueueNDRangeKernel(mCacheBlendTopKKernel->get(), cl::NullRange, cl::NDRange(topKLocalSize),
                                      cl::NDRange(topKLocalSize));
     MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_topk");
+    if (profileDetail) {
+        queue.finish();
+        topKUs += _nowUs() - opStartUs;
+    }
     std::vector<int> selected(topK);
+    opStartUs = profileDetail ? _nowUs() : 0;
     if (queue.enqueueReadBuffer(openCLBuffer(mCacheBlendIndices.get()), CL_TRUE, 0,
                                 static_cast<size_t>(topK) * sizeof(int), selected.data()) != CL_SUCCESS) {
         return INVALID_VALUE;
+    }
+    if (profileDetail) {
+        readbackUs += _nowUs() - opStartUs;
     }
     std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
     for (int index : selected) {
@@ -1625,10 +1823,18 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
         seen[static_cast<size_t>(index)] = 1;
     }
     mMeta->setCacheBlendScoringResult(selected);
-    if (_profilePagedAttention()) {
+    if (profile) {
         queue.finish();
-        MNN_PRINT("OpenCLPagedAttention profile op=cacheblend_score layer=%d pic_tokens=%d top_k=%d\n",
-                  layerIndex, picTokenCount, topK);
+        const uint64_t totalUs = _nowUs() - startUs;
+        MNN_PRINT("OpenCLPagedAttention profile op=cacheblend_score layer=%d pic_tokens=%d top_k=%d us=%llu "
+                  "read_us=%llu score_kernel_us=%llu topk_us=%llu readback_us=%llu detail=%d\n",
+                  layerIndex, picTokenCount, topK,
+                  static_cast<unsigned long long>(totalUs),
+                  static_cast<unsigned long long>(readUs),
+                  static_cast<unsigned long long>(scoreKernelUs),
+                  static_cast<unsigned long long>(topKUs),
+                  static_cast<unsigned long long>(readbackUs),
+                  profileDetail ? 1 : 0);
     }
     return NO_ERROR;
 }
@@ -1736,6 +1942,7 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     if (sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
         qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
     }
+    auto pieces = _buildRangeAwareSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen);
     auto err = ensureFastPrefillTemps(activeLen, kvLen, qChunkLen, staticWorkspace);
     if (err != NO_ERROR && staticWorkspace) {
         static std::once_flag fallbackOnce;
@@ -1754,6 +1961,7 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         mFastStaticWorkspace = false;
         staticWorkspace = false;
         qChunkLen = _prefillQChunkLen(activeLen, kvLen, mBatch, mNumHead, layerCount);
+        pieces = _buildRangeAwareSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen);
         err = ensureFastPrefillTemps(activeLen, kvLen, qChunkLen, false);
     }
     if (err != NO_ERROR) {
@@ -1792,6 +2000,13 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     const bool directValuePrefill = _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL", false) &&
         mCache != nullptr && mCache->value != nullptr && mCache->maxSlots >= kvLen &&
         _slotTableIsIdentity(mMeta, kvLen);
+    const bool fusedSoftmaxQKVRequested =
+        _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FUSED_SOFTMAX_QKV", false) ||
+        _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH", false);
+    const int fusedSoftmaxQKVMaxActive = std::max(0,
+        _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FUSED_SOFTMAX_QKV_MAX_ACTIVE", 256));
+    const bool fusedSoftmaxQKV = fusedSoftmaxQKVRequested &&
+        (fusedSoftmaxQKVMaxActive <= 0 || activeLen <= fusedSoftmaxQKVMaxActive);
     cl::Buffer& qkvValueBuffer = directValuePrefill ? openCLBuffer(mCache->value.get()) : tempBuffer(mTempV.get());
     const int qkvValueMaxLen = directValuePrefill ? mCache->maxSlots : kvPack;
     cl_int ret = CL_SUCCESS;
@@ -1880,24 +2095,15 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         finishSparseStage(2);
     }
 
-    int qSplitNum = UP_DIV(activeLen, qChunkLen);
-    for (int piece = 0; piece < qSplitNum; ++piece) {
-        const int qStart = piece * qChunkLen;
-        const int qPieceLen = std::min(qChunkLen, activeLen - qStart);
+    const int qSplitNum = static_cast<int>(pieces.size());
+    for (const auto& piece : pieces) {
+        const int qStart = piece.qStart;
+        const int qPieceLen = piece.qLen;
         if (qPieceLen <= 0) {
             continue;
         }
         const int qPiecePack = ROUND_UP(qPieceLen, 4);
-        int pieceMaxLogical = -1;
-        if (mMeta != nullptr &&
-            static_cast<int>(mMeta->sparse_query_logical_indices.size()) >= qStart + qPieceLen) {
-            for (int qi = 0; qi < qPieceLen; ++qi) {
-                pieceMaxLogical = std::max(pieceMaxLogical, mMeta->sparse_query_logical_indices[qStart + qi]);
-            }
-        } else {
-            pieceMaxLogical = kvLen - 1;
-        }
-        const int activeKvLen = std::max(1, std::min(kvLen, pieceMaxLogical + 1));
+        const int activeKvLen = std::max(1, std::min(kvLen, piece.activeKvLen));
         if (profileDetail) {
             qkRectTiles += static_cast<uint64_t>(UP_DIV(qPieceLen, 4)) * UP_DIV(activeKvLen, 4);
             if (mMeta != nullptr &&
@@ -1945,58 +2151,89 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
             finishSparseStage(4);
         }
 
-        idx = 0;
-        gws = {64u, static_cast<uint32_t>(UP_DIV(qPiecePack, 4)), static_cast<uint32_t>(mNumHead * mBatch)};
-        ret = CL_SUCCESS;
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[0]);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[1]);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[2]);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, qPiecePack);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, mNumHead * mBatch);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, activeKvLen);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, activeLen);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, qStart);
-        ret |= mSparseSoftmaxKernel->get().setArg(idx++, qPieceLen);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast softmax");
-        opStartUs = profileDetail ? _nowUs() : 0;
-        run3DKernelDefault(mSparseSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
-        if (profileDetail) {
-            runtime->commandQueue().finish();
-            softmaxUs += _nowUs() - opStartUs;
+        if (fusedSoftmaxQKV) {
+            idx = 0;
+            gws = {64u, static_cast<uint32_t>(UP_DIV(qPieceLen, 4)),
+                   static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, gws[0]);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, gws[1]);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, gws[2]);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, qkvValueBuffer);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, activeLen);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, qStart);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, qPieceLen);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, activeKvLen);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, qkvValueMaxLen);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, mNumHead);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mSparseSoftmaxQKVKernel->get().setArg(idx++, headPack8);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast matmul_softmax_qkv_sparse_prefill_piece");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3D(mSparseSoftmaxQKVKernel, gws, "matmul_softmax_qkv_sparse_prefill_piece", "attention_buf");
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                qkvUs += _nowUs() - opStartUs;
+            } else {
+                finishSparseStage(16);
+            }
         } else {
-            finishSparseStage(8);
-        }
+            idx = 0;
+            gws = {64u, static_cast<uint32_t>(UP_DIV(qPiecePack, 4)), static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[0]);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[1]);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, gws[2]);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, qPiecePack);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, mNumHead * mBatch);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, activeKvLen);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, activeLen);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, qStart);
+            ret |= mSparseSoftmaxKernel->get().setArg(idx++, qPieceLen);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast softmax");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3DKernelDefault(mSparseSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                softmaxUs += _nowUs() - opStartUs;
+            } else {
+                finishSparseStage(8);
+            }
 
-        idx = 0;
-        gws = {static_cast<uint32_t>(UP_DIV(mHeadDim, 8)), static_cast<uint32_t>(UP_DIV(qPieceLen, 4)),
-               static_cast<uint32_t>(mNumHead * mBatch)};
-        ret = CL_SUCCESS;
-        ret |= mSparseQKVKernel->get().setArg(idx++, gws[0]);
-        ret |= mSparseQKVKernel->get().setArg(idx++, gws[1]);
-        ret |= mSparseQKVKernel->get().setArg(idx++, gws[2]);
-        ret |= mSparseQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
-        ret |= mSparseQKVKernel->get().setArg(idx++, qkvValueBuffer);
-        ret |= mSparseQKVKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
-        ret |= mSparseQKVKernel->get().setArg(idx++, openCLBuffer(output));
-        ret |= mSparseQKVKernel->get().setArg(idx++, activeLen);
-        ret |= mSparseQKVKernel->get().setArg(idx++, qStart);
-        ret |= mSparseQKVKernel->get().setArg(idx++, qPieceLen);
-        ret |= mSparseQKVKernel->get().setArg(idx++, activeKvLen);
-        ret |= mSparseQKVKernel->get().setArg(idx++, qkvValueMaxLen);
-        ret |= mSparseQKVKernel->get().setArg(idx++, mNumHead);
-        ret |= mSparseQKVKernel->get().setArg(idx++, mKvNumHead);
-        ret |= mSparseQKVKernel->get().setArg(idx++, headPack8);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast matmul_qkv_sparse_prefill_piece");
-        opStartUs = profileDetail ? _nowUs() : 0;
-        run3D(mSparseQKVKernel, gws, "matmul_qkv_sparse_prefill_piece", "attention_buf");
-        if (profileDetail) {
-            runtime->commandQueue().finish();
-            qkvUs += _nowUs() - opStartUs;
-        } else {
-            finishSparseStage(16);
+            idx = 0;
+            gws = {static_cast<uint32_t>(UP_DIV(mHeadDim, 8)), static_cast<uint32_t>(UP_DIV(qPieceLen, 4)),
+                   static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mSparseQKVKernel->get().setArg(idx++, gws[0]);
+            ret |= mSparseQKVKernel->get().setArg(idx++, gws[1]);
+            ret |= mSparseQKVKernel->get().setArg(idx++, gws[2]);
+            ret |= mSparseQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
+            ret |= mSparseQKVKernel->get().setArg(idx++, qkvValueBuffer);
+            ret |= mSparseQKVKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= mSparseQKVKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= mSparseQKVKernel->get().setArg(idx++, activeLen);
+            ret |= mSparseQKVKernel->get().setArg(idx++, qStart);
+            ret |= mSparseQKVKernel->get().setArg(idx++, qPieceLen);
+            ret |= mSparseQKVKernel->get().setArg(idx++, activeKvLen);
+            ret |= mSparseQKVKernel->get().setArg(idx++, qkvValueMaxLen);
+            ret |= mSparseQKVKernel->get().setArg(idx++, mNumHead);
+            ret |= mSparseQKVKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mSparseQKVKernel->get().setArg(idx++, headPack8);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse fast matmul_qkv_sparse_prefill_piece");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3D(mSparseQKVKernel, gws, "matmul_qkv_sparse_prefill_piece", "attention_buf");
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                qkvUs += _nowUs() - opStartUs;
+            } else {
+                finishSparseStage(16);
+            }
         }
     }
     if (profile) {
@@ -2005,11 +2242,12 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         const uint64_t totalUs = _nowUs() - startUs;
         if (profileDetail) {
             MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
-                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d us=%llu "
+                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d direct_value=%d "
+                      "fused_softmax_qkv=%d us=%llu "
                       "rearrange_us=%llu pack_us=%llu qk_us=%llu softmax_us=%llu qkv_us=%llu "
                       "qk_rect_tiles=%llu qk_active_tiles=%llu\n",
                       layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
-                      staticWorkspace ? 1 : 0,
+                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, fusedSoftmaxQKV ? 1 : 0,
                       static_cast<unsigned long long>(totalUs),
                       static_cast<unsigned long long>(rearrangeUs),
                       static_cast<unsigned long long>(packUs),
@@ -2020,9 +2258,10 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
                       static_cast<unsigned long long>(qkActiveTiles));
         } else {
             MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
-                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d us=%llu\n",
+                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d direct_value=%d "
+                      "fused_softmax_qkv=%d us=%llu\n",
                       layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
-                      staticWorkspace ? 1 : 0,
+                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, fusedSoftmaxQKV ? 1 : 0,
                       static_cast<unsigned long long>(totalUs));
         }
     }
@@ -2350,6 +2589,23 @@ ErrorCode PagedAttentionBufExecution::onResize(const std::vector<Tensor*>& input
         }
     }
     auto err = ensureCache(maxSlots, mBatch, mKvNumHead, mHeadDim);
+    const int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
+    if (err == NO_ERROR && !_legacyB863976OpenCL() && mMeta != nullptr &&
+        mMeta->shouldHydrateExternalLayer(layerIndex)) {
+        size_t kept = mMeta->previous >= mMeta->remove ? (mMeta->previous - mMeta->remove) : 0;
+        const int baseLogical = static_cast<int>(kept) + _reverseCount(mMeta);
+        const int kvWriteLen = mMeta->add > 0
+            ? static_cast<int>(std::min<size_t>(mMeta->add, mNewKvSeqLen))
+            : mNewKvSeqLen;
+        const bool plannedSparseLayer = mPicAttentionMode == 2 &&
+            (mMeta->sparse_query_active || mMeta->cacheblend_score_active || mMeta->pic_graph_active_plan_ready);
+        const int prefetchKvLen = plannedSparseLayer ? std::max(0, mMeta->logical_length)
+                                                     : (baseLogical + kvWriteLen);
+        if (prefetchKvLen > 0 && prefetchKvLen <= maxSlots) {
+            _scheduleExternalLayerReadsFrom(mMeta, std::max(0, mMeta->external_hydrate_start_layer_idx),
+                                            mBatch, mKvNumHead, mHeadDim, mBytes, prefetchKvLen);
+        }
+    }
     if (_picOpenCLDebug()) {
         const int outLen = outputs[0] != nullptr && outputs[0]->dimensions() > 1 ? outputs[0]->length(1) : -1;
         const int budget = inputs.size() > 4 && inputs[4] != nullptr && inputs[4]->host<int32_t>() != nullptr
@@ -2469,6 +2725,10 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     if (!_legacyB863976OpenCL()) {
         _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, mCache->maxSlots,
                                            mCache->key, mCache->value, queue);
+    }
+    if (!_legacyB863976OpenCL() && mMeta != nullptr && mMeta->shouldHydrateExternalLayer(layerIndex)) {
+        _scheduleExternalLayerReadsFrom(mMeta, std::max(0, mMeta->external_hydrate_start_layer_idx),
+                                        mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
     }
     const bool shouldHydrateExternal = mMeta != nullptr && mMeta->shouldHydrateExternalLayer(layerIndex);
     if (shouldHydrateExternal && !mMeta->externalLayerLoaded(layerIndex)) {

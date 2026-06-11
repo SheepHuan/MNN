@@ -39,6 +39,7 @@ private:
     void handleHealth(const httplib::Request& req, httplib::Response& res);
     void handleModels(const httplib::Request& req, httplib::Response& res);
     void handleReset(const httplib::Request& req, httplib::Response& res);
+    void handleUpdateRuntimeCache(const httplib::Request& req, httplib::Response& res);
     void handlePrefillText(const httplib::Request& req, httplib::Response& res);
     void handlePicCaches(const httplib::Request& req, httplib::Response& res);
     void handleChatCompletions(const httplib::Request& req, httplib::Response& res);

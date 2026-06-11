@@ -7,6 +7,14 @@ description: 当用户要求分析或优化 MNN PIC/PagedAttention 的 OpenCL At
 
 本 Skill 用于优化 MNN PIC/PagedAttention 在 OpenCL backend 上的 attention 计算，尤其是 OrangePi/Mali 上的 cacheblend、epic、kvshare sparse prefill。核心目标是先保证执行语义正确，再做 kernel 优化。
 
+当前 OpenCL PIC 优化的连续记录文档是：
+
+```text
+.codex/skills/mnn-opencl-pic-attention/OPTIMIZATION_LOG.md
+```
+
+后续围绕 OrangePi OpenCL cacheblend/epic 性能定位、1024-token 预算 sweep、profile detail 拆分和候选优化，都先追加到这个文档，再把稳定结论收敛回本 Skill。
+
 ## 入口约束
 
 1. 从 MNN 仓库根目录工作，先读 `AGENTS.md`。
@@ -18,7 +26,15 @@ git status --short
 
 3. 不要读取或修改 `schema/private/`、`source/internal/`。
 4. 构建产物、日志和实验输出放到 `.cache/`、`output/` 或用户指定目录。
-5. 构建、同步和跑 PIC server benchmark 时，按需读取：
+5. OrangePi 远端实验的 run/log/KV cache 默认放到 SSD-backed cache root，不要继续写满根分区下的仓库 `.cache`。当前可写路径是：
+
+```text
+/mnt/ssd/code/.cache/mnn_opencl_pic
+```
+
+如果设备上已手动创建并授权 `/mnt/ssd/.cache`，可以用 `PIC_SWEEP_REMOTE_CACHE_ROOT=/mnt/ssd/.cache/mnn_opencl_pic` 覆盖。当前 `orangepi` 用户不能直接在 `/mnt/ssd` 根目录创建 `/mnt/ssd/.cache`，无密码 sudo 也不可用。
+
+6. 构建、同步和跑 PIC server benchmark 时，按需读取：
 
 - `.codex/skills/mnn-build-artifacts/SKILL.md`
 - `.codex/skills/mnn-llm-bench/SKILL.md`
@@ -173,11 +189,16 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 ## 优化优先级
 
 1. 先修正执行语义：`sparse_start_layer = score_layer_idx`。score layer 之前 full compute；score layer 当层先 full-K/V scoring，然后立刻裁剪 active hidden states，从本层开始 sparse。不要让 `forwardVec(selected_tokens)` 从 layer 0 开始触发 sparse query。
-2. 再看 sparse attention 热点。通常 QK 是主热点，QKV 次之，hydrate/disk 往往不是第一瓶颈。
-3. 如果第一个 sparse layer 的 QK 比后续层慢数秒，优先怀疑 OpenCL `localWS3DDefault` 调参或首次执行开销。只在 PagedAttention sparse fast path 内处理：固定/禁用 request-critical LWS autotune，或在正式计时前预热对应 shape。
-4. 如果 `qk_active_tiles / qk_rect_tiles` 很高，优化方向是让 sparse Q 按 logical position 分组、缩小 K 有效范围，或设计按 Q range 的分段 QK，而不是继续优化 hydrate。
-5. direct PagedCache value prefill 主要影响 QKV 和 pack，不会解决 QK 主瓶颈；只有在 QK 已经降下来后再评估。
-6. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
+2. 再把 OpenCL LWS tuning 移出正式请求。MNN 已有原生 OpenCL Autotuning cache：`RuntimeManager::setCache(...)` 加载 `mnn_cachefile.bin`，`RuntimeManager::updateCache()` 写回 `AutotuningT`。不要在 PIC 正式请求路径里维护另一套在线 tuner。新增 sparse/PIC OpenCL kernel 默认接 `localWS2DDefault` / `localWS3DDefault` 和 MNN cache；固定 LWS 或禁用 tune 只作为 A/B 诊断开关。正式 OrangePi sweep 的正确流程是先 warm 目标 sparse shapes，调用 `/v1/tune/update_cache`，然后在正式计时中复用 MNN cache；冷 shape tuning 不能算作 cacheblend/epic request latency。
+3. 再看 sparse attention 热点。通常 QK 是主热点，QKV 次之，hydrate/disk 往往不是第一瓶颈。
+4. 如果第一个 sparse layer 的 QK 比后续层慢数秒，优先怀疑 OpenCL `localWS3DDefault` 调参或首次执行开销。生产口径用 MNN tune cache/prewarm 解决；固定/禁用 LWS 只作为 A/B 实验开关，不作为长期生产路径。
+5. 如果 `qk_active_tiles / qk_rect_tiles` 很高，优化方向是让 sparse Q 按 logical position 分组、缩小 K 有效范围，或设计按 Q range 的分段 QK，而不是继续优化 hydrate。
+6. FlashAttention / FlashMask 优化顺序：
+   - 先做不改语义的 FlashMask-style range-aware pieces：active indices 不变，只让每段 sparse Q 的 K 上界更贴近该段 logical rows。
+   - 再做 fused sparse FlashAttention：融合 QK、causal softmax、QKV，减少中间 QK/softmax buffer 和 kernel launch。必须同时支持 `PicScoreAttention` 的 full-Q/compact-output 和 `PicSparseAttention` 的 compact-Q；第一版只允许放在 `MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH=1` 后面，默认关闭，且不能用会重复 8 次 QK 的 naive per-output-dim 融合。
+   - 若进一步限制 cacheblend 选择窗口或重新排序 active rows 会改变算法语义，必须作为 `cacheblend-windowed` / `cacheblend-prefix-regularized` 这类命名变体报告，不能算普通 cacheblend。
+7. direct PagedCache value prefill 主要影响 QKV 和 pack，不会解决 QK 主瓶颈；2026-06-11 的 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=1` A/B 让正式 cacheblend/epic 10-50% 都仍快于 normal，但收益混合，profile-detail 中 40% later layers 改善、50% later layers 回退。不要默认全局开启，保留为显式实验开关或后续 QK 降下来后的条件 heuristic。
+8. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
 
 ## 验证要求
 
@@ -202,6 +223,45 @@ model_name,mode,buget,latency_s,effective_tps,speedup_vs_normal
 - `sparse_total` 中 `qk_us` 占大头：优化 sparse QK kernel、LWS、Q/K 分块和 K range。
 - `layer 0 qk_us` 远大于其他层：先排查首次 sparse shape 调参/编译/driver overhead，再看是否错误从 layer 0 sparse。
 - 所有层 QK 都慢且随 ratio 线性增长：需要真正减少 QK 计算量，而不是只减少请求 token 列表长度。
+
+## 2026-06-11 OpenCL 1024-token 当前结论
+
+OrangePi OpenCL PIC graph-boundary 路径在 1024-token prompt 下已经有过 cacheblend 和 epic 在 10/20/30/40/50% 全部快于普通 normal LLM full-compute 的 warm/preloaded MNN tune cache repeat：
+
+```text
+mode,budget,latency_s,speedup_vs_normal
+full-reuse,full,0.406432,17.145
+cacheblend,0.10,4.569623,1.525
+cacheblend,0.20,5.725607,1.217
+cacheblend,0.30,4.343375,1.604
+cacheblend,0.40,5.714816,1.219
+cacheblend,0.50,6.569642,1.061
+epic,0.10,3.163368,2.203
+epic,0.20,5.337575,1.306
+epic,0.30,3.360976,2.073
+epic,0.40,4.062803,1.715
+epic,0.50,6.008137,1.160
+```
+
+三个 attention 阶段的新拆分：
+
+```text
+budget,PagedAttention_ms,ScoreAttention_scoring_ms,ScoreAttention_layer1_attention_ms,ScoreAttention_total_ms,SparseAttention_layers_gt1_ms,Hydrate_ms
+0.10,246.468,18.531,22.575,41.106,337.876,18.905
+0.20,150.686,57.895,52.477,110.372,740.025,19.554
+0.30,68.741,124.080,71.238,195.318,1474.706,22.979
+0.40,65.701,225.106,115.671,340.777,2220.714,23.202
+0.50,100.777,343.987,172.663,516.650,2186.564,15.937
+```
+
+结论：
+
+- `PagedAttention` 不是当前主瓶颈。
+- `ScoreAttention layer=1` 的秒级慢点主要是冷 sparse-shape LWS tuning/driver 开销，已经通过 MNN tune cache/prewarm 移出正式请求。
+- `ScoreAttention scoring/top-k` 在 40/50% 可见，但仍不是最大项。
+- 当前主瓶颈转移到 `PicSparseAttention layers > 1`，尤其 QK 与 QKV 聚合；后续优化围绕 fused sparse FlashAttention 和更强的 FlashMask/range 分段展开。
+- 最新 retune audit（`opencl_pic_1024_default_retune_after_lwscache_20260611_032213`）显示 epic 10-50% 仍全部快于 normal，但 cacheblend 50% 为 `7.031057s / 0.991x`，未满足“始终更快”的严格目标。profile-detail 拆分为 `Hydrate_ms=21.143`、`ScoreAttention_scoring_ms=344.503`、`ScoreAttention_layer1_attention_ms=181.984`、`SparseAttention_layers_gt1_ms=3030.656`，其中 later sparse QK `1366.483ms`、QKV `884.708ms`。因此当前开放优化点是 cacheblend 50% 的 later `PicSparseAttention`，不是 async KV 或 PageCache zero-copy。
+- 2026-06-11 已否定的快速 heuristic：自动 direct-value、`q_chunk=16`、`q_chunk=128`、`q_chunk=256 + direct-value` 都没有让 cacheblend 50% 稳定快于 normal；不要把这些设为默认。env-gated fused softmax+QKV V0 在 50% active rows 上触发过 OpenCL `CL_OUT_OF_RESOURCES (-14)`，已加默认 `activeLen <= 256` guard，50% 会回退，不作为性能结论。
 
 ## 2026-06-10 x64 CPU 稳定性检查
 
@@ -235,6 +295,78 @@ cmake --build .cache/build/mnn/x64_cpu_pic --target pic_server --parallel 48
 ```
 
 注意：`POST /reset` 本地用 `Content-Type: application/json` 和 body `{}`，空 body 会被 httplib 请求层返回 400。
+
+## 2026-06-11 CPU 精度恢复：显式 token 边界
+
+CPU cacheblend/full-reuse 曾出现输出碎片、拒答和 full-compute 与 no-PIC 不一致。根因不是 CPUPagedAttention 数学本身，而是 `pic_server` 旧的 placeholder 文本路径把 prompt 切成 `preludeText + docText + suffixText` 分别 tokenize，再拼 persistent doc token；BPE 边界和 BOS trimming 会让 PIC full-compute/reuse/cacheblend 实际输入 token 序列不同于普通完整 prompt。这个错误会让 full-compute 也坏，因此不能用它判断 Attention 精度。
+
+修复边界改为显式 token 协议：
+
+- `/v1/prefill/text` 可以直接接受 `token_ids`，并用这段 token 构建持久 text cache；不要强制由 server 重新 tokenize 原始文档文本。
+- `/v1/chat/completions` 可以直接接受 `full_prompt_token_ids` / `prompt_token_ids` / `input_token_ids`，有显式 token 时 `messages` 不再必需。
+- PIC 请求必须显式标记 doc cache token span：`doc_cache_spans: [{"prompt_start": P, "source_start": S, "token_count": N}]`，或兼容别名 `pic_token_start/token_count`、连续 `pic_token_indices`。
+- server 只做硬校验：`full_prompt_token_ids[P+i] == text_cache.token_ids[S+i]`。不相等立即报错，不再猜 placeholder 边界，不再 decode cache token 拼文本，不再悄悄 fallback 到错误 CPU 路径。
+- no-PIC baseline、PIC full-compute、full-reuse、epic/cacheblend 都应使用同一份 `full_prompt_token_ids`。full-compute 不读取磁盘 KV，但 prefill 输入 token 必须完全相同；full-reuse/sparse 只把显式 span 对应 token 替换成持久 PagedCache KV。
+
+本地 x64 CPU 验证结果：
+
+```text
+explicit span: prompt_start=5, source_start=0, token_count=36, full_prompt_token_count=59
+no-pic:         The project codename is Cobalt Lantern and the reusable object is the persistent PIC
+full-compute:   The project codename is Cobalt Lantern and the reusable object is the persistent PIC
+full-reuse:     The project codename is cobalt lantern. The reusable object is the persistent PIC
+epic 0.1:       The project codename is cobalt lantern and the reusable object is the persistent PIC
+cacheblend 0.1: The project codename is cobalt lantern and the reusable object is the persistent PIC
+```
+
+负向校验：故意改坏 span 第一个 prompt token，server 返回：
+
+```text
+Doc cache span token mismatch at prompt index 5: prompt token 32716 != cache source token 32715
+```
+
+## 2026-06-11 持久 KV RoPE metadata 硬标准
+
+CPU / CUDA / OpenCL 导出的每层 `.json` sidecar 和 `meta.json.kv_layout` 必须包含 `rope_attention_scaling`。hydrate canonical_no_rope key 时，CPU/CUDA/OpenCL 都会按当前 logical slot 重新施加 RoPE，并乘以这个 attention scaling；导出 canonical key 时会除回同一个 scaling。旧 cache 如果没有该字段，`pic_server` 读取 text cache 时必须硬错误并要求重建，不能默认当作 1.0 静默运行，因为这会让非 1.0 RoPE scaling 的模型在 full-reuse/cacheblend/epic 上恢复错精度。
+
+这条 metadata 修复不改变异步加载 KV 的设计：OpenCL 仍先把持久 PIC cache 源读入当前请求 PagedCache 的保留 physical source slots，score 从 reference slots/source slots 比较，hydrate 再从 source slots 写回真实 logical slots。异步预取窗口、zero-copy PagedCache target 和 `MNN_PAGED_ATTENTION_OPENCL_ALLOW_KV_STAGING_FALLBACK` 调试开关语义保持不变。
+
+## 2026-06-11 OrangePi OpenCL cacheblend 稳定性修复
+
+OrangePi OpenCL `pic_server` 已用本机交叉编译验证：
+
+```bash
+MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 JOBS=48 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/home/orangepi/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/orangepi5plus/
+```
+
+远端 OpenCL 服务使用：
+
+```text
+artifact: .cache/output/mnn/artifacts/orangepi5plus
+config:   .cache/weight/AI-ModelScope__Llama-3___2-1B-Instruct-pic-boundary/config_opencl_greedy.json
+kv dir:   .cache/kvshare/pic_opencl_explicit_20260611_v3
+log:      .cache/logs/pic_opencl_explicit_20260611_v3.log
+```
+
+显式 token/span smoke 结果：
+
+```text
+/v1/prefill/text token_ids: HTTP 200, token_count=36, cache_status=built
+full-reuse max_tokens=0:    HTTP 200, protocol=explicit-full-prompt-token-span-v1, token_alignment=explicit_request_verified, execution_mode=native-full-reuse
+cacheblend 0.1 max_tokens=0: HTTP 200, protocol=explicit-full-prompt-token-span-v1, token_alignment=explicit_request_verified, execution_mode=native-cacheblend-graph-boundary
+```
+
+OpenCL prefetch 正确性要求更新为硬约束：
+
+- 异步读取持久 PIC cache 源必须严格按 layer index 升序组织队列，hydrate 当前 layer 时只能消费同一 `layerIndex` 的任务结果。
+- 不需要等待所有 layer 的 PagedCache target 全部注册后才开始预取；只要队首 layer 的 target 已注册且 `maxSlots` 覆盖真实 KV 长度和保留 physical source slots，就可以启动该 layer 的 async read。这样 full-reuse 的 layer 0 计算时，layer 1 可以并行加载；cacheblend/epic 从 `external_hydrate_start_layer_idx = score_layer_idx + 1` 开始同理流水。
+- 队列推进时遇到第一个 target 未注册或容量不足的 layer 必须停止，不能跳过它去调度更后面的 layer；后续 layer 注册 target 时再重新推进队列。
+- async task 创建时要捕获已注册 PagedCache target 的强引用，不能在线程里重新 lookup 弱引用后失败。
+- 不允许为了处理 “direct PagedCache target unavailable” 做失败后同步重试兜底；正确做法是未就绪时不建 async task，让当前 layer 的 hydrate 走已有同步 direct read，后续注册 target 后继续有序预取。
+- OrangePi v3 日志确认没有 `target unavailable` / `async persistent PIC cache read failed` / `ERROR`；full-reuse 首次容量变化时 layer0/layer1 是同步 direct hydrate，后续 layer `async_read=1 direct_segments=1 fallback_tokens=0`；cacheblend 在 `cacheblend_score layer=1` 后进入 `sparse_prefill_attention_fast_qk_softmax_qkv`，后续 hydrate 同样为 direct PagedCache。
 
 ## 2026-06-10 OrangePi OpenCL 实测
 

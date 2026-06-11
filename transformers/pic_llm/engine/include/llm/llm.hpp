@@ -148,6 +148,7 @@ public:
     int getOutputIndex(const std::string& name) const;
     void reset();
     void tuning(TuneType type, std::vector<int> candidates);
+    void updateRuntimeCache();
     virtual std::vector<Express::VARP> forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs = {});
     Express::VARP forward(const std::vector<int>& input_ids, bool is_prefill = true);
     Express::VARP forward(MNN::Express::VARP input_embeds);
@@ -158,6 +159,7 @@ public:
     bool setPrefixCacheFile(const std::string& filename, int flag = 0);
     void clearPrefixCacheFile();
     bool beginExternalPagedKVRequest();
+    bool reserveExternalPagedKVSourceSlots(size_t token_count);
     bool appendExternalPagedKV(const std::vector<int>& token_ids, const std::vector<MNN::PagedKVExternalSegment>& segments);
     bool recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids,
                                   int sparse_start_layer_idx = 0);

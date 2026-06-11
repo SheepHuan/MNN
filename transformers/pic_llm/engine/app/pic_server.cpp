@@ -397,6 +397,7 @@ struct KvShape {
     double ropeScalingHighFreqFactor = 4.0;
     int ropeScalingOriginalMaxPositionEmbeddings = 0;
     int maxPositionEmbeddings = 0;
+    double ropeAttentionScaling = 1.0;
 };
 
 struct TextCacheRef {
@@ -471,6 +472,9 @@ KvShape kvShapeFromSegment(const MNN::PagedKVExternalSegment& segment) {
     shape.ropeScalingHighFreqFactor = segment.ropeScalingHighFreqFactor;
     shape.ropeScalingOriginalMaxPositionEmbeddings = segment.ropeScalingOriginalMaxPositionEmbeddings;
     shape.maxPositionEmbeddings = segment.maxPositionEmbeddings;
+    shape.ropeAttentionScaling = segment.ropeAttentionScaling;
+    shape.keyRopeState = segment.keyRopeState;
+    shape.ropePairing = segment.ropePairing;
     return shape;
 }
 
@@ -864,6 +868,7 @@ KvShape readKvShape(const fs::path& layersDir, const std::string& cacheName) {
             sidecar, "rope_scaling_original_max_position_embeddings",
             shape.ropeScalingOriginalMaxPositionEmbeddings);
         shape.maxPositionEmbeddings = jsonInt(sidecar, "max_position_embeddings", shape.maxPositionEmbeddings);
+        shape.ropeAttentionScaling = jsonDouble(sidecar, "rope_attention_scaling", shape.ropeAttentionScaling);
     }
     return shape;
 }
@@ -899,7 +904,8 @@ bool existingCacheMatches(const fs::path& metaPath, const std::string& contentSh
     auto kvLayout = meta.value("kv_layout", json::object());
     if (!kvLayout.is_object() || kvLayout.value("layout", "") != "mnn_paged_attention_raw_v1" ||
         kvLayout.value("key_rope_state", "") != "canonical_no_rope" ||
-        jsonInt(kvLayout, "kv_heads", 0) <= 0 || jsonInt(kvLayout, "head_dim", 0) <= 0) {
+        jsonInt(kvLayout, "kv_heads", 0) <= 0 || jsonInt(kvLayout, "head_dim", 0) <= 0 ||
+        !kvLayout.contains("rope_attention_scaling")) {
         return false;
     }
     if (!meta.contains("token_ids") || !meta["token_ids"].is_array()) {
@@ -961,6 +967,7 @@ json makeKvLayout(const json& config, int tokenCount, const KvShape& shape) {
         {"rope_scaling_high_freq_factor", shape.ropeScalingHighFreqFactor},
         {"rope_scaling_original_max_position_embeddings", shape.ropeScalingOriginalMaxPositionEmbeddings},
         {"max_position_embeddings", shape.maxPositionEmbeddings},
+        {"rope_attention_scaling", shape.ropeAttentionScaling},
         {"source_position_base", 0},
         {"page_size", 0},
     };
@@ -992,6 +999,10 @@ bool loadPreparedTextCache(const std::string& kvCacheDir, const std::string& bac
         kvLayout.value("key_rope_state", "") != "canonical_no_rope" ||
         kvLayout.value("rope_pairing", "") != "half") {
         error = "Text cache is not mnn_paged_attention_raw_v1 canonical_no_rope: " + metaPath.string();
+        return false;
+    }
+    if (!kvLayout.contains("rope_attention_scaling")) {
+        error = "Text cache metadata is missing rope_attention_scaling; rebuild: " + metaPath.string();
         return false;
     }
     if (kvLayout.value("backend", "") != backend && meta.value("backend", "") != backend) {
@@ -1047,6 +1058,7 @@ bool loadPreparedTextCache(const std::string& kvCacheDir, const std::string& bac
                 jsonInt(sidecar, "rope_scaling_original_max_position_embeddings",
                         shape.ropeScalingOriginalMaxPositionEmbeddings);
             shape.maxPositionEmbeddings = jsonInt(sidecar, "max_position_embeddings", shape.maxPositionEmbeddings);
+            shape.ropeAttentionScaling = jsonDouble(sidecar, "rope_attention_scaling", shape.ropeAttentionScaling);
         }
     }
     if (shape.kvHeads <= 0) {
@@ -1073,6 +1085,7 @@ bool loadPreparedTextCache(const std::string& kvCacheDir, const std::string& bac
         jsonInt(kvLayout, "rope_scaling_original_max_position_embeddings",
                 shape.ropeScalingOriginalMaxPositionEmbeddings);
     shape.maxPositionEmbeddings = jsonInt(kvLayout, "max_position_embeddings", shape.maxPositionEmbeddings);
+    shape.ropeAttentionScaling = jsonDouble(kvLayout, "rope_attention_scaling", shape.ropeAttentionScaling);
     if (shape.kvHeads <= 0 || shape.headDim <= 0 || shape.dtypeBytes <= 0) {
         error = "Text cache KV shape is incomplete: " + metaPath.string();
         return false;
@@ -1093,6 +1106,7 @@ bool loadPreparedTextCache(const std::string& kvCacheDir, const std::string& bac
     segment.ropeScalingHighFreqFactor = static_cast<float>(shape.ropeScalingHighFreqFactor);
     segment.ropeScalingOriginalMaxPositionEmbeddings = shape.ropeScalingOriginalMaxPositionEmbeddings;
     segment.maxPositionEmbeddings = shape.maxPositionEmbeddings;
+    segment.ropeAttentionScaling = static_cast<float>(shape.ropeAttentionScaling);
     segment.ropeType = shape.ropeType;
     segment.keyRopeState = shape.keyRopeState;
     segment.ropePairing = shape.ropePairing;
@@ -1335,13 +1349,14 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
     if (pic.selectionAlgorithm == "full-reuse") {
         plan.plannerName = "FullReusePlanner";
         plan.executionMode = "native-full-reuse";
-        plan.scoreLayerIdx = 0;
+        plan.scoreLayerIdx = effectiveScoreLayer;
         plan.externalTokenIds = pic.tokenIds;
         plan.externalSegments = pic.segments;
         plan.metadata = {
             {"score_kind", "none"},
             {"pic_token_count", picLength},
             {"reuse_token_count", picLength},
+            {"score_pass", "not_required_full_reuse"},
             {"suffix_query_source", "current_context"},
         };
         return plan;
@@ -1536,6 +1551,9 @@ bool PicServer::start() {
     server.Get("/healthz", [this](const httplib::Request& req, httplib::Response& res) { handleHealth(req, res); });
     server.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) { handleModels(req, res); });
     server.Post("/reset", [this](const httplib::Request& req, httplib::Response& res) { handleReset(req, res); });
+    server.Post("/v1/tune/update_cache", [this](const httplib::Request& req, httplib::Response& res) {
+        handleUpdateRuntimeCache(req, res);
+    });
     server.Post("/v1/prefill/text", [this](const httplib::Request& req, httplib::Response& res) {
         handlePrefillText(req, res);
     });
@@ -1566,6 +1584,7 @@ void PicServer::handleRoot(const httplib::Request&, httplib::Response& res) {
         "/healthz",
         "/v1/models",
         "/reset",
+        "/v1/tune/update_cache",
         "/v1/prefill/text",
         "/v1/kv/pic_caches",
         "/v1/chat/completions",
@@ -1605,6 +1624,19 @@ void PicServer::handleReset(const httplib::Request&, httplib::Response& res) {
         {"status", "ok"},
         {"scope", "llm_request_state"},
         {"cleared", json::array({"prefix_cache_mode", "paged_pic_request", "context_history"})},
+    }), 200, -1);
+}
+
+void PicServer::handleUpdateRuntimeCache(const httplib::Request&, httplib::Response& res) {
+    allowCors(res);
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mLlm) {
+        mLlm->updateRuntimeCache();
+    }
+    writeJson(res, json({
+        {"status", "ok"},
+        {"scope", "mnn_runtime_cache"},
+        {"note", "runtime manager cache updated through MNN native cache flow"},
     }), 200, -1);
 }
 
@@ -2203,6 +2235,12 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             if (!graphBoundaryPrefillDone) {
                 mLlm->reset();
                 mLlm->generate_init(&sink, "");
+                if (!plan.externalTokenIds.empty() &&
+                    !mLlm->reserveExternalPagedKVSourceSlots(plan.externalTokenIds.size())) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Failed to reserve OpenCL PagedCache source slots for persistent PIC cache";
+                    return false;
+                }
             }
             if (!graphBoundaryPrefillDone && plan.fullCompute) {
                 if (!mLlm->prefill(fullPromptTokenIds)) {

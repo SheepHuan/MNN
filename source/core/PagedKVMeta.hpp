@@ -65,6 +65,7 @@ struct PagedKVMeta : public KVMeta {
     int logical_length = 0;
     int slot_table_version = 0;
     int external_hydrate_start_layer_idx = 0;
+    size_t external_source_slot_reserve = 0;
     std::vector<int> slot_table_host;
     std::vector<PagedKVExternalSegment> external_segments;
     std::vector<int> external_loaded_layers;
@@ -101,6 +102,7 @@ struct PagedKVMeta : public KVMeta {
         reserve = nullptr;
         reserveHost.clear();
         external_hydrate_start_layer_idx = 0;
+        external_source_slot_reserve = 0;
         external_segments.clear();
         external_loaded_layers.clear();
         sparse_query_active = false;
@@ -121,6 +123,7 @@ struct PagedKVMeta : public KVMeta {
     void finishRequest() {
         request_active = false;
         external_hydrate_start_layer_idx = 0;
+        external_source_slot_reserve = 0;
         external_segments.clear();
         external_loaded_layers.clear();
         sparse_query_active = false;
@@ -154,6 +157,14 @@ struct PagedKVMeta : public KVMeta {
         logical_length = static_cast<int>(required);
         previous = required;
         external_loaded_layers.clear();
+        return true;
+    }
+
+    bool reserveExternalSourceSlots(size_t tokenCount) {
+        if (!request_active) {
+            return false;
+        }
+        external_source_slot_reserve = std::max(external_source_slot_reserve, tokenCount);
         return true;
     }
 

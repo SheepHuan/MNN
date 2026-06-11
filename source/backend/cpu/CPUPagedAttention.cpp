@@ -267,7 +267,8 @@ static bool _writeShapeFile(const std::string& path, int batch, int kvHeads, int
        << "  \"rope_scaling_high_freq_factor\": " << (meta != nullptr ? meta->rope_scaling_high_freq_factor : 4.0f) << ",\n"
        << "  \"rope_scaling_original_max_position_embeddings\": "
        << (meta != nullptr ? meta->rope_scaling_original_max_position_embeddings : 0) << ",\n"
-       << "  \"max_position_embeddings\": " << (meta != nullptr ? meta->max_position_embeddings : 0) << "\n"
+       << "  \"max_position_embeddings\": " << (meta != nullptr ? meta->max_position_embeddings : 0) << ",\n"
+       << "  \"rope_attention_scaling\": " << (meta != nullptr ? meta->rope_attention_scaling : 1.0f) << "\n"
        << "}\n";
     return os.good();
 }

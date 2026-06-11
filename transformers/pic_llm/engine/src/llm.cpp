@@ -560,6 +560,15 @@ void Llm::tuning(TuneType type, std::vector<int> candidates) {
     finishTuning();
 }
 
+void Llm::updateRuntimeCache() {
+    if (mRuntimeManager != nullptr) {
+        mRuntimeManager->updateCache();
+    }
+    if (mCacheBlendScoreRuntimeManager != nullptr) {
+        mCacheBlendScoreRuntimeManager->updateCache();
+    }
+}
+
 void Llm::switchMode(Llm::Stage stage) {
     // do nothing, only reserve api
     return;
@@ -578,6 +587,24 @@ void Llm::setKVCacheInfo(size_t add, size_t remove, int* reserve, int n_reserve)
 
 bool Llm::beginExternalPagedKVRequest() {
     return beginPagedRequestIfNeeded() || (mConfig->paged_attention() && static_cast<PagedKVMeta*>(mMeta.get())->request_active);
+}
+
+bool Llm::reserveExternalPagedKVSourceSlots(size_t token_count) {
+    if (token_count == 0) {
+        return true;
+    }
+    if (!mConfig->paged_attention()) {
+        MNN_ERROR("Persistent PIC cache source slot reservation requires paged_attention=true\n");
+        return false;
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return false;
+    }
+    if (!paged->request_active) {
+        paged->beginRequest(mConfig->paged_kv_max_tokens());
+    }
+    return paged->reserveExternalSourceSlots(token_count);
 }
 
 bool Llm::appendExternalPagedKV(const std::vector<int>& token_ids,
@@ -1398,6 +1425,11 @@ bool Llm::prefill(const std::vector<int>& input_ids) {
                 return false;
             }
             generate(hidden_states, 0);
+            if (mContext->status == LlmStatus::INTERNAL_ERROR ||
+                mContext->status == LlmStatus::TIMEOUT ||
+                mContext->status == LlmStatus::USER_CANCEL) {
+                return false;
+            }
             completePrefixWrite();
             mContext->prompt_len = static_cast<int>(input_ids.size());
             return true;
@@ -1416,6 +1448,11 @@ bool Llm::prefill(const std::vector<int>& input_ids) {
                 return false;
             }
             generate(input_embeds, 0);
+            if (mContext->status == LlmStatus::INTERNAL_ERROR ||
+                mContext->status == LlmStatus::TIMEOUT ||
+                mContext->status == LlmStatus::USER_CANCEL) {
+                return false;
+            }
         }
         completePrefixWrite();
     } else {

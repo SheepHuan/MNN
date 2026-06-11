@@ -432,9 +432,55 @@ __kernel void pic_cacheblend_topk(
     const int top_k) {
     const int lid = get_local_id(0);
     const int local_size = get_local_size(0);
-    __local float best_values[128];
-    __local int best_indices[128];
-    if (get_group_id(0) != 0 || lid >= 128) {
+    __local float best_values[1024];
+    __local int best_indices[1024];
+    if (get_group_id(0) != 0 || lid >= 1024) {
+        return;
+    }
+    if (token_count <= 1024) {
+        for (int i = lid; i < 1024; i += local_size) {
+            float value = -3.4028234663852886e+38f;
+            int index = i;
+            if (i < token_count) {
+                value = scores[i];
+                if (isnan(value)) {
+                    value = -3.4028234663852886e+38f;
+                }
+            }
+            best_values[i] = value;
+            best_indices[i] = index;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int k = 2; k <= 1024; k <<= 1) {
+            for (int stride = k >> 1; stride > 0; stride >>= 1) {
+                for (int i = lid; i < 1024; i += local_size) {
+                    int other = i ^ stride;
+                    if (other > i) {
+                        float value_i = best_values[i];
+                        float value_o = best_values[other];
+                        int index_i = best_indices[i];
+                        int index_o = best_indices[other];
+                        int other_better = (value_o > value_i) ||
+                            (value_o == value_i && index_o >= 0 &&
+                             (index_i < 0 || index_o < index_i));
+                        int self_better = (value_i > value_o) ||
+                            (value_i == value_o && index_i >= 0 &&
+                             (index_o < 0 || index_i < index_o));
+                        int descending = ((i & k) == 0);
+                        if ((descending && other_better) || (!descending && self_better)) {
+                            best_values[i] = value_o;
+                            best_indices[i] = index_o;
+                            best_values[other] = value_i;
+                            best_indices[other] = index_i;
+                        }
+                    }
+                }
+                barrier(CLK_LOCAL_MEM_FENCE);
+            }
+        }
+        for (int i = lid; i < top_k; i += local_size) {
+            selected[i] = best_indices[i];
+        }
         return;
     }
     for (int k = 0; k < top_k; ++k) {
