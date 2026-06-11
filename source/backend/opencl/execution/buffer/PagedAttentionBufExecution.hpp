@@ -72,7 +72,8 @@ private:
     std::shared_ptr<KernelWrap> mQKKernel;
     std::shared_ptr<KernelWrap> mSoftmaxKernel;
     std::shared_ptr<KernelWrap> mQKVKernel;
-    std::shared_ptr<KernelWrap> mSparseFlashKernel;
+    std::shared_ptr<KernelWrap> mSparseFlashKernel32;
+    std::shared_ptr<KernelWrap> mSparseFlashKernel64;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
     std::shared_ptr<Tensor> mTempK;

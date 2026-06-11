@@ -177,6 +177,7 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 - `op=prefill_attention_fast_qk_softmax_qkv`：full prefill attention。
 - `op=cacheblend_score layer=N`：score/top-k 所在层。
 - `op=hydrate layer=N`：持久 PIC cache 源直接 hydrate 到当前请求 PagedCache。
+- `op=score_flash_attention layer=1`：当前默认 score layer full-Q/compact-output flash-style attention；`full_q=1` 时按 active logical index 读 full query row。
 - `op=sparse_flash_attention layer=N`：当前默认 later `PicSparseAttention` compact-Q sparse recompute attention。
 - 历史日志里的 `op=sparse_prefill_attention_fast_qk_softmax_qkv` 是已移除的三段式 sparse QK / sparse softmax / sparse QKV 旧路径；不要再围绕它新增调参。
 
@@ -194,9 +195,11 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 3. 再看 sparse attention 热点。通常 QK 是主热点，QKV 次之，hydrate/disk 往往不是第一瓶颈。
 4. 如果第一个 sparse layer 的 QK 比后续层慢数秒，优先怀疑 OpenCL `localWS3DDefault` 调参或首次执行开销。生产口径用 MNN tune cache/prewarm 解决；固定/禁用 LWS 只作为 A/B 实验开关，不作为长期生产路径。
 5. 如果 `qk_active_tiles / qk_rect_tiles` 很高，优化方向是让 sparse Q 按 logical position 分组、缩小 K 有效范围，或设计按 Q range 的分段 QK，而不是继续优化 hydrate。
-6. OpenCL later sparse attention 当前生产路径固定为 fused sparse FlashAttention row64：
-   - 只用于 `PicSparseAttention` compact-Q 层，也就是当前 graph-boundary 模型的 `layer >= 2`。
-   - `PicScoreAttention layer=1` 是 full-Q/compact-output，仍走通用 correctness path；不要为了省时间把 score layer 错塞进 compact-Q flash kernel。
+6. OpenCL sparse attention 当前生产路径是 fused sparse FlashAttention：
+   - `PicScoreAttention layer=1` 使用专门的 full-Q/compact-output `score_flash_attention` 路径：先完成 full prompt K/V 写入和 score/top-k，再用 active logical indices 读取 full query row 并输出 compact rows。不要把它理解成 compact-Q later-layer kernel。
+   - `PicSparseAttention layer>=2` 使用 compact-Q `sparse_flash_attention` 路径。
+   - sparse flash 同时保留 row32/row64 两个内核，默认由内置形状/plan 启发式选择；不要重新增加请求期 env fallback。
+   - cacheblend selected PIC ratio `>=50%` 默认使用 row64，因为 row32 在 1024-token cb50 正式 repeat 中会让 cacheblend 低于 normal baseline；其他高预算 sparse layers 可使用 row32。
    - 旧的三段式 sparse QK / sparse softmax / sparse QKV OpenCL kernel 和 env-gated fused softmax-QKV 实验路径已移除；不要再新增开关回退到旧路径。
    - 若进一步限制 cacheblend 选择窗口或重新排序 active rows 会改变算法语义，必须作为 `cacheblend-windowed` / `cacheblend-prefix-regularized` 这类命名变体报告，不能算普通 cacheblend。
 7. direct PagedCache value prefill 现在只保留为内置窄 heuristic：cacheblend 高预算且 slot table identity 时才直接读 PagedCache value，避免 packed V staging；不再提供 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL` 强制开关作为生产路径。
@@ -229,6 +232,36 @@ model_name,mode,buget,latency_s,effective_tps,speedup_vs_normal
 ## 2026-06-11 OpenCL 1024-token 当前结论
 
 OrangePi OpenCL PIC graph-boundary 路径在 1024-token prompt 下已经稳定运行。默认 `score_layer_idx=1`，不要改成 layer 0：`layer 0` 是 score 前 full compute，`layer 1` 是 `PicScoreAttention` scoring/top-k 和 compact 输出，`layer >= 2` 是后续 `PicSparseAttention` compact sparse rows。
+
+当前最快默认路径已经包含 score-layer flash：
+
+```text
+tag=opencl_pic_1024_score_flash_formal_20260611_1427
+mode,budget,latency_s,speedup_vs_normal
+normal,full,6.968234,1.000
+full-reuse,full,0.840850,8.287
+cacheblend,0.10,4.159067,1.675
+cacheblend,0.20,5.922973,1.176
+cacheblend,0.30,4.001684,1.741
+cacheblend,0.40,4.801796,1.451
+cacheblend,0.50,5.968761,1.167
+epic,0.10,3.576207,1.948
+epic,0.20,5.793736,1.203
+epic,0.30,3.626172,1.922
+epic,0.40,4.340059,1.606
+epic,0.50,5.340461,1.305
+```
+
+对应 cb50 profile 口径：
+
+```text
+score_flash_attention layer=1 total=186.431 ms flash=110.222 ms full_q=1
+later_sparse_flash_attention_total=1783.178 ms
+later_sparse_flash_compute=1326.024 ms
+hydrate/async/score-topk remain non-bottlenecks
+```
+
+下一步优先 P2：补非 attention dense 图 profile，确认 score layer 后的 QKV projection、o_proj、MLP、norm、residual 是否全部只跑 compact active rows。若仍有 full 1024-row dense kernel，这是 cb50 剩余 4s 级差额的首要优化点。
 
 source-slot reserve 修复后的 fresh repeat：
 

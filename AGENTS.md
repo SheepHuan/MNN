@@ -115,6 +115,8 @@ PIC/PagedAttention 优化目标按正确语义分层处理，不为了跑分绕�
 - `cacheblend` / `epic` / `kvshare` sparse prefill 的目标不是复用跨请求 scoring，而是在每个独立请求内高效完成 full-reference / scoring / top-k，再 hydrate 大量复用 KV，只 sparse recompute 选中的 PIC token。低 ratio 应接近 full-reuse，高 ratio 延迟应随重算 token 数增加而合理上升；若比 full-compute 更慢，优先拆 `full_reference/scoring`、`disk_read/hydrate`、`sparse_recompute`、`suffix_prefill` 定位瓶颈。
 - 报告性能时至少给出 `PIC full-compute / normal LLM full-compute`、`full-reuse / PIC full-compute`、各 ratio `cacheblend / full-reuse`、各 ratio `cacheblend / PIC full-compute`、各 ratio `cacheblend / normal LLM full-compute`。这些倍数是判断优化方向是否正确的主指标。
 - 优先级固定为：先让 `PIC full-compute` 对齐 `normal LLM full-compute`，再让 `full-reuse` 只剩 hydrate + suffix prefill 成本，最后再优化 `cacheblend` / `epic` / `kvshare` 的 GPU/CL/CUDA native scoring 和 sparse recompute。
+- OpenCL PIC 正式性能测试前必须先 warm 目标 shape / ratio，并调用 `/v1/tune/update_cache` 写回 MNN OpenCL autotune cache；冷启动 kernel build、LWS tuning、cachefile 生成或首轮 prefix-cache 探测不能计入正式 cacheblend/epic latency。正式报告只使用 warm 后的独立请求计时，run log 必须确认没有 `Cache invalid`、`target unavailable`、`async persistent PIC cache read failed` 或 `ERROR`。
+- OpenCL PIC 默认生产路径必须使用当前最快且已验证的实现和调度逻辑：`score_layer_idx=1`，`layer=1` 走 full-Q/compact-output `score_flash_attention`，`layer>=2` 走 fused `sparse_flash_attention`，row32/row64 由内置 shape/plan heuristic 选择，cacheblend selected PIC ratio `>=50%` 保持 row64。不要留下 env 开关、旧三段 sparse QK/softmax/QKV fallback、手工强制 direct-value 路径或其它调试分支进入正式路径，避免无意性能回退。
 
 ## MNN 修改约束
 

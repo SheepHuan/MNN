@@ -1093,3 +1093,138 @@ Conclusion:
 - The new artifact no longer needs or recognizes the sparse flash/direct-value env switches in production source.
 - The later sparse attention path is now exactly the intended default: score layer full-Q stays on row correctness path, compact-Q `layer >= 2` goes through fused sparse flash.
 - This repeat is somewhat slower than the earlier best env-gated sparse-flash formal run at several budgets, but still much faster than the pre-flash source-slot repeat at cacheblend 50% (`7.188658s -> 6.424953s`) and satisfies the hard acceptance criterion.
+
+## 2026-06-11 Analysis: Current Layer-Type Bottleneck After Default Sparse Flash
+
+Profile inputs:
+
+- Low-budget smoke: `opencl_pic_1024_sparse_flash_default_cb10_profile_20260611_052724`
+- High-budget smoke: `opencl_pic_1024_sparse_flash_default_cb50_profile_20260611_053802`
+- Both use default code path with no sparse-flash/direct-value env.
+- Profile detail inserts `queue.finish()`, so use only for attribution, not formal latency.
+
+cacheblend 10% measured request attention sections:
+
+```text
+layer0_full_attention=636.842 ms
+score_layer_row_attention=99.893 ms
+later_sparse_flash_attention_total=238.784 ms
+hydrate=21.159 ms
+cacheblend_score_topk=5.267 ms
+```
+
+cacheblend 50% measured request attention sections:
+
+```text
+layer0_full_attention=770.269 ms
+score_layer_row_attention=1001.957 ms
+later_sparse_flash_attention_total=2321.259 ms
+later_sparse_flash_compute=1717.448 ms
+later_sparse_pack=11.605 ms
+later_sparse_rearrange=26.974 ms
+hydrate=20.296 ms
+cacheblend_score_topk=5.600 ms
+qk_active_tiles/qk_rect_tiles=0.9282
+worst_sparse_flash_layer=7 total=268.213 ms flash=228.374 ms
+```
+
+Conclusion:
+
+- At low active-row budgets, later sparse flash is no longer the dominant request cost. Remaining latency is mostly outside the later sparse attention kernels: score-before full compute, score-layer row path, and dense graph work not covered by PagedAttention profile rows.
+- At high active-row budgets, the main attention bottleneck is again `PicSparseAttention layer >= 2`, but now inside the fused sparse flash kernel rather than the old QK/softmax/QKV split path. The score layer `layer=1` row path is the second-largest attention cost.
+- `PagedCache` hydrate, async persistent PIC cache source loading, score kernel, and top-k are not current bottlenecks: hydrate is about 20 ms and cacheblend score/top-k about 5-6 ms in the cb50 profile.
+- FlashMask/range splitting alone is not enough for cb50 because `qk_active_tiles/qk_rect_tiles` remains about 0.928. Most work is real selected-row x long-K causal attention, not rectangular mask waste.
+
+Next optimization priority:
+
+1. Optimize high-budget `layer >= 2` sparse flash kernel:
+   - reduce local-memory/barrier overhead in online softmax reduction;
+   - consider 32-lane vs 64-lane variants through MNN tune cache, not per-request env switches;
+   - improve Q/K/V vectorized loads and accumulator layout;
+   - avoid increasing QK recomputation across output dim groups.
+2. Add a dedicated score-layer full-Q/compact-output flash-style path for `layer=1`:
+   - keep full K/V write for scoring semantics;
+   - gather/read active Q rows by logical index;
+   - output compact rows;
+   - do not route `layer=1` through the compact-Q-only sparse flash kernel.
+3. Instrument non-attention dense graph work after the score boundary:
+   - verify QKV projection, o_proj, norm, MLP, and residual kernels operate on compact active rows after `layer=1`;
+   - if any still process full 1024 rows, make that the next graph-level optimization.
+4. Optimize `layer=0` full PagedAttention only after the above:
+   - it is required by score-before full compute semantics, so it cannot be sparsified;
+   - the goal is to reduce PagedAttention overhead versus normal full attention while preserving PagedCache write/read semantics.
+
+## 2026-06-11 Implementation: Sparse Flash Lane Tuning + Score-Layer Flash
+
+Goal:
+
+- Continue P0/P1 from the current bottleneck analysis.
+- Try 32-lane vs 64-lane sparse flash variants without reintroducing env-gated production fallbacks.
+- Replace the slow `layer=1` full-Q/compact-output row kernel with a dedicated flash-style path that still reads full query rows by logical active index.
+
+Code changes:
+
+- Added `sparse_flash_attention_row32` beside the existing `sparse_flash_attention_row64`.
+- `PagedAttentionBufExecution` now builds both row32/row64 sparse flash kernels by default.
+- Lane selection is a fixed shape/plan heuristic:
+  - active rows `<384`: row64.
+  - cacheblend with selected PIC ratio `>=50%`: row64, because scattered high-budget rows were slower/unstable with row32 in formal repeats.
+  - other high-budget sparse layers: row32.
+- Extended the sparse flash kernel signature with `output_seq_len` and `query_rows_are_full`.
+- `PicScoreAttention layer=1` may now use `op=score_flash_attention`:
+  - K/V write and cacheblend score/top-k still happen on the full prompt.
+  - active compact output rows are produced after scoring.
+  - query loads use `q_row = sparse_query[q]` when `full_q=1`, so this is not the compact-Q later-layer kernel misapplied to score layer.
+- Later `PicSparseAttention layer>=2` remains `op=sparse_flash_attention`.
+- Regenerated `attention_buf_mnn_cl.cpp` and `opencl_source_map.hpp`.
+
+Important failed/negative result:
+
+```text
+tag=opencl_pic_1024_sparse_flash_row32_formal_20260611_1401
+cacheblend,0.50,7.029228,0.991
+```
+
+Pure `activeLen>=384 -> row32` improved some profile sub-ops but made cacheblend 50% fail the hard "faster than normal" requirement. The production heuristic therefore keeps cacheblend selected>=50% on row64.
+
+Score-layer flash profile:
+
+```text
+tag=opencl_pic_1024_score_flash_cb50_profile_20260611_1424
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+layer0_full_attention=1076.265 ms
+cacheblend_score_topk=5.980 ms
+score_flash_attention layer=1 total=186.431 ms flash=110.222 ms full_q=1 lane64_pieces=13
+later_sparse_flash_attention_total=1783.178 ms
+later_sparse_flash_compute=1326.024 ms
+```
+
+Compared with the previous default cb50 profile, score layer attention dropped from about `0.79-1.00s` on `op=row` to `0.186s` on `op=score_flash_attention`.
+
+Formal sweep:
+
+```text
+tag=opencl_pic_1024_score_flash_formal_20260611_1427
+server_env=<none for sparse flash/direct-value>
+remote_cache_root=/mnt/ssd/code/.cache/mnn_opencl_pic
+normal,full,6.968234,1.000
+full-reuse,full,0.840850,8.287
+cacheblend,0.10,4.159067,1.675
+cacheblend,0.20,5.922973,1.176
+cacheblend,0.30,4.001684,1.741
+cacheblend,0.40,4.801796,1.451
+cacheblend,0.50,5.968761,1.167
+epic,0.10,3.576207,1.948
+epic,0.20,5.793736,1.203
+epic,0.30,3.626172,1.922
+epic,0.40,4.340059,1.606
+epic,0.50,5.340461,1.305
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Conclusion:
+
+- The score-layer flash path restores clear margin at cacheblend 50%: default repeat `6.424953s -> 5.968761s`, and the slower post-row32 repeats `7.4-7.6s -> 5.97s`.
+- cacheblend and epic are again faster than normal full-compute at every tested 10/20/30/40/50 budget.
+- Hydrate/async load/score-topk are still not bottlenecks.
+- Remaining cb50 gap is mostly non-score later sparse flash plus non-attention graph work. P2 is now more important: profile QKV projection, o_proj, MLP, norm, residual after the score layer to confirm all dense kernels operate on compact active rows.
