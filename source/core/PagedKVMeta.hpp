@@ -58,6 +58,7 @@ struct PagedKVExternalSegment {
 
 struct PagedKVMeta : public KVMeta {
     bool paged_attention = true;
+    bool full_causal_attention_mask = false;
     bool request_active = false;
     int max_tokens = 0;
     int request_base = 0;

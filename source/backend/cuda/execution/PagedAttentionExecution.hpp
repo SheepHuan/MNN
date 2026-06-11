@@ -67,6 +67,8 @@ private:
     size_t mCacheBlendScoreCount = 0;
     int* mCacheBlendIndices = nullptr;
     size_t mCacheBlendIndexCount = 0;
+    unsigned char* mCacheBlendUsed = nullptr;
+    size_t mCacheBlendUsedCount = 0;
 };
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

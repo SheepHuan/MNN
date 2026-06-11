@@ -1879,6 +1879,8 @@ Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
     if (mConfig->paged_attention()) {
         auto paged = std::make_shared<PagedKVMeta>();
         paged->max_tokens = mConfig->paged_kv_max_tokens();
+        paged->full_causal_attention_mask =
+            mConfig->attention_mask() == "float" && mConfig->attention_type() == "full";
         mMeta = paged;
     } else {
         mMeta.reset(new KVMeta);

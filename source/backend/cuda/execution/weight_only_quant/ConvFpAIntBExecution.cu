@@ -12,6 +12,11 @@
 #include "../ConvBaseKernel.cuh"
 #include <float.h>
 #include <cublas_v2.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstdint>
 
 //#define DEBUG
 
@@ -26,6 +31,42 @@ const int SUB_GEMM_TILE_DIM = 16; // GEMM_Int
 const int BLOCK_SIZE = 256; // Quant / SumBq / Bias
 const int DEQUANT_TILE_DIM = 32; // Dequant
 const int WARP_SIZE = 32;
+static std::atomic<size_t> gPicStaticDequantBytes{0};
+
+static bool profilePicWeightOnlyConv() {
+    const char* paged = ::getenv("MNN_PAGED_ATTENTION_PROFILE");
+    if (paged != nullptr && paged[0] != '\0' && paged[0] != '0') {
+        return true;
+    }
+    const char* graph = ::getenv("MNN_PIC_GRAPH_PROFILE");
+    return graph != nullptr && graph[0] != '\0' && graph[0] != '0';
+}
+
+static uint64_t convProfileNowUs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static size_t picStaticDequantLimitBytes(const cudaDeviceProp& prop) {
+    constexpr size_t minLimit = 256ull * 1024ull * 1024ull;
+    constexpr size_t maxLimit = 2048ull * 1024ull * 1024ull;
+    const size_t byMem = prop.totalGlobalMem / 16;
+    return std::max(minLimit, std::min(maxLimit, byMem));
+}
+
+static bool reservePicStaticDequantBytes(size_t bytes, size_t limit) {
+    if (bytes == 0 || bytes > limit) {
+        return false;
+    }
+    size_t current = gPicStaticDequantBytes.load(std::memory_order_relaxed);
+    while (current <= limit - bytes) {
+        if (gPicStaticDequantBytes.compare_exchange_weak(
+                current, current + bytes, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 template<typename T, typename dT>
 __global__ void DequantizeInt8Weight(
@@ -1524,6 +1565,42 @@ ConvFpAIntBExecution::Resource::Resource(Backend* bn, const MNN::Op* op) {
                     checkKernelErrors;
                 }
             }
+            const int backendPrecision = static_cast<CUDABackend*>(bn)->getPrecision();
+            const bool cutlassLowPrecision = backendPrecision == 2 || backendPrecision == 0;
+            if (khw == 1 && cutlassLowPrecision) {
+                const size_t dequantBytes = static_cast<size_t>(hp) * static_cast<size_t>(icp) * sizeof(uint16_t);
+                const size_t cacheLimit = picStaticDequantLimitBytes(runtime->prop());
+                if (reservePicStaticDequantBytes(dequantBytes, cacheLimit)) {
+                    staticDequantWeightTensor.reset(Tensor::createDevice<int16_t>({hp, icp}));
+                    if (staticDequantWeightTensor &&
+                        bn->onAcquireBuffer(staticDequantWeightTensor.get(), Backend::STATIC)) {
+                        mStaticDequantFilter = reinterpret_cast<void*>(staticDequantWeightTensor->buffer().device);
+                        mStaticDequantBytes = dequantBytes;
+                        int threads_per_row = UP_DIV(icp, 16);
+                        dim3 dq_block(std::min(threads_per_row, 256));
+                        dim3 dq_grid(oc, UP_DIV(threads_per_row, static_cast<int>(dq_block.x)));
+                        if (backendPrecision == 2) {
+                            DequantizeInt4Weight<half, half><<<dq_grid, dq_block>>>(
+                                reinterpret_cast<const uint8_t*>(mFilter),
+                                reinterpret_cast<half*>(mStaticDequantFilter),
+                                reinterpret_cast<const half*>(mScale),
+                                reinterpret_cast<const half*>(mOffset),
+                                oc, ic, icp, mQuanC);
+                        } else {
+                            DequantizeInt4Weight<float, half><<<dq_grid, dq_block>>>(
+                                reinterpret_cast<const uint8_t*>(mFilter),
+                                reinterpret_cast<half*>(mStaticDequantFilter),
+                                reinterpret_cast<const float*>(mScale),
+                                reinterpret_cast<const float*>(mOffset),
+                                oc, ic, icp, mQuanC);
+                        }
+                        checkKernelErrors;
+                    } else {
+                        staticDequantWeightTensor.reset();
+                        gPicStaticDequantBytes.fetch_sub(dequantBytes, std::memory_order_relaxed);
+                    }
+                }
+            }
         } else {
             auto tempCacheBuffer = static_cast<CUDABackend*>(bn)->getStaticBufferPool()->alloc(weightSize * sizeof(int8_t));
             float* cacheWeight = (float*)((uint8_t*)tempCacheBuffer.first + tempCacheBuffer.second);
@@ -1591,6 +1668,10 @@ ConvFpAIntBExecution::Resource::Resource(Backend* bn, const MNN::Op* op) {
 
 ConvFpAIntBExecution::Resource::~Resource() {
     if (mGemvParams) cudaFree(mGemvParams);
+    if (mStaticDequantBytes > 0) {
+        gPicStaticDequantBytes.fetch_sub(mStaticDequantBytes, std::memory_order_relaxed);
+        mStaticDequantBytes = 0;
+    }
 }
 ConvFpAIntBExecution::ConvFpAIntBExecution(Backend* backend, const MNN::Op* op, std::shared_ptr<Resource> res) : CutlassConvCommonExecution(backend) {
     mOp = op;
@@ -1703,19 +1784,30 @@ ErrorCode ConvFpAIntBExecution::onResize(const std::vector<Tensor*> &inputs, con
     if (!mFp32Infer) {
         if (mIsConv1x1S1D1P0) {
             std::vector<int> dequantShape = {mGemmInfo.elhPad[2], mGemmInfo.elhPad[1]}; // Shape: [oc_p, ic_p]
-            if (mFp16Infer || mFp16Fp32MixInfer) {
-                mDequantFilterTensor.reset(Tensor::createDevice<int16_t>(dequantShape));
+            const size_t dequantBytes = static_cast<size_t>(mGemmInfo.elhPad[2]) *
+                static_cast<size_t>(mGemmInfo.elhPad[1]) * sizeof(uint16_t);
+            const bool useStaticDequant = (mFp16Infer || mFp16Fp32MixInfer) &&
+                mResource->mStaticDequantFilter != nullptr &&
+                mResource->mStaticDequantBytes >= dequantBytes;
+            if (useStaticDequant) {
+                mDequantFilter = mResource->mStaticDequantFilter;
+                mNeedRuntimeDequant = false;
+                mDequantIsStatic = false;
             } else {
-                mDequantFilterTensor.reset(Tensor::createDevice<float>(dequantShape));
+                if (mFp16Infer || mFp16Fp32MixInfer) {
+                    mDequantFilterTensor.reset(Tensor::createDevice<int16_t>(dequantShape));
+                } else {
+                    mDequantFilterTensor.reset(Tensor::createDevice<float>(dequantShape));
+                }
+                backend()->onAcquireBuffer(mDequantFilterTensor.get(), Backend::DYNAMIC);
+                backend()->onReleaseBuffer(mDequantFilterTensor.get(), Backend::DYNAMIC);
+                mNeedRuntimeDequant = true;
+                mDequantIsStatic = false;
+                mDequantFilter = (void*)mDequantFilterTensor->buffer().device;
             }
-            backend()->onAcquireBuffer(mDequantFilterTensor.get(), Backend::DYNAMIC);
-            backend()->onReleaseBuffer(mDequantFilterTensor.get(), Backend::DYNAMIC);
-            mNeedRuntimeDequant = true;
-            mDequantIsStatic = false;
 
             mBiasAddr   = mResource->mBias;
             mBackendPtr = mResource->mBackend;
-            mDequantFilter = (void*)mDequantFilterTensor->buffer().device;
             mFilterAddr = mDequantFilter;
 
             if (mFp32Infer) {
@@ -1789,9 +1881,10 @@ ErrorCode ConvFpAIntBExecution::onExecute(const std::vector<Tensor*> &inputs, co
 
     const int batch = inputs[0]->batch();
 
-    // Weight dequantization now happens once in onResize (STATIC buffer).
-    // GEMV path (batch <= 4) reads packed INT4 weights directly.
-
+    const bool profileConv = profilePicWeightOnlyConv() && mIsConv1x1S1D1P0 && batch > 4 &&
+        (mFp16Infer || mFp16Fp32MixInfer);
+    const bool staticDequant = mResource->mStaticDequantFilter != nullptr &&
+        mDequantFilter == mResource->mStaticDequantFilter && !mNeedRuntimeDequant;
 
     if(mResource->mIsWeightInt4) {
         if (mIsConv1x1S1D1P0) {
@@ -1878,8 +1971,20 @@ ErrorCode ConvFpAIntBExecution::onExecute(const std::vector<Tensor*> &inputs, co
                     }
                 } else {
                     // Prefill/batched GEMM path: CUTLASS with dequantized FP16 weights
+                    uint64_t totalStartUs = 0;
+                    uint64_t dequantUs = 0;
+                    uint64_t convertUs = 0;
+                    uint64_t gemmUs = 0;
+                    if (profileConv) {
+                        cudaDeviceSynchronize();
+                        totalStartUs = convProfileNowUs();
+                    }
                     if (mNeedRuntimeDequant) {
                         // Runtime dequantization: dequant INT4→FP16 into DYNAMIC buffer before CUTLASS
+                        uint64_t dequantStartUs = 0;
+                        if (profileConv) {
+                            dequantStartUs = convProfileNowUs();
+                        }
                         if (mResource->mIsWeightInt4) {
                             int threads_per_row = UP_DIV(icp, 16);
                             dim3 dq_block(min(threads_per_row, 256));
@@ -1910,12 +2015,45 @@ ErrorCode ConvFpAIntBExecution::onExecute(const std::vector<Tensor*> &inputs, co
                                     oc, ic, icp, mResource->mQuanC);
                             }
                         }
+                        if (profileConv) {
+                            cudaDeviceSynchronize();
+                            dequantUs = convProfileNowUs() - dequantStartUs;
+                        }
                     }
                     if (mFp16Fp32MixInfer) {
                         size_t maxCount = mGemmInfo.elh[0] * mGemmInfo.elhPad[1];
+                        uint64_t convertStartUs = 0;
+                        if (profileConv) {
+                            convertStartUs = convProfileNowUs();
+                        }
                         callFloat2Half(input_addr, mIm2ColBuffer, maxCount, runtime);
+                        if (profileConv) {
+                            cudaDeviceSynchronize();
+                            convertUs = convProfileNowUs() - convertStartUs;
+                        }
+                    }
+                    uint64_t gemmStartUs = 0;
+                    if (profileConv) {
+                        gemmStartUs = convProfileNowUs();
                     }
                     runCutlassGemmFunc();
+                    if (profileConv) {
+                        cudaDeviceSynchronize();
+                        gemmUs = convProfileNowUs() - gemmStartUs;
+                        MNN_PRINT("CUDAWeightOnlyConv profile op=conv_fpa_intb_1x1 batch=%d ic=%d oc=%d "
+                                  "icp=%d ocp=%d int4=%d runtime_dequant=%d fp16=%d mix=%d "
+                                  "static_dequant=%d static_cache_bytes=%zu static_cache_total=%zu "
+                                  "dequant_us=%llu convert_us=%llu cutlass_us=%llu total_us=%llu\n",
+                                  batch, ic, oc, icp, ocp, mResource->mIsWeightInt4 ? 1 : 0,
+                                  mNeedRuntimeDequant ? 1 : 0, mFp16Infer ? 1 : 0,
+                                  mFp16Fp32MixInfer ? 1 : 0, staticDequant ? 1 : 0,
+                                  mResource->mStaticDequantBytes,
+                                  gPicStaticDequantBytes.load(std::memory_order_relaxed),
+                                  static_cast<unsigned long long>(dequantUs),
+                                  static_cast<unsigned long long>(convertUs),
+                                  static_cast<unsigned long long>(gemmUs),
+                                  static_cast<unsigned long long>(convProfileNowUs() - totalStartUs));
+                    }
                 }
             }
         } else {

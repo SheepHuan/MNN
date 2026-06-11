@@ -31,8 +31,11 @@ public:
         std::shared_ptr<Tensor> scaleTensor;
         std::shared_ptr<Tensor> offsetTensor;
         std::shared_ptr<Tensor> biasTensor;
+        std::shared_ptr<Tensor> staticDequantWeightTensor;
         Backend* mBackend = nullptr;
         bool mIsWeightInt4 = false;
+        void* mStaticDequantFilter = nullptr;
+        size_t mStaticDequantBytes = 0;
         
         std::shared_ptr<Tensor> mSumBQTensor;
         void* mSumBQ = nullptr;
@@ -56,8 +59,8 @@ private:
     std::shared_ptr<Tensor> mDequantFilterTensor;
     void* mDequantFilter = nullptr;
 
-    // When true, STATIC dequant buffer allocation failed (OOM for large models).
-    // Dequantization will be done just-in-time in onExecute using DYNAMIC buffer.
+    // Low-memory 1x1 GEMM uses Resource static dequant weights when the
+    // memory cap admits them; remaining shapes refresh this DYNAMIC buffer.
     bool mNeedRuntimeDequant = false;
     bool mDequantIsStatic = false;  // Track whether dequant buffer is STATIC or DYNAMIC
 

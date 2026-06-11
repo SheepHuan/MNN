@@ -250,7 +250,44 @@ __global__ void cacheBlendValueScoreKernel(const T* referenceValueCache, const T
     scores[scoreOffset + local] = acc / denom;
 }
 
-__global__ void cacheBlendTopKKernel(const float* scores, int* selected, int tokenCount, int topK) {
+template <typename T>
+__global__ void cacheBlendValueScoreFromPagedSourceKernel(const T* valueCache, const int* slotTable, float* scores,
+                                                          int batch, int tokenCount, int kvHeads, int headDim,
+                                                          int maxSlots, int sourceSlotStart, int logicalStart,
+                                                          int scoreOffset) {
+    int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= tokenCount) {
+        return;
+    }
+    int logical = logicalStart + local;
+    int sourceSlot = sourceSlotStart + local;
+    if (logical < 0 || logical >= maxSlots || sourceSlot < 0 || sourceSlot >= maxSlots) {
+        scores[scoreOffset + local] = -FLT_MAX;
+        return;
+    }
+    int slot = slotTable ? slotTable[logical] : logical;
+    if (slot < 0 || slot >= maxSlots) {
+        scores[scoreOffset + local] = -FLT_MAX;
+        return;
+    }
+    float acc = 0.0f;
+    for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < kvHeads; ++h) {
+            int refBase = ((b * kvHeads + h) * maxSlots + slot) * headDim;
+            int sourceBase = ((b * kvHeads + h) * maxSlots + sourceSlot) * headDim;
+            for (int d = 0; d < headDim; ++d) {
+                acc += fabsf(pagedToFloat<T>(valueCache[refBase + d]) -
+                             pagedToFloat<T>(valueCache[sourceBase + d]));
+            }
+        }
+    }
+    const int denomInt = batch * kvHeads * headDim > 0 ? batch * kvHeads * headDim : 1;
+    const float denom = static_cast<float>(denomInt);
+    scores[scoreOffset + local] = acc / denom;
+}
+
+__global__ void cacheBlendTopKKernel(const float* scores, int* selected, unsigned char* used, int tokenCount,
+                                     int topK) {
     __shared__ float bestValues[256];
     __shared__ int bestIndices[256];
     int tid = threadIdx.x;
@@ -261,14 +298,7 @@ __global__ void cacheBlendTopKKernel(const float* scores, int* selected, int tok
         float best = -FLT_MAX;
         int bestIndex = -1;
         for (int i = tid; i < tokenCount; i += blockDim.x) {
-            bool used = false;
-            for (int prev = 0; prev < k; ++prev) {
-                if (selected[prev] == i) {
-                    used = true;
-                    break;
-                }
-            }
-            if (used) {
+            if (used != nullptr && used[i] != 0) {
                 continue;
             }
             float value = scores[i];
@@ -297,7 +327,12 @@ __global__ void cacheBlendTopKKernel(const float* scores, int* selected, int tok
             __syncthreads();
         }
         if (tid == 0) {
-            selected[k] = bestIndices[0];
+            const int chosen = bestIndices[0];
+            selected[k] = chosen;
+            if (used != nullptr && chosen >= 0 && chosen < tokenCount) {
+                used[chosen] = 1;
+                __threadfence_block();
+            }
         }
         __syncthreads();
     }
@@ -535,6 +570,217 @@ __global__ void pagedAttentionRowCompressedMaskKernel(
     }
 }
 
+static __device__ __forceinline__ float pagedWarpMax(float v) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v = fmaxf(v, __shfl_down_sync(0xffffffff, v, offset));
+    }
+    return v;
+}
+
+static __device__ __forceinline__ float pagedWarpSum(float v) {
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v += __shfl_down_sync(0xffffffff, v, offset);
+    }
+    return v;
+}
+
+template <typename T, int Q_TILE, int K_TILE>
+__global__ void pagedSparseFlashTileKernel(
+    const T* query, const T* keyCache, const T* valueCache, T* output, const float* mask, const int* slotTable,
+    int maskElements, int batch, int queryLen, int outputLen, int insertLen, int numHeads, int kvHeads,
+    int baseLogical, int kvLen, int maxSlots, float scale, const int* queryLogicalIndices, int queryRowsAreFull) {
+    constexpr int HEAD_DIM = 64;
+    __shared__ float qShared[Q_TILE][HEAD_DIM + 1];
+    __shared__ float kShared[K_TILE][HEAD_DIM + 1];
+    __shared__ float vShared[K_TILE][HEAD_DIM + 1];
+    __shared__ float scoreShared[Q_TILE][K_TILE + 1];
+    __shared__ float outShared[Q_TILE][HEAD_DIM + 1];
+    __shared__ int qLogicalShared[Q_TILE];
+    __shared__ int qRowShared[Q_TILE];
+    __shared__ int qValidShared[Q_TILE];
+    __shared__ int qMaxLogicalShared;
+    __shared__ float runningMax[Q_TILE];
+    __shared__ float runningSum[Q_TILE];
+    __shared__ float oldScaleShared[Q_TILE];
+    __shared__ float tileScaleShared[Q_TILE];
+    __shared__ int tileValidShared[Q_TILE];
+
+    const int lane = threadIdx.x;
+    const int qLane = threadIdx.y;
+    const int linearTid = qLane * blockDim.x + lane;
+    const int linearThreads = blockDim.x * blockDim.y;
+    const int qBaseTile = blockIdx.x * Q_TILE;
+    const int h = blockIdx.y;
+    const int b = blockIdx.z;
+    if (b >= batch || h >= numHeads) {
+        return;
+    }
+    const int group = numHeads / kvHeads;
+    const int kvHead = h / group;
+
+    if (lane == 0) {
+        const int q = qBaseTile + qLane;
+        const int qLogical = q < insertLen ? (queryLogicalIndices ? queryLogicalIndices[q] : (baseLogical + q)) : -1;
+        const int qRow = queryRowsAreFull ? qLogical : q;
+        qLogicalShared[qLane] = qLogical;
+        qRowShared[qLane] = qRow;
+        qValidShared[qLane] = (q < insertLen && qRow >= 0 && qRow < queryLen) ? 1 : 0;
+        runningMax[qLane] = -FLT_MAX;
+        runningSum[qLane] = 0.0f;
+        oldScaleShared[qLane] = 1.0f;
+        tileScaleShared[qLane] = 0.0f;
+        tileValidShared[qLane] = 0;
+        if (qLane == 0) {
+            qMaxLogicalShared = -1;
+        }
+    }
+    __syncthreads();
+
+    if (linearTid == 0) {
+        int maxLogical = -1;
+#pragma unroll
+        for (int i = 0; i < Q_TILE; ++i) {
+            if (qValidShared[i] && qLogicalShared[i] > maxLogical) {
+                maxLogical = qLogicalShared[i];
+            }
+        }
+        qMaxLogicalShared = maxLogical;
+    }
+    __syncthreads();
+
+    for (int idx = linearTid; idx < Q_TILE * HEAD_DIM; idx += linearThreads) {
+        const int qLocal = idx / HEAD_DIM;
+        const int d = idx - qLocal * HEAD_DIM;
+        float qValue = 0.0f;
+        if (qValidShared[qLocal]) {
+            const int qOffset = ((b * queryLen + qRowShared[qLocal]) * numHeads + h) * HEAD_DIM + d;
+            qValue = pagedToFloat<T>(query[qOffset]);
+        }
+        qShared[qLocal][d] = qValue;
+        outShared[qLocal][d] = 0.0f;
+    }
+    __syncthreads();
+
+    int maskCols = 0;
+    int maskGap = 0;
+    if (mask != nullptr && maskElements > 1) {
+        maskCols = maskElements >= insertLen * kvLen ? kvLen : insertLen;
+        maskGap = kvLen - maskCols;
+    }
+
+    int causalKLimit = qMaxLogicalShared + 1;
+    if (causalKLimit < 0) {
+        causalKLimit = 0;
+    }
+    if (causalKLimit > kvLen) {
+        causalKLimit = kvLen;
+    }
+    for (int kStart = 0; kStart < causalKLimit; kStart += K_TILE) {
+        for (int idx = linearTid; idx < K_TILE * HEAD_DIM; idx += linearThreads) {
+            const int kk = idx / HEAD_DIM;
+            const int d = idx - kk * HEAD_DIM;
+            const int logical = kStart + kk;
+            float kValue = 0.0f;
+            if (logical < causalKLimit) {
+                const int slot = slotTable ? slotTable[logical] : logical;
+                if (slot >= 0 && slot < maxSlots) {
+                    const int kOffset = ((slot * batch + b) * kvHeads + kvHead) * HEAD_DIM + d;
+                    kValue = pagedToFloat<T>(keyCache[kOffset]);
+                }
+            }
+            kShared[kk][d] = kValue;
+        }
+        __syncthreads();
+
+        float score = -FLT_MAX;
+        const int qLocal = qLane;
+        const int kk = lane;
+        const int logical = kStart + kk;
+        if (qValidShared[qLocal] && logical < causalKLimit && logical <= qLogicalShared[qLocal]) {
+            float dot = 0.0f;
+#pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dot += qShared[qLocal][d] * kShared[kk][d];
+            }
+            score = dot * scale;
+            if (mask != nullptr && maskCols > 0 && logical >= maskGap) {
+                const int col = logical - maskGap;
+                const int maskRow = queryRowsAreFull ? qLogicalShared[qLocal] : (qBaseTile + qLocal);
+                const int maskIdx = maskRow * maskCols + col;
+                if (maskIdx >= 0 && maskIdx < maskElements) {
+                    score += mask[maskIdx];
+                }
+            }
+        }
+        const float tileMax = pagedWarpMax(score);
+        float prob = 0.0f;
+        if (score != -FLT_MAX && tileMax != -FLT_MAX) {
+            prob = expf(score - tileMax);
+        }
+        const float tileSum = pagedWarpSum(prob);
+        scoreShared[qLocal][kk] = prob;
+        if (lane == 0) {
+            if (tileSum > 0.0f) {
+                const float newMax = runningSum[qLocal] > 0.0f ? fmaxf(runningMax[qLocal], tileMax) : tileMax;
+                oldScaleShared[qLocal] = runningSum[qLocal] > 0.0f ? expf(runningMax[qLocal] - newMax) : 0.0f;
+                tileScaleShared[qLocal] = expf(tileMax - newMax);
+                runningSum[qLocal] = runningSum[qLocal] * oldScaleShared[qLocal] + tileSum * tileScaleShared[qLocal];
+                runningMax[qLocal] = newMax;
+                tileValidShared[qLocal] = 1;
+            } else {
+                oldScaleShared[qLocal] = 1.0f;
+                tileScaleShared[qLocal] = 0.0f;
+                tileValidShared[qLocal] = 0;
+            }
+        }
+        __syncthreads();
+
+        for (int idx = linearTid; idx < K_TILE * HEAD_DIM; idx += linearThreads) {
+            const int kLocal = idx / HEAD_DIM;
+            const int d = idx - kLocal * HEAD_DIM;
+            const int logicalV = kStart + kLocal;
+            float vValue = 0.0f;
+            if (logicalV < causalKLimit) {
+                const int slot = slotTable ? slotTable[logicalV] : logicalV;
+                if (slot >= 0 && slot < maxSlots) {
+                    const int vOffset = ((b * kvHeads + kvHead) * maxSlots + slot) * HEAD_DIM + d;
+                    vValue = pagedToFloat<T>(valueCache[vOffset]);
+                }
+            }
+            vShared[kLocal][d] = vValue;
+        }
+        __syncthreads();
+
+        for (int idx = linearTid; idx < Q_TILE * HEAD_DIM; idx += linearThreads) {
+            const int qAcc = idx / HEAD_DIM;
+            const int d = idx - qAcc * HEAD_DIM;
+            if (qValidShared[qAcc] && tileValidShared[qAcc]) {
+                float tileAcc = 0.0f;
+#pragma unroll
+                for (int kLocal = 0; kLocal < K_TILE; ++kLocal) {
+                    tileAcc += scoreShared[qAcc][kLocal] * vShared[kLocal][d];
+                }
+                outShared[qAcc][d] = outShared[qAcc][d] * oldScaleShared[qAcc] +
+                                     tileAcc * tileScaleShared[qAcc];
+            }
+        }
+        __syncthreads();
+    }
+
+    for (int idx = linearTid; idx < Q_TILE * HEAD_DIM; idx += linearThreads) {
+        const int qLocal = idx / HEAD_DIM;
+        const int d = idx - qLocal * HEAD_DIM;
+        const int q = qBaseTile + qLocal;
+        if (qValidShared[qLocal] && q < outputLen) {
+            const float invSum = runningSum[qLocal] > 0.0f ? 1.0f / runningSum[qLocal] : 0.0f;
+            const int outOffset = (b * outputLen * numHeads * HEAD_DIM) + q * numHeads * HEAD_DIM + h * HEAD_DIM + d;
+            output[outOffset] = pagedFromFloat<T>(outShared[qLocal][d] * invSum);
+        }
+    }
+}
+
 template <typename T>
 __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* scores, const int* slotTable,
                                      const float* mask, int maskElements,
@@ -693,6 +939,42 @@ static inline int reverseCount(const KVMeta* meta) {
     }
     int reverse = meta->computeReverseSize();
     return std::max(0, reverse);
+}
+
+static size_t segmentTokenCountCUDA(const std::vector<PagedKVExternalSegment>& segments) {
+    size_t total = 0;
+    for (const auto& segment : segments) {
+        total += segment.tokenCount;
+    }
+    return total;
+}
+
+static int picCacheSourceSlotBaseCUDA(const PagedKVMeta* meta, int kvLen) {
+    if (meta == nullptr) {
+        return kvLen;
+    }
+    return std::max(kvLen, meta->request_capacity);
+}
+
+static size_t picCacheSourceSlotCountCUDA(const PagedKVMeta* meta) {
+    if (meta == nullptr) {
+        return 0;
+    }
+    return std::max(meta->external_source_slot_reserve,
+                    std::max(segmentTokenCountCUDA(meta->external_segments),
+                             segmentTokenCountCUDA(meta->cacheblend_score_segments)));
+}
+
+static int maxSlotsWithPicSourceSlotsCUDA(const PagedKVMeta* meta, int kvLen) {
+    const size_t sourceSlots = picCacheSourceSlotCountCUDA(meta);
+    if (sourceSlots == 0) {
+        return kvLen;
+    }
+    const int sourceBase = picCacheSourceSlotBaseCUDA(meta, kvLen);
+    if (sourceSlots > static_cast<size_t>(std::numeric_limits<int>::max() - sourceBase)) {
+        return std::numeric_limits<int>::max();
+    }
+    return std::max(kvLen, sourceBase + static_cast<int>(sourceSlots));
 }
 
 static bool writeBinaryFile(const std::string& path, const std::vector<int8_t>& data) {
@@ -1458,10 +1740,11 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
 
 static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
                                           int bytes, int maxSlots, int kvLen, const void* valueCacheDevice,
-                                          const int* slotTableDevice, void** valueWorkspace,
-                                          size_t* valueWorkspaceBytes, float** scoreWorkspace,
+                                          void* valueCacheHost, int sourceSlotBase, const int* slotTableDevice,
+                                          void** valueWorkspace, size_t* valueWorkspaceBytes, float** scoreWorkspace,
                                           size_t* scoreWorkspaceCount, int** indexWorkspace,
-                                          size_t* indexWorkspaceCount) {
+                                          size_t* indexWorkspaceCount, unsigned char** usedWorkspace,
+                                          size_t* usedWorkspaceCount) {
     if (meta == nullptr || !meta->needsCacheBlendScoring(layerIndex)) {
         return NO_ERROR;
     }
@@ -1475,10 +1758,30 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
         meta->setCacheBlendScoringResult({});
         return NO_ERROR;
     }
+    const bool profile = profilePagedAttention();
+    uint64_t totalStartUs = 0;
+    uint64_t allocUs = 0;
+    uint64_t readUs = 0;
+    uint64_t h2dUs = 0;
+    uint64_t scoreKernelUs = 0;
+    uint64_t topKInitUs = 0;
+    uint64_t topKUs = 0;
+    uint64_t d2hUs = 0;
+    uint64_t metadataUs = 0;
+    size_t sourceSlotTokens = 0;
+    int sourceSlotSegments = 0;
+    if (profile) {
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            return INVALID_VALUE;
+        }
+        totalStartUs = nowUs();
+    }
     if (valueWorkspace == nullptr || valueWorkspaceBytes == nullptr || scoreWorkspace == nullptr ||
-        scoreWorkspaceCount == nullptr || indexWorkspace == nullptr || indexWorkspaceCount == nullptr) {
+        scoreWorkspaceCount == nullptr || indexWorkspace == nullptr || indexWorkspaceCount == nullptr ||
+        usedWorkspace == nullptr || usedWorkspaceCount == nullptr) {
         return INVALID_VALUE;
     }
+    uint64_t allocStartUs = profile ? nowUs() : 0;
     if (*scoreWorkspace == nullptr || *scoreWorkspaceCount < static_cast<size_t>(picTokenCount)) {
         if (*scoreWorkspace != nullptr) {
             cudaFree(*scoreWorkspace);
@@ -1502,6 +1805,24 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
             return OUT_OF_MEMORY;
         }
         *indexWorkspaceCount = static_cast<size_t>(topK);
+    }
+    if (*usedWorkspace == nullptr || *usedWorkspaceCount < static_cast<size_t>(picTokenCount)) {
+        if (*usedWorkspace != nullptr) {
+            cudaFree(*usedWorkspace);
+            *usedWorkspace = nullptr;
+            *usedWorkspaceCount = 0;
+        }
+        if (cudaMalloc(reinterpret_cast<void**>(usedWorkspace), static_cast<size_t>(picTokenCount)) !=
+            cudaSuccess) {
+            return OUT_OF_MEMORY;
+        }
+        *usedWorkspaceCount = static_cast<size_t>(picTokenCount);
+    }
+    if (profile) {
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            return INVALID_VALUE;
+        }
+        allocUs += nowUs() - allocStartUs;
     }
     size_t scoreOffset = 0;
     for (const auto& segment : meta->cacheblend_score_segments) {
@@ -1531,29 +1852,76 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
             segment.logicalStart > maxInt || segment.tokenCount > maxInt || scoreOffset > maxInt) {
             return INVALID_VALUE;
         }
-        std::vector<int8_t> cachedValue;
-        if (!readExternalValueSegment(layer->valuePath, cachedValue, batch, kvHeads, sourceTokenCount,
-                                      sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
-            return INVALID_VALUE;
-        }
-        const size_t valueBytes = cachedValue.size();
-        if (*valueWorkspace == nullptr || *valueWorkspaceBytes < valueBytes) {
-            if (*valueWorkspace != nullptr) {
-                cudaFree(*valueWorkspace);
-                *valueWorkspace = nullptr;
-                *valueWorkspaceBytes = 0;
-            }
-            if (cudaMalloc(valueWorkspace, valueBytes) != cudaSuccess) {
-                return OUT_OF_MEMORY;
-            }
-            *valueWorkspaceBytes = valueBytes;
-        }
-        if (cudaMemcpy(*valueWorkspace, cachedValue.data(), valueBytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-            return INVALID_VALUE;
-        }
         const int threads = 128;
         const int blocks = UP_DIV(static_cast<int>(segment.tokenCount), threads);
-        if (bytes == 4) {
+        const int sourceSlotStart = sourceSlotBase + static_cast<int>(scoreOffset);
+        const bool useSourceSlots = valueCacheHost != nullptr && sourceSlotBase >= 0 &&
+            sourceSlotStart >= 0 && sourceSlotStart + static_cast<int>(segment.tokenCount) <= maxSlots;
+        if (useSourceSlots) {
+            uint64_t readStartUs = profile ? nowUs() : 0;
+            if (!readExternalValueSegmentToPagedCache(layer->valuePath, valueCacheHost, batch, kvHeads, maxSlots,
+                                                      static_cast<size_t>(sourceSlotStart), sourceTokenCount,
+                                                      sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+                return INVALID_VALUE;
+            }
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            if (profile) {
+                readUs += nowUs() - readStartUs;
+            }
+            sourceSlotTokens += segment.tokenCount;
+            ++sourceSlotSegments;
+        } else {
+            std::vector<int8_t> cachedValue;
+            uint64_t readStartUs = profile ? nowUs() : 0;
+            if (!readExternalValueSegment(layer->valuePath, cachedValue, batch, kvHeads, sourceTokenCount,
+                                          sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+                return INVALID_VALUE;
+            }
+            if (profile) {
+                readUs += nowUs() - readStartUs;
+            }
+            const size_t valueBytes = cachedValue.size();
+            if (*valueWorkspace == nullptr || *valueWorkspaceBytes < valueBytes) {
+                uint64_t valueAllocStartUs = profile ? nowUs() : 0;
+                if (*valueWorkspace != nullptr) {
+                    cudaFree(*valueWorkspace);
+                    *valueWorkspace = nullptr;
+                    *valueWorkspaceBytes = 0;
+                }
+                if (cudaMalloc(valueWorkspace, valueBytes) != cudaSuccess) {
+                    return OUT_OF_MEMORY;
+                }
+                *valueWorkspaceBytes = valueBytes;
+                if (profile) {
+                    if (cudaDeviceSynchronize() != cudaSuccess) {
+                        return INVALID_VALUE;
+                    }
+                    allocUs += nowUs() - valueAllocStartUs;
+                }
+            }
+            uint64_t h2dStartUs = profile ? nowUs() : 0;
+            if (cudaMemcpy(*valueWorkspace, cachedValue.data(), valueBytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+                return INVALID_VALUE;
+            }
+            if (profile) {
+                if (cudaDeviceSynchronize() != cudaSuccess) {
+                    return INVALID_VALUE;
+                }
+                h2dUs += nowUs() - h2dStartUs;
+            }
+        }
+        uint64_t scoreStartUs = profile ? nowUs() : 0;
+        if (useSourceSlots && bytes == 4) {
+            cacheBlendValueScoreFromPagedSourceKernel<float><<<blocks, threads>>>(
+                reinterpret_cast<const float*>(valueCacheDevice), slotTableDevice, *scoreWorkspace, batch,
+                static_cast<int>(segment.tokenCount), kvHeads, headDim, maxSlots, sourceSlotStart,
+                static_cast<int>(segment.logicalStart), static_cast<int>(scoreOffset));
+        } else if (useSourceSlots) {
+            cacheBlendValueScoreFromPagedSourceKernel<half><<<blocks, threads>>>(
+                reinterpret_cast<const half*>(valueCacheDevice), slotTableDevice, *scoreWorkspace, batch,
+                static_cast<int>(segment.tokenCount), kvHeads, headDim, maxSlots, sourceSlotStart,
+                static_cast<int>(segment.logicalStart), static_cast<int>(scoreOffset));
+        } else if (bytes == 4) {
             cacheBlendValueScoreKernel<float><<<blocks, threads>>>(
                 reinterpret_cast<const float*>(valueCacheDevice), reinterpret_cast<const float*>(*valueWorkspace),
                 slotTableDevice, *scoreWorkspace, batch, static_cast<int>(segment.tokenCount), kvHeads, headDim,
@@ -1567,20 +1935,48 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
         if (cudaGetLastError() != cudaSuccess) {
             return INVALID_VALUE;
         }
+        if (profile) {
+            if (cudaDeviceSynchronize() != cudaSuccess) {
+                return INVALID_VALUE;
+            }
+            scoreKernelUs += nowUs() - scoreStartUs;
+        }
         scoreOffset += segment.tokenCount;
     }
     if (scoreOffset != static_cast<size_t>(picTokenCount)) {
         return INVALID_VALUE;
     }
-    cacheBlendTopKKernel<<<1, 256>>>(*scoreWorkspace, *indexWorkspace, picTokenCount, topK);
+    uint64_t topKInitStartUs = profile ? nowUs() : 0;
+    if (cudaMemset(*usedWorkspace, 0, static_cast<size_t>(picTokenCount)) != cudaSuccess) {
+        return INVALID_VALUE;
+    }
+    if (profile) {
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            return INVALID_VALUE;
+        }
+        topKInitUs = nowUs() - topKInitStartUs;
+    }
+    uint64_t topKStartUs = profile ? nowUs() : 0;
+    cacheBlendTopKKernel<<<1, 256>>>(*scoreWorkspace, *indexWorkspace, *usedWorkspace, picTokenCount, topK);
     if (cudaGetLastError() != cudaSuccess) {
         return INVALID_VALUE;
     }
+    if (profile) {
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            return INVALID_VALUE;
+        }
+        topKUs = nowUs() - topKStartUs;
+    }
     std::vector<int> selected(topK);
+    uint64_t d2hStartUs = profile ? nowUs() : 0;
     if (cudaMemcpy(selected.data(), *indexWorkspace, static_cast<size_t>(topK) * sizeof(int),
                    cudaMemcpyDeviceToHost) != cudaSuccess) {
         return INVALID_VALUE;
     }
+    if (profile) {
+        d2hUs = nowUs() - d2hStartUs;
+    }
+    uint64_t metadataStartUs = profile ? nowUs() : 0;
     std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
     for (int index : selected) {
         if (index < 0 || index >= picTokenCount || seen[static_cast<size_t>(index)] != 0) {
@@ -1589,10 +1985,26 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
         seen[static_cast<size_t>(index)] = 1;
     }
     meta->setCacheBlendScoringResult(selected);
-    if (profilePagedAttention()) {
-        cudaDeviceSynchronize();
-        MNN_PRINT("CUDAPagedAttention profile op=cacheblend_score layer=%d pic_tokens=%d top_k=%d\n",
-                  layerIndex, picTokenCount, topK);
+    if (profile) {
+        metadataUs = nowUs() - metadataStartUs;
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            return INVALID_VALUE;
+        }
+        MNN_PRINT("CUDAPagedAttention profile op=cacheblend_score layer=%d pic_tokens=%d top_k=%d "
+                  "segments=%d source_slot_segments=%d source_slot_tokens=%d us=%llu alloc_us=%llu "
+                  "read_us=%llu h2d_us=%llu score_kernel_us=%llu "
+                  "topk_init_us=%llu topk_us=%llu d2h_us=%llu metadata_us=%llu\n",
+                  layerIndex, picTokenCount, topK, static_cast<int>(meta->cacheblend_score_segments.size()),
+                  sourceSlotSegments, static_cast<int>(sourceSlotTokens),
+                  static_cast<unsigned long long>(nowUs() - totalStartUs),
+                  static_cast<unsigned long long>(allocUs),
+                  static_cast<unsigned long long>(readUs),
+                  static_cast<unsigned long long>(h2dUs),
+                  static_cast<unsigned long long>(scoreKernelUs),
+                  static_cast<unsigned long long>(topKInitUs),
+                  static_cast<unsigned long long>(topKUs),
+                  static_cast<unsigned long long>(d2hUs),
+                  static_cast<unsigned long long>(metadataUs));
     }
     return NO_ERROR;
 }
@@ -1726,6 +2138,11 @@ CUDAPagedAttention::~CUDAPagedAttention() {
         cudaFree(mCacheBlendIndices);
         mCacheBlendIndices = nullptr;
         mCacheBlendIndexCount = 0;
+    }
+    if (mCacheBlendUsed != nullptr) {
+        cudaFree(mCacheBlendUsed);
+        mCacheBlendUsed = nullptr;
+        mCacheBlendUsedCount = 0;
     }
 }
 
@@ -1895,6 +2312,7 @@ ErrorCode CUDAPagedAttention::onResize(const std::vector<Tensor*>& inputs, const
         if (maxSlots <= 0) {
             maxSlots = static_cast<int>(mMeta->previous) + mNewKvSeqLen;
         }
+        maxSlots = maxSlotsWithPicSourceSlotsCUDA(mMeta, maxSlots);
     }
     return ensureCache(maxSlots, mBatch, mKvNumHead, mHeadDim);
 }
@@ -2010,11 +2428,14 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         checkKernelErrors;
     }
 
+    void* mappedValueHost = (mCache->zeroCopyKV && mCache->mappedValue != nullptr) ? mCache->mappedValue->host : nullptr;
+    const int sourceSlotBase = picCacheSourceSlotBaseCUDA(mMeta, kvLen);
     auto cacheBlendScore = runCacheBlendScoringCUDA(
         mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mPrecision, mCache->maxSlots, kvLen,
-        pagedDevPtr<void>(mCache->value.get()), pagedDevPtr<int>(mCache->slotTable.get()), &mExternalValue,
-        &mExternalValueBytes, &mCacheBlendScores, &mCacheBlendScoreCount, &mCacheBlendIndices,
-        &mCacheBlendIndexCount);
+        pagedDevPtr<void>(mCache->value.get()), mappedValueHost, sourceSlotBase,
+        pagedDevPtr<int>(mCache->slotTable.get()), &mExternalValue, &mExternalValueBytes, &mCacheBlendScores,
+        &mCacheBlendScoreCount, &mCacheBlendIndices, &mCacheBlendIndexCount, &mCacheBlendUsed,
+        &mCacheBlendUsedCount);
     if (cacheBlendScore != NO_ERROR) {
         return cacheBlendScore;
     }
@@ -2171,6 +2592,47 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                       "kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d us=%llu\n",
                       layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
                       queryRowsAreFull ? 1 : 0, maskElements,
+                      static_cast<unsigned long long>(nowUs() - attentionStartUs));
+        }
+        return NO_ERROR;
+    }
+    const bool cacheBlendLargeSparseTile = sparseQuery && mMeta != nullptr &&
+        mMeta->cacheblend_score_active && attnLen > 256;
+    const bool fixedPlanSparseTile = sparseQuery && mMeta != nullptr && mMeta->pic_graph_active_plan_ready;
+    if ((fixedPlanSparseTile || cacheBlendLargeSparseTile) && mHeadDim == 64) {
+        constexpr int qTile = 8;
+        constexpr int kTile = 32;
+        dim3 flashBlock(kTile, qTile, 1);
+        dim3 flashGrid(UP_DIV(attnLen, qTile), mNumHead, mBatch);
+        const bool skipCausalMask = mMeta != nullptr && mMeta->full_causal_attention_mask;
+        const float* sparseTileMask = (!skipCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
+        const int sparseTileMaskElements = sparseTileMask != nullptr ? maskElements : 0;
+        ScopedNvtxRange flashNvtx(nvtxLayerRangeName("sparse_flash_tile_attention", layerIndex,
+                                                     mQuerySeqLen, attnLen, kvLen), nvtx);
+        if (mPrecision == 4) {
+            pagedSparseFlashTileKernel<float, qTile, kTile><<<flashGrid, flashBlock, 0, stream>>>(
+                pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()),
+                pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
+                sparseTileMask, pagedDevPtr<int>(mCache->slotTable.get()),
+                sparseTileMaskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, baseLogical,
+                kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
+        } else {
+            pagedSparseFlashTileKernel<half, qTile, kTile><<<flashGrid, flashBlock, 0, stream>>>(
+                pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()),
+                pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
+                sparseTileMask, pagedDevPtr<int>(mCache->slotTable.get()),
+                sparseTileMaskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, baseLogical,
+                kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
+        }
+        checkKernelErrors;
+        if (profile) {
+            cudaDeviceSynchronize();
+            MNN_PRINT("CUDAPagedAttention profile op=sparse_flash_tile_attention layer=%d query=%d attn=%d "
+                      "kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d input_mask_elements=%d "
+                      "causal_mask_skipped=%d q_tile=%d k_tile=%d us=%llu\n",
+                      layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                      queryRowsAreFull ? 1 : 0, sparseTileMaskElements, maskElements, skipCausalMask ? 1 : 0,
+                      qTile, kTile,
                       static_cast<unsigned long long>(nowUs() - attentionStartUs));
         }
         return NO_ERROR;
