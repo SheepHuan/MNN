@@ -226,42 +226,81 @@ model_name,mode,buget,latency_s,effective_tps,speedup_vs_normal
 
 ## 2026-06-11 OpenCL 1024-token 当前结论
 
-OrangePi OpenCL PIC graph-boundary 路径在 1024-token prompt 下已经有过 cacheblend 和 epic 在 10/20/30/40/50% 全部快于普通 normal LLM full-compute 的 warm/preloaded MNN tune cache repeat：
+OrangePi OpenCL PIC graph-boundary 路径在 1024-token prompt 下已经稳定运行。默认 `score_layer_idx=1`，不要改成 layer 0：`layer 0` 是 score 前 full compute，`layer 1` 是 `PicScoreAttention` scoring/top-k 和 compact 输出，`layer >= 2` 是后续 `PicSparseAttention` compact sparse rows。
+
+source-slot reserve 修复后的 fresh repeat：
 
 ```text
 mode,budget,latency_s,speedup_vs_normal
-full-reuse,full,0.406432,17.145
-cacheblend,0.10,4.569623,1.525
-cacheblend,0.20,5.725607,1.217
-cacheblend,0.30,4.343375,1.604
-cacheblend,0.40,5.714816,1.219
-cacheblend,0.50,6.569642,1.061
-epic,0.10,3.163368,2.203
-epic,0.20,5.337575,1.306
-epic,0.30,3.360976,2.073
-epic,0.40,4.062803,1.715
-epic,0.50,6.008137,1.160
+normal,full,6.968234,1.000
+full-reuse,full,1.035310,6.731
+cacheblend,0.10,4.187917,1.664
+cacheblend,0.20,6.196139,1.125
+cacheblend,0.30,4.680493,1.489
+cacheblend,0.40,5.594163,1.246
+cacheblend,0.50,7.188658,0.969
+epic,0.10,3.761944,1.852
+epic,0.20,5.863076,1.188
+epic,0.30,3.706188,1.880
+epic,0.40,4.979558,1.399
+epic,0.50,6.012580,1.159
 ```
 
-三个 attention 阶段的新拆分：
+cacheblend 50% profile-detail 拆分：
 
 ```text
-budget,PagedAttention_ms,ScoreAttention_scoring_ms,ScoreAttention_layer1_attention_ms,ScoreAttention_total_ms,SparseAttention_layers_gt1_ms,Hydrate_ms
-0.10,246.468,18.531,22.575,41.106,337.876,18.905
-0.20,150.686,57.895,52.477,110.372,740.025,19.554
-0.30,68.741,124.080,71.238,195.318,1474.706,22.979
-0.40,65.701,225.106,115.671,340.777,2220.714,23.202
-0.50,100.777,343.987,172.663,516.650,2186.564,15.937
+PagedAttention_layer0_ms=1720.863
+ScoreAttention_scoring_ms=5.783
+ScoreAttention_topk_ms=0.863
+ScoreAttention_layer1_attention_ms=183.203
+SparseAttention_layers_gt1_ms=2958.786
+SparseAttention_layers_gt1_qk_ms=1285.347
+SparseAttention_layers_gt1_qkv_ms=836.536
+Hydrate_ms=63.654
 ```
 
 结论：
 
-- `PagedAttention` 不是当前主瓶颈。
-- `ScoreAttention layer=1` 的秒级慢点主要是冷 sparse-shape LWS tuning/driver 开销，已经通过 MNN tune cache/prewarm 移出正式请求。
-- `ScoreAttention scoring/top-k` 在 40/50% 可见，但仍不是最大项。
-- 当前主瓶颈转移到 `PicSparseAttention layers > 1`，尤其 QK 与 QKV 聚合；后续优化围绕 fused sparse FlashAttention 和更强的 FlashMask/range 分段展开。
-- 最新 retune audit（`opencl_pic_1024_default_retune_after_lwscache_20260611_032213`）显示 epic 10-50% 仍全部快于 normal，但 cacheblend 50% 为 `7.031057s / 0.991x`，未满足“始终更快”的严格目标。profile-detail 拆分为 `Hydrate_ms=21.143`、`ScoreAttention_scoring_ms=344.503`、`ScoreAttention_layer1_attention_ms=181.984`、`SparseAttention_layers_gt1_ms=3030.656`，其中 later sparse QK `1366.483ms`、QKV `884.708ms`。因此当前开放优化点是 cacheblend 50% 的 later `PicSparseAttention`，不是 async KV 或 PageCache zero-copy。
+- 稳定性问题已修：`log_scan.json` 中 `target_unavailable=false`、`async_failed=false`，source-slot reserve 后 full-reuse 和后续 cacheblend/epic 不再隐藏 forward error。
+- `PagedAttention` / async hydrate / PageCache zero-copy 不是当前主瓶颈。cacheblend 50% hydrate 只有约 64ms，score/top-k 只有约 5.8ms/0.9ms。
+- 当前主瓶颈明确是 `PicSparseAttention layers > 1` 的每层 sparse attention，尤其 QK 与 QKV；cacheblend 50% 需要至少再省约 220ms 才能稳定快于 normal full-compute。
+- FlashMask-style range-aware pieces 已经默认打开，但 50% active rows 下 `qk_active_tiles/qk_rect_tiles ~= 0.928`，selected rows 覆盖到 1023 附近，4-row group 内 causal K 上界浪费不到 1%。因此单纯“把每段 K 上界收紧”已经不够，后续要优化 sparse QK/QKV kernel 本身，或做会改变选择分布的命名变体。
 - 2026-06-11 已否定的快速 heuristic：自动 direct-value、`q_chunk=16`、`q_chunk=128`、`q_chunk=256 + direct-value` 都没有让 cacheblend 50% 稳定快于 normal；不要把这些设为默认。env-gated fused softmax+QKV V0 在 50% active rows 上触发过 OpenCL `CL_OUT_OF_RESOURCES (-14)`，已加默认 `activeLen <= 256` guard，50% 会回退，不作为性能结论。
+
+已实现的第一版 sparse FlashAttention：
+
+- 新增 env-gated OpenCL kernel：`MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1`。
+- 只覆盖 `layer >= 2` 的 `PicSparseAttention` compact-Q；`layer=1` score layer full-Q/compact-output 仍走现有 sparse fast correctness path。
+- 新 kernel `sparse_flash_attention_row64` 用 64-lane workgroup 处理一个 active row/head，在线合并各 lane 的 softmax `(m,l,o)`，每个 K 的 QK 只计算一次；输出 accumulator 使用 `float8` 向量 local storage，避免 V0 scalar local-memory 循环。
+- profile op 单独打印为 `op=sparse_flash_attention`，默认不开，先作为可控优化开关。
+- direct PagedCache value prefill 增加窄 auto heuristic：无显式 env 覆盖时，只对 cacheblend 高预算 sparse layers 自动启用；`MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=0/1` 仍可强制关闭/打开。
+
+正式验证：
+
+```text
+tag=opencl_pic_1024_sparse_flash_vec8_formal_20260611_130036
+env=MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1
+normal,full,6.968234,1.000
+full-reuse,full,0.764264,9.118
+cacheblend,0.10,3.780810,1.843
+cacheblend,0.20,6.638145,1.050
+cacheblend,0.30,3.903327,1.785
+cacheblend,0.40,4.756370,1.465
+cacheblend,0.50,5.834781,1.194
+epic,0.10,4.015643,1.735
+epic,0.20,5.884426,1.184
+epic,0.30,3.889955,1.791
+epic,0.40,4.398280,1.584
+epic,0.50,5.346845,1.303
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+当前 TODO：
+
+1. 再做一次 fresh repeat 决定是否把 `MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION` 从实验开关提升为默认 OpenCL PIC sparse path。
+2. 继续优化 score layer `layer=1` 的 full-Q sparse attention；profile-detail 下它仍会因为旧 QK path 和调度/finish 被放大。
+3. 继续记录 selected logical rows 的覆盖范围、`qk_active_tiles/qk_rect_tiles`、每层 flash/QK/QKV 时间；只有在不改变 active rows 的情况下减少真实 QK 工作量，才算普通 cacheblend 优化。
+4. 如果要限制 cacheblend selected rows 的窗口、前缀正则或重排以降低 K range，必须命名为 `cacheblend-windowed` / `cacheblend-prefix-regularized` 等语义变体，不能报作普通 cacheblend。
 
 ## 2026-06-10 x64 CPU 稳定性检查
 

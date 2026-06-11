@@ -42,6 +42,7 @@ private:
     ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
     ErrorCode ensureSparseFastKernels();
+    ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
@@ -77,6 +78,7 @@ private:
     std::shared_ptr<KernelWrap> mQKVKernel;
     std::shared_ptr<KernelWrap> mSparseQKVKernel;
     std::shared_ptr<KernelWrap> mSparseSoftmaxQKVKernel;
+    std::shared_ptr<KernelWrap> mSparseFlashKernel;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
     std::shared_ptr<Tensor> mTempK;
@@ -107,6 +109,7 @@ private:
     int mFastKvLen = 0;
     int mFastQChunkLen = 0;
     int mSparseKernelGroupSize = 0;
+    int mSparseFlashKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;

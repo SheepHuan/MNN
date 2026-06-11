@@ -838,3 +838,181 @@ Next optimization direction:
   - fused sparse FlashAttention that does not duplicate QK per output dim group;
   - or a stronger FlashMask-style segmentation that reduces `qk_active_tiles/qk_rect_tiles` for scattered late rows without changing selected active rows.
 - Any windowing or re-ranking of cacheblend selected rows would change semantics and must be reported as a separate named variant, not normal cacheblend.
+
+## 2026-06-11 Update: Confirm Later SparseAttention Bottleneck
+
+User constraint update:
+
+- Default score layer is `layer=1`. Keep this fixed.
+- `layer 0` is score-before full compute.
+- `layer 1` is `PicScoreAttention` scoring/top-k plus compact output.
+- `layer >= 2` is later `PicSparseAttention` over compact active rows.
+
+Fresh repeat after source-slot reserve:
+
+```text
+tag=opencl_pic_1024_source_slot_reserve_cachefile_repeat_20260611_1232
+normal,full,6.968234,1.000
+full-reuse,full,1.035310,6.731
+cacheblend,0.10,4.187917,1.664
+cacheblend,0.20,6.196139,1.125
+cacheblend,0.30,4.680493,1.489
+cacheblend,0.40,5.594163,1.246
+cacheblend,0.50,7.188658,0.969
+epic,0.10,3.761944,1.852
+epic,0.20,5.863076,1.188
+epic,0.30,3.706188,1.880
+epic,0.40,4.979558,1.399
+epic,0.50,6.012580,1.159
+```
+
+Stability scan:
+
+```text
+target_unavailable=false
+async_failed=false
+error_lines=[]
+```
+
+cacheblend 50% profile-detail:
+
+```text
+tag=opencl_pic_1024_source_slot_reserve_cb50_profile_20260611_1236
+cacheblend_score layer=1 pic_tokens=1010 top_k=505 us=5783 read_us=3260 score_kernel_us=1505 topk_us=863 readback_us=55
+ScoreAttention_layer1_attention_ms=183.203
+SparseAttention_layers_gt1_ms=2958.786
+SparseAttention_layers_gt1_qk_ms=1285.347
+SparseAttention_layers_gt1_qkv_ms=836.536
+Hydrate_ms=63.654
+qk_rect_tiles=14561
+qk_active_tiles=13516
+qk_active_tiles/qk_rect_tiles=0.928
+```
+
+Conclusion:
+
+- The remaining failure is narrow: epic 10-50% is faster than normal, but cacheblend 50% is still slower than normal by about 220 ms.
+- This is not PageCache/zero-copy, async persistent PIC KV loading, hydrate, or cacheblend score/top-k.
+- The current bottleneck is later `PicSparseAttention` at `layer >= 2`, especially per-layer sparse QK and QKV.
+- At 50%, active query rows are 519 total rows and selected logical positions reach the end of the 1024-token context. The real causal K range is therefore close to full length for many rows.
+
+Why FlashMask-style range pieces are not enough:
+
+- The current range-aware splitter already tightens each sparse piece's K upper bound without changing active rows.
+- For cacheblend 50%, `qk_active_tiles/qk_rect_tiles ~= 0.928`, leaving only about 7.2% rectangular-piece waste to remove.
+- A row-level lower-bound check on the same active rows shows 4-row group causal waste is only about 0.6%. Splitting QK into 1-row/2-row groups would therefore mostly add launch overhead and not save enough math.
+- FlashMask helps when many selected rows are early or clustered and piece-level K ranges can shrink. cacheblend 50% selects many rows across late positions, so the true work is not the mask waste; it is the actual active-row x long-K attention.
+- Any stronger method that changes selected-row distribution, clamps windows, or regularizes toward prefix rows changes cacheblend semantics and must be reported as a named variant, not normal cacheblend.
+
+TODO:
+
+1. Optimize later `PicSparseAttention` sparse QK/QKV kernels directly.
+2. Revisit sparse FlashAttention as a real fused kernel that streams QK/softmax/QKV once and does not recompute QK per output-dim group.
+3. Keep the fused path env-gated and default-off until it beats the current sparse fast path for cacheblend/epic 10/20/30/40/50.
+4. Continue recording for each profile: layer, active rows, q_split, q_chunk, QK/QKV/softmax us, `qk_active_tiles/qk_rect_tiles`, hydrate us, and `async_failed`.
+5. Preserve the current PagedCache zero-copy and async loading path; do not add host KV staging or scratch `.k/.v` to mask the attention bottleneck.
+
+## 2026-06-11 Experiment: Sparse FlashAttention Row64 V1
+
+Goal:
+
+- Implement a real fused sparse attention backend kernel for later `PicSparseAttention` layers.
+- Keep score layer fixed at `layer=1`.
+- Do not change active row semantics, PagedCache zero-copy, or async persistent PIC KV loading.
+
+Code:
+
+- Added `sparse_flash_attention_row64` in `source/backend/opencl/execution/cl/attention_buf.cl`.
+- Added `PagedAttentionBufExecution::ensureSparseFlashKernel()`.
+- New env gate:
+
+```text
+MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1
+```
+
+- The path only enters when:
+  - sparse query is compact-Q (`full_q=0`);
+  - `head_dim == 64`;
+  - current layer is later `PicSparseAttention` (`layer >= 2` in the current graph-boundary model).
+- `layer=1` score-layer full-Q/compact-output remains on the existing sparse fast path.
+- The kernel uses one 64-lane workgroup per active row/head. Each lane streams a subset of K, computes QK once for each K, maintains local online softmax state, and reduces `(m,l,o)` across lanes.
+- V0 scalar accumulator used `local_o[64 lanes][64 dims]` and ran, but was slower than the old path.
+- V1 changed accumulator storage to `float8` vectors (`64 lanes x 8 float8`) and reduced local-memory loops from 64 to 8.
+- Added profile op name:
+
+```text
+op=sparse_flash_attention
+```
+
+Build/deploy:
+
+```bash
+python3 opencl_codegen.py .
+
+MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 JOBS=48 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/home/orangepi/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/orangepi5plus/
+```
+
+Profile smoke:
+
+```text
+tag=opencl_pic_1024_sparse_flash_vec8_cb10_profile_20260611_125849
+env=MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1 MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=0
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Key rows:
+
+```text
+layer=1 old score-layer path:
+op=sparse_prefill_attention_fast_qk_softmax_qkv layer=1 query=115 full_q=1 us=597808 qk_us=359129 qkv_us=171004
+
+later layers with sparse flash:
+layer=4 flash_us=11726
+layer=5 flash_us=12196
+layer=9 flash_us=13144
+layer=15 flash_us=12060
+```
+
+Interpretation:
+
+- V1 sparse flash is slower than ideal at score layer because score layer is intentionally not using it (`full_q=1`).
+- For later compact-Q layers, V1 flash is materially faster than V0 and faster than the old cb10 later-layer QK/softmax/QKV profile rows.
+- No OpenCL resource failure occurred at 10% smoke.
+
+Formal latency:
+
+```text
+tag=opencl_pic_1024_sparse_flash_vec8_formal_20260611_130036
+env=MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1
+remote_cache_root=/mnt/ssd/code/.cache/mnn_opencl_pic
+normal,full,6.968234,1.000
+full-reuse,full,0.764264,9.118
+cacheblend,0.10,3.780810,1.843
+cacheblend,0.20,6.638145,1.050
+cacheblend,0.30,3.903327,1.785
+cacheblend,0.40,4.756370,1.465
+cacheblend,0.50,5.834781,1.194
+epic,0.10,4.015643,1.735
+epic,0.20,5.884426,1.184
+epic,0.30,3.889955,1.791
+epic,0.40,4.398280,1.584
+epic,0.50,5.346845,1.303
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Conclusion:
+
+- This meets the strict 1024-token requirement for the env-gated sparse flash path: cacheblend and epic are faster than normal full-compute at 10/20/30/40/50%.
+- cacheblend 50% improved from the source-slot-reserve fresh repeat `7.188658s / 0.969x` to `5.834781s / 1.194x`.
+- The main remaining OpenCL attention target is score layer `layer=1`, not later `layer >= 2` sparse layers.
+- Keep `MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION` env-gated until one more fresh repeat confirms stability, then consider making it the default compact-Q `PicSparseAttention` path.
+
+Direct-value note:
+
+- Added a narrow auto direct-value heuristic for cacheblend high-budget sparse layers.
+- `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=0/1` still explicitly disables/enables it.
+- This preserves A/B control while letting high-budget cacheblend avoid unnecessary packed value staging when slot table identity makes direct PagedCache value reads safe.

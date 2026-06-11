@@ -92,6 +92,11 @@ static bool _envFlagEnabled(const char* name, bool defaultValue) {
     return value[0] != '0';
 }
 
+static bool _envPresent(const char* name) {
+    const char* value = ::getenv(name);
+    return value != nullptr && value[0] != '\0';
+}
+
 static bool _picOpenCLDebug() {
     return _envFlagEnabled("MNN_PIC_DECODE_DEBUG", false);
 }
@@ -300,6 +305,27 @@ static size_t _fastPrefillScratchBytes(int seqLen, int kvLen, int batch, int num
     bytes += static_cast<size_t>(qChunkPack) * kvLen * numHeads * batch * elemBytes;
     bytes += static_cast<size_t>(qChunkPack) * kvLen * numHeads * batch * elemBytes;
     return bytes;
+}
+
+static bool _autoDirectValuePrefillForSparse(const PagedKVMeta* meta, int activeLen) {
+    if (meta == nullptr || !_envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL_AUTO", true)) {
+        return false;
+    }
+    if (!meta->cacheblend_score_ready || meta->cacheblend_score_pic_token_count <= 0) {
+        return false;
+    }
+    const int minActive =
+        std::max(0, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL_AUTO_MIN_ACTIVE", 384));
+    if (activeLen < minActive) {
+        return false;
+    }
+    const int selected = meta->cacheblend_score_selected_local_indices.empty()
+        ? meta->cacheblend_score_top_k
+        : static_cast<int>(meta->cacheblend_score_selected_local_indices.size());
+    const int minRatioPercent =
+        std::max(0, _envIntValue("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL_AUTO_MIN_RATIO_PERCENT", 40));
+    return selected > 0 &&
+        selected * 100 >= meta->cacheblend_score_pic_token_count * minRatioPercent;
 }
 
 static bool _useStaticFullPrefill(int seqLen, int kvLen, int batch, int numHeads, int kvHeads, int headDim) {
@@ -1432,6 +1458,23 @@ ErrorCode PagedAttentionBufExecution::ensureSparseFastKernels() {
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::ensureSparseFlashKernel() {
+    if (mHeadDim != 64 || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    const int groupSize = mNumHead / mKvNumHead;
+    if (mSparseFlashKernel && mSparseFlashKernelGroupSize == groupSize) {
+        return NO_ERROR;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    mSparseFlashKernel = runtime->buildKernel("attention_buf", "sparse_flash_attention_row64",
+                                              {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                              mOpenCLBackend->getPrecision());
+    OPENCL_CHECK_KERNEL(mSparseFlashKernel);
+    mSparseFlashKernelGroupSize = groupSize;
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::ensureExternalTemps(size_t keyElements, size_t valueElements) {
     if (keyElements == 0 || valueElements == 0) {
         return INVALID_VALUE;
@@ -1932,6 +1975,7 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     uint64_t qkUs = 0;
     uint64_t softmaxUs = 0;
     uint64_t qkvUs = 0;
+    uint64_t flashUs = 0;
     uint64_t qkRectTiles = 0;
     uint64_t qkActiveTiles = 0;
     const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
@@ -1997,15 +2041,29 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     const float scale = (mMeta && mMeta->attn_scale > 0)
         ? mMeta->attn_scale
         : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
-    const bool directValuePrefill = _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL", false) &&
-        mCache != nullptr && mCache->value != nullptr && mCache->maxSlots >= kvLen &&
-        _slotTableIsIdentity(mMeta, kvLen);
+    const bool directValueRequested = _envPresent("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL")
+        ? _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL", false)
+        : _autoDirectValuePrefillForSparse(mMeta, activeLen);
+    const bool directValuePrefill = directValueRequested && mCache != nullptr && mCache->value != nullptr &&
+        mCache->maxSlots >= kvLen && _slotTableIsIdentity(mMeta, kvLen);
     const bool fusedSoftmaxQKVRequested =
         _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FUSED_SOFTMAX_QKV", false) ||
         _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH", false);
     const int fusedSoftmaxQKVMaxActive = std::max(0,
         _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FUSED_SOFTMAX_QKV_MAX_ACTIVE", 256));
-    const bool fusedSoftmaxQKV = fusedSoftmaxQKVRequested &&
+    const int sparseFlashMaxActive = std::max(0,
+        _envIntValue("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION_MAX_ACTIVE", 0));
+    const bool sparseFlashAttention =
+        _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION", false) &&
+        !queryRowsAreFull && mHeadDim == 64 &&
+        (sparseFlashMaxActive <= 0 || activeLen <= sparseFlashMaxActive);
+    if (sparseFlashAttention) {
+        err = ensureSparseFlashKernel();
+        if (err != NO_ERROR) {
+            return err;
+        }
+    }
+    const bool fusedSoftmaxQKV = !sparseFlashAttention && fusedSoftmaxQKVRequested &&
         (fusedSoftmaxQKVMaxActive <= 0 || activeLen <= fusedSoftmaxQKVMaxActive);
     cl::Buffer& qkvValueBuffer = directValuePrefill ? openCLBuffer(mCache->value.get()) : tempBuffer(mTempV.get());
     const int qkvValueMaxLen = directValuePrefill ? mCache->maxSlots : kvPack;
@@ -2120,6 +2178,40 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
             } else {
                 qkActiveTiles += static_cast<uint64_t>(UP_DIV(qPieceLen, 4)) * UP_DIV(activeKvLen, 4);
             }
+        }
+
+        if (sparseFlashAttention) {
+            idx = 0;
+            gws = {64u, static_cast<uint32_t>(qPieceLen), static_cast<uint32_t>(mNumHead * mBatch)};
+            ret = CL_SUCCESS;
+            ret |= mSparseFlashKernel->get().setArg(idx++, gws[0]);
+            ret |= mSparseFlashKernel->get().setArg(idx++, gws[1]);
+            ret |= mSparseFlashKernel->get().setArg(idx++, gws[2]);
+            ret |= mSparseFlashKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+            ret |= mSparseFlashKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+            ret |= mSparseFlashKernel->get().setArg(idx++, qkvValueBuffer);
+            ret |= mSparseFlashKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= mSparseFlashKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= mSparseFlashKernel->get().setArg(idx++, scale);
+            ret |= mSparseFlashKernel->get().setArg(idx++, activeLen);
+            ret |= mSparseFlashKernel->get().setArg(idx++, qStart);
+            ret |= mSparseFlashKernel->get().setArg(idx++, qPieceLen);
+            ret |= mSparseFlashKernel->get().setArg(idx++, activeKvLen);
+            ret |= mSparseFlashKernel->get().setArg(idx++, kvPack);
+            ret |= mSparseFlashKernel->get().setArg(idx++, qkvValueMaxLen);
+            ret |= mSparseFlashKernel->get().setArg(idx++, mNumHead);
+            ret |= mSparseFlashKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mSparseFlashKernel->get().setArg(idx++, mHeadDim);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse flash attention row64");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3DKernelDefault(mSparseFlashKernel, gws, {64u, 1u, 1u}, runtime);
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                flashUs += _nowUs() - opStartUs;
+            } else {
+                finishSparseStage(32);
+            }
+            continue;
         }
 
         idx = 0;
@@ -2241,25 +2333,41 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
         const uint64_t totalUs = _nowUs() - startUs;
         if (profileDetail) {
-            MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
-                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d direct_value=%d "
-                      "fused_softmax_qkv=%d us=%llu "
-                      "rearrange_us=%llu pack_us=%llu qk_us=%llu softmax_us=%llu qkv_us=%llu "
-                      "qk_rect_tiles=%llu qk_active_tiles=%llu\n",
-                      layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
-                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, fusedSoftmaxQKV ? 1 : 0,
-                      static_cast<unsigned long long>(totalUs),
-                      static_cast<unsigned long long>(rearrangeUs),
-                      static_cast<unsigned long long>(packUs),
-                      static_cast<unsigned long long>(qkUs),
-                      static_cast<unsigned long long>(softmaxUs),
-                      static_cast<unsigned long long>(qkvUs),
-                      static_cast<unsigned long long>(qkRectTiles),
-                      static_cast<unsigned long long>(qkActiveTiles));
+            if (sparseFlashAttention) {
+                MNN_PRINT("OpenCLPagedAttention profile op=sparse_flash_attention layer=%d "
+                          "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d "
+                          "direct_value=%d us=%llu rearrange_us=%llu pack_us=%llu flash_us=%llu "
+                          "qk_rect_tiles=%llu qk_active_tiles=%llu\n",
+                          layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
+                          staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0,
+                          static_cast<unsigned long long>(totalUs),
+                          static_cast<unsigned long long>(rearrangeUs),
+                          static_cast<unsigned long long>(packUs),
+                          static_cast<unsigned long long>(flashUs),
+                          static_cast<unsigned long long>(qkRectTiles),
+                          static_cast<unsigned long long>(qkActiveTiles));
+            } else {
+                MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
+                          "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d direct_value=%d "
+                          "fused_softmax_qkv=%d us=%llu "
+                          "rearrange_us=%llu pack_us=%llu qk_us=%llu softmax_us=%llu qkv_us=%llu "
+                          "qk_rect_tiles=%llu qk_active_tiles=%llu\n",
+                          layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
+                          staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, fusedSoftmaxQKV ? 1 : 0,
+                          static_cast<unsigned long long>(totalUs),
+                          static_cast<unsigned long long>(rearrangeUs),
+                          static_cast<unsigned long long>(packUs),
+                          static_cast<unsigned long long>(qkUs),
+                          static_cast<unsigned long long>(softmaxUs),
+                          static_cast<unsigned long long>(qkvUs),
+                          static_cast<unsigned long long>(qkRectTiles),
+                          static_cast<unsigned long long>(qkActiveTiles));
+            }
         } else {
-            MNN_PRINT("OpenCLPagedAttention profile op=sparse_prefill_attention_fast_qk_softmax_qkv layer=%d "
+            MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d "
                       "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d direct_value=%d "
                       "fused_softmax_qkv=%d us=%llu\n",
+                      sparseFlashAttention ? "sparse_flash_attention" : "sparse_prefill_attention_fast_qk_softmax_qkv",
                       layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
                       staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, fusedSoftmaxQKV ? 1 : 0,
                       static_cast<unsigned long long>(totalUs));
