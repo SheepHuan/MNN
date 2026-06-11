@@ -177,7 +177,8 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 - `op=prefill_attention_fast_qk_softmax_qkv`：full prefill attention。
 - `op=cacheblend_score layer=N`：score/top-k 所在层。
 - `op=hydrate layer=N`：持久 PIC cache 源直接 hydrate 到当前请求 PagedCache。
-- `op=sparse_prefill_attention_fast_qk_softmax_qkv layer=N`：sparse recompute attention。
+- `op=sparse_flash_attention layer=N`：当前默认 later `PicSparseAttention` compact-Q sparse recompute attention。
+- 历史日志里的 `op=sparse_prefill_attention_fast_qk_softmax_qkv` 是已移除的三段式 sparse QK / sparse softmax / sparse QKV 旧路径；不要再围绕它新增调参。
 
 解释日志时要注意：
 
@@ -193,11 +194,12 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 3. 再看 sparse attention 热点。通常 QK 是主热点，QKV 次之，hydrate/disk 往往不是第一瓶颈。
 4. 如果第一个 sparse layer 的 QK 比后续层慢数秒，优先怀疑 OpenCL `localWS3DDefault` 调参或首次执行开销。生产口径用 MNN tune cache/prewarm 解决；固定/禁用 LWS 只作为 A/B 实验开关，不作为长期生产路径。
 5. 如果 `qk_active_tiles / qk_rect_tiles` 很高，优化方向是让 sparse Q 按 logical position 分组、缩小 K 有效范围，或设计按 Q range 的分段 QK，而不是继续优化 hydrate。
-6. FlashAttention / FlashMask 优化顺序：
-   - 先做不改语义的 FlashMask-style range-aware pieces：active indices 不变，只让每段 sparse Q 的 K 上界更贴近该段 logical rows。
-   - 再做 fused sparse FlashAttention：融合 QK、causal softmax、QKV，减少中间 QK/softmax buffer 和 kernel launch。必须同时支持 `PicScoreAttention` 的 full-Q/compact-output 和 `PicSparseAttention` 的 compact-Q；第一版只允许放在 `MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH=1` 后面，默认关闭，且不能用会重复 8 次 QK 的 naive per-output-dim 融合。
+6. OpenCL later sparse attention 当前生产路径固定为 fused sparse FlashAttention row64：
+   - 只用于 `PicSparseAttention` compact-Q 层，也就是当前 graph-boundary 模型的 `layer >= 2`。
+   - `PicScoreAttention layer=1` 是 full-Q/compact-output，仍走通用 correctness path；不要为了省时间把 score layer 错塞进 compact-Q flash kernel。
+   - 旧的三段式 sparse QK / sparse softmax / sparse QKV OpenCL kernel 和 env-gated fused softmax-QKV 实验路径已移除；不要再新增开关回退到旧路径。
    - 若进一步限制 cacheblend 选择窗口或重新排序 active rows 会改变算法语义，必须作为 `cacheblend-windowed` / `cacheblend-prefix-regularized` 这类命名变体报告，不能算普通 cacheblend。
-7. direct PagedCache value prefill 主要影响 QKV 和 pack，不会解决 QK 主瓶颈；2026-06-11 的 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=1` A/B 让正式 cacheblend/epic 10-50% 都仍快于 normal，但收益混合，profile-detail 中 40% later layers 改善、50% later layers 回退。不要默认全局开启，保留为显式实验开关或后续 QK 降下来后的条件 heuristic。
+7. direct PagedCache value prefill 现在只保留为内置窄 heuristic：cacheblend 高预算且 slot table identity 时才直接读 PagedCache value，避免 packed V staging；不再提供 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL` 强制开关作为生产路径。
 8. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
 
 ## 验证要求
@@ -265,21 +267,21 @@ Hydrate_ms=63.654
 - `PagedAttention` / async hydrate / PageCache zero-copy 不是当前主瓶颈。cacheblend 50% hydrate 只有约 64ms，score/top-k 只有约 5.8ms/0.9ms。
 - 当前主瓶颈明确是 `PicSparseAttention layers > 1` 的每层 sparse attention，尤其 QK 与 QKV；cacheblend 50% 需要至少再省约 220ms 才能稳定快于 normal full-compute。
 - FlashMask-style range-aware pieces 已经默认打开，但 50% active rows 下 `qk_active_tiles/qk_rect_tiles ~= 0.928`，selected rows 覆盖到 1023 附近，4-row group 内 causal K 上界浪费不到 1%。因此单纯“把每段 K 上界收紧”已经不够，后续要优化 sparse QK/QKV kernel 本身，或做会改变选择分布的命名变体。
-- 2026-06-11 已否定的快速 heuristic：自动 direct-value、`q_chunk=16`、`q_chunk=128`、`q_chunk=256 + direct-value` 都没有让 cacheblend 50% 稳定快于 normal；不要把这些设为默认。env-gated fused softmax+QKV V0 在 50% active rows 上触发过 OpenCL `CL_OUT_OF_RESOURCES (-14)`，已加默认 `activeLen <= 256` guard，50% 会回退，不作为性能结论。
+- 2026-06-11 已否定的快速 heuristic：手动 direct-value、`q_chunk=16`、`q_chunk=128`、`q_chunk=256 + direct-value` 都没有让 cacheblend 50% 稳定快于 normal；不要恢复这些可调开关。env-gated fused softmax+QKV V0 在 50% active rows 上触发过 OpenCL `CL_OUT_OF_RESOURCES (-14)`，该旧实验路径已被移除，不作为性能结论。
 
-已实现的第一版 sparse FlashAttention：
+已实现并默认启用的 sparse FlashAttention：
 
-- 新增 env-gated OpenCL kernel：`MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1`。
 - 只覆盖 `layer >= 2` 的 `PicSparseAttention` compact-Q；`layer=1` score layer full-Q/compact-output 仍走现有 sparse fast correctness path。
 - 新 kernel `sparse_flash_attention_row64` 用 64-lane workgroup 处理一个 active row/head，在线合并各 lane 的 softmax `(m,l,o)`，每个 K 的 QK 只计算一次；输出 accumulator 使用 `float8` 向量 local storage，避免 V0 scalar local-memory 循环。
-- profile op 单独打印为 `op=sparse_flash_attention`，默认不开，先作为可控优化开关。
-- direct PagedCache value prefill 增加窄 auto heuristic：无显式 env 覆盖时，只对 cacheblend 高预算 sparse layers 自动启用；`MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=0/1` 仍可强制关闭/打开。
+- profile op 单独打印为 `op=sparse_flash_attention`；不再需要设置 sparse flash 环境变量。
+- 旧的普通 OpenCL sparse kernel 已从生产代码移除：不再构建 `rearrange_sparse_q`、`matmul_qk_sparse_prefill_piece`、`matmul_qkv_sparse_prefill_piece` 或 `matmul_softmax_qkv_sparse_prefill_piece`。
+- direct PagedCache value prefill 只保留窄 heuristic：cacheblend 高预算 sparse layers 且 slot table identity 时自动启用。
 
 正式验证：
 
 ```text
 tag=opencl_pic_1024_sparse_flash_vec8_formal_20260611_130036
-env=MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION=1
+note=当时通过 env 开启；当前源码已默认使用同一 sparse flash 逻辑
 normal,full,6.968234,1.000
 full-reuse,full,0.764264,9.118
 cacheblend,0.10,3.780810,1.843
@@ -295,10 +297,40 @@ epic,0.50,5.346845,1.303
 log_scan: target_unavailable=false, async_failed=false, error_lines=[]
 ```
 
+默认路径验证：
+
+```text
+tag=opencl_pic_1024_sparse_flash_default_repeat_20260611_052347
+server_env=<none for sparse flash/direct-value>
+normal,full,6.968234,1.000
+full-reuse,full,0.854002,8.160
+cacheblend,0.10,4.116973,1.693
+cacheblend,0.20,6.318665,1.103
+cacheblend,0.30,4.174995,1.669
+cacheblend,0.40,5.634095,1.237
+cacheblend,0.50,6.424953,1.085
+epic,0.10,3.795829,1.836
+epic,0.20,5.948663,1.171
+epic,0.30,3.831606,1.819
+epic,0.40,4.720560,1.476
+epic,0.50,5.842008,1.193
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+默认路径 profile smoke：
+
+```text
+tag=opencl_pic_1024_sparse_flash_default_cb10_profile_20260611_052724
+old_sparse_prefill_rows=0
+sparse_flash_layers=2..15
+score_layer_row: op=row layer=1 full_q=1 us=99893
+sparse_flash_total_ms=192.641
+```
+
 当前 TODO：
 
-1. 再做一次 fresh repeat 决定是否把 `MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION` 从实验开关提升为默认 OpenCL PIC sparse path。
-2. 继续优化 score layer `layer=1` 的 full-Q sparse attention；profile-detail 下它仍会因为旧 QK path 和调度/finish 被放大。
+1. 继续优化 score layer `layer=1` 的 full-Q/compact-output attention；不要把它混入 compact-Q sparse flash 路径。
+2. 继续缩小默认 repeat 与早先 env-gated sparse-flash best run 的波动差距，优先看 tune cache、score-layer row path 和 full/suffix prefill timing。
 3. 继续记录 selected logical rows 的覆盖范围、`qk_active_tiles/qk_rect_tiles`、每层 flash/QK/QKV 时间；只有在不改变 active rows 的情况下减少真实 QK 工作量，才算普通 cacheblend 优化。
 4. 如果要限制 cacheblend selected rows 的窗口、前缀正则或重排以降低 K range，必须命名为 `cacheblend-windowed` / `cacheblend-prefix-regularized` 等语义变体，不能报作普通 cacheblend。
 

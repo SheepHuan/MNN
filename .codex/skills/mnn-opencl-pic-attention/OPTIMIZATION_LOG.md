@@ -1016,3 +1016,80 @@ Direct-value note:
 - Added a narrow auto direct-value heuristic for cacheblend high-budget sparse layers.
 - `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL=0/1` still explicitly disables/enables it.
 - This preserves A/B control while letting high-budget cacheblend avoid unnecessary packed value staging when slot table identity makes direct PagedCache value reads safe.
+
+## 2026-06-11 Implementation: Make Sparse FlashAttention the Only OpenCL Sparse Fast Path
+
+Goal:
+
+- Promote the latest fastest OpenCL PIC sparse attention implementation to the default path.
+- Remove the old non-improving OpenCL sparse implementation and env/fallback switches so later maintenance does not split across stale paths.
+- Keep score-layer semantics, PagedCache zero-copy, and async persistent PIC cache source loading unchanged.
+
+Code changes:
+
+- `PicSparseAttention` compact-Q sparse fast path now always uses `sparse_flash_attention_row64`.
+- Removed the env gates for sparse flash / fused sparse softmax-QKV / manual direct-value from `PagedAttentionBufExecution`.
+- Removed old sparse OpenCL kernel members and build logic:
+  - `matmul_qk_sparse_prefill_piece`
+  - `matmul_qkv_sparse_prefill_piece`
+  - `matmul_softmax_qkv_sparse_prefill_piece`
+  - `rearrange_sparse_q`
+- Regenerated `attention_buf_mnn_cl.cpp` and `opencl_source_map.hpp` from `attention_buf.cl`.
+- Direct PagedCache value prefill remains only as a built-in narrow heuristic for cacheblend high-budget sparse layers with identity slot table.
+
+Current production behavior:
+
+- `layer=1` score layer is still full-Q/compact-output and does not enter sparse flash.
+- `layer >= 2` compact-Q `PicSparseAttention` uses fused sparse flash by default.
+- Profile logs for the later sparse fast path should now be `op=sparse_flash_attention`; seeing the old `op=sparse_prefill_attention_fast_qk_softmax_qkv` means the artifact is stale.
+
+Next:
+
+- Cross-compile and run a no-env fresh repeat on OrangePi:
+  - no `MNN_PAGED_ATTENTION_OPENCL_SPARSE_FLASH_ATTENTION`;
+  - no `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL`;
+  - same 1024-token cacheblend/epic 10/20/30/40/50 sweep;
+  - normal baseline fixed at `6.968234s`.
+- Expected acceptance criterion remains: cacheblend and epic are faster than normal full-compute at every tested budget.
+
+Validation:
+
+```text
+tag=opencl_pic_1024_sparse_flash_default_repeat_20260611_052347
+server_env=<none for sparse flash/direct-value>
+normal,full,6.968234,1.000
+full-reuse,full,0.854002,8.160
+cacheblend,0.10,4.116973,1.693
+cacheblend,0.20,6.318665,1.103
+cacheblend,0.30,4.174995,1.669
+cacheblend,0.40,5.634095,1.237
+cacheblend,0.50,6.424953,1.085
+epic,0.10,3.795829,1.836
+epic,0.20,5.948663,1.171
+epic,0.30,3.831606,1.819
+epic,0.40,4.720560,1.476
+epic,0.50,5.842008,1.193
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Default-path profile smoke:
+
+```text
+tag=opencl_pic_1024_sparse_flash_default_cb10_profile_20260611_052724
+server_env=<none for sparse flash/direct-value>
+old_sparse_prefill_rows=0
+sparse_flash_rows=14
+sparse_flash_layers=2..15
+score_layer_row: op=row layer=1 query=1024 attn=115 kv_write=1024 kv_len=1024 sparse=1 full_q=1 us=99893
+sparse_flash_total_ms=192.641
+sparse_flash_pack_total_ms=20.316
+direct_value_values=[0]
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Conclusion:
+
+- The speedup survives the default-path cleanup: cacheblend and epic remain faster than normal full-compute for every tested 10/20/30/40/50 budget.
+- The new artifact no longer needs or recognizes the sparse flash/direct-value env switches in production source.
+- The later sparse attention path is now exactly the intended default: score layer full-Q stays on row correctness path, compact-Q `layer >= 2` goes through fused sparse flash.
+- This repeat is somewhat slower than the earlier best env-gated sparse-flash formal run at several budgets, but still much faster than the pre-flash source-slot repeat at cacheblend 50% (`7.188658s -> 6.424953s`) and satisfies the hard acceptance criterion.

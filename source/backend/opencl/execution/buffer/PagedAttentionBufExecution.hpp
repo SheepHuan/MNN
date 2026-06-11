@@ -41,7 +41,6 @@ private:
     ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
-    ErrorCode ensureSparseFastKernels();
     ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
@@ -69,15 +68,10 @@ private:
     std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
     std::shared_ptr<KernelWrap> mCacheBlendTopKKernel;
     std::shared_ptr<KernelWrap> mRearrangeQKernel;
-    std::shared_ptr<KernelWrap> mRearrangeSparseQKernel;
     std::shared_ptr<KernelWrap> mRearrangeMaskKernel;
     std::shared_ptr<KernelWrap> mQKKernel;
-    std::shared_ptr<KernelWrap> mSparseQKKernel;
     std::shared_ptr<KernelWrap> mSoftmaxKernel;
-    std::shared_ptr<KernelWrap> mSparseSoftmaxKernel;
     std::shared_ptr<KernelWrap> mQKVKernel;
-    std::shared_ptr<KernelWrap> mSparseQKVKernel;
-    std::shared_ptr<KernelWrap> mSparseSoftmaxQKVKernel;
     std::shared_ptr<KernelWrap> mSparseFlashKernel;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
@@ -108,7 +102,6 @@ private:
     int mFastSeqLen = 0;
     int mFastKvLen = 0;
     int mFastQChunkLen = 0;
-    int mSparseKernelGroupSize = 0;
     int mSparseFlashKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
