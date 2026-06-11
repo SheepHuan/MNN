@@ -1955,17 +1955,24 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     uint64_t flashUs = 0;
     uint64_t qkRectTiles = 0;
     uint64_t qkActiveTiles = 0;
+    uint64_t qkRowTiles = 0;
     int flash32Pieces = 0;
     int flash64Pieces = 0;
-    const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
     bool staticWorkspace = _useStaticFullPrefill(qStorageLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
-    int qChunkLen = staticWorkspace ? activeLen
-                                    : _prefillQChunkLen(activeLen, kvLen, mBatch, mNumHead, layerCount);
-    constexpr int sparseQChunkLimit = 64;
-    if (sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
-        qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
+    const bool singlePieceSparseFlash = mMeta != nullptr && mMeta->cacheblend_score_ready;
+    const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
+    int qChunkLen = singlePieceSparseFlash
+        ? activeLen
+        : (staticWorkspace ? activeLen : _prefillQChunkLen(activeLen, kvLen, mBatch, mNumHead, layerCount));
+    if (!singlePieceSparseFlash) {
+        constexpr int sparseQChunkLimit = 64;
+        if (sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
+            qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
+        }
     }
-    auto pieces = _buildRangeAwareSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen);
+    auto pieces = singlePieceSparseFlash
+        ? _buildFixedSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen)
+        : _buildRangeAwareSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen);
     auto err = ensureFastPrefillTemps(qStorageLen, kvLen, qChunkLen, staticWorkspace);
     if (err != NO_ERROR) {
         return err;
@@ -2078,13 +2085,15 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
                     int q4MaxLogical = -1;
                     const int qGroupLen = std::min(4, qPieceLen - qLocal4);
                     for (int qi = 0; qi < qGroupLen; ++qi) {
-                        q4MaxLogical = std::max(q4MaxLogical,
-                                                mMeta->sparse_query_logical_indices[qStart + qLocal4 + qi]);
+                        const int logical = mMeta->sparse_query_logical_indices[qStart + qLocal4 + qi];
+                        q4MaxLogical = std::max(q4MaxLogical, logical);
+                        qkRowTiles += UP_DIV(std::max(0, std::min(kvLen, logical + 1)), 4);
                     }
                     qkActiveTiles += UP_DIV(std::max(0, std::min(kvLen, q4MaxLogical + 1)), 4);
                 }
             } else {
                 qkActiveTiles += static_cast<uint64_t>(UP_DIV(qPieceLen, 4)) * UP_DIV(activeKvLen, 4);
+                qkRowTiles += static_cast<uint64_t>(qPieceLen) * UP_DIV(activeKvLen, 4);
             }
         }
 
@@ -2137,7 +2146,7 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
                       "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d "
                       "direct_value=%d lane32_pieces=%d lane64_pieces=%d us=%llu "
                       "rearrange_us=%llu pack_us=%llu flash_us=%llu "
-                      "qk_rect_tiles=%llu qk_active_tiles=%llu\n",
+                      "qk_rect_tiles=%llu qk_active_tiles=%llu qk_row_tiles=%llu\n",
                       queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
                       layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
                       staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, flash32Pieces, flash64Pieces,
@@ -2146,7 +2155,8 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
                       static_cast<unsigned long long>(packUs),
                       static_cast<unsigned long long>(flashUs),
                       static_cast<unsigned long long>(qkRectTiles),
-                      static_cast<unsigned long long>(qkActiveTiles));
+                      static_cast<unsigned long long>(qkActiveTiles),
+                      static_cast<unsigned long long>(qkRowTiles));
         } else {
             MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d "
                       "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d "

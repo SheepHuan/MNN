@@ -946,9 +946,14 @@ __kernel void sparse_flash_attention_row64(GLOBAL_SIZE_3_DIMS
     COMPUTE_FLOAT local local_m[64];
     COMPUTE_FLOAT local local_l[64];
     COMPUTE_FLOAT8 local local_o[512];
-    for (int d8 = 0; d8 < 8; ++d8) {
-        local_o[lid * 8 + d8] = (COMPUTE_FLOAT8)0;
-    }
+    COMPUTE_FLOAT8 o0 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o1 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o2 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o3 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o4 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o5 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o6 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o7 = (COMPUTE_FLOAT8)0;
 
     COMPUTE_FLOAT m = (COMPUTE_FLOAT)-FLT_MAX;
     COMPUTE_FLOAT l = (COMPUTE_FLOAT)0;
@@ -967,16 +972,29 @@ __kernel void sparse_flash_attention_row64(GLOBAL_SIZE_3_DIMS
         const COMPUTE_FLOAT new_m = fmax(m, score);
         const COMPUTE_FLOAT alpha = l > (COMPUTE_FLOAT)0 ? exp(m - new_m) : (COMPUTE_FLOAT)0;
         const COMPUTE_FLOAT beta = exp(score - new_m);
-        for (int d8 = 0; d8 < 8; ++d8) {
-            const COMPUTE_FLOAT8 v =
-                CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_base + k * head_dim + (d8 << 3)));
-            local_o[lid * 8 + d8] = local_o[lid * 8 + d8] * alpha + (COMPUTE_FLOAT8)beta * v;
-        }
+        const int value_offset = value_base + k * head_dim;
+        const COMPUTE_FLOAT8 beta8 = (COMPUTE_FLOAT8)beta;
+        o0 = o0 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset));
+        o1 = o1 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 8));
+        o2 = o2 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 16));
+        o3 = o3 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 24));
+        o4 = o4 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 32));
+        o5 = o5 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 40));
+        o6 = o6 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 48));
+        o7 = o7 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 56));
         l = l * alpha + beta;
         m = new_m;
     }
     local_m[lid] = m;
     local_l[lid] = l;
+    local_o[lid * 8] = o0;
+    local_o[lid * 8 + 1] = o1;
+    local_o[lid * 8 + 2] = o2;
+    local_o[lid * 8 + 3] = o3;
+    local_o[lid * 8 + 4] = o4;
+    local_o[lid * 8 + 5] = o5;
+    local_o[lid * 8 + 6] = o6;
+    local_o[lid * 8 + 7] = o7;
     barrier(CLK_LOCAL_MEM_FENCE);
 
     for (int stride = 32; stride > 0; stride >>= 1) {
@@ -1056,9 +1074,14 @@ __kernel void sparse_flash_attention_row32(GLOBAL_SIZE_3_DIMS
     COMPUTE_FLOAT local local_m[32];
     COMPUTE_FLOAT local local_l[32];
     COMPUTE_FLOAT8 local local_o[256];
-    for (int d8 = 0; d8 < 8; ++d8) {
-        local_o[lid * 8 + d8] = (COMPUTE_FLOAT8)0;
-    }
+    COMPUTE_FLOAT8 o0 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o1 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o2 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o3 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o4 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o5 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o6 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o7 = (COMPUTE_FLOAT8)0;
 
     COMPUTE_FLOAT m = (COMPUTE_FLOAT)-FLT_MAX;
     COMPUTE_FLOAT l = (COMPUTE_FLOAT)0;
@@ -1077,16 +1100,29 @@ __kernel void sparse_flash_attention_row32(GLOBAL_SIZE_3_DIMS
         const COMPUTE_FLOAT new_m = fmax(m, score);
         const COMPUTE_FLOAT alpha = l > (COMPUTE_FLOAT)0 ? exp(m - new_m) : (COMPUTE_FLOAT)0;
         const COMPUTE_FLOAT beta = exp(score - new_m);
-        for (int d8 = 0; d8 < 8; ++d8) {
-            const COMPUTE_FLOAT8 v =
-                CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_base + k * head_dim + (d8 << 3)));
-            local_o[lid * 8 + d8] = local_o[lid * 8 + d8] * alpha + (COMPUTE_FLOAT8)beta * v;
-        }
+        const int value_offset = value_base + k * head_dim;
+        const COMPUTE_FLOAT8 beta8 = (COMPUTE_FLOAT8)beta;
+        o0 = o0 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset));
+        o1 = o1 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 8));
+        o2 = o2 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 16));
+        o3 = o3 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 24));
+        o4 = o4 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 32));
+        o5 = o5 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 40));
+        o6 = o6 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 48));
+        o7 = o7 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, past_value + value_offset + 56));
         l = l * alpha + beta;
         m = new_m;
     }
     local_m[lid] = m;
     local_l[lid] = l;
+    local_o[lid * 8] = o0;
+    local_o[lid * 8 + 1] = o1;
+    local_o[lid * 8 + 2] = o2;
+    local_o[lid * 8 + 3] = o3;
+    local_o[lid * 8 + 4] = o4;
+    local_o[lid * 8 + 5] = o5;
+    local_o[lid * 8 + 6] = o6;
+    local_o[lid * 8 + 7] = o7;
     barrier(CLK_LOCAL_MEM_FENCE);
 
     for (int stride = 16; stride > 0; stride >>= 1) {

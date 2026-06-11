@@ -817,6 +817,23 @@ void ConvBufLowMemoryExecution::tuneGemvLowMemory(Tensor * input, Tensor * outpu
     unit.localWorkSize = {mLocalWorkSize[0], mLocalWorkSize[1]};
     return;
 }
+
+bool ConvBufLowMemoryExecution::usePicCompactGemmLowMemory(Tensor * input, Tensor * output) const {
+    if (!mResource->mConv1x1Opt || mResource->mPrelu) {
+        return false;
+    }
+    std::vector<int> inputShape  = tensorShapeFormat(input);
+    std::vector<int> outputShape = tensorShapeFormat(output);
+    const int inputChannels = inputShape.at(3);
+    const int outChannel = outputShape.at(3);
+    const int globalY = outputShape.at(0) * outputShape.at(1) * outputShape.at(2);
+
+    // PIC sparse recompute produces compact rows after the score layer. These
+    // shapes are large Linear ops with small-M / large-N,K and need their own
+    // OpenCL tune namespace instead of reusing generic conv1x1 LWS history.
+    return globalY > 16 && globalY <= 512 && inputChannels >= 1024 && outChannel >= 1024;
+}
+
 void ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * output) {
     mUnits.resize(1);
     auto &unit = mUnits[0];
@@ -832,7 +849,8 @@ void ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
     const int blockDim = mResource->mInputChannel / mResource->mBlockSize;
     
     int global_y = batch * width_height;
-    std::string kernelName = "gemm_b4_c8";
+    const bool usePicCompactKernel = usePicCompactGemmLowMemory(input, output);
+    std::string kernelName = usePicCompactKernel ? "pic_gemm_b4_c8" : "gemm_b4_c8";
     std::set<std::string> buildOption = mResource->mBuildOptions;
     int inputChannelLeaves = 0;
     int inputBatchLeaves = global_y % 4;
@@ -859,6 +877,9 @@ void ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
         auto kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel("gemm_conv1x1_buf", kernelName, option, mOpenCLBackend->getPrecision());
     }
     std::string info = std::to_string(inputChannels) + "_" + std::to_string(outChannel);
+    if (usePicCompactKernel) {
+        info += "_pic_m" + std::to_string(global_y);
+    }
     if(global_y <= 16) {
         mUnits.resize(3);
         int outputChannelAlign8 = ROUND_UP(outChannel, 8);
@@ -1114,9 +1135,10 @@ ErrorCode ConvBufLowMemoryExecution::onResize(const std::vector<Tensor *> &input
         if(batch == 1){
             tuneGemvLowMemory(input, output);
         } else {
+            const bool usePicCompactKernel = usePicCompactGemmLowMemory(input, output);
             std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
             std::string info = "convBufLowMemory_" + std::to_string(mResource->mInputChannel) + "_" + std::to_string(mResource->mOutputChannel);
-            if(batch > 16){
+            if(batch > 16 && !usePicCompactKernel){
                 if(getTunedInfo(info, {static_cast<unsigned int>(batch)}, tuneInfo, mOpenCLBackend->getOpenCLRuntime())){
                     mUseFPWeight = tuneInfo.first[0];
                 } else{

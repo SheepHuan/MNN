@@ -1228,3 +1228,569 @@ Conclusion:
 - cacheblend and epic are again faster than normal full-compute at every tested 10/20/30/40/50 budget.
 - Hydrate/async load/score-topk are still not bottlenecks.
 - Remaining cb50 gap is mostly non-score later sparse flash plus non-attention graph work. P2 is now more important: profile QKV projection, o_proj, MLP, norm, residual after the score layer to confirm all dense kernels operate on compact active rows.
+
+## 2026-06-11 P2: Graph-Level Dense Profile
+
+Goal:
+
+- Confirm whether the non-attention dense graph after `score_layer_idx=1` still processes full 1024 rows or correctly switches to compact active rows.
+- Keep this profile out of production timing. The graph profile forces output waits in the MNN debug callback, so its latency is attribution-only.
+
+Code changes:
+
+- Added PIC server env-gated graph op profiler:
+  - `MNN_PIC_GRAPH_PROFILE=1` enables MNN debug callback before model load.
+  - `MNN_PIC_GRAPH_PROFILE_TOP=N` controls printed top ops; use `1000` to dump all 690 ops for the 1024-token Llama-3.2-1B graph.
+  - Output lines are `MNN_PIC_GRAPH_PROFILE_SUMMARY`, `MNN_PIC_GRAPH_PROFILE_TYPE`, and `MNN_PIC_GRAPH_PROFILE_OP`.
+- Default execution is unchanged when the env var is not set.
+
+Build / sync:
+
+```bash
+MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/home/orangepi/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/orangepi5plus/
+```
+
+Validation / tags:
+
+```text
+tag=opencl_pic_1024_graph_profile_cb50_20260611_142948
+server_env=MNN_PIC_GRAPH_PROFILE=1,MNN_PIC_GRAPH_PROFILE_TOP=80
+attention_profile=MNN_PAGED_ATTENTION_PROFILE=1,MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
+cacheblend,0.50,7.022372,0.992  # wait-inflated, not formal latency
+
+tag=opencl_pic_1024_graph_only_cb50_fullops_20260611_143125
+server_env=MNN_PIC_GRAPH_PROFILE=1,MNN_PIC_GRAPH_PROFILE_TOP=1000
+cacheblend,0.50,6.604463,1.055  # wait-inflated, not formal latency
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+tag=opencl_pic_1024_default_cb50_after_graphprof_20260611_143642
+server_env=<none>
+profile=false, detail=false, warm_tune=true
+full-reuse,full,0.665456,10.471
+cacheblend,0.50,6.035463,1.155
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Final cb50 graph profile summary, request 4:
+
+```text
+Convolution total=3416.229 ms calls=113
+PicSparseAttention total=1306.372 ms calls=14
+PagedAttention layer0 total=914.879 ms calls=1
+Raster total=372.903 ms calls=268
+PicScoreAttention layer1 total=116.110 ms calls=1
+```
+
+Shape boundary result:
+
+```text
+conv full layer0:           442.276 ms, 7 ops
+conv full layer1 score-pre:  39.809 ms, 3 ops
+conv full layer>=2:           0.000 ms, 0 ops
+conv active layer1+:       2923.752 ms, 102 ops
+conv active layer>=2:      2764.124 ms, 98 ops
+```
+
+Important shape examples:
+
+```text
+layer0 full PagedAttention:
+inputs=[1x1024x32x64]|[1x1024x8x64]|[1x1024x8x64]|[1x1x1024x1024]
+outputs=[1x1024x2048]
+
+layer1 PicScoreAttention full-Q / compact-output:
+inputs=[1x1024x32x64]|[1x1024x8x64]|[1x1024x8x64]|[1x1x1024x1024]|[1]
+outputs=[1x519x2048]|[519]
+
+layer1 post-score MLP:
+inputs=[519x2048x1x1] outputs=[519x8192x1x1]
+
+layer>=2 sparse attention:
+inputs=[1x519x32x64]|[1x519x8x64]|[1x519x8x64]|[1x1x519x1024]
+outputs=[1x519x2048]
+```
+
+Conclusion:
+
+- P2 did not find a graph-boundary bug where dense layers accidentally continue on full 1024 rows after the score layer.
+- `layer 0` is full by required score-before full compute semantics.
+- `layer 1` still has full-row pre-attention Q/K/V and rotary/norm work, which is expected because the score layer must write full K/V and score/top-k before compacting.
+- After `PicScoreAttention`, layer 1 MLP and all `layer >= 2` QKV/o_proj/MLP/norm/residual paths run on compact active rows. For cb50 the active row count is 519.
+- The remaining cb50 latency is therefore a real mix of mandatory full layer-0/score-pre work, later sparse flash attention, and active-row dense OpenCL convolution/MLP work. It is not a simple missing gather bug.
+
+Next optimization order:
+
+1. Continue P0 sparse flash kernel work for `layer >= 2`: reduce online softmax barrier/local-memory cost, improve Q/K/V load layout, and keep row32/row64 decisions in MNN tune/default heuristics.
+2. Start a dense OpenCL attribution/optimization loop for active-row linear/conv shapes:
+   - `[519,2048] -> [519,8192]` gate/up;
+   - `[519,8192] -> [519,2048]` down;
+   - `[519,2048] -> [519,2048]` q/o proj.
+   If formal timing confirms this non-attention component is as large as the graph profile suggests, optimize MNN OpenCL linear/conv kernels for medium-M active rows.
+3. Only then revisit layer-0 full PagedAttention / full dense overhead, because it is semantically mandatory and only one layer.
+
+## 2026-06-11 Attention-Only: Why Sparse Flash Speedup Is Lower Than Expected
+
+Focus:
+
+- Ignore dense graph for this section and analyze only `PicSparseAttention layer >= 2`.
+- Current production kernel is `sparse_flash_attention_row64/row32`: one active query row per workgroup, lanes scan K from `0..q_logical`.
+
+Observed later-layer sparse flash work:
+
+```text
+cb10 default sparse flash profile:
+active rows=115
+later_sparse_flash_attention_total=238.784 ms
+qk_active_tiles / qk_rect_tiles = 1367 / 1783 = 0.7667
+qk_active_tiles / full_causal_tiles ~= 1367 / 32896 = 0.0416
+
+cb50 score-flash profile:
+active rows=519
+later_sparse_flash_attention_total=1783.178 ms
+later_sparse_flash_compute=1326.024 ms
+qk_active_tiles / qk_rect_tiles = 13516 / 14561 = 0.9282
+qk_active_tiles / full_causal_tiles ~= 13516 / 32896 = 0.4109
+```
+
+Interpretation:
+
+- For cb50, attention QK work is not reduced to 50% of full causal attention; it is about 41% of full causal tiles because the selected active rows are scattered into late logical positions and each selected row still attends to almost the whole prefix.
+- `qk_active_tiles / qk_rect_tiles ~= 0.928` means there is only about 7% rectangular/mask waste left in 4-row groups. FlashMask-style masking alone cannot deliver a large gain for cb50.
+- The current sparse flash kernel already uses the exact row causal bound:
+
+```c
+active_kv_seq_len = clamp(q_logical + 1, 0, key_seq_len)
+```
+
+  Therefore it is not spending most time multiplying masked-out future K positions. The remaining work is real selected-row x long-K attention.
+
+Why row-wise sparse flash under-delivers versus dense full attention:
+
+1. Dense full attention is a better-shaped GEMM-like workload:
+   - full kernels tile multiple Q rows and reuse K/V across rows;
+   - row-wise sparse flash launches one workgroup per Q row/head and reloads K/V independently.
+2. Current row kernel repeats Q loads inside the K loop:
+   - `qv = vload4(query + ...)` is inside `for (k = lid; k < active_kv_seq_len; k += lanes)`;
+   - Q is constant for the row/head, so this is redundant memory/conversion work.
+3. Current row kernel updates `local_o` inside the K loop:
+   - each K step reads/writes 8 `float8` accumulators in local memory;
+   - the accumulators only need to become local memory before cross-lane reduction, so this likely costs avoidable LDS traffic and barriers pressure.
+4. GQA K/V reuse is not exploited:
+   - `kvh = h / NUMHEAD_GROUP_SIZE`, so four query heads share the same K/V head;
+   - current z dimension is one query head, so the same K/V rows are loaded once per query head.
+5. `q_split` is still inherited from old QK/softmax/QKV chunking:
+   - cb50 uses `q_chunk=64`, `q_split=13`, so later sparse attention launches 13 flash kernels per layer;
+   - fused row flash does not need q-piece rectangular QK buffers, so a single launch per layer may be enough. This mainly attacks driver scheduling overhead, not math.
+
+Attention-only optimization candidates:
+
+P0a. Single-launch sparse flash piece:
+
+- For fused row flash, set q piece to `activeLen` instead of hard-limiting to 64.
+- Expected benefit: fewer OpenCL launches (`13 -> 1` per sparse layer at cb50, `182 -> 14` for layers 2..15).
+- Risk: low; local memory per workgroup is unchanged. Need verify MNN tune cache and formal cb10/cb50.
+
+P0b. Private accumulators inside row64/row32:
+
+- Replace per-K-loop `local_o[lid * 8 + d8]` updates with private `o0..o7` accumulators and store to local memory once before reduction.
+- Keep a conservative variant first: private O only, do not hoist all Q yet.
+- Expected benefit: reduce local memory traffic in the hot K loop.
+- Risk: register pressure on Mali; keep env-free production only after row32/row64 variants are validated.
+
+P0c. Hoist Q vector loads outside the K loop:
+
+- Preload the 16 `float4` Q chunks for `head_dim=64` once per workgroup/lane before scanning K.
+- Expected benefit: remove redundant Q loads/conversions repeated for every K step.
+- Risk: additional private registers. This should be tested separately from P0b.
+
+P1. Block-row sparse flash (`row2` / `row4`):
+
+- One workgroup handles 2 or 4 adjacent active Q rows for the same head.
+- Load each K/V element once and update multiple rows' softmax/output states.
+- Use per-row causal checks inside the group. For cb50, the 4-row group overhead is small because active/rect is already `0.928`; the K/V reuse may be worth more than the extra masked rows.
+- Expected benefit: recover some dense-attention-style K/V reuse and reduce workgroup/launch overhead.
+- Risk: much higher register/local memory pressure because each row needs separate `m/l/o` state. Start with row2 before row4.
+
+P2. GQA-head grouped sparse flash:
+
+- Compute 2 or 4 query heads sharing the same KV head in one workgroup.
+- Reuse K/V across GQA heads; keep independent softmax states per query head.
+- Risk: even higher register pressure than row grouping. Consider only after row2/row4.
+
+P3. Algorithmic K-range compression:
+
+- Exact cacheblend cannot skip early K positions for a late selected row without changing semantics.
+- To truly reduce K length, planner must produce a different algorithm variant such as `cacheblend-windowed` or `cacheblend-prefix-regularized`, where selected rows are biased/clustered or attention is approximated by a window/prefix policy.
+- This must not be reported as ordinary cacheblend.
+
+Immediate next experiment order:
+
+1. Implement P0a single-launch sparse flash and run cb10/cb50 attention profile + formal cb50 smoke.
+2. If stable, implement P0b private-O row64/row32 variant.
+3. If P0b wins, test P0c Q-hoist as a separate variant.
+4. Then design P1 row2 shared-K/V sparse flash for cb40/cb50, keeping current row64 as low-budget path.
+
+## 2026-06-11 P0a Implementation: CacheBlend Single-Piece Sparse Flash
+
+Goal:
+
+- Reduce fused sparse flash launch overhead without changing attention semantics.
+- Current row-wise sparse flash computes each active row with exact `q_logical + 1` K bound inside the kernel, so splitting Q into q64 pieces is no longer required to reduce K math. The old q64 split mostly adds kernel launches.
+
+Code changes:
+
+- In `PagedAttentionBufExecution::runSparseFastPrefill`:
+  - if `mMeta->cacheblend_score_ready` is true, use single-piece sparse flash:
+
+```text
+q_chunk = activeLen
+q_split = 1
+pieces = _buildFixedSparsePieces(..., activeLen)
+```
+
+  - if not score-ready, keep the previous range-aware q64 pieces. This preserves epic / non-cacheblend behavior.
+  - added `qk_row_tiles` to detail profile to show exact row-wise K span estimate; after single-piece scheduling, old `qk_rect_tiles` is just the large one-piece rectangular estimate and should not be treated as real compute.
+
+Why cacheblend-only:
+
+- First trial applied single-piece to every sparse flash path.
+- cb50 attention profile improved, but formal epic 10/30/40/50 moved slightly worse in that run.
+- Final implementation therefore uses single-piece only for cacheblend score-ready paths and keeps epic on the existing range-aware q64 path.
+
+Build / sync:
+
+```bash
+MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/home/orangepi/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/orangepi5plus/
+```
+
+Attention profile, first all-mode single-piece trial:
+
+```text
+tag=opencl_pic_1024_sparse_flash_single_piece_cb50_profile_20260611_145116
+profile=true, detail=true, warm_tune=true
+cacheblend,0.50,6.093415,1.144  # profile-inflated
+
+timed request:
+score_flash_attention layer=1:
+  q_chunk=519 q_split=1 lane64_pieces=1 total=94.111 ms flash=89.369 ms
+later sparse_flash_attention layers 2..15:
+  q_chunk=519 q_split=1 lane64_pieces=14
+  total=1255.392 ms
+  flash=1214.291 ms
+  rearrange=23.370 ms
+  pack=15.720 ms
+  hydrate=19.348 ms
+```
+
+Compared with the previous `opencl_pic_1024_score_flash_cb50_profile_20260611_1424`:
+
+```text
+score_flash_attention: 186.431 ms -> 94.111 ms
+later sparse_flash_attention_total: 1783.178 ms -> 1255.392 ms
+later sparse_flash_compute/flash: 1326.024 ms -> 1214.291 ms
+```
+
+Formal all-mode single-piece trial:
+
+```text
+tag=opencl_pic_1024_sparse_flash_single_piece_formal_20260611_145310
+cacheblend,0.10,3.964500,1.758
+cacheblend,0.20,6.133227,1.136
+cacheblend,0.30,3.913386,1.781
+cacheblend,0.40,4.644832,1.500
+cacheblend,0.50,5.658548,1.231
+epic,0.10,3.691532,1.888
+epic,0.20,5.789389,1.204
+epic,0.30,3.675803,1.896
+epic,0.40,4.389616,1.587
+epic,0.50,5.439305,1.281
+```
+
+Final formal cacheblend-only single-piece:
+
+```text
+tag=opencl_pic_1024_sparse_flash_single_piece_cacheblend_only_formal_20260611_145659
+profile=false, detail=false, warm_tune=true
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal,full,6.968234,1.000
+full-reuse,full,0.712506,9.780
+cacheblend,0.10,3.970299,1.755
+cacheblend,0.20,6.061056,1.150
+cacheblend,0.30,3.753421,1.857
+cacheblend,0.40,4.609172,1.512
+cacheblend,0.50,5.508688,1.265
+epic,0.10,3.953986,1.762
+epic,0.20,5.877313,1.186
+epic,0.30,3.504080,1.989
+epic,0.40,4.264059,1.634
+epic,0.50,5.118367,1.361
+```
+
+Epic sanity profile:
+
+```text
+tag=opencl_pic_1024_sparse_flash_cacheblend_only_epic10_profile_20260611_145926
+epic,0.10,3.855016,1.808  # profile-inflated
+timed epic10 sparse_flash_attention:
+  q_chunk=64 q_split=3 lane64_pieces=42
+  later layers total=174.702 ms
+  flash=141.025 ms
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+```
+
+Conclusion:
+
+- P0a is valid for cacheblend: cb50 formal improves from `5.968761s -> 5.508688s`, speedup vs normal `1.167x -> 1.265x`.
+- The attention profile confirms the intended mechanism: cb50 later sparse flash `q_split=13 -> 1`, and later attention total `1783 ms -> 1255 ms` in detail mode.
+- All tested cacheblend/epic 10/20/30/40/50 remain faster than normal full-compute.
+- Epic is not using the single-piece path in the final heuristic; epic10 detail shows `q_chunk=64 q_split=3`. Remaining epic variation is likely outside this P0a change or normal OpenCL timing variance.
+
+Next attention-only optimization:
+
+1. P0b private output accumulators in `sparse_flash_attention_row64/row32`, so the hot K loop updates private `o0..o7` registers and writes local memory only before cross-lane reduction.
+2. P0c Q-load hoist, tested separately because it may increase register pressure.
+3. P1 row2 sparse flash to share K/V loads across adjacent active rows for cb40/cb50.
+
+## 2026-06-11 P0b Implementation: Private Sparse-Flash Output Accumulators
+
+Goal:
+
+- Reduce local memory traffic inside the row-wise sparse FlashAttention hot K loop.
+- Keep semantics unchanged: exact active logical row, exact causal bound `q_logical + 1`, same online softmax recurrence, same row32/row64 production heuristic.
+
+Final code shape:
+
+- `sparse_flash_attention_row64` and `sparse_flash_attention_row32` now keep each lane's output accumulator in private `COMPUTE_FLOAT8 o0..o7`.
+- The K loop updates private accumulators directly.
+- `local_o` is written once after the K loop, immediately before cross-lane reduction.
+- No row64 local-Q cache is kept. The attempted `local_q[16]` variant was removed.
+
+Important precision note:
+
+- Do not hard-code `half4` in these kernels. MNN OpenCL chooses storage and compute types through build options:
+  - precisionLevel 2: `FLOAT=half`, `COMPUTE_FLOAT=half`.
+  - precisionLevel 0: `FLOAT=half`, `COMPUTE_FLOAT=float`.
+  - fp32 path: both are float.
+- Attention QK / online softmax math should use `COMPUTE_FLOAT*` and `CONVERT_COMPUTE_FLOAT*`, so it follows the runtime precision policy. Hard-coding `half4` would bypass the fp16-storage/fp32-compute mode and risks changing numerical behavior.
+
+P0b attention profile:
+
+```text
+tag=opencl_pic_1024_sparse_flash_private_o_cb50_profile_20260611_070706
+profile=true, detail=true, warm_tune=true
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+timed request:
+score_flash_attention layer=1:
+  total=53.085 ms
+  flash=48.952 ms
+later sparse_flash_attention layers 2..15:
+  total=745.236 ms
+  rearrange=30.627 ms
+  pack=17.368 ms
+  flash=693.913 ms
+```
+
+Compared with P0a single-piece profile:
+
+```text
+score_flash_attention: 94.111 ms -> 53.085 ms
+later sparse_flash_attention_total: 1255.392 ms -> 745.236 ms
+later sparse_flash flash: 1214.291 ms -> 693.913 ms
+```
+
+P0b formal sweep:
+
+```text
+tag=opencl_pic_1024_sparse_flash_private_o_formal_20260611_071022
+profile=false, detail=false, warm_tune=true
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal,full,6.968234,1.000
+full-reuse,full,0.743882,9.367
+cacheblend,0.10,3.617224,1.926
+cacheblend,0.20,6.015361,1.158
+cacheblend,0.30,3.737483,1.864
+cacheblend,0.40,4.069478,1.712
+cacheblend,0.50,5.262682,1.324
+epic,0.10,3.656841,1.906
+epic,0.20,6.142038,1.135
+epic,0.30,3.476549,2.004
+epic,0.40,4.005558,1.740
+epic,0.50,5.514270,1.264
+```
+
+Comparison against P0a cacheblend-only single-piece formal:
+
+```text
+cacheblend,0.10: 3.970299 -> 3.617224  (-8.9%)
+cacheblend,0.20: 6.061056 -> 6.015361  (-0.8%)
+cacheblend,0.30: 3.753421 -> 3.737483  (-0.4%)
+cacheblend,0.40: 4.609172 -> 4.069478 (-11.7%)
+cacheblend,0.50: 5.508688 -> 5.262682  (-4.5%)
+epic,0.10:       3.953986 -> 3.656841  (-7.5%)
+epic,0.20:       5.877313 -> 6.142038  (+4.5%)
+epic,0.30:       3.504080 -> 3.476549  (-0.8%)
+epic,0.40:       4.264059 -> 4.005558  (-6.1%)
+epic,0.50:       5.118367 -> 5.514270  (+7.7%)
+```
+
+All cacheblend and epic ratios remain faster than normal full compute. Cacheblend improves across all tested budgets. Epic improves at 10/30/40 but regresses at 20/50 in this run; since the current user focus is cacheblend sparse attention and cacheblend high budget, P0b is kept as the default kernel simplification.
+
+Rejected P0c local-Q cache:
+
+- Tried `COMPUTE_FLOAT4 local_q[16]` to load each row's Q once per workgroup and reuse it in the K loop.
+- A full-localQ variant made cacheblend50 formal worse (`5.262682s -> 5.709010s` in comparable full sweeps) despite sometimes improving detail-mode flash microseconds.
+- A row64-only localQ variant improved some epic runs but still hurt cacheblend50 repeat (`5.634133s`) and was explicitly rejected.
+- Final production code does not contain `local_q`; `rg local_q source/backend/opencl/execution/cl/attention_buf.cl source/backend/opencl/execution/cl/attention_buf_mnn_cl.cpp` returns no matches.
+
+Final sync smoke after removing localQ:
+
+```text
+tag=opencl_pic_1024_sparse_flash_private_o_final_cb50_repeat_20260611_073012
+profile=false, detail=false, warm_tune=true
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+cacheblend,0.50,5.624736,1.239
+```
+
+This repeat confirms the synced artifact is stable and faster than normal, but the full P0b formal sweep above remains the main comparison point because single-ratio runs show visible end-to-end variance.
+
+## 2026-06-11 P2 Fix: PIC Compact Dense GEMM Fast Path
+
+Problem:
+
+- A repeated 20/30 budget profile showed that 20% recompute was slower end-to-end than 30%, even though attention work was lower.
+- Attention detail was not the cause:
+  - cacheblend20 score/later attention: `20.311 ms` / `252.640 ms`.
+  - cacheblend30 score/later attention: `31.056 ms` / `409.080 ms`.
+  - epic20 score/later attention: `19.172 ms` / `219.471 ms`.
+  - epic30 score/later attention: `27.368 ms` / `359.014 ms`.
+- Graph profile identified the cliff in dense `Convolution` / Linear after the score-layer compact boundary:
+  - old request=5 cacheblend20: `Convolution=4964.176 ms`, `PicSparseAttention=253.992 ms`, `PicScoreAttention=26.444 ms`.
+  - old request=6 cacheblend30: `Convolution=2335.675 ms`, `PicSparseAttention=406.522 ms`, `PicScoreAttention=34.198 ms`.
+  - The pathological shape was compact rows around `[216x2048x1x1]` and `[216x8192x1x1]`; attention was behaving as expected.
+
+Implementation:
+
+- Added PIC-prefixed OpenCL low-memory 1x1 Conv kernels:
+  - `pic_gemm_b4_c8_int4_buf`
+  - `pic_gemm_b4_c8_int8_buf`
+- The kernel bodies share the existing quantized `gemm_b4_c8_*` implementation through inline impl functions, so quantization math and output layout stay unchanged.
+- `ConvBufLowMemoryExecution` now routes large-channel compact rows (`globalY > 16 && globalY <= 512`, `inputChannels/outChannel >= 1024`) to the `pic_gemm_b4_c8_*` kernels by default.
+- The fast path bypasses the generic `convBufLowMemory_*` FP-weight decision and gives PIC compact dense shapes independent MNN tune keys by appending `pic_m<active_rows>` to the LWS key. This prevents old generic GEMM tune entries from being reused for 216-row compact shapes.
+- No env fallback was added; this is the default fast path for the matching shape class.
+
+Build and sync:
+
+```text
+(cd source/backend/opencl/execution/cl && python3 opencl_codegen.py .)
+MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/home/orangepi/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/orangepi5plus/
+```
+
+Artifact check:
+
+```text
+strings .cache/output/mnn/artifacts/orangepi5plus/lib/libMNN_CL.so | rg "pic_gemm_b4_c8"
+pic_gemm_b4_c8
+__kernel void pic_gemm_b4_c8_int4_buf
+__kernel void pic_gemm_b4_c8_int8_buf
+```
+
+Smoke 20/30 sweep:
+
+```text
+tag=opencl_pic_1024_picgemm_20_30_smoke_20260611_155014
+profile=false, detail=false, warm_tune=true
+
+normal,full,6.968234,1.000
+full-reuse,full,0.864710,8.058
+cacheblend,0.20,3.411061,2.043
+cacheblend,0.30,4.026625,1.731
+epic,0.20,3.170452,2.198
+epic,0.30,4.282373,1.627
+```
+
+Graph attribution after the fix:
+
+```text
+tag=opencl_pic_1024_picgemm_graph_cb20_30_20260611_155256
+profile=false, detail=false, graph_profile=true, warm_tune=true
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+request=5 cacheblend20 total=3831.490 ms
+  Convolution=2249.682 ms
+  PagedAttention=704.097 ms
+  PicSparseAttention=292.069 ms
+  PicScoreAttention=26.421 ms
+
+request=6 cacheblend30 total=4651.346 ms
+  Convolution=2988.953 ms
+  PagedAttention=624.255 ms
+  PicSparseAttention=461.266 ms
+  PicScoreAttention=33.417 ms
+```
+
+Compared to the old graph profile, cacheblend20 `Convolution` dropped from `4964.176 ms` to `2249.682 ms`. The 20% budget no longer has the inverted latency trend; the remaining higher latency at larger budgets is now consistent with more compact rows and more sparse attention work.
+
+Formal 10/20/30/40/50 sweep:
+
+```text
+tag=opencl_pic_1024_picgemm_formal_20260611_155453
+profile=false, detail=false, warm_tune=true
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal,full,6.968234,1.000
+full-reuse,full,0.817891,8.520
+cacheblend,0.10,2.212856,3.149
+cacheblend,0.20,3.290629,2.118
+cacheblend,0.30,3.889923,1.791
+cacheblend,0.40,5.281809,1.319
+cacheblend,0.50,5.769052,1.208
+epic,0.10,2.185259,3.189
+epic,0.20,3.199813,2.178
+epic,0.30,3.829921,1.819
+epic,0.40,4.779629,1.458
+epic,0.50,5.119875,1.361
+```
+
+Comparison against the previous P0b formal sweep:
+
+```text
+cacheblend,0.10: 3.617224 -> 2.212856 (-38.8%)
+cacheblend,0.20: 6.015361 -> 3.290629 (-45.3%)
+cacheblend,0.30: 3.737483 -> 3.889923 (+4.1%)
+cacheblend,0.40: 4.069478 -> 5.281809 (+29.8%)
+cacheblend,0.50: 5.262682 -> 5.769052 (+9.6%)
+epic,0.10:       3.656841 -> 2.185259 (-40.2%)
+epic,0.20:       6.142038 -> 3.199813 (-47.9%)
+epic,0.30:       3.476549 -> 3.829921 (+10.2%)
+epic,0.40:       4.005558 -> 4.779629 (+19.3%)
+epic,0.50:       5.514270 -> 5.119875 (-7.2%)
+```
+
+Conclusion:
+
+- The 20% budget cliff is fixed. It was a dense compact Linear / OpenCL low-memory 1x1 Conv tune-path issue, not a sparse attention issue.
+- All cacheblend and epic ratios remain faster than normal full compute in the formal sweep.
+- The `pic_gemm_b4_c8_*` fast path is kept as default because it removes the severe 20% regression and improves low-budget cacheblend/epic substantially.
+- High-budget cacheblend 40/50 can still be improved; next work should profile whether the regression versus P0b is from the new compact dense tune key selection or from normal run variance, then consider separate compact-row LWS buckets for `globalY` around 400/500.
+
+Important MLP follow-up:
+
+- Treat MLP as a first-class optimization track, not as incidental `Convolution` noise. After score-layer compaction, every later layer runs:
+  - `mlp/gate_proj/Linear` with compact rows x 2048 -> compact rows x 8192.
+  - `mlp/up_proj/Linear` with compact rows x 2048 -> compact rows x 8192.
+  - `mlp/down_proj/Linear` with compact rows x 8192 -> compact rows x 2048.
+- The same MLP fast path must hold for all recompute ratios from 1% to 50%. For the 1024-token setup, even 1% should usually be above the tiny-GEMV cutoff because active rows include prelude/suffix plus selected PIC rows.
+- Future sweeps should include at least 1/5/10/20/30/40/50 when studying budget scaling, or explicitly say which subset was run. For each sweep, spot-check graph profile on low/mid/high ratios and confirm MLP inputs are compact rows and use the `pic_gemm_b4_c8_*` tune namespace.
+- If a low budget is unexpectedly slower than a higher budget, first compare MLP `gate_proj/up_proj/down_proj` latency and tune key behavior before changing attention semantics. The historical 20% anomaly was exactly this class of MLP/dense compact-row issue.

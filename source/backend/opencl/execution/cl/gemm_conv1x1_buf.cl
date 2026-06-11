@@ -213,7 +213,7 @@ __private const int channelAlign
     wei.s7 = CONVERT_FLOAT((b.s3 & 15) - 8); \
     wei = wei * scale + offset;
 
-__kernel void gemm_b4_c8_int4_buf(GLOBAL_SIZE_DIM2
+static inline void gemm_b4_c8_int4_buf_impl(GLOBAL_SIZE_DIM2
                         __global const FLOAT* input,
 #ifdef USE_IMAGE
                         __read_only image2d_t weight,
@@ -517,7 +517,47 @@ __kernel void gemm_b4_c8_int4_buf(GLOBAL_SIZE_DIM2
 #endif
 }
 
-__kernel void gemm_b4_c8_int8_buf(GLOBAL_SIZE_DIM2
+__kernel void gemm_b4_c8_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__kernel void pic_gemm_b4_c8_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+static inline void gemm_b4_c8_int8_buf_impl(GLOBAL_SIZE_DIM2
                         __global const FLOAT* input,
 #ifdef USE_IMAGE
                         __read_only image2d_t weight,
@@ -815,4 +855,44 @@ __kernel void gemm_b4_c8_int8_buf(GLOBAL_SIZE_DIM2
 #if INPUT_BATCH_LEAVES_NUM != 0
     }
 #endif
+}
+
+__kernel void gemm_b4_c8_int8_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const char *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int8_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__kernel void pic_gemm_b4_c8_int8_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const char *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int8_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
 }

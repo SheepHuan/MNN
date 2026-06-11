@@ -172,6 +172,15 @@ MNN_PAGED_ATTENTION_PROFILE=1
 MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 ```
 
+PIC server 图级 op profile：
+
+```bash
+MNN_PIC_GRAPH_PROFILE=1
+MNN_PIC_GRAPH_PROFILE_TOP=1000
+```
+
+这个 profile 只用于 attribution，不作为正式 latency：server 会开启 MNN debug callback，并在每个 op 后等待输出完成，打印 `MNN_PIC_GRAPH_PROFILE_TYPE` 和 `MNN_PIC_GRAPH_PROFILE_OP`。它适合确认 score layer 后 dense 图是否按 active rows 运行，例如 `inputs=[519x2048x1x1]` 表示 compact active rows，`inputs=[1024x2048x1x1]` 表示 full prompt rows。正式性能报告不要开启这个开关。
+
 重点看这些日志：
 
 - `op=prefill_attention_fast_qk_softmax_qkv`：full prefill attention。
@@ -198,12 +207,22 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 6. OpenCL sparse attention 当前生产路径是 fused sparse FlashAttention：
    - `PicScoreAttention layer=1` 使用专门的 full-Q/compact-output `score_flash_attention` 路径：先完成 full prompt K/V 写入和 score/top-k，再用 active logical indices 读取 full query row 并输出 compact rows。不要把它理解成 compact-Q later-layer kernel。
    - `PicSparseAttention layer>=2` 使用 compact-Q `sparse_flash_attention` 路径。
+   - cacheblend/score-ready sparse flash 默认使用 single-piece 调度，`q_chunk=activeLen`、`q_split=1`，减少 fused row flash 的 per-layer launch 数；epic / 非 score-ready sparse flash 保留 range-aware q64 pieces，避免低预算路径回退。
+   - sparse flash row32/row64 的 output accumulator 默认放在 private `COMPUTE_FLOAT8 o0..o7` 中，K loop 结束后再写入 `local_o` 做跨 lane reduction，避免在热循环里反复读写 local memory。
    - sparse flash 同时保留 row32/row64 两个内核，默认由内置形状/plan 启发式选择；不要重新增加请求期 env fallback。
    - cacheblend selected PIC ratio `>=50%` 默认使用 row64，因为 row32 在 1024-token cb50 正式 repeat 中会让 cacheblend 低于 normal baseline；其他高预算 sparse layers 可使用 row32。
+   - 不保留 row64/row32 的 `local_q` Q-cache 变体。实测它在 detail profile 中偶尔降低 flash 子耗时，但会让 cacheblend50 端到端退化；不要重新引入。
+   - OpenCL kernel 不要硬编码 `half4` / `float4` 来表达精度策略；用 `FLOAT*` 表示存储类型，用 `COMPUTE_FLOAT*` 和 `CONVERT_COMPUTE_FLOAT*` 表示计算类型。MNN runtime 会按 precisionLevel 决定 fp16-storage/fp32-compute 或 fp16-compute。
    - 旧的三段式 sparse QK / sparse softmax / sparse QKV OpenCL kernel 和 env-gated fused softmax-QKV 实验路径已移除；不要再新增开关回退到旧路径。
    - 若进一步限制 cacheblend 选择窗口或重新排序 active rows 会改变算法语义，必须作为 `cacheblend-windowed` / `cacheblend-prefix-regularized` 这类命名变体报告，不能算普通 cacheblend。
-7. direct PagedCache value prefill 现在只保留为内置窄 heuristic：cacheblend 高预算且 slot table identity 时才直接读 PagedCache value，避免 packed V staging；不再提供 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL` 强制开关作为生产路径。
-8. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
+7. score layer 后的 compact-row dense Linear 在 OpenCL low-memory 1x1 Conv 路径中默认使用 PIC 专属 fast path：
+   - kernel 名称固定为 `pic_gemm_b4_c8_int4_buf` / `pic_gemm_b4_c8_int8_buf`，只用于大通道、小 M compact rows，例如 1024-token sparse recompute 的 1%-50% budget。
+   - 这个 fast path 的主要价值是给 PIC compact dense shapes 独立 MNN tune namespace：`pic_m<active_rows>` 会进入 LWS key，避免普通 `gemm_b4_c8_*` / `convBufLowMemory_*` 历史 tune 让 216-row 这类 shape 掉到慢路径。
+   - MLP 是后续优化的关键线索：score layer 后每层 `mlp/gate_proj`、`mlp/up_proj`、`mlp/down_proj` 都是 compact-row 大 Linear，1%-50% 不同重算比例下都必须确认它们被优化，而不能只看 `PicSparseAttention` 是否变快。
+   - 1024-token 当前 active rows 约为 prelude/suffix 加选中 PIC token；1% 也通常超过 16 rows，因此应进入 `pic_gemm_b4_c8_*` 而不是 tiny GEMV 分支。若未来模型/模板导致 active rows <=16，需要单独记录为 tiny-MLP fast path 问题。
+   - 不要新增 env fallback 或请求期在线 tuner；正式测试仍然先 warm 目标 ratios，再 `/v1/tune/update_cache`，计时请求复用 MNN cache。
+8. direct PagedCache value prefill 现在只保留为内置窄 heuristic：cacheblend 高预算且 slot table identity 时才直接读 PagedCache value，避免 packed V staging；不再提供 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL` 强制开关作为生产路径。
+9. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
 
 ## 验证要求
 
@@ -214,6 +233,7 @@ MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
 - `PIC full-compute` 仍接近 normal full-compute。
 - `full-reuse` 明显快于 PIC full-compute。
 - `cacheblend` / `epic` 每个 ratio 是独立请求，延迟包含本次 scoring/top-k、hydrate、sparse recompute、suffix prefill。
+- 对 1%-50% ratio sweep，必须把 MLP 作为单独检查项：至少 spot-check 1/10/20/30/40/50 或当前报告覆盖的全部 ratios，确认 score layer 后 `/layers.* /mlp/{gate_proj,up_proj,down_proj}/Linear` 输入是 compact rows，并且这些 low-memory 1x1 Conv 使用 PIC compact dense fast path / 独立 tune cache。
 - 报告 OrangePi TPS 时保持简单 CSV 格式：
 
 ```text
@@ -228,28 +248,30 @@ model_name,mode,buget,latency_s,effective_tps,speedup_vs_normal
 - `sparse_total` 中 `qk_us` 占大头：优化 sparse QK kernel、LWS、Q/K 分块和 K range。
 - `layer 0 qk_us` 远大于其他层：先排查首次 sparse shape 调参/编译/driver overhead，再看是否错误从 layer 0 sparse。
 - 所有层 QK 都慢且随 ratio 线性增长：需要真正减少 QK 计算量，而不是只减少请求 token 列表长度。
+- 若某个较低 budget 反而比更高 budget 慢，先用 `MNN_PIC_GRAPH_PROFILE=1` 看 `Convolution` dense Linear，而不是默认归因到 attention。历史 20% cliff 是 `[216x2048]` / `[216x8192]` compact-row low-memory 1x1 Conv 形状触发的 dense GEMM/LWS 问题，已用 `pic_gemm_b4_c8_*` fast path 修复。
+- 若 `Convolution` 在 graph profile 里仍是第一热点，优先拆 MLP gate/up/down，而不是继续微调 sparse flash；MLP compact dense 的性能必须随 1%-50% active rows 平滑增长，不能再出现低 budget 比高 budget 更慢的形状 cliff。
 
 ## 2026-06-11 OpenCL 1024-token 当前结论
 
 OrangePi OpenCL PIC graph-boundary 路径在 1024-token prompt 下已经稳定运行。默认 `score_layer_idx=1`，不要改成 layer 0：`layer 0` 是 score 前 full compute，`layer 1` 是 `PicScoreAttention` scoring/top-k 和 compact 输出，`layer >= 2` 是后续 `PicSparseAttention` compact sparse rows。
 
-当前最快默认路径已经包含 score-layer flash：
+当前最快默认路径已经包含 score-layer flash、layer>=2 sparse flash private accumulators，以及 compact-row dense `pic_gemm_b4_c8_*` fast path：
 
 ```text
-tag=opencl_pic_1024_score_flash_formal_20260611_1427
+tag=opencl_pic_1024_picgemm_formal_20260611_155453
 mode,budget,latency_s,speedup_vs_normal
 normal,full,6.968234,1.000
-full-reuse,full,0.840850,8.287
-cacheblend,0.10,4.159067,1.675
-cacheblend,0.20,5.922973,1.176
-cacheblend,0.30,4.001684,1.741
-cacheblend,0.40,4.801796,1.451
-cacheblend,0.50,5.968761,1.167
-epic,0.10,3.576207,1.948
-epic,0.20,5.793736,1.203
-epic,0.30,3.626172,1.922
-epic,0.40,4.340059,1.606
-epic,0.50,5.340461,1.305
+full-reuse,full,0.817891,8.520
+cacheblend,0.10,2.212856,3.149
+cacheblend,0.20,3.290629,2.118
+cacheblend,0.30,3.889923,1.791
+cacheblend,0.40,5.281809,1.319
+cacheblend,0.50,5.769052,1.208
+epic,0.10,2.185259,3.189
+epic,0.20,3.199813,2.178
+epic,0.30,3.829921,1.819
+epic,0.40,4.779629,1.458
+epic,0.50,5.119875,1.361
 ```
 
 对应 cb50 profile 口径：

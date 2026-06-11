@@ -24,6 +24,7 @@
 #include <mutex>
 #include <sstream>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -210,6 +211,283 @@ int envInt(const char* name, int fallback = 0) {
         return fallback;
     }
     return static_cast<int>(parsed);
+}
+
+bool picGraphProfileEnabled() {
+    return envInt("MNN_PIC_GRAPH_PROFILE", 0) > 0;
+}
+
+int64_t monotonicUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string tensorShapes(const std::vector<MNN::Tensor*>& tensors) {
+    std::ostringstream os;
+    for (size_t i = 0; i < tensors.size(); ++i) {
+        if (i > 0) {
+            os << "|";
+        }
+        const auto* tensor = tensors[i];
+        if (tensor == nullptr) {
+            os << "null";
+            continue;
+        }
+        os << "[";
+        const auto shape = tensor->shape();
+        for (size_t j = 0; j < shape.size(); ++j) {
+            if (j > 0) {
+                os << "x";
+            }
+            os << shape[j];
+        }
+        os << "]";
+    }
+    return os.str();
+}
+
+struct PicGraphProfileRecord {
+    std::string name;
+    std::string type;
+    std::string inputShapes;
+    std::string outputShapes;
+    int calls = 0;
+    int64_t totalUs = 0;
+    int64_t maxUs = 0;
+    float flops = 0.0f;
+};
+
+struct PicGraphProfilePending {
+    bool valid = false;
+    int64_t startUs = 0;
+    std::string name;
+    std::string type;
+    std::string inputShapes;
+    float flops = 0.0f;
+};
+
+class PicGraphProfiler {
+public:
+    static PicGraphProfiler& get() {
+        static PicGraphProfiler profiler;
+        return profiler;
+    }
+
+    void beginRequest(const std::string& label) {
+        if (!picGraphProfileEnabled()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mMutex);
+        mActive = true;
+        mLabel = label;
+        mRequestId++;
+        mRecords.clear();
+        mTotalUs = 0;
+        mTotalCalls = 0;
+    }
+
+    void endRequest() {
+        if (!picGraphProfileEnabled()) {
+            return;
+        }
+        std::vector<PicGraphProfileRecord> records;
+        std::unordered_map<std::string, PicGraphProfileRecord> typeRecords;
+        std::string label;
+        int requestId = 0;
+        int64_t totalUs = 0;
+        int totalCalls = 0;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            if (!mActive) {
+                return;
+            }
+            label = mLabel;
+            requestId = mRequestId;
+            totalUs = mTotalUs;
+            totalCalls = mTotalCalls;
+            records.reserve(mRecords.size());
+            for (const auto& iter : mRecords) {
+                records.emplace_back(iter.second);
+                auto& typeRecord = typeRecords[iter.second.type];
+                typeRecord.type = iter.second.type;
+                typeRecord.name = iter.second.type;
+                typeRecord.calls += iter.second.calls;
+                typeRecord.totalUs += iter.second.totalUs;
+                typeRecord.maxUs = std::max(typeRecord.maxUs, iter.second.maxUs);
+                typeRecord.flops += iter.second.flops;
+            }
+            mActive = false;
+        }
+        std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.totalUs != rhs.totalUs) {
+                return lhs.totalUs > rhs.totalUs;
+            }
+            return lhs.name < rhs.name;
+        });
+        std::vector<PicGraphProfileRecord> types;
+        types.reserve(typeRecords.size());
+        for (const auto& iter : typeRecords) {
+            types.emplace_back(iter.second);
+        }
+        std::sort(types.begin(), types.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.totalUs != rhs.totalUs) {
+                return lhs.totalUs > rhs.totalUs;
+            }
+            return lhs.type < rhs.type;
+        });
+        const int topN = envInt("MNN_PIC_GRAPH_PROFILE_TOP", 40);
+        std::fprintf(stderr,
+                     "MNN_PIC_GRAPH_PROFILE_SUMMARY request=%d label=%s total_ms=%.3f calls=%d unique_ops=%zu "
+                     "unique_types=%zu\n",
+                     requestId, label.c_str(), totalUs / 1000.0, totalCalls, records.size(), types.size());
+        for (int i = 0; i < static_cast<int>(types.size()) && i < topN; ++i) {
+            const auto& record = types[i];
+            std::fprintf(stderr,
+                         "MNN_PIC_GRAPH_PROFILE_TYPE rank=%d type=%s total_ms=%.3f max_ms=%.3f calls=%d\n",
+                         i + 1, record.type.c_str(), record.totalUs / 1000.0, record.maxUs / 1000.0,
+                         record.calls);
+        }
+        for (int i = 0; i < static_cast<int>(records.size()) && i < topN; ++i) {
+            const auto& record = records[i];
+            std::fprintf(stderr,
+                         "MNN_PIC_GRAPH_PROFILE_OP rank=%d type=%s name=%s total_ms=%.3f max_ms=%.3f calls=%d "
+                         "inputs=%s outputs=%s\n",
+                         i + 1, record.type.c_str(), record.name.c_str(), record.totalUs / 1000.0,
+                         record.maxUs / 1000.0, record.calls, record.inputShapes.c_str(),
+                         record.outputShapes.c_str());
+        }
+        std::fflush(stderr);
+    }
+
+    bool before(const std::vector<MNN::Tensor*>& inputs, const MNN::OperatorInfo* info) {
+        if (!picGraphProfileEnabled() || info == nullptr) {
+            return true;
+        }
+        if (!isActive()) {
+            return true;
+        }
+        auto& pending = pendingOp();
+        pending.valid = true;
+        pending.startUs = monotonicUs();
+        pending.name = info->name();
+        pending.type = info->type();
+        pending.inputShapes = tensorShapes(inputs);
+        pending.flops = info->flops();
+        return true;
+    }
+
+    bool after(const std::vector<MNN::Tensor*>& outputs, const MNN::OperatorInfo* info) {
+        if (!picGraphProfileEnabled() || info == nullptr) {
+            return true;
+        }
+        auto& pending = pendingOp();
+        if (!pending.valid) {
+            return true;
+        }
+        for (auto* output : outputs) {
+            if (output != nullptr) {
+                output->wait(MNN::Tensor::MAP_TENSOR_READ, true);
+            }
+        }
+        const int64_t costUs = std::max<int64_t>(0, monotonicUs() - pending.startUs);
+        const std::string outputShapes = tensorShapes(outputs);
+        const std::string key = pending.name + "\n" + pending.type + "\n" + pending.inputShapes + "\n" + outputShapes;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            if (mActive) {
+                auto& record = mRecords[key];
+                if (record.calls == 0) {
+                    record.name = pending.name;
+                    record.type = pending.type;
+                    record.inputShapes = pending.inputShapes;
+                    record.outputShapes = outputShapes;
+                }
+                record.calls++;
+                record.totalUs += costUs;
+                record.maxUs = std::max(record.maxUs, costUs);
+                record.flops += pending.flops;
+                mTotalUs += costUs;
+                mTotalCalls++;
+            }
+        }
+        pending.valid = false;
+        return true;
+    }
+
+private:
+    PicGraphProfiler() = default;
+
+    bool isActive() {
+        std::lock_guard<std::mutex> lock(mMutex);
+        return mActive;
+    }
+
+    static PicGraphProfilePending& pendingOp() {
+        thread_local PicGraphProfilePending pending;
+        return pending;
+    }
+
+    std::mutex mMutex;
+    bool mActive = false;
+    int mRequestId = 0;
+    std::string mLabel;
+    std::unordered_map<std::string, PicGraphProfileRecord> mRecords;
+    int64_t mTotalUs = 0;
+    int mTotalCalls = 0;
+};
+
+class PicGraphProfileRequestScope {
+public:
+    explicit PicGraphProfileRequestScope(std::string label) : mEnabled(picGraphProfileEnabled()) {
+        if (mEnabled) {
+            PicGraphProfiler::get().beginRequest(label);
+        }
+    }
+
+    PicGraphProfileRequestScope(const PicGraphProfileRequestScope&) = delete;
+    PicGraphProfileRequestScope& operator=(const PicGraphProfileRequestScope&) = delete;
+
+    ~PicGraphProfileRequestScope() {
+        if (mEnabled) {
+            PicGraphProfiler::get().endRequest();
+        }
+    }
+
+private:
+    bool mEnabled = false;
+};
+
+std::string picGraphProfileLabel(const json& request) {
+    std::ostringstream os;
+    os << "mode=";
+    if (request.contains("pic_cache") && request["pic_cache"].is_object()) {
+        const auto& pic = request["pic_cache"];
+        os << (pic.contains("selection_algorithm") && pic["selection_algorithm"].is_string()
+                   ? pic["selection_algorithm"].get<std::string>()
+                   : "pic");
+        os << ",ratio="
+           << (pic.contains("pic_recompute_ratio") && pic["pic_recompute_ratio"].is_number()
+                   ? pic["pic_recompute_ratio"].get<double>()
+                   : 0.0);
+        os << ",score_layer="
+           << (pic.contains("pic_recompute_score_layer_idx") && pic["pic_recompute_score_layer_idx"].is_number_integer()
+                   ? pic["pic_recompute_score_layer_idx"].get<int>()
+                   : 1);
+    } else {
+        os << "full-compute";
+    }
+    os << ",max_tokens="
+       << (request.contains("max_tokens") && request["max_tokens"].is_number_integer()
+               ? request["max_tokens"].get<int>()
+               : -1);
+    for (const char* key : {"full_prompt_token_ids", "prompt_token_ids", "input_token_ids"}) {
+        if (request.contains(key) && request[key].is_array()) {
+            os << ",tokens=" << request[key].size();
+            break;
+        }
+    }
+    return os.str();
 }
 
 uint32_t sha256RotateRight(uint32_t value, int bits) {
@@ -1532,8 +1810,21 @@ bool PicServer::load() {
         runtimeConfig["max_all_tokens"] = pagedKvLimit;
         std::cout << "PIC server test override: paged_kv_max_tokens=" << pagedKvLimit << "\n";
     }
+    if (picGraphProfileEnabled()) {
+        runtimeConfig["enable_debug"] = true;
+        std::cout << "PIC server graph profile enabled: MNN_PIC_GRAPH_PROFILE=1\n";
+    }
     std::string config = runtimeConfig.dump();
     mLlm->set_config(config);
+    if (picGraphProfileEnabled()) {
+        mLlm->setDebugCallback(
+            [](const std::vector<MNN::Tensor*>& inputs, const MNN::OperatorInfo* info) {
+                return PicGraphProfiler::get().before(inputs, info);
+            },
+            [](const std::vector<MNN::Tensor*>& outputs, const MNN::OperatorInfo* info) {
+                return PicGraphProfiler::get().after(outputs, info);
+            });
+    }
     if (!mLlm->load()) {
         std::cerr << "Failed to load LLM from " << mConfig.configPath << "\n";
         return false;
@@ -1979,6 +2270,7 @@ bool PicServer::completeChatBatch(const std::vector<json>& requests, json& respo
 }
 
 bool PicServer::completeChatBatchItem(const json& request, json& response, std::string& error) {
+    PicGraphProfileRequestScope graphProfileScope(picGraphProfileLabel(request));
     if (!mLlm) {
         error = "LLM is not loaded";
         return false;

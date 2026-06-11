@@ -33,6 +33,7 @@ private:
 	void useFPWeightGemmLowMemory(Tensor * input, Tensor * output);
     void tuneGemvLowMemory(Tensor * input, Tensor * output);
     void tuneGemmLowMemory(Tensor * input, Tensor * output);
+    bool usePicCompactGemmLowMemory(Tensor * input, Tensor * output) const;
     bool convertToQuantWeight1x1Buffer(cl::Buffer input);
     std::vector<int> mPaddings{0, 0};
     std::vector<uint32_t> mGlobalWorkSize{1, 1, 1};
