@@ -306,9 +306,9 @@ __global__ void cacheBlendTopKKernel(const float* scores, int* selected, int tok
 template <typename T>
 __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T* valueCache, T* output,
                                      const float* mask, const int* slotTable, int maskElements, int batch,
-                                     int queryLen, int insertLen, int numHeads, int kvHeads, int headDim,
+                                     int queryLen, int outputLen, int insertLen, int numHeads, int kvHeads, int headDim,
                                      int baseLogical, int kvLen, int maxSlots, float scale,
-                                     const int* queryLogicalIndices) {
+                                     const int* queryLogicalIndices, int queryRowsAreFull) {
     extern __shared__ float smem[];
     float* scores = smem;
     float* reduce = smem + kvLen;
@@ -323,6 +323,10 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
     int group = numHeads / kvHeads;
     int kvHead = h / group;
     int qLogical = queryLogicalIndices ? queryLogicalIndices[q] : (baseLogical + q);
+    int qRow = queryRowsAreFull ? qLogical : q;
+    if (qRow < 0 || qRow >= queryLen) {
+        return;
+    }
     float localMax = -FLT_MAX;
     int maskCols = 0;
     int maskGap = 0;
@@ -343,14 +347,14 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
         }
         float score = 0.0f;
         for (int d = 0; d < headDim; ++d) {
-            int qOffset = ((b * queryLen + q) * numHeads + h) * headDim + d;
+            int qOffset = ((b * queryLen + qRow) * numHeads + h) * headDim + d;
             int kOffset = ((slot * batch + b) * kvHeads + kvHead) * headDim + d;
             score += pagedToFloat<T>(query[qOffset]) * pagedToFloat<T>(keyCache[kOffset]);
         }
         score *= scale;
         if (mask != nullptr && maskCols > 0 && k >= maskGap) {
             int col = k - maskGap;
-            int maskIdx = q * maskCols + col;
+            int maskIdx = (queryRowsAreFull ? qLogical : q) * maskCols + col;
             if (maskIdx >= 0 && maskIdx < maskElements) {
                 score += mask[maskIdx];
             }
@@ -397,7 +401,7 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
             int vOffset = ((b * kvHeads + kvHead) * maxSlots + slot) * headDim + d;
             acc += scores[k] * invSum * pagedToFloat<T>(valueCache[vOffset]);
         }
-        int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
+        int outOffset = (b * outputLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
         output[outOffset] = pagedFromFloat<T>(acc);
     }
 }
@@ -405,8 +409,9 @@ __global__ void pagedAttentionKernel(const T* query, const T* keyCache, const T*
 template <typename T>
 __global__ void pagedAttentionRowCompressedMaskKernel(
     const T* query, const T* keyCache, const T* valueCache, T* output, const float* mask, const int* slotTable,
-    int maskElements, int batch, int queryLen, int insertLen, int numHeads, int kvHeads, int headDim,
-    int baseLogical, int kvLen, int maxSlots, float scale, const int* queryLogicalIndices) {
+    int maskElements, int batch, int queryLen, int outputLen, int insertLen, int numHeads, int kvHeads, int headDim,
+    int baseLogical, int kvLen, int maxSlots, float scale, const int* queryLogicalIndices,
+    int queryRowsAreFull) {
     extern __shared__ float smem[];
     float* qShared = smem;
     float* outShared = qShared + headDim;
@@ -423,6 +428,10 @@ __global__ void pagedAttentionRowCompressedMaskKernel(
     int group = numHeads / kvHeads;
     int kvHead = h / group;
     int qLogical = queryLogicalIndices ? queryLogicalIndices[q] : (baseLogical + q);
+    int qRow = queryRowsAreFull ? qLogical : q;
+    if (qRow < 0 || qRow >= queryLen) {
+        return;
+    }
     int rowEnd = qLogical + 1;
     rowEnd = rowEnd < 0 ? 0 : rowEnd;
     rowEnd = rowEnd > kvLen ? kvLen : rowEnd;
@@ -433,7 +442,7 @@ __global__ void pagedAttentionRowCompressedMaskKernel(
         maskGap = kvLen - maskCols;
     }
 
-    int qBase = ((b * queryLen + q) * numHeads + h) * headDim;
+    int qBase = ((b * queryLen + qRow) * numHeads + h) * headDim;
     for (int d = tid; d < headDim; d += blockDim.x) {
         qShared[d] = pagedToFloat<T>(query[qBase + d]);
         outShared[d] = 0.0f;
@@ -459,7 +468,7 @@ __global__ void pagedAttentionRowCompressedMaskKernel(
                 localScore *= scale;
                 if (mask != nullptr && maskCols > 0 && k >= maskGap) {
                     int col = k - maskGap;
-                    int maskIdx = q * maskCols + col;
+                    int maskIdx = (queryRowsAreFull ? qLogical : q) * maskCols + col;
                     if (maskIdx >= 0 && maskIdx < maskElements) {
                         localScore += mask[maskIdx];
                     }
@@ -521,7 +530,7 @@ __global__ void pagedAttentionRowCompressedMaskKernel(
 
     float invSum = runningSum > 0.0f ? 1.0f / runningSum : 0.0f;
     for (int d = tid; d < headDim; d += blockDim.x) {
-        int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
+        int outOffset = (b * outputLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
         output[outOffset] = pagedFromFloat<T>(outShared[d] * invSum);
     }
 }
@@ -532,7 +541,7 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
                                      int batch, int queryLen, int insertLen, int numHeads, int kvHeads,
                                      int headDim, int baseLogical, int qStart, int qPieceLen, int kvLen, int maxSlots,
                                      float scale,
-                                     const int* queryLogicalIndices) {
+                                     const int* queryLogicalIndices, int queryRowsAreFull) {
     constexpr int TILE_Q = 16;
     constexpr int TILE_K = 16;
     constexpr int TILE_D = 32;
@@ -552,6 +561,8 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
     int kvHead = h / group;
     bool validQ = qLocal < qPieceLen && q < insertLen;
     int qLogical = validQ ? (queryLogicalIndices ? queryLogicalIndices[q] : (baseLogical + q)) : -1;
+    int qRow = queryRowsAreFull ? qLogical : q;
+    validQ = validQ && qRow >= 0 && qRow < queryLen;
     int scoreOffset = ((b * numHeads + h) * qPieceLen + qLocal) * kvLen + k;
 
     int slot = k < kvLen ? (slotTable ? slotTable[k] : k) : -1;
@@ -570,7 +581,7 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
             int d = dStart + dd;
             float value = 0.0f;
             if (validQ && d < headDim) {
-                int qOffset = ((b * queryLen + q) * numHeads + h) * headDim + d;
+                int qOffset = ((b * queryLen + qRow) * numHeads + h) * headDim + d;
                 value = pagedToFloat<T>(query[qOffset]);
             }
             qTile[threadIdx.y][dd] = value;
@@ -599,7 +610,7 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
         float finalScore = validScore ? score * scale : -FLT_MAX;
         if (validScore && mask != nullptr && maskCols > 0 && k >= maskGap) {
             int col = k - maskGap;
-            int maskIdx = q * maskCols + col;
+            int maskIdx = (queryRowsAreFull ? qLogical : q) * maskCols + col;
             if (maskIdx >= 0 && maskIdx < maskElements) {
                 finalScore += mask[maskIdx];
             }
@@ -610,7 +621,7 @@ __global__ void pagedPrefillQKKernel(const T* query, const T* keyCache, float* s
 
 template <typename T>
 __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T* output, const int* slotTable,
-                                      int batch, int queryLen, int qStart, int qPieceLen, int numHeads, int kvHeads,
+                                      int batch, int outputLen, int qStart, int qPieceLen, int numHeads, int kvHeads,
                                       int headDim, int kvLen, int maxSlots) {
     constexpr int TILE_D = 32;
     constexpr int TILE_Q = 8;
@@ -659,7 +670,7 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
         }
         __syncthreads();
 
-        if (qLocal < qPieceLen && q < queryLen && d < headDim) {
+        if (qLocal < qPieceLen && q < outputLen && d < headDim) {
 #pragma unroll
             for (int kk = 0; kk < TILE_K; ++kk) {
                 if (kStart + kk < kvLen) {
@@ -670,8 +681,8 @@ __global__ void pagedPrefillQKVKernel(const float* probs, const T* valueCache, T
         __syncthreads();
     }
 
-    if (qLocal < qPieceLen && q < queryLen && d < headDim) {
-        int outOffset = (b * queryLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
+    if (qLocal < qPieceLen && q < outputLen && d < headDim) {
+        int outOffset = (b * outputLen * numHeads * headDim) + q * numHeads * headDim + h * headDim + d;
         output[outOffset] = pagedFromFloat<T>(acc);
     }
 }
@@ -1586,6 +1597,58 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
     return NO_ERROR;
 }
 
+static ErrorCode emitActiveIndicesCUDA(PagedKVMeta* meta, int layerIndex, int kvLen, Tensor* output) {
+    if (output == nullptr) {
+        return NO_ERROR;
+    }
+    const int budget = static_cast<int>(output->elementSize());
+    std::vector<int> active;
+    if (meta != nullptr) {
+        active = meta->buildBudgetActiveLogicalIndices(kvLen, budget);
+    }
+    if (active.empty() && budget > 0) {
+        const int count = std::min(kvLen, budget);
+        active.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            active.emplace_back(i);
+        }
+    }
+    if (static_cast<int>(active.size()) != budget) {
+        MNN_ERROR("CUDAPagedAttention layer %d active index count mismatch, budget=%d active=%d\n",
+                  layerIndex, budget, static_cast<int>(active.size()));
+        return INVALID_VALUE;
+    }
+    if (meta != nullptr && !active.empty() && !meta->activatePicRows(active, layerIndex, kvLen)) {
+        return INVALID_VALUE;
+    }
+    if (!active.empty()) {
+        if (cudaMemcpy(pagedDevPtr<int>(output), active.data(), active.size() * sizeof(int),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            return INVALID_VALUE;
+        }
+    }
+    return NO_ERROR;
+}
+
+static ErrorCode emitIdentityIndicesCUDA(int count, Tensor* output) {
+    if (output == nullptr) {
+        return NO_ERROR;
+    }
+    count = std::min(count, static_cast<int>(output->elementSize()));
+    if (count <= 0) {
+        return NO_ERROR;
+    }
+    std::vector<int> indices(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        indices[static_cast<size_t>(i)] = i;
+    }
+    if (cudaMemcpy(pagedDevPtr<int>(output), indices.data(), indices.size() * sizeof(int),
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+        return INVALID_VALUE;
+    }
+    return NO_ERROR;
+}
+
 static bool writeShapeFile(const std::string& path, int batch, int kvHeads, int headDim, int tokenCount, int bytes,
                            const KVMeta* meta) {
     std::ofstream os(path, std::ios::binary);
@@ -1620,6 +1683,11 @@ static bool writeShapeFile(const std::string& path, int batch, int kvHeads, int 
 
 CUDAPagedAttention::CUDAPagedAttention(Backend* backend, const MNN::Op* op)
     : Execution(backend), mCudaBackend(static_cast<CUDABackend*>(backend)) {
+    if (op != nullptr && op->type() == OpType_PicScoreAttention) {
+        mPicAttentionMode = 1;
+    } else if (op != nullptr && op->type() == OpType_PicSparseAttention) {
+        mPicAttentionMode = 2;
+    }
     auto param = op->main_as_AttentionParam();
     if (param != nullptr) {
         mLayerIndex = param->layer_index();
@@ -1843,7 +1911,12 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     }
 
     int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);
-    if (mMeta != nullptr && mMeta->sparseQueryBlockedBeforeLayer(layerIndex)) {
+    const bool decodeStep = mMeta != nullptr && mQuerySeqLen == 1 && mNewKvSeqLen == 1 &&
+        mMeta->previous > 0 && !mMeta->cacheblend_score_active && !mMeta->pic_graph_active_plan_ready;
+    const bool picRuntimeActive = mMeta != nullptr &&
+        (mMeta->sparse_query_active || mMeta->cacheblend_score_active || mMeta->pic_graph_active_plan_ready);
+    const int effectivePicAttentionMode = (decodeStep || !picRuntimeActive) ? 0 : mPicAttentionMode;
+    if (!decodeStep && mMeta != nullptr && mMeta->sparseQueryBlockedBeforeLayer(layerIndex)) {
         MNN_ERROR("CUDAPagedAttention layer %d received sparse query before sparse_start_layer=%d. "
                   "Run full prompt until the score layer, crop active hidden states, then resume sparse.\n",
                   layerIndex, mMeta->sparse_query_start_layer_idx);
@@ -1852,21 +1925,35 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
 
     int reverse = reverseCount(mMeta);
     int baseLogical = 0;
-    int insertLen = mNewKvSeqLen;
+    int kvWriteLen = mNewKvSeqLen;
+    int attnLen = output->length(1);
     bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
+    const bool scoreAttention = effectivePicAttentionMode == 1;
+    if (scoreAttention) {
+        sparseQuery = false;
+    }
     if (mMeta != nullptr) {
         size_t kept = mMeta->previous >= mMeta->remove ? (mMeta->previous - mMeta->remove) : 0;
         baseLogical = static_cast<int>(kept) + reverse;
-        insertLen = mMeta->add > 0 ? static_cast<int>(std::min<size_t>(mMeta->add, mNewKvSeqLen)) : mNewKvSeqLen;
+        kvWriteLen = mMeta->add > 0 ? static_cast<int>(std::min<size_t>(mMeta->add, mNewKvSeqLen)) : mNewKvSeqLen;
     }
-    insertLen = std::min(insertLen, mQuerySeqLen);
     if (sparseQuery) {
-        if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < insertLen) {
+        if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+            return INVALID_VALUE;
+        }
+        if (mNewKvSeqLen < attnLen) {
+            MNN_ERROR("CUDAPagedAttention layer %d sparse K/V rows %d smaller than active attention rows %d\n",
+                      layerIndex, mNewKvSeqLen, attnLen);
             return INVALID_VALUE;
         }
         baseLogical = 0;
+        kvWriteLen = attnLen;
+    } else if (effectivePicAttentionMode == 2) {
+        MNN_ERROR("CUDA PicSparseAttention layer %d requires active sparse rows from PicScoreAttention\n",
+                  layerIndex);
+        return INVALID_VALUE;
     }
-    int kvLen = sparseQuery ? std::max(0, mMeta->logical_length) : (baseLogical + insertLen);
+    int kvLen = sparseQuery ? std::max(0, mMeta->logical_length) : (baseLogical + kvWriteLen);
     if (kvLen > mCache->maxSlots) {
         MNN_ERROR("CUDAPagedAttention layer %d needs %d slots, cache capacity is %d\n", mLayerIndex, kvLen,
                   mCache->maxSlots);
@@ -1883,14 +1970,14 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     const int* sparseQueryDevice = nullptr;
     if (sparseQuery) {
         cudaMemcpy(pagedDevPtr<int>(mCache->sparseQuery.get()), mMeta->sparse_query_logical_indices.data(),
-                   insertLen * sizeof(int), cudaMemcpyHostToDevice);
+                   attnLen * sizeof(int), cudaMemcpyHostToDevice);
         sparseQueryDevice = pagedDevPtr<int>(mCache->sparseQuery.get());
     }
 
     cudaStream_t stream = 0;
     const bool profile = profilePagedAttention();
     const bool nvtx = nvtxPagedAttention();
-    ScopedNvtxRange layerNvtx(nvtxLayerRangeName("paged_attention_layer_total", layerIndex, mQuerySeqLen, insertLen,
+    ScopedNvtxRange layerNvtx(nvtxLayerRangeName("paged_attention_layer_total", layerIndex, mQuerySeqLen, attnLen,
                                                  kvLen), nvtx);
     if (mCache->zeroCopyKV) {
         registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mPrecision,
@@ -1904,21 +1991,21 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         return restore;
     }
 
-    if (!mIsKVShared && insertLen > 0) {
+    if (!mIsKVShared && kvWriteLen > 0) {
         ScopedNvtxRange copyNvtx(nvtxLayerRangeName("write_current_kv_to_paged_cache", layerIndex, mQuerySeqLen,
-                                                    insertLen, kvLen), nvtx);
+                                                    kvWriteLen, kvLen), nvtx);
         dim3 block(32, 8, 1);
-        dim3 grid(UP_DIV(mHeadDim, block.x), UP_DIV(insertLen, block.y), UP_DIV(mBatch * mKvNumHead, block.z));
+        dim3 grid(UP_DIV(mHeadDim, block.x), UP_DIV(kvWriteLen, block.y), UP_DIV(mBatch * mKvNumHead, block.z));
         if (mPrecision == 4) {
             copyPagedKVKernel<float><<<grid, block, 0, stream>>>(
                 pagedDevPtr<float>(key), pagedDevPtr<float>(value), pagedDevPtr<float>(mCache->key.get()),
                 pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<int>(mCache->slotTable.get()), mBatch,
-                mNewKvSeqLen, insertLen, mKvNumHead, mHeadDim, baseLogical, mCache->maxSlots, sparseQueryDevice);
+                mNewKvSeqLen, kvWriteLen, mKvNumHead, mHeadDim, baseLogical, mCache->maxSlots, sparseQueryDevice);
         } else {
             copyPagedKVKernel<half><<<grid, block, 0, stream>>>(
                 pagedDevPtr<half>(key), pagedDevPtr<half>(value), pagedDevPtr<half>(mCache->key.get()),
                 pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<int>(mCache->slotTable.get()), mBatch,
-                mNewKvSeqLen, insertLen, mKvNumHead, mHeadDim, baseLogical, mCache->maxSlots, sparseQueryDevice);
+                mNewKvSeqLen, kvWriteLen, mKvNumHead, mHeadDim, baseLogical, mCache->maxSlots, sparseQueryDevice);
         }
         checkKernelErrors;
     }
@@ -1930,6 +2017,32 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         &mCacheBlendIndexCount);
     if (cacheBlendScore != NO_ERROR) {
         return cacheBlendScore;
+    }
+
+    if (scoreAttention && outputs.size() > 1) {
+        err = emitActiveIndicesCUDA(mMeta, layerIndex, kvLen, outputs[1]);
+        if (err != NO_ERROR) {
+            return err;
+        }
+        sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
+        if (sparseQuery) {
+            if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+                return INVALID_VALUE;
+            }
+            baseLogical = 0;
+            kvLen = std::max(0, mMeta->logical_length);
+            if (cudaMemcpy(pagedDevPtr<int>(mCache->sparseQuery.get()),
+                           mMeta->sparse_query_logical_indices.data(), attnLen * sizeof(int),
+                           cudaMemcpyHostToDevice) != cudaSuccess) {
+                return INVALID_VALUE;
+            }
+            sparseQueryDevice = pagedDevPtr<int>(mCache->sparseQuery.get());
+        }
+    } else if (outputs.size() > 1) {
+        err = emitIdentityIndicesCUDA(attnLen, outputs[1]);
+        if (err != NO_ERROR) {
+            return err;
+        }
     }
 
     if (mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite && kvLen > 0) {
@@ -2018,9 +2131,9 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         }
     }
 
-    size_t outputBytes = static_cast<size_t>(mBatch) * mQuerySeqLen * mNumHead * mHeadDim * mPrecision;
+    size_t outputBytes = output->elementSize() * static_cast<size_t>(mPrecision);
     cudaMemset(pagedDevPtr<void>(output), 0, outputBytes);
-    if (insertLen <= 0 || kvLen <= 0) {
+    if (attnLen <= 0 || kvLen <= 0) {
         return NO_ERROR;
     }
 
@@ -2029,52 +2142,54 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     int maskElements = useMask ? static_cast<int>(mask->elementSize()) : 0;
     const uint64_t attentionStartUs = profile ? nowUs() : 0;
     const bool benchForceV2Kernel = envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
+    const bool queryRowsAreFull = sparseQuery && mQuerySeqLen > attnLen;
     if (benchForceV2Kernel) {
         const int v2BlockSize = 128;
         const int v2SharedBytes = (mHeadDim * 2 + v2BlockSize * 2) * static_cast<int>(sizeof(float));
         ScopedNvtxRange v2Nvtx(nvtxLayerRangeName("paged_attention_v2_row_compressed_mask", layerIndex,
-                                                  mQuerySeqLen, insertLen, kvLen), nvtx);
-        dim3 v2Grid(insertLen, mNumHead, mBatch);
+                                                  mQuerySeqLen, attnLen, kvLen), nvtx);
+        dim3 v2Grid(attnLen, mNumHead, mBatch);
         if (mPrecision == 4) {
             pagedAttentionRowCompressedMaskKernel<float><<<v2Grid, v2BlockSize, v2SharedBytes, stream>>>(
                 pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()),
                 pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
                 useMask ? pagedDevPtr<float>(mask) : nullptr, pagedDevPtr<int>(mCache->slotTable.get()),
-                maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead, mKvNumHead, mHeadDim,
-                baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+                maskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
         } else {
             pagedAttentionRowCompressedMaskKernel<half><<<v2Grid, v2BlockSize, v2SharedBytes, stream>>>(
                 pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()),
                 pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
                 useMask ? pagedDevPtr<float>(mask) : nullptr, pagedDevPtr<int>(mCache->slotTable.get()),
-                maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead, mKvNumHead, mHeadDim,
-                baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+                maskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
         }
         checkKernelErrors;
         if (profile) {
             cudaDeviceSynchronize();
-            MNN_PRINT("CUDAPagedAttention profile op=v2_row_compressed_mask layer=%d query=%d insert=%d "
-                      "kv_len=%d sparse=%d mask_elements=%d us=%llu\n",
-                      layerIndex, mQuerySeqLen, insertLen, kvLen, sparseQuery ? 1 : 0, maskElements,
+            MNN_PRINT("CUDAPagedAttention profile op=v2_row_compressed_mask layer=%d query=%d attn=%d "
+                      "kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d us=%llu\n",
+                      layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                      queryRowsAreFull ? 1 : 0, maskElements,
                       static_cast<unsigned long long>(nowUs() - attentionStartUs));
         }
         return NO_ERROR;
     }
-    if (insertLen > 1) {
+    if (attnLen > 1) {
         int qSplitNum = 1;
-        if (insertLen > 1024) {
-            qSplitNum = UP_DIV(insertLen, 1024);
-        } else if (insertLen > 256) {
-            qSplitNum = UP_DIV(insertLen, 256);
+        if (attnLen > 1024) {
+            qSplitNum = UP_DIV(attnLen, 1024);
+        } else if (attnLen > 256) {
+            qSplitNum = UP_DIV(attnLen, 256);
         }
-        const int maxPieceLen = UP_DIV(insertLen, qSplitNum);
+        const int maxPieceLen = UP_DIV(attnLen, qSplitNum);
         size_t prefillElements = static_cast<size_t>(mBatch) * mNumHead * maxPieceLen * kvLen;
         if (ensurePrefillTemp(prefillElements)) {
             ScopedNvtxRange prefillNvtx(nvtxLayerRangeName("prefill_attention_fast_qk_softmax_qkv", layerIndex,
-                                                           mQuerySeqLen, insertLen, kvLen), nvtx);
+                                                           mQuerySeqLen, attnLen, kvLen), nvtx);
             for (int piece = 0; piece < qSplitNum; ++piece) {
                 const int qStart = piece * maxPieceLen;
-                const int qPieceLen = std::min(maxPieceLen, insertLen - qStart);
+                const int qPieceLen = std::min(maxPieceLen, attnLen - qStart);
                 if (qPieceLen <= 0) {
                     continue;
                 }
@@ -2084,14 +2199,16 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     pagedPrefillQKKernel<float><<<qkGrid, qkBlock, 0, stream>>>(
                         pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), mPrefillQK,
                         pagedDevPtr<int>(mCache->slotTable.get()), useMask ? pagedDevPtr<float>(mask) : nullptr,
-                        maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead, mKvNumHead, mHeadDim,
-                        baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+                        maskElements, mBatch, mQuerySeqLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                        baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
+                        queryRowsAreFull ? 1 : 0);
                 } else {
                     pagedPrefillQKKernel<half><<<qkGrid, qkBlock, 0, stream>>>(
                         pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), mPrefillQK,
                         pagedDevPtr<int>(mCache->slotTable.get()), useMask ? pagedDevPtr<float>(mask) : nullptr,
-                        maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead, mKvNumHead, mHeadDim,
-                        baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+                        maskElements, mBatch, mQuerySeqLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                        baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
+                        queryRowsAreFull ? 1 : 0);
                 }
                 checkKernelErrors;
 
@@ -2113,51 +2230,55 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                 if (mPrecision == 4) {
                     pagedPrefillQKVKernel<float><<<qkvGrid, qkvBlock, 0, stream>>>(
                         mPrefillSoftmax, pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
-                        pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, qStart, qPieceLen,
+                        pagedDevPtr<int>(mCache->slotTable.get()), mBatch, attnLen, qStart, qPieceLen,
                         mNumHead, mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
                 } else {
                     pagedPrefillQKVKernel<half><<<qkvGrid, qkvBlock, 0, stream>>>(
                         mPrefillSoftmax, pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
-                        pagedDevPtr<int>(mCache->slotTable.get()), mBatch, mQuerySeqLen, qStart, qPieceLen,
+                        pagedDevPtr<int>(mCache->slotTable.get()), mBatch, attnLen, qStart, qPieceLen,
                         mNumHead, mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
                 }
                 checkKernelErrors;
             }
             if (profile) {
                 cudaDeviceSynchronize();
-                MNN_PRINT("CUDAPagedAttention profile op=prefill_attention_fast_qk_softmax_qkv layer=%d query=%d insert=%d kv_len=%d "
-                          "mask_elements=%d q_split=%d us=%llu\n",
-                          layerIndex, mQuerySeqLen, insertLen, kvLen, maskElements, qSplitNum,
+                MNN_PRINT("CUDAPagedAttention profile op=prefill_attention_fast_qk_softmax_qkv layer=%d query=%d "
+                          "attn=%d kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d q_split=%d us=%llu\n",
+                          layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                          queryRowsAreFull ? 1 : 0, maskElements, qSplitNum,
                           static_cast<unsigned long long>(nowUs() - attentionStartUs));
             }
             return NO_ERROR;
         }
     }
 
-    dim3 grid(insertLen, mNumHead, mBatch);
+    dim3 grid(attnLen, mNumHead, mBatch);
     int blockSize = 128;
     int sharedBytes = (kvLen + blockSize) * sizeof(float);
     ScopedNvtxRange genericNvtx(nvtxLayerRangeName("prefill_attention_generic_kernel", layerIndex, mQuerySeqLen,
-                                                   insertLen, kvLen), nvtx);
+                                                   attnLen, kvLen), nvtx);
     if (mPrecision == 4) {
         pagedAttentionKernel<float><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), pagedDevPtr<float>(mCache->value.get()),
             pagedDevPtr<float>(output), useMask ? pagedDevPtr<float>(mask) : nullptr,
-            pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead,
-            mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+            pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, attnLen, attnLen,
+            mNumHead, mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
+            queryRowsAreFull ? 1 : 0);
     } else {
         pagedAttentionKernel<half><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), pagedDevPtr<half>(mCache->value.get()),
             pagedDevPtr<half>(output), useMask ? pagedDevPtr<float>(mask) : nullptr,
-            pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, insertLen, mNumHead,
-            mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice);
+            pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, attnLen, attnLen,
+            mNumHead, mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
+            queryRowsAreFull ? 1 : 0);
     }
     checkKernelErrors;
     if (profile) {
         cudaDeviceSynchronize();
-        MNN_PRINT("CUDAPagedAttention profile op=generic layer=%d query=%d insert=%d kv_len=%d sparse=%d "
-                  "mask_elements=%d us=%llu\n",
-                  layerIndex, mQuerySeqLen, insertLen, kvLen, sparseQuery ? 1 : 0, maskElements,
+        MNN_PRINT("CUDAPagedAttention profile op=generic layer=%d query=%d attn=%d kv_write=%d kv_len=%d "
+                  "sparse=%d full_q=%d mask_elements=%d us=%llu\n",
+                  layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                  queryRowsAreFull ? 1 : 0, maskElements,
                   static_cast<unsigned long long>(nowUs() - attentionStartUs));
     }
     return NO_ERROR;
@@ -2169,6 +2290,7 @@ bool CUDAPagedAttention::onClone(Backend* bn, const Op* op, Execution** dst) {
     }
     auto tmp = new CUDAPagedAttention(bn, op);
     tmp->mCache = mCache;
+    tmp->mPicAttentionMode = mPicAttentionMode;
     auto param = op->main_as_AttentionParam();
     tmp->mIsKVShared = param != nullptr && param->kv_shared_layer_index() >= 0;
     *dst = tmp;
@@ -2184,6 +2306,8 @@ public:
 };
 
 static CUDACreatorRegister<PagedAttentionCreator> __init_paged_attention(OpType_PagedAttention);
+static CUDACreatorRegister<PagedAttentionCreator> __init_pic_score_attention(OpType_PicScoreAttention);
+static CUDACreatorRegister<PagedAttentionCreator> __init_pic_sparse_attention(OpType_PicSparseAttention);
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE
 

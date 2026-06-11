@@ -1794,3 +1794,102 @@ Important MLP follow-up:
 - The same MLP fast path must hold for all recompute ratios from 1% to 50%. For the 1024-token setup, even 1% should usually be above the tiny-GEMV cutoff because active rows include prelude/suffix plus selected PIC rows.
 - Future sweeps should include at least 1/5/10/20/30/40/50 when studying budget scaling, or explicitly say which subset was run. For each sweep, spot-check graph profile on low/mid/high ratios and confirm MLP inputs are compact rows and use the `pic_gemm_b4_c8_*` tune namespace.
 - If a low budget is unexpectedly slower than a higher budget, first compare MLP `gate_proj/up_proj/down_proj` latency and tune key behavior before changing attention semantics. The historical 20% anomaly was exactly this class of MLP/dense compact-row issue.
+
+## 2026-06-11 Jetson CUDA Graph-Boundary Adaptation
+
+Scope:
+
+- Ported the current PIC score-layer graph-boundary semantics to CUDA `PagedAttentionExecution`.
+- CUDA now registers `OpType_PicScoreAttention` and `OpType_PicSparseAttention`.
+- `kvWriteLen` and `attnLen` are separated:
+  - score layer uses full Q/K/V write with compact attention output and emits `active_indices`.
+  - later layers use compact Q/K/V rows while writing/reading true logical slots through `active_indices`.
+- Decode and non-PIC runtime still use normal `PagedAttention` behavior.
+- Async persistent PIC cache loading and PagedCache hydrate semantics are unchanged.
+
+Rejected CUDA dense experiment:
+
+- Tried a naive packed INT4 CUDA `PicGEMM_FpAInt4B` for compact 1x1 MLP rows.
+- It was wrong for production performance even though it avoided runtime dequant:
+  - old graph profile with this path, cacheblend20: `Convolution=2983.717 ms`, `PicSparseAttention=230.608 ms`.
+  - per-layer compact MLP was pathological: 216-row `down_proj` around `67 ms`, `gate/up` around `51 ms`.
+  - end-to-end formal cacheblend20 regressed to `3.408640s` / `0.690x` normal, and cacheblend50 to `7.818670s` / `0.301x`.
+- The final CUDA code does not keep this path. CUDA compact MLP currently uses the existing tensor-core CUTLASS + runtime dequant path; a future compact GEMM must beat this path across 1%-50% before becoming default.
+
+A/B confirmation after removing naive CUDA PicGEMM:
+
+```text
+tag=pic_cuda_1024_profile_cb20_cutlass_ab_20260611_164608
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend20 latency=0.816942s speedup_vs_normal=2.881
+graph request=3 cacheblend20 total=706.398 ms
+  Convolution=262.514 ms
+  PicSparseAttention=230.444 ms
+  PagedAttention=87.252 ms
+  PicScoreAttention=30.225 ms
+
+score layer output: [1x216x2048] + active_indices [216]
+later sparse layers: [1x216x32x64] Q/K/V, [1x1x216x1024] mask
+compact MLP after fix: 216-row down_proj around 3.9 ms, not 67 ms
+```
+
+Formal Jetson CUDA 1024-token sweep:
+
+```text
+tag=pic_cuda_1024_boundary_cutlass_formal_20260611_164704
+model=Llama-3.2-1B-Instruct@jetson-cuda
+profile=false, graph_profile=false
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.359027,0.997
+full-reuse,full,0.292211,8.051
+cacheblend,0.10,0.513967,4.577
+cacheblend,0.20,0.690936,3.405
+cacheblend,0.30,0.863871,2.723
+cacheblend,0.40,1.103854,2.131
+cacheblend,0.50,1.297994,1.812
+epic,0.10,0.473170,4.972
+epic,0.20,0.670933,3.506
+epic,0.30,0.839971,2.801
+epic,0.40,1.051566,2.237
+epic,0.50,1.253765,1.876
+```
+
+Low-budget CUDA smoke:
+
+```text
+tag=pic_cuda_1024_low_budget_cutlass_smoke_20260611_164825
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend,0.01,0.354654,6.633
+cacheblend,0.05,0.410731,5.728
+epic,0.01,0.318615,7.384
+epic,0.05,0.413581,5.688
+```
+
+High-budget CUDA attribution:
+
+```text
+tag=pic_cuda_1024_profile_cb50_cutlass_20260611_164857
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend50 graph total=1334.525 ms
+  PicSparseAttention=535.167 ms
+  Convolution=459.797 ms
+  PicScoreAttention=89.685 ms
+  PagedAttention=87.304 ms
+  UnaryOp=74.069 ms
+
+score layer output rows=519
+later sparse attention per layer ~=38.1 ms
+compact MLP per layer ~=7.4-7.8 ms
+```
+
+Conclusion:
+
+- CUDA graph-boundary semantics are active and stable on Jetson for 1024 tokens.
+- `PIC full-compute` is aligned with normal full compute (`2.359027s` vs `2.352533s`).
+- `full-reuse`, cacheblend and epic are faster than normal for 1/5/10/20/30/40/50 tested budgets.
+- Current remaining CUDA high-budget bottleneck is split between later-layer `PicSparseAttention` and compact dense MLP. For the next CUDA optimization round, P0 is a real CUDA sparse flash attention kernel that fuses QK/softmax/QKV without repeating QK; P1 is a tensor-core compact-row INT4/FP16 GEMM that beats CUTLASS + runtime dequant across 1%-50%.

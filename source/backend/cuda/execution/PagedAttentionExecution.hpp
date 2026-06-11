@@ -47,6 +47,7 @@ private:
     int mLayerIndex = -1;
     int mKVSharedLayerIndex = -1;
     bool mIsKVShared = false;
+    int mPicAttentionMode = 0; // 0: normal, 1: PicScoreAttention, 2: PicSparseAttention
     int mPrecision = 4;
     int mBatch = 0;
     int mQuerySeqLen = 0;

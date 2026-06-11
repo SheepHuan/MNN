@@ -221,8 +221,12 @@ MNN_PIC_GRAPH_PROFILE_TOP=1000
    - MLP 是后续优化的关键线索：score layer 后每层 `mlp/gate_proj`、`mlp/up_proj`、`mlp/down_proj` 都是 compact-row 大 Linear，1%-50% 不同重算比例下都必须确认它们被优化，而不能只看 `PicSparseAttention` 是否变快。
    - 1024-token 当前 active rows 约为 prelude/suffix 加选中 PIC token；1% 也通常超过 16 rows，因此应进入 `pic_gemm_b4_c8_*` 而不是 tiny GEMV 分支。若未来模型/模板导致 active rows <=16，需要单独记录为 tiny-MLP fast path 问题。
    - 不要新增 env fallback 或请求期在线 tuner；正式测试仍然先 warm 目标 ratios，再 `/v1/tune/update_cache`，计时请求复用 MNN cache。
-8. direct PagedCache value prefill 现在只保留为内置窄 heuristic：cacheblend 高预算且 slot table identity 时才直接读 PagedCache value，避免 packed V staging；不再提供 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL` 强制开关作为生产路径。
-9. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
+8. Jetson CUDA 按同一套 graph-boundary 语义适配，但 dense fast path 不能照搬 OpenCL：
+   - CUDA `PagedAttentionExecution` 必须注册 `PicScoreAttention` / `PicSparseAttention`，拆分 `kvWriteLen` 和 `attnLen`，score layer 写出 `active_indices`，后续层按 compact active rows 计算并用真实 logical slot 写 PagedCache。
+   - 不要新增朴素 packed INT4 CUDA `PicGEMM` 作为 PIC compact MLP 快路径。2026-06-11 Jetson A/B 证明它会让 cacheblend20 从 CUTLASS 路径的 `0.816942s` 退化到 `3.527971s`，216-row compact MLP 变成第一瓶颈。CUDA 目前默认保留 tensor-core CUTLASS + runtime dequant，直到有真正的 compact tensor-core GEMM 并在 1%-50% 全部更快。
+   - CUDA 正式 sweep 至少覆盖 10/20/30/40/50；如果修改 compact MLP 或 graph-boundary row shape，补 1/5 低预算 smoke。
+9. direct PagedCache value prefill 现在只保留为内置窄 heuristic：cacheblend 高预算且 slot table identity 时才直接读 PagedCache value，避免 packed V staging；不再提供 `MNN_PAGED_ATTENTION_OPENCL_DIRECT_VALUE_PREFILL` 强制开关作为生产路径。
+10. 不要用 `MNN_PAGED_ATTENTION_IMPL` 或 V2 路由影响生产路径；bench ops 可以保留 V1/V2 对比入口。
 
 ## 验证要求
 
