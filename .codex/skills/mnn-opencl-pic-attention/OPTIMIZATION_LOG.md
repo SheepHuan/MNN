@@ -2092,7 +2092,7 @@ Cacheblend active rows are sorted but scattered and reach the tail even at 10%. 
 Further optimization potential:
 
 - P0a cacheblend-specific sparse flash: keep the same active set, but bucket rows internally by logical position and scatter outputs back to the original compact row order. The kernel should skip K tiles above each bucket's max causal position and avoid loading V for invalid K. This does not change cacheblend semantics, but the upside is bounded because cacheblend average causal K is already 65%-75% of full.
-- P0b tune the accepted tile flash for epic/fixed rows: A/B `Q_TILE=4/8/16`, `K_TILE=32/64`, fewer `__syncthreads()`, no `scoreShared` round trip, vectorized half/half2 K/V loads, and register accumulators. Promote only a shape heuristic that wins 1/5/10/20/30/40/50; do not add production env fallbacks.
+- P0b tune the accepted tile flash for epic/fixed rows: A/B `Q_TILE=4/8/16`, `K_TILE=32/64`, fewer `__syncthreads()`, less `scoreShared` round trip, vectorized half/half2 K/V loads, and adaptive q-piece/bucket heuristics. Promote only a shape heuristic that wins 1/5/10/20/30/40/50; do not add production env fallbacks. The later `outAcc0/outAcc1` register-accumulator experiment was rejected on sm72.
 - P1 cacheblend score layer: cacheblend50 `PicScoreAttention=89 ms`, but the attention sub-kernel is only about `37 ms`; scoring/top-k/metadata costs the other ~50 ms. Split and optimize score/top-k before changing attention semantics.
 - P2 compact dense: at 50%, `Convolution ~=459-466 ms`, the same order as sparse attention. The next large end-to-end win likely needs a real tensor-core compact-row weight-only GEMM or dequant-cache strategy, not naive packed GEMV.
 
@@ -2899,3 +2899,844 @@ Conclusion:
 - Do not count it as a large end-to-end win: no-profile latency still has run-to-run noise and repeat cb50 is close to the previous static-dequant sweep.
 - The next P0 work must reduce real tile math / synchronization cost, not just mask overhead. The most promising direction remains adaptive q-piece / bucketed cacheblend sparse flash that reduces K work for scattered active rows while preserving compact output order.
 - P1 dense work is still equally important: cacheblend50 remains split between `PicSparseAttention` and compact `Convolution`, while epic50 is dense-bound.
+
+## 2026-06-11 Jetson CUDA High-Budget q16 Sparse Tile
+
+Implemented a high-budget sparse tile variant:
+
+- Keep q8/k32 as the default sparse tile.
+- Use q16/k32 only when `attnLen >= 512`. This targets 1024-token 50% budgets where active rows are 519 and q8 launches many small blocks.
+- Low budgets and mid budgets remain on q8/k32; cacheblend `attnLen <= 256` still keeps the existing QK/softmax/QKV path.
+- This is not the rejected q4 path. q4 increased block count and regressed high budgets; q16 reduces block count and improves K/V reuse at the cost of larger CTAs.
+
+Build:
+
+```text
+target=pic_server
+CUDA support: ON
+CUDA architectures: 7.2
+Enabling CUDA support (... archs: sm_72)
+artifact=.cache/output/mnn/artifacts/jetson_cross_cuda
+rsync target=jetson@192.168.101.192
+```
+
+Profile:
+
+```text
+tag=pic_cuda_1024_q16_sparse_tile_profile_50_20260611_133723
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend50 sparse tile:
+  q_tile=16 k_tile=32
+  layer=1 us=19476
+  layer=2+ us~=19184-19426
+
+cacheblend50 graph:
+  Convolution        = 410.138 ms
+  PicSparseAttention = 282.117 ms
+  PagedAttention     = 87.561 ms
+  UnaryOp            = 74.427 ms
+  BinaryOp           = 26.398 ms
+  PicScoreAttention  = 25.754 ms
+
+epic50 graph:
+  Convolution        = 418.182 ms
+  PicSparseAttention = 136.829 ms
+  PagedAttention     = 80.605 ms
+  UnaryOp            = 74.018 ms
+  BinaryOp           = 25.848 ms
+  PicScoreAttention  = 10.632 ms
+```
+
+Compared with q8 + mask-skip profile `pic_cuda_1024_sparse_tile_skip_mask_profile_50_20260611_132617`:
+
+```text
+cacheblend50 PicSparseAttention: 383.119 ms -> 282.117 ms (-101.002 ms)
+cacheblend50 profile e2e:        1.186406 s -> 1.086636 s
+```
+
+No-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_q16_sparse_tile_sweep_1_50_20260611_133816
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.318760,1.015
+full-reuse,full,0.641728,3.666
+
+cacheblend,0.01,0.319125,7.372
+cacheblend,0.05,0.373730,6.295
+cacheblend,0.10,0.430131,5.469
+cacheblend,0.20,0.641187,3.669
+cacheblend,0.30,0.749005,3.141
+cacheblend,0.40,0.887050,2.652
+cacheblend,0.50,0.912159,2.579
+
+epic,0.01,0.264764,8.885
+epic,0.05,0.306151,7.684
+epic,0.10,0.334668,7.029
+epic,0.20,0.442513,5.316
+epic,0.30,0.543946,4.325
+epic,0.40,0.678555,3.467
+epic,0.50,0.773988,3.039
+```
+
+Repeat smoke:
+
+```text
+tag=pic_cuda_1024_q16_sparse_tile_repeat_40_50_20260611_133907
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend,0.40,0.954381,2.465
+cacheblend,0.50,0.937722,2.509
+epic,0.40,0.684346,3.438
+epic,0.50,0.794305,2.962
+```
+
+Conclusion:
+
+- q16/k32 was a real P0 gain for the 50% budget where sparse attention was still a major bottleneck, but it is now superseded by q32/k32 for the same `attnLen >= 512` threshold.
+- q16 does not apply to 40% in the 1024-token setup (`attnLen` is below 512), so the slower cacheblend40 repeat is treated as run-to-run noise rather than q16 regression.
+- Compared with the prior q8 no-profile sweep, cacheblend50 improved from `1.027361 s` to `0.912159 s`, and epic50 improved from `0.821617 s` to `0.773988 s`.
+- Further sparse attention work should look at wide-Q threshold tuning for larger contexts and cacheblend-specific logical bucket/scatter only if it preserves compact output order. q4 remains rejected.
+
+## 2026-06-11 Jetson CUDA High-Budget q32 Sparse Tile
+
+Tested and accepted q32/k32 for high-budget sparse tile:
+
+- Keep q8/k32 as the default sparse tile for lower budgets.
+- Use q32/k32 when `attnLen >= 512`, replacing the q16/k32 intermediate path.
+- q32 uses the largest legal CTA size here (`32 x 32 = 1024` threads), so this acceptance is specific to the current sm72 1024-token profile/sweep and must be rechecked for larger contexts or different head dimensions.
+
+Profile:
+
+```text
+tag=pic_cuda_1024_q32_sparse_tile_profile_50_20260611_135111
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend50 sparse tile:
+  q_tile=32 k_tile=32
+  layer=1 us=17404
+  layer=2+ us~=17099-17449
+
+cacheblend50 graph:
+  Convolution        = 410.933 ms
+  PicSparseAttention = 252.729 ms
+  PagedAttention     = 87.644 ms
+  UnaryOp            = 74.383 ms
+  BinaryOp           = 26.196 ms
+  PicScoreAttention  = 23.336 ms
+
+epic50 graph:
+  Convolution        = 416.042 ms
+  PicSparseAttention = 123.640 ms
+  PagedAttention     = 81.209 ms
+  UnaryOp            = 73.979 ms
+  BinaryOp           = 26.403 ms
+  PicScoreAttention  = 9.505 ms
+```
+
+No-profile 40/50 repeat:
+
+```text
+tag=pic_cuda_1024_q32_sparse_tile_repeat_40_50_20260611_135207
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend,0.40,0.949852,2.477
+cacheblend,0.50,0.908365,2.590
+epic,0.40,0.689273,3.413
+epic,0.50,0.785227,2.996
+```
+
+No-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_q32_sparse_tile_sweep_1_50_20260611_135252
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.308713,1.019
+full-reuse,full,0.636979,3.693
+
+cacheblend,0.01,0.313335,7.508
+cacheblend,0.05,0.372454,6.316
+cacheblend,0.10,0.432448,5.440
+cacheblend,0.20,0.641337,3.668
+cacheblend,0.30,0.747125,3.149
+cacheblend,0.40,0.890466,2.642
+cacheblend,0.50,0.884471,2.660
+
+epic,0.01,0.264879,8.882
+epic,0.05,0.309508,7.601
+epic,0.10,0.331932,7.087
+epic,0.20,0.442790,5.313
+epic,0.30,0.544793,4.318
+epic,0.40,0.678758,3.466
+epic,0.50,0.764576,3.077
+```
+
+Compared with q16:
+
+```text
+cacheblend50: 0.912159 s -> 0.884471 s
+epic50:       0.773988 s -> 0.764576 s
+```
+
+Conclusion:
+
+- Keep q32/k32 for `attnLen >= 512` as the current Jetson CUDA high-budget sparse tile default.
+- This is the first P0 change in this round that pushes cacheblend50 under `0.9 s` in a full no-profile sweep while preserving every 1%-50% ratio faster than normal.
+- Remaining cb50 bottleneck after q32 is no longer dominated by sparse attention alone; compact `Convolution`, `UnaryOp`, and residual graph overhead need the next P1/P2 work.
+
+## 2026-06-11 Jetson CUDA Sparse Tile K-Slot Cache
+
+Implemented a small P0 cleanup inside `pagedSparseFlashTileKernel`:
+
+- Each K tile now resolves `slotTable[logical]` once into shared `kSlotShared[K_TILE]`.
+- K and V shared-memory load phases reuse the same cached physical slot.
+- This avoids repeating the same slot-table global load and bounds check for every head_dim lane in both K and V loads.
+- No semantic change: active logical indices, causal K limit, PagedCache physical slots, GQA head mapping, q8/q32 tile selection, and full-causal mask skip all stay unchanged.
+
+Build:
+
+```text
+target=pic_server
+CUDA support: ON
+CUDA architectures: 7.2
+artifact=.cache/output/mnn/artifacts/jetson_cross_cuda
+rsync target=jetson@192.168.101.192
+```
+
+Initial no-profile 40/50 smoke had visible run-to-run noise:
+
+```text
+tag=pic_cuda_1024_q32_kslot_smoke_40_50_20260611_2204
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend,0.40,0.923296,2.548
+cacheblend,0.50,0.890479,2.642
+epic,0.40,0.675901,3.481
+epic,0.50,0.776560,3.029
+```
+
+Graph/profile showed the kernel-level win clearly, compared with q32 baseline `pic_cuda_1024_q32_sparse_tile_profile_50_20260611_135111`:
+
+```text
+tag=pic_cuda_1024_q32_kslot_profile_50_20260611_2205
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend50 graph:
+  Convolution        = 409.960 ms
+  PicSparseAttention = 242.378 ms
+  PagedAttention     = 87.480 ms
+  UnaryOp            = 73.924 ms
+  BinaryOp           = 25.910 ms
+  PicScoreAttention  = 22.101 ms
+
+epic50 graph:
+  Convolution        = 415.936 ms
+  PicSparseAttention = 118.928 ms
+  PagedAttention     = 80.307 ms
+  UnaryOp            = 73.895 ms
+  BinaryOp           = 26.017 ms
+  PicScoreAttention  = 9.350 ms
+
+Compared with q32 baseline:
+  cacheblend50 PicSparseAttention: 252.729 ms -> 242.378 ms
+  epic50 PicSparseAttention:       123.640 ms -> 118.928 ms
+```
+
+No-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_q32_kslot_sweep_1_50_20260611_2207
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.313485,1.017
+full-reuse,full,0.634177,3.710
+
+cacheblend,0.01,0.312411,7.530
+cacheblend,0.05,0.360835,6.520
+cacheblend,0.10,0.427082,5.508
+cacheblend,0.20,0.640144,3.675
+cacheblend,0.30,0.718657,3.274
+cacheblend,0.40,0.859711,2.736
+cacheblend,0.50,0.871012,2.701
+
+epic,0.01,0.260832,9.019
+epic,0.05,0.300341,7.833
+epic,0.10,0.327441,7.185
+epic,0.20,0.438567,5.364
+epic,0.30,0.534851,4.398
+epic,0.40,0.666852,3.528
+epic,0.50,0.757372,3.106
+```
+
+Compared with the q32 no-profile sweep:
+
+```text
+cacheblend50: 0.884471 s -> 0.871012 s
+epic50:       0.764576 s -> 0.757372 s
+```
+
+Conclusion:
+
+- Keep the shared K-slot cache as part of the default CUDA sparse tile path. It is a small but real P0 attention cleanup, confirmed by profile attribution and a full 1%-50% sweep.
+- The remaining high-budget bottleneck is now even more balanced: cacheblend50 still has `PicSparseAttention ~=242 ms` and `Convolution ~=410 ms`; epic50 is clearly compact-dense bound.
+- Next CUDA work should move to P1/P2 dense/activation fusion unless doing a larger cacheblend-specific sparse flash redesign that reduces true causal K work for scattered active rows.
+
+Rejected follow-up in the same area:
+
+```text
+tag=pic_cuda_1024_q32_kslot_skipclear_profile_50_20260611_2211
+change=skip cudaMemset(output) before sparse tile flash
+
+cacheblend50 PicSparseAttention: 242.378 ms -> 242.429 ms
+cacheblend50 graph total:        923.615 ms -> 924.581 ms
+epic50 PicSparseAttention:       118.928 ms -> 118.493 ms
+epic50 graph total:              784.749 ms -> 788.512 ms
+```
+
+Do not keep the skip-output-clear change as default. The sparse tile kernel writes all active rows in the current graph-boundary path, but the measured benefit is noise-level and graph total did not improve. Keep the conservative output clear outside any future explicit A/B branch.
+
+## 2026-06-11 Jetson CUDA q32 Threshold 384
+
+Lowered the wide-Q sparse tile threshold:
+
+- Previous default: q32/k32 only when `attnLen >= 512`, so in the 1024-token sweep only 50% budgets used q32.
+- New default: q32/k32 when `attnLen >= 384`, so 40% budgets with active rows around 418 also use q32.
+- Lower budgets keep the existing q8/k32 or cacheblend `attnLen <= 256` QK/softmax/QKV path.
+- This does not change attention semantics, active indices, causal K limit, or PagedCache slot mapping.
+
+No-profile 40/50 smoke:
+
+```text
+tag=pic_cuda_1024_q32_kslot_thr384_smoke_40_50_20260611_2223
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend,0.40,0.819659,2.870
+cacheblend,0.50,0.897994,2.620
+epic,0.40,0.643837,3.654
+epic,0.50,0.783233,3.004
+```
+
+Graph/profile:
+
+```text
+tag=pic_cuda_1024_q32_kslot_thr384_profile_40_50_20260611_2224
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend40 graph:
+  Convolution        = 342.747 ms
+  PicSparseAttention = 228.638 ms
+  PagedAttention     = 87.619 ms
+  UnaryOp            = 62.099 ms
+  BinaryOp           = 23.607 ms
+  PicScoreAttention  = 21.264 ms
+
+cacheblend50 graph:
+  Convolution        = 410.863 ms
+  PicSparseAttention = 236.728 ms
+  PagedAttention     = 80.738 ms
+  UnaryOp            = 73.770 ms
+  BinaryOp           = 25.774 ms
+  PicScoreAttention  = 20.555 ms
+
+epic40 graph:
+  Convolution        = 343.400 ms
+  PicSparseAttention = 92.426 ms
+  PagedAttention     = 80.068 ms
+  UnaryOp            = 61.799 ms
+  BinaryOp           = 22.298 ms
+  PicScoreAttention  = 7.294 ms
+
+epic50 graph:
+  Convolution        = 414.465 ms
+  PicSparseAttention = 118.701 ms
+  PagedAttention     = 80.117 ms
+  UnaryOp            = 73.924 ms
+  BinaryOp           = 25.664 ms
+  PicScoreAttention  = 8.883 ms
+```
+
+No-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_q32_kslot_thr384_sweep_1_50_20260611_2226
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.303239,1.021
+full-reuse,full,0.640213,3.675
+
+cacheblend,0.01,0.311590,7.550
+cacheblend,0.05,0.369951,6.359
+cacheblend,0.10,0.429822,5.473
+cacheblend,0.20,0.641737,3.666
+cacheblend,0.30,0.723793,3.250
+cacheblend,0.40,0.755525,3.114
+cacheblend,0.50,0.872416,2.697
+
+epic,0.01,0.259708,9.058
+epic,0.05,0.300698,7.824
+epic,0.10,0.326507,7.205
+epic,0.20,0.438586,5.364
+epic,0.30,0.534949,4.398
+epic,0.40,0.636039,3.699
+epic,0.50,0.757277,3.107
+```
+
+Compared with q32 + k-slot-cache threshold 512 sweep:
+
+```text
+cacheblend40: 0.859711 s -> 0.755525 s
+cacheblend50: 0.871012 s -> 0.872416 s
+epic40:       0.666852 s -> 0.636039 s
+epic50:       0.757372 s -> 0.757277 s
+```
+
+Conclusion:
+
+- Keep q32/k32 threshold at `attnLen >= 384`. It is a large win for 40% budgets and neutral at 50% in the full sweep.
+- Do not push the threshold lower without another full 1%-50% sweep. 30% has active rows around 317 and may not have enough Q work to offset q32's 1024-thread CTA cost.
+- After this change, cacheblend40/50 are still split between `PicSparseAttention` and compact dense `Convolution`; epic40/50 are more compact-dense bound. P1 compact dense and P2 activation fusion remain the next larger opportunities.
+
+## 2026-06-11 Jetson CUDA SM70 Compact CUTLASS Dense Fast Path
+
+Tested and accepted a narrow P1 compact dense fast path for score-layer graph-boundary rows:
+
+- Add a sm70 tensor-core CUTLASS Linear variant with `GemmShape<128,64,64>` / warp `64x32x64`.
+- Use it only for low-memory INT4 1x1 Linear with static FP16 dequant cache, fp16 inference, no activation, `M in [384,768]`, and padded input channels at least 1024.
+- The condition targets 1024-token high-budget compact rows (`cacheblend/epic 40%-50%`) and intentionally avoids low-budget tiny rows and full 1010-row full-compute.
+- No environment gate is needed; the default path selects this variant only for the measured compact range and falls back to the existing CUTLASS path for other shapes.
+
+Profile A/B against q32 + k-slot-cache threshold 384:
+
+```text
+old tag=pic_cuda_1024_q32_kslot_thr384_profile_40_50_20260611_2224
+new tag=pic_cuda_1024_piccompact_sm70_profile_40_50_20260611_223500
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend40:
+  Convolution        342.747 ms -> 273.260 ms
+  PicSparseAttention 228.638 ms -> 227.874 ms
+  graph total        824.835 ms -> 750.962 ms
+
+cacheblend50:
+  Convolution        410.863 ms -> 354.839 ms
+  PicSparseAttention 236.728 ms -> 236.047 ms
+  graph total        908.114 ms -> 851.371 ms
+
+epic40:
+  Convolution        343.400 ms -> 272.537 ms
+  PicSparseAttention  92.426 ms ->  92.691 ms
+  graph total        662.669 ms -> 595.666 ms
+
+epic50:
+  Convolution        414.465 ms -> 361.439 ms
+  PicSparseAttention 118.701 ms -> 119.267 ms
+  graph total        781.244 ms -> 732.635 ms
+
+profile hit counts:
+  pic_compact_sm70=1: 403 lines
+  pic_compact_sm70=0: 488 lines
+```
+
+No-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_piccompact_sm70_sweep_1_50_20260611_223627
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.321451,1.013
+full-reuse,full,0.636562,3.696
+
+cacheblend,0.01,0.314889,7.471
+cacheblend,0.05,0.374720,6.278
+cacheblend,0.10,0.430173,5.469
+cacheblend,0.20,0.642467,3.662
+cacheblend,0.30,0.720687,3.264
+cacheblend,0.40,0.687828,3.420
+cacheblend,0.50,0.818838,2.873
+
+epic,0.01,0.265916,8.847
+epic,0.05,0.303827,7.743
+epic,0.10,0.329392,7.142
+epic,0.20,0.440432,5.341
+epic,0.30,0.538072,4.372
+epic,0.40,0.570946,4.120
+epic,0.50,0.705095,3.336
+```
+
+Compared with q32 + k-slot-cache threshold 384 no-profile sweep:
+
+```text
+cacheblend40: 0.755525 s -> 0.687828 s  (+8.96%)
+cacheblend50: 0.872416 s -> 0.818838 s  (+6.14%)
+epic40:       0.636039 s -> 0.570946 s  (+10.23%)
+epic50:       0.757277 s -> 0.705095 s  (+6.89%)
+```
+
+Low-budget 1%-30% results are within small noise/regression because the new path does not trigger below `M=384`; all cacheblend/epic ratios remain faster than normal full-compute.
+
+Conclusion:
+
+- Keep the SM70 compact CUTLASS fast path as the default CUDA compact dense high-budget path.
+- Do not broaden it below `M=384` without another full 1%-50% sweep; low-budget compact rows previously rejected packed GEMV/PicGEMM attempts and are sensitive to launch/tiling overhead.
+- P0 sparse flash remains the cacheblend-specific bottleneck; P1 dense is improved for high budgets, but `Convolution` is still large enough that graph-level gate/up fusion and fused SiLU*up remain worthwhile.
+
+Rejected follow-up: lower the SM70 compact CUTLASS threshold to `M >= 256`.
+
+```text
+tag=pic_cuda_1024_piccompact_sm70_thr256_smoke_30_50_20260611_224503
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+Compared with accepted M>=384 sweep:
+cacheblend30: 0.720687 s -> 0.736422 s  (-15.735 ms)
+cacheblend40: 0.687828 s -> 0.712581 s  (-24.753 ms)
+cacheblend50: 0.818838 s -> 0.832377 s  (-13.539 ms)
+epic30:       0.538072 s -> 0.528442 s  (+9.630 ms)
+epic40:       0.570946 s -> 0.574024 s  (-3.078 ms)
+epic50:       0.705095 s -> 0.704313 s  (+0.782 ms)
+```
+
+Do not lower the default threshold to 256. It gives a small epic30 win but regresses cacheblend30/40/50, so it violates the default-path rule that cacheblend and epic must both remain faster/no-regression across the sweep.
+
+## 2026-06-11 Jetson CUDA half2 SiLU Unary Fast Path
+
+Tested and accepted a P2 activation optimization:
+
+- Add a contiguous FP16 `UnaryOpOperation_SILU` half2 kernel in CUDA `UnaryBlit`.
+- Keep the existing generic unary path for non-contiguous tensors, non-FP16, odd element counts, and other unary ops.
+- This is not the full graph-level `SiLU(gate) * up` fusion, but it removes most of the expensive generic SiLU unary time while preserving graph structure and tensor semantics.
+
+Profile A/B against accepted SM70 compact CUTLASS path:
+
+```text
+old tag=pic_cuda_1024_piccompact_sm70_profile_40_50_20260611_223500
+new tag=pic_cuda_1024_half2_silu_profile_50_20260611_225119
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend50 graph:
+  UnaryOp            73.874 ms ->   9.009 ms
+  BinaryOp           25.802 ms ->  26.302 ms
+  Convolution       354.839 ms -> 356.754 ms
+  PicSparseAttention 236.047 ms -> 243.252 ms
+  graph total       851.371 ms -> 807.220 ms
+
+epic50 graph:
+  UnaryOp            74.187 ms ->   8.979 ms
+  BinaryOp           26.307 ms ->  26.158 ms
+  Convolution       361.439 ms -> 358.732 ms
+  PicSparseAttention 119.267 ms -> 119.180 ms
+  graph total       732.635 ms -> 664.275 ms
+
+compact SiLU representative:
+  /blocks.* /mlp/act_fn/Mul_output_0, input [1x519x8192]
+  about 4.16 ms/layer -> about 0.34 ms/layer
+```
+
+No-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_half2_silu_sweep_1_50_20260611_225217
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.190676,1.074
+full-reuse,full,0.637651,3.689
+
+cacheblend,0.01,0.310606,7.574
+cacheblend,0.05,0.354184,6.642
+cacheblend,0.10,0.410112,5.736
+cacheblend,0.20,0.609088,3.862
+cacheblend,0.30,0.678736,3.466
+cacheblend,0.40,0.635933,3.699
+cacheblend,0.50,0.753021,3.124
+
+epic,0.01,0.252736,9.308
+epic,0.05,0.287881,8.172
+epic,0.10,0.307184,7.658
+epic,0.20,0.406571,5.786
+epic,0.30,0.494993,4.753
+epic,0.40,0.515728,4.562
+epic,0.50,0.635977,3.699
+```
+
+Correctness smoke:
+
+```text
+Jetson command:
+  run_test.out op/unary/silu 2 1
+
+result:
+  all <op/unary/silu> tests passed
+```
+
+Compared with accepted SM70 compact CUTLASS no-profile sweep:
+
+```text
+full-compute: 2.321451 s -> 2.190676 s  (+5.63%)
+cacheblend10: 0.430173 s -> 0.410112 s  (+4.66%)
+cacheblend20: 0.642467 s -> 0.609088 s  (+5.20%)
+cacheblend30: 0.720687 s -> 0.678736 s  (+5.82%)
+cacheblend40: 0.687828 s -> 0.635933 s  (+7.54%)
+cacheblend50: 0.818838 s -> 0.753021 s  (+8.04%)
+epic10:       0.329392 s -> 0.307184 s  (+6.74%)
+epic20:       0.440432 s -> 0.406571 s  (+7.69%)
+epic30:       0.538072 s -> 0.494993 s  (+8.01%)
+epic40:       0.570946 s -> 0.515728 s  (+9.67%)
+epic50:       0.705095 s -> 0.635977 s  (+9.80%)
+```
+
+Conclusion:
+
+- Keep the CUDA half2 SiLU fast path as default. It benefits full-compute and all sparse ratios, and no target/async/error log lines appeared.
+- The remaining elementwise opportunity is the actual graph-level `SiLU(gate) * up` fusion, which would remove the separate BinaryOp and some raster/intermediate traffic. Do not call that done just because unary SiLU is now fast.
+- After this optimization, cacheblend50 is again mostly split between `PicSparseAttention` and compact `Convolution`; `UnaryOp` is no longer the first P2 bottleneck.
+
+## 2026-06-11 Jetson CUDA Rejected Sparse Flash Register Accumulator
+
+Goal:
+
+- Reduce CUDA `pagedSparseFlashTileKernel` hot-loop shared-memory traffic by moving the output accumulator from
+  `outShared[Q_TILE][HEAD_DIM]` into two per-thread register accumulators.
+- Test this as a P0 sparse flash attention follow-up after the accepted k-slot cache and q32/k32 threshold.
+
+Code/env:
+
+- Changed only `source/backend/cuda/execution/PagedAttentionExecution.cu` after the accepted q32/k-slot path:
+  removed `outShared`, used `accIdx0=linearTid` and `accIdx1=linearTid+linearThreads`, and wrote output directly
+  from `outAcc0/outAcc1`.
+- Built locally with Jetson CUDA cross compile and synced to Jetson.
+- Profile tag:
+
+```text
+pic_cuda_1024_sparse_regacc_profile_50_20260611_150559
+```
+
+Profile result:
+
+```text
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+profile latency:
+cacheblend50: 0.982005 s
+epic50:       0.776255 s
+
+CUDAPagedAttention op=sparse_flash_tile_attention across cacheblend50+epic50:
+  count=30
+  total=441.449 ms
+  max_layer=9.237 ms
+```
+
+Compared with accepted half2 SiLU profile:
+
+```text
+accepted profile latency:
+cacheblend50: 0.807220 s
+epic50:       0.664275 s
+
+accepted PicSparseAttention graph total:
+cacheblend50: 243.252 ms
+epic50:       119.180 ms
+total:        362.432 ms
+```
+
+Conclusion:
+
+- Reject this variant. It worsens the sparse flash portion instead of improving it, likely because the extra private
+  registers reduce occupancy / scheduling efficiency on sm72 more than the removed shared-memory accumulator helps.
+- Reverted the register-accumulator source change and rebuilt/synced the accepted artifact back to Jetson.
+- Do not reintroduce this `outAcc0/outAcc1` variant as a default CUDA sparse flash path.
+
+Post-revert smoke:
+
+```text
+tag=pic_cuda_1024_after_regacc_revert_smoke_50_20260611_150905
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+full-compute: 2.201449 s
+full-reuse:   0.638487 s
+cacheblend50: 0.806360 s
+epic50:       0.656208 s
+```
+
+## 2026-06-11 Jetson CUDA SM70 Compact CUTLASS Hybrid Tile
+
+Goal:
+
+- Continue P1 compact dense optimization after static dequant cache and the accepted `128x64x64` SM70 compact CUTLASS path.
+- Target the remaining 50% budget compact MLP shapes:
+  - `M=519,K=2048,N=8192` gate/up
+  - `M=519,K=8192,N=2048` down
+
+Code/env:
+
+- Added a second SM70 FP16 tensor-core Linear instance:
+
+```text
+GemmTensor_F16_F16_Linear_AlignTensor_Sm70_64x128x64
+```
+
+- Added `mPicCompactSm70Tile` profile metadata:
+  - `0`: normal CUTLASS path
+  - `1`: existing PIC compact `128x64x64`
+  - `2`: new PIC compact `64x128x64`
+- Kept the path default and shape-gated, with no env switch:
+
+```text
+384 <= M < 512: 128x64x64
+M >= 512:       64x128x64
+```
+
+Rejected intermediate:
+
+```text
+tag=pic_cuda_1024_piccompact_nwide_smoke_40_50_20260611_151644
+
+cacheblend40: 0.695613 s
+cacheblend50: 0.739442 s
+epic40:       0.517384 s
+epic50:       0.624207 s
+```
+
+The all-compact `64x128x64` tile improves 50% but regresses cacheblend40 badly compared with the accepted half2 SiLU sweep
+(`cacheblend40=0.635933 s`). Do not use it for `M < 512`.
+
+Profile evidence for `M=519`:
+
+```text
+tag=pic_cuda_1024_piccompact_nwide_profile_50_20260611_151532
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+accepted 128x64x64 profile, compact M=519:
+  2048->8192: avg cutlass 5452.2 us
+  8192->2048: avg cutlass 5552.8 us
+  2048->2048: avg cutlass 1397.7 us
+
+64x128x64 profile, compact M=519:
+  2048->8192: avg cutlass 4916.4 us
+  8192->2048: avg cutlass 4722.0 us
+  2048->2048: avg cutlass 1267.6 us
+```
+
+Accepted no-profile 1%-50% sweep:
+
+```text
+tag=pic_cuda_1024_piccompact_hybrid_nwide_sweep_1_50_20260611_151823
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+normal-full-compute,full,2.352533,1.000
+full-compute,full,2.192074,1.073
+full-reuse,full,0.636807,3.694
+
+cacheblend,0.01,0.308307,7.630
+cacheblend,0.05,0.363945,6.464
+cacheblend,0.10,0.414109,5.681
+cacheblend,0.20,0.611740,3.846
+cacheblend,0.30,0.678835,3.466
+cacheblend,0.40,0.634798,3.706
+cacheblend,0.50,0.721868,3.259
+
+epic,0.01,0.254410,9.247
+epic,0.05,0.290160,8.108
+epic,0.10,0.308750,7.620
+epic,0.20,0.408996,5.752
+epic,0.30,0.494652,4.756
+epic,0.40,0.514860,4.569
+epic,0.50,0.606127,3.881
+```
+
+Compared with the accepted half2 SiLU sweep:
+
+```text
+cacheblend50: 0.753021 s -> 0.721868 s  (+4.14%)
+epic50:       0.635977 s -> 0.606127 s  (+4.69%)
+cacheblend40: 0.635933 s -> 0.634798 s  (+0.18%)
+epic40:       0.515728 s -> 0.514860 s  (+0.17%)
+```
+
+Conclusion:
+
+- Accept the hybrid SM70 compact CUTLASS tile as the default P1 dense path.
+- Keep `64x128x64` gated to `M >= 512`; below that, the existing `128x64x64` path is safer.
+- This is a compact dense win, not an attention win. After it, cacheblend50 still needs P0 sparse attention work, while epic50 is pushed further toward dense/MLP and graph overhead.
+
+## 2026-06-11 Jetson CUDA Rejected Mid-Budget q16 Sparse Tile
+
+Goal:
+
+- Test whether `384 <= attnLen < 512` should use a q16/k32 sparse flash tile instead of the accepted q32/k32 tile.
+- Motivation: 40% budgets have active rows around 418, so q32 might waste K streaming for scattered cacheblend rows even though it reduces block count.
+
+Code/env:
+
+- Temporary change in `source/backend/cuda/execution/PagedAttentionExecution.cu`:
+
+```text
+attnLen < 384:   q8/k32
+384 <= attnLen < 512: q16/k32
+attnLen >= 512:  q32/k32
+```
+
+- Built locally with Jetson CUDA cross compile and synced to Jetson.
+
+Profile run:
+
+```text
+tag=pic_cuda_1024_sparse_midq16_profile_40_50_20260611_152446
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+sparse tile summary:
+  attn=418 q_tile=16 count=29 total=339.458 ms max=17.075 ms
+  attn=519 q_tile=32 count=28 total=332.758 ms max=16.353 ms
+
+graph profile:
+cacheblend40 PicSparseAttention: 247.913 ms
+cacheblend50 PicSparseAttention: 235.928 ms
+epic40       PicSparseAttention:  96.965 ms
+epic50       PicSparseAttention: 118.787 ms
+```
+
+No-profile smoke:
+
+```text
+tag=pic_cuda_1024_sparse_midq16_smoke_40_50_20260611_152613
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend40: 0.720326 s
+cacheblend50: 0.743643 s
+epic40:       0.522904 s
+epic50:       0.623024 s
+```
+
+Compared with accepted hybrid dense + q32 threshold sweep:
+
+```text
+cacheblend40: 0.634798 s -> 0.720326 s  (regression)
+cacheblend50: 0.721868 s -> 0.743643 s  (regression/noise)
+epic40:       0.514860 s -> 0.522904 s  (regression)
+epic50:       0.606127 s -> 0.623024 s  (regression)
+```
+
+Conclusion:
+
+- Reject q16 for the `384 <= attnLen < 512` mid-budget range.
+- Reverted to the accepted rule: q32/k32 when `attnLen >= 384`, q8/k32 below that.
+- q32's larger CTA still wins for the current 1024-token 40% shape despite potential scattered-row K waste. Future P0 must reduce causal K work with a more explicit bucket/adaptive-piece design, not by simply shrinking q32 to q16.
+
+Post-revert smoke:
+
+```text
+tag=pic_cuda_1024_after_midq16_revert_smoke_40_50_20260611_152900
+log_scan: target_unavailable=false, async_failed=false, error_lines=[]
+
+cacheblend40: 0.701642 s
+cacheblend50: 0.737961 s
+epic40:       0.521909 s
+epic50:       0.626386 s
+```

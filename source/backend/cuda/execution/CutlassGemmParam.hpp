@@ -166,6 +166,40 @@ using GemmTensor_F16_F16_Linear_AlignTensor_Sm70 = cutlass::gemm::device::Gemm<
     SwizzleThreadBlock,
     NumStages>;
 
+using GemmTensor_F16_F16_Linear_AlignTensor_Sm70_128x64x64 = cutlass::gemm::device::Gemm<
+    cutlass::half_t,
+    LayoutInputA,
+    cutlass::half_t,
+    LayoutInputB,
+    cutlass::half_t,
+    LayoutOutput,
+    ElementAccumulator,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm70,
+    cutlass::gemm::GemmShape<128, 64, 64>,
+    cutlass::gemm::GemmShape<64, 32, 64>,
+    cutlass::gemm::GemmShape<8, 8, 4>,
+    EpilogueTensorOp_F16_Linear,
+    SwizzleThreadBlock,
+    NumStages>;
+
+using GemmTensor_F16_F16_Linear_AlignTensor_Sm70_64x128x64 = cutlass::gemm::device::Gemm<
+    cutlass::half_t,
+    LayoutInputA,
+    cutlass::half_t,
+    LayoutInputB,
+    cutlass::half_t,
+    LayoutOutput,
+    ElementAccumulator,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm70,
+    cutlass::gemm::GemmShape<64, 128, 64>,
+    cutlass::gemm::GemmShape<32, 64, 64>,
+    cutlass::gemm::GemmShape<8, 8, 4>,
+    EpilogueTensorOp_F16_Linear,
+    SwizzleThreadBlock,
+    NumStages>;
+
 using GemmTensor_F16_F32_Linear_AlignCuda_Sm70 = cutlass::gemm::device::Gemm<
     cutlass::half_t,
     LayoutInputA,

@@ -1817,6 +1817,12 @@ ErrorCode ConvFpAIntBExecution::onResize(const std::vector<Tensor*> &inputs, con
             if (mGpuComputeCap < 70) {
                 return callCutlassGemmCudaCoreFloat16(inputs, outputs);
             } else if (mGpuComputeCap < 75) {
+                const bool usePicCompactSm70Linear = mResource->mIsWeightInt4 && mFp16Infer && mActivationType == 0 &&
+                    mIsConv1x1S1D1P0 && useStaticDequant && mGemmInfo.elh[0] >= 384 &&
+                    mGemmInfo.elh[0] <= 768 && mGemmInfo.elhPad[1] >= 1024;
+                if (usePicCompactSm70Linear) {
+                    return callCutlassGemmTensorCore884PicCompact(inputs, outputs);
+                }
                 return callCutlassGemmTensorCore884(inputs, outputs);
             }
             return callCutlassGemmTensorCore(inputs, outputs);
@@ -2042,11 +2048,13 @@ ErrorCode ConvFpAIntBExecution::onExecute(const std::vector<Tensor*> &inputs, co
                         gemmUs = convProfileNowUs() - gemmStartUs;
                         MNN_PRINT("CUDAWeightOnlyConv profile op=conv_fpa_intb_1x1 batch=%d ic=%d oc=%d "
                                   "icp=%d ocp=%d int4=%d runtime_dequant=%d fp16=%d mix=%d "
-                                  "static_dequant=%d static_cache_bytes=%zu static_cache_total=%zu "
+                                  "static_dequant=%d pic_compact_sm70=%d pic_compact_tile=%d "
+                                  "static_cache_bytes=%zu static_cache_total=%zu "
                                   "dequant_us=%llu convert_us=%llu cutlass_us=%llu total_us=%llu\n",
                                   batch, ic, oc, icp, ocp, mResource->mIsWeightInt4 ? 1 : 0,
                                   mNeedRuntimeDequant ? 1 : 0, mFp16Infer ? 1 : 0,
                                   mFp16Fp32MixInfer ? 1 : 0, staticDequant ? 1 : 0,
+                                  mUsePicCompactSm70Linear ? 1 : 0, mPicCompactSm70Tile,
                                   mResource->mStaticDequantBytes,
                                   gPicStaticDequantBytes.load(std::memory_order_relaxed),
                                   static_cast<unsigned long long>(dequantUs),

@@ -101,7 +101,14 @@ ErrorCode CutlassConvCommonExecution::runCutlassGemmFunc() {
                 cutlass::Status status = mGemmF16F32LnSm70();
                 cutlass_check(status);
             } else {
-                cutlass::Status status = mGemmF16F16LnSm70();
+                cutlass::Status status = cutlass::Status::kSuccess;
+                if (mUsePicCompactSm70Linear && mPicCompactSm70Tile == 2) {
+                    status = mGemmF16F16LnSm70PicCompactNWide();
+                } else if (mUsePicCompactSm70Linear) {
+                    status = mGemmF16F16LnSm70PicCompact();
+                } else {
+                    status = mGemmF16F16LnSm70();
+                }
                 cutlass_check(status);
             }
         }

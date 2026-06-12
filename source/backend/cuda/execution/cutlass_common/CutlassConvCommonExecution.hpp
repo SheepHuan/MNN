@@ -36,6 +36,7 @@ public:
     ErrorCode callCutlassGemmCudaCoreFloat16(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs);
     ErrorCode callCutlassGemmCudaCoreFloat32(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs);
     ErrorCode callCutlassGemmTensorCore884(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs);
+    ErrorCode callCutlassGemmTensorCore884PicCompact(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs);
     ErrorCode callCutlassGemmTensorCore(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs);
     ErrorCode callCutlassGemmBf16TensorCore(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs);
 
@@ -61,6 +62,8 @@ protected:
     int mBlockNum = 1;
 
     GemmTensor_F16_F16_Linear_AlignTensor_Sm70 mGemmF16F16LnSm70;
+    GemmTensor_F16_F16_Linear_AlignTensor_Sm70_128x64x64 mGemmF16F16LnSm70PicCompact;
+    GemmTensor_F16_F16_Linear_AlignTensor_Sm70_64x128x64 mGemmF16F16LnSm70PicCompactNWide;
     GemmTensor_F16_F32_Linear_AlignTensor_Sm70 mGemmF16F32LnSm70;
     GemmCuda_F16_F16_Linear_AlignCuda  mGemmCudaF16F16Ln;
     GemmCuda_F16_F32_Linear_AlignCuda  mGemmCudaF16F32Ln;
@@ -95,6 +98,8 @@ protected:
     #endif
     int mGpuComputeCap = 75;
     bool mIsTuned = false;
+    bool mUsePicCompactSm70Linear = false;
+    int mPicCompactSm70Tile = 0;
     int mActivationType = 0;
     bool mFp16Infer = false;
     bool mFp32Infer = false;

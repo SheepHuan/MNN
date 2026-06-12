@@ -11,6 +11,8 @@
 namespace MNN {
 namespace CUDA {
 ErrorCode CutlassConvCommonExecution::callCutlassGemmTensorCore884(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs) {
+    mUsePicCompactSm70Linear = false;
+    mPicCompactSm70Tile = 0;
     auto input = inputs[0];
     auto output = outputs[0];
     ElementInput_F16 *inputA_ptr = mNeedIm2Col ? (ElementInput_F16 *)mIm2ColBuffer : (ElementInput_F16 *)input->deviceId();
@@ -176,6 +178,70 @@ ErrorCode CutlassConvCommonExecution::callCutlassGemmTensorCore884(const std::ve
             cutlass_check(status);
         }
     }
+    return NO_ERROR;
+}
+
+ErrorCode CutlassConvCommonExecution::callCutlassGemmTensorCore884PicCompact(const std::vector<Tensor*> &inputs, const std::vector<Tensor*> &outputs) {
+    if (!mFp16Infer || mActivationType != 0) {
+        return callCutlassGemmTensorCore884(inputs, outputs);
+    }
+
+    auto input = inputs[0];
+    auto output = outputs[0];
+    ElementInput_F16 *inputA_ptr = mNeedIm2Col ? (ElementInput_F16 *)mIm2ColBuffer : (ElementInput_F16 *)input->deviceId();
+    ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
+    ElementComputeEpilogue beta = ElementComputeEpilogue(1);
+    int split_k_slices = 1;
+    cutlass::gemm::GemmCoord problem_size(mGemmInfo.elh[0], mGemmInfo.elhPad[2], mGemmInfo.elhPad[1]);
+    mWorkspace = nullptr;
+    const bool useNWideTile = mGemmInfo.elh[0] >= 512;
+
+    if (useNWideTile) {
+        typename GemmTensor_F16_F16_Linear_AlignTensor_Sm70_64x128x64::Arguments arguments{
+            problem_size,
+            {inputA_ptr, mGemmInfo.elhPad[1]},
+            {(ElementInput_F16 *)mFilterAddr, mGemmInfo.elhPad[1]},
+            {(ElementOutput_F16 *)mBiasAddr, 0},
+            {(ElementOutput_F16 *)output->deviceId(), mGemmInfo.elhPad[2]},
+            {alpha, beta},
+            split_k_slices};
+        size_t workspace_size = GemmTensor_F16_F16_Linear_AlignTensor_Sm70_64x128x64::get_workspace_size(arguments);
+        if (workspace_size != 0) {
+            workspaceTensor.reset(Tensor::createDevice<int8_t>({(int)workspace_size}));
+            mBackendPtr->onAcquireBuffer(workspaceTensor.get(), Backend::STATIC);
+            mWorkspace = (void *)workspaceTensor.get()->buffer().device;
+        }
+
+        cutlass::Status status = mGemmF16F16LnSm70PicCompactNWide.can_implement(arguments);
+        cutlass_check(status);
+        status = mGemmF16F16LnSm70PicCompactNWide.initialize(arguments, (uint8_t *)mWorkspace);
+        cutlass_check(status);
+        mUsePicCompactSm70Linear = true;
+        mPicCompactSm70Tile = 2;
+        return NO_ERROR;
+    }
+
+    typename GemmTensor_F16_F16_Linear_AlignTensor_Sm70_128x64x64::Arguments arguments{
+        problem_size,
+        {inputA_ptr, mGemmInfo.elhPad[1]},
+        {(ElementInput_F16 *)mFilterAddr, mGemmInfo.elhPad[1]},
+        {(ElementOutput_F16 *)mBiasAddr, 0},
+        {(ElementOutput_F16 *)output->deviceId(), mGemmInfo.elhPad[2]},
+        {alpha, beta},
+        split_k_slices};
+    size_t workspace_size = GemmTensor_F16_F16_Linear_AlignTensor_Sm70_128x64x64::get_workspace_size(arguments);
+    if (workspace_size != 0) {
+        workspaceTensor.reset(Tensor::createDevice<int8_t>({(int)workspace_size}));
+        mBackendPtr->onAcquireBuffer(workspaceTensor.get(), Backend::STATIC);
+        mWorkspace = (void *)workspaceTensor.get()->buffer().device;
+    }
+
+    cutlass::Status status = mGemmF16F16LnSm70PicCompact.can_implement(arguments);
+    cutlass_check(status);
+    status = mGemmF16F16LnSm70PicCompact.initialize(arguments, (uint8_t *)mWorkspace);
+    cutlass_check(status);
+    mUsePicCompactSm70Linear = true;
+    mPicCompactSm70Tile = 1;
     return NO_ERROR;
 }
 

@@ -600,6 +600,7 @@ __global__ void pagedSparseFlashTileKernel(
     __shared__ int qLogicalShared[Q_TILE];
     __shared__ int qRowShared[Q_TILE];
     __shared__ int qValidShared[Q_TILE];
+    __shared__ int kSlotShared[K_TILE];
     __shared__ int qMaxLogicalShared;
     __shared__ float runningMax[Q_TILE];
     __shared__ float runningSum[Q_TILE];
@@ -678,17 +679,27 @@ __global__ void pagedSparseFlashTileKernel(
         causalKLimit = kvLen;
     }
     for (int kStart = 0; kStart < causalKLimit; kStart += K_TILE) {
+        if (linearTid < K_TILE) {
+            const int logical = kStart + linearTid;
+            int slot = -1;
+            if (logical < causalKLimit) {
+                slot = slotTable ? slotTable[logical] : logical;
+                if (slot < 0 || slot >= maxSlots) {
+                    slot = -1;
+                }
+            }
+            kSlotShared[linearTid] = slot;
+        }
+        __syncthreads();
+
         for (int idx = linearTid; idx < K_TILE * HEAD_DIM; idx += linearThreads) {
             const int kk = idx / HEAD_DIM;
             const int d = idx - kk * HEAD_DIM;
-            const int logical = kStart + kk;
+            const int slot = kSlotShared[kk];
             float kValue = 0.0f;
-            if (logical < causalKLimit) {
-                const int slot = slotTable ? slotTable[logical] : logical;
-                if (slot >= 0 && slot < maxSlots) {
-                    const int kOffset = ((slot * batch + b) * kvHeads + kvHead) * HEAD_DIM + d;
-                    kValue = pagedToFloat<T>(keyCache[kOffset]);
-                }
+            if (slot >= 0) {
+                const int kOffset = ((slot * batch + b) * kvHeads + kvHead) * HEAD_DIM + d;
+                kValue = pagedToFloat<T>(keyCache[kOffset]);
             }
             kShared[kk][d] = kValue;
         }
@@ -740,14 +751,11 @@ __global__ void pagedSparseFlashTileKernel(
         for (int idx = linearTid; idx < K_TILE * HEAD_DIM; idx += linearThreads) {
             const int kLocal = idx / HEAD_DIM;
             const int d = idx - kLocal * HEAD_DIM;
-            const int logicalV = kStart + kLocal;
+            const int slot = kSlotShared[kLocal];
             float vValue = 0.0f;
-            if (logicalV < causalKLimit) {
-                const int slot = slotTable ? slotTable[logicalV] : logicalV;
-                if (slot >= 0 && slot < maxSlots) {
-                    const int vOffset = ((b * kvHeads + kvHead) * maxSlots + slot) * HEAD_DIM + d;
-                    vValue = pagedToFloat<T>(valueCache[vOffset]);
-                }
+            if (slot >= 0) {
+                const int vOffset = ((b * kvHeads + kvHead) * maxSlots + slot) * HEAD_DIM + d;
+                vValue = pagedToFloat<T>(valueCache[vOffset]);
             }
             vShared[kLocal][d] = vValue;
         }
@@ -2601,15 +2609,31 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     const bool fixedPlanSparseTile = sparseQuery && mMeta != nullptr && mMeta->pic_graph_active_plan_ready;
     if ((fixedPlanSparseTile || cacheBlendLargeSparseTile) && mHeadDim == 64) {
         constexpr int qTile = 8;
+        constexpr int qTileWide = 32;
         constexpr int kTile = 32;
-        dim3 flashBlock(kTile, qTile, 1);
-        dim3 flashGrid(UP_DIV(attnLen, qTile), mNumHead, mBatch);
+        const bool useWideQTile = attnLen >= 384;
+        dim3 flashBlock(kTile, useWideQTile ? qTileWide : qTile, 1);
+        dim3 flashGrid(UP_DIV(attnLen, useWideQTile ? qTileWide : qTile), mNumHead, mBatch);
         const bool skipCausalMask = mMeta != nullptr && mMeta->full_causal_attention_mask;
         const float* sparseTileMask = (!skipCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
         const int sparseTileMaskElements = sparseTileMask != nullptr ? maskElements : 0;
         ScopedNvtxRange flashNvtx(nvtxLayerRangeName("sparse_flash_tile_attention", layerIndex,
                                                      mQuerySeqLen, attnLen, kvLen), nvtx);
-        if (mPrecision == 4) {
+        if (useWideQTile && mPrecision == 4) {
+            pagedSparseFlashTileKernel<float, qTileWide, kTile><<<flashGrid, flashBlock, 0, stream>>>(
+                pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()),
+                pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
+                sparseTileMask, pagedDevPtr<int>(mCache->slotTable.get()),
+                sparseTileMaskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, baseLogical,
+                kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
+        } else if (useWideQTile) {
+            pagedSparseFlashTileKernel<half, qTileWide, kTile><<<flashGrid, flashBlock, 0, stream>>>(
+                pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()),
+                pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
+                sparseTileMask, pagedDevPtr<int>(mCache->slotTable.get()),
+                sparseTileMaskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, baseLogical,
+                kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
+        } else if (mPrecision == 4) {
             pagedSparseFlashTileKernel<float, qTile, kTile><<<flashGrid, flashBlock, 0, stream>>>(
                 pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()),
                 pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
@@ -2632,7 +2656,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                       "causal_mask_skipped=%d q_tile=%d k_tile=%d us=%llu\n",
                       layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
                       queryRowsAreFull ? 1 : 0, sparseTileMaskElements, maskElements, skipCausalMask ? 1 : 0,
-                      qTile, kTile,
+                      useWideQTile ? qTileWide : qTile, kTile,
                       static_cast<unsigned long long>(nowUs() - attentionStartUs));
         }
         return NO_ERROR;

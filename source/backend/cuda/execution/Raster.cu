@@ -149,6 +149,19 @@ __global__ void UNARY_HALF2_SIGMOID(const T *input, T *output,
 }
 
 template<typename T>
+__global__ void UNARY_HALF2_SILU(const T *input, T *output,
+        int count
+        ) {
+  for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += blockDim.x * gridDim.x) {
+    half2 x = input[i];
+    half2 one;
+    one.x = 1.0;
+    one.y = 1.0f;
+    output[i] = __hmul2(x, __h2div(one, __hadd2(one, h2exp(__hneg2(x)))));
+  }
+}
+
+template<typename T>
 __global__ void blit_2_float(const T *input, T *output,
     int count,
     DivModFast sizeZ, DivModFast sizeY, DivModFast sizeX,
@@ -569,6 +582,10 @@ void UnaryBlit(uint8_t* output, const uint8_t* input, const int32_t* size, const
              block_num = runtime->blocks_num(count/2);\
              threads_num = runtime->threads_num();\
              UNARY_HALF2_SIGMOID<<<block_num, threads_num>>>((const half2*)input, (half2*)output, count/2);\
+        } else if(size[0] == 1 && size[1] == 1 && srcStride[2] == 1 && dstStride[2] == 1 && opType == MNN::UnaryOpOperation_SILU && bytes==2 && count % 2 == 0) {\
+             block_num = runtime->blocks_num(count/2);\
+             threads_num = runtime->threads_num();\
+             UNARY_HALF2_SILU<<<block_num, threads_num>>>((const half2*)input, (half2*)output, count/2);\
         } else if(size[0] == 1 && size[1] == 1 && srcStride[2] == 1 && dstStride[2] == 1) {\
             if(bytes==2) {\
                 UNARY_SINGLE##TYPE<<<block_num, threads_num>>>((const half*)input, (half*)output, count);\
