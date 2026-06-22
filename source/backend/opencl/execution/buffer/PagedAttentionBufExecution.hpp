@@ -10,6 +10,7 @@
 
 #include "backend/opencl/execution/image/CommonExecution.hpp"
 #include "core/PagedKVMeta.hpp"
+#include <vector>
 
 namespace MNN {
 namespace OpenCL {
@@ -28,6 +29,7 @@ public:
         int bytes = 4;
         int slotTableVersion = -1;
         int slotTableLength = 0;
+        std::vector<int> sparseQueryHost;
     };
 
     PagedAttentionBufExecution(const MNN::Op* op, Backend* backend);
@@ -42,6 +44,7 @@ private:
     ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
     ErrorCode ensureSparseFlashKernel();
+    ErrorCode ensureDecodeCausalKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
@@ -54,6 +57,9 @@ private:
                              int maskKeyLen);
     ErrorCode runSparseFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                                    int attnLen, bool queryRowsAreFull);
+    ErrorCode runDecodeCausalAttention(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                                       int kvLen, int attnLen, int baseLogical, bool sparseQuery,
+                                       bool queryRowsAreFull);
 
     OpenCLBackend* mOpenCLBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -74,6 +80,8 @@ private:
     std::shared_ptr<KernelWrap> mQKVKernel;
     std::shared_ptr<KernelWrap> mSparseFlashKernel32;
     std::shared_ptr<KernelWrap> mSparseFlashKernel64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernel32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernel64;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
     std::shared_ptr<Tensor> mTempK;
@@ -104,6 +112,7 @@ private:
     int mFastKvLen = 0;
     int mFastQChunkLen = 0;
     int mSparseFlashKernelGroupSize = 0;
+    int mDecodeCausalKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;

@@ -176,6 +176,10 @@ public:
         return std::max(0, config_.value("pic_recompute_score_layer_idx", 1));
     }
 
+    bool has_pic_decode_repair_outputs() const {
+        return config_.value("pic_decode_repair_outputs", false);
+    }
+
     int paged_kv_max_tokens() const {
         int configured = config_.value("paged_kv_max_tokens", 0);
         return configured > 0 ? configured : max_all_tokens();

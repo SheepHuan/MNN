@@ -650,6 +650,17 @@ static bool _RebuildExternalOp(FileLoader* external, const MNN::Op* origin, flat
             parameterMain = Convolution2D::Pack(builder, param.get()).Union();
             break;
         }
+        case OpParameter_Extra:
+        {
+            auto extra = origin->main_as_Extra();
+            if (extra != nullptr && extra->type() != nullptr &&
+                extra->type()->str() == "PicGateUpWeightOnly") {
+                std::unique_ptr<ExtraT> param(extra->UnPack());
+                externalPathFbb = builder.CreateString(external->path());
+                parameterMain = Extra::Pack(builder, param.get()).Union();
+            }
+            break;
+        }
         default:
             break;
     }
@@ -681,6 +692,13 @@ Execution* OpCommonUtils::createExecutionWithExternal(Backend* backend, const st
         case OpParameter_LayerNorm:
             hasExternal = USE_EXTERNAL_DATA(op->main_as_LayerNorm());
             break;
+        case OpParameter_Extra:
+        {
+            auto extra = op->main_as_Extra();
+            hasExternal = extra != nullptr && extra->type() != nullptr &&
+                extra->type()->str() == "PicGateUpWeightOnly";
+            break;
+        }
         default:
             break;
     }

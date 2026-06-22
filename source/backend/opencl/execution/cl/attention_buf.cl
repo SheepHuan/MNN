@@ -1153,6 +1153,278 @@ __kernel void sparse_flash_attention_row32(GLOBAL_SIZE_3_DIMS
         }
     }
 }
+
+__kernel void decode_causal_attention_row64(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *query, // [batch, query_seq_len, head_num, head_dim]
+                              __global const FLOAT *key_cache, // [max_slots, batch, kv_head_num, head_dim]
+                              __global const FLOAT *value_cache, // [batch, kv_head_num, max_slots, head_dim]
+                              __global const int *slot_table, // [key_seq_len]
+                              __global const int *sparse_query, // [output_seq_len], used when sparse_query_active != 0
+                              __global FLOAT *output, // [batch, output_seq_len, head_num, head_dim]
+                              __private const float scale,
+                              __private const int batch,
+                              __private const int query_seq_len,
+                              __private const int output_seq_len,
+                              __private const int base_logical,
+                              __private const int sparse_query_active,
+                              __private const int query_rows_are_full,
+                              __private const int key_seq_len,
+                              __private const int key_max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int lid = get_local_id(0);
+    if (get_local_size(0) != 64 || lid >= 64 || head_dim != 64) {
+        return;
+    }
+    const int q_index = y;
+    if (q_index >= output_seq_len) {
+        return;
+    }
+
+    const int b = z / head_num;
+    const int h = z - b * head_num;
+    if (b >= batch) {
+        return;
+    }
+    const int kvh = h / NUMHEAD_GROUP_SIZE;
+    if (kvh >= kv_head_num) {
+        return;
+    }
+
+    const int q_logical = sparse_query_active != 0 ? sparse_query[q_index] : base_logical + q_index;
+    const int q_row = query_rows_are_full ? q_logical : q_index;
+    if (q_row < 0 || q_row >= query_seq_len) {
+        return;
+    }
+    const int active_kv_seq_len = clamp(q_logical + 1, 0, key_seq_len);
+
+    COMPUTE_FLOAT local local_m[64];
+    COMPUTE_FLOAT local local_l[64];
+    COMPUTE_FLOAT8 local local_o[512];
+    COMPUTE_FLOAT8 o0 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o1 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o2 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o3 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o4 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o5 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o6 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o7 = (COMPUTE_FLOAT8)0;
+
+    COMPUTE_FLOAT m = (COMPUTE_FLOAT)-FLT_MAX;
+    COMPUTE_FLOAT l = (COMPUTE_FLOAT)0;
+    const int query_offset = ((b * query_seq_len + q_row) * head_num + h) * head_dim;
+
+    for (int k = lid; k < active_kv_seq_len; k += 64) {
+        const int slot = slot_table[k];
+        if (slot < 0 || slot >= key_max_len) {
+            continue;
+        }
+        COMPUTE_FLOAT score = (COMPUTE_FLOAT)0;
+        const int key_offset = ((slot * batch + b) * kv_head_num + kvh) * head_dim;
+        for (int d4 = 0; d4 < 64; d4 += 4) {
+            COMPUTE_FLOAT4 qv = CONVERT_COMPUTE_FLOAT4(vload4(0, query + query_offset + d4));
+            COMPUTE_FLOAT4 kv = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset + d4));
+            score += dot(qv, kv);
+        }
+        score *= (COMPUTE_FLOAT)scale;
+        const COMPUTE_FLOAT new_m = fmax(m, score);
+        const COMPUTE_FLOAT alpha = l > (COMPUTE_FLOAT)0 ? exp(m - new_m) : (COMPUTE_FLOAT)0;
+        const COMPUTE_FLOAT beta = exp(score - new_m);
+        const int value_offset = ((b * kv_head_num + kvh) * key_max_len + slot) * head_dim;
+        const COMPUTE_FLOAT8 beta8 = (COMPUTE_FLOAT8)beta;
+        o0 = o0 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset));
+        o1 = o1 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 8));
+        o2 = o2 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 16));
+        o3 = o3 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 24));
+        o4 = o4 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 32));
+        o5 = o5 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 40));
+        o6 = o6 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 48));
+        o7 = o7 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 56));
+        l = l * alpha + beta;
+        m = new_m;
+    }
+    local_m[lid] = m;
+    local_l[lid] = l;
+    local_o[lid * 8] = o0;
+    local_o[lid * 8 + 1] = o1;
+    local_o[lid * 8 + 2] = o2;
+    local_o[lid * 8 + 3] = o3;
+    local_o[lid * 8 + 4] = o4;
+    local_o[lid * 8 + 5] = o5;
+    local_o[lid * 8 + 6] = o6;
+    local_o[lid * 8 + 7] = o7;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            const COMPUTE_FLOAT m0 = local_m[lid];
+            const COMPUTE_FLOAT l0 = local_l[lid];
+            const COMPUTE_FLOAT m1 = local_m[lid + stride];
+            const COMPUTE_FLOAT l1 = local_l[lid + stride];
+            const COMPUTE_FLOAT merged_m = fmax(m0, m1);
+            const COMPUTE_FLOAT a = l0 > (COMPUTE_FLOAT)0 ? exp(m0 - merged_m) : (COMPUTE_FLOAT)0;
+            const COMPUTE_FLOAT b_scale = l1 > (COMPUTE_FLOAT)0 ? exp(m1 - merged_m) : (COMPUTE_FLOAT)0;
+            for (int d8 = 0; d8 < 8; ++d8) {
+                local_o[lid * 8 + d8] =
+                    local_o[lid * 8 + d8] * a + local_o[(lid + stride) * 8 + d8] * b_scale;
+            }
+            local_l[lid] = l0 * a + l1 * b_scale;
+            local_m[lid] = merged_m;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        const COMPUTE_FLOAT denom = local_l[0] > (COMPUTE_FLOAT)0 ? local_l[0] : (COMPUTE_FLOAT)1;
+        const int output_offset = ((b * output_seq_len + q_index) * head_num + h) * head_dim;
+        for (int d8 = 0; d8 < 8; ++d8) {
+            vstore8(CONVERT_FLOAT8(local_o[d8] / (COMPUTE_FLOAT8)denom), 0,
+                    output + output_offset + (d8 << 3));
+        }
+    }
+}
+
+__kernel void decode_causal_attention_row32(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *query, // [batch, query_seq_len, head_num, head_dim]
+                              __global const FLOAT *key_cache, // [max_slots, batch, kv_head_num, head_dim]
+                              __global const FLOAT *value_cache, // [batch, kv_head_num, max_slots, head_dim]
+                              __global const int *slot_table, // [key_seq_len]
+                              __global const int *sparse_query, // [output_seq_len], used when sparse_query_active != 0
+                              __global FLOAT *output, // [batch, output_seq_len, head_num, head_dim]
+                              __private const float scale,
+                              __private const int batch,
+                              __private const int query_seq_len,
+                              __private const int output_seq_len,
+                              __private const int base_logical,
+                              __private const int sparse_query_active,
+                              __private const int query_rows_are_full,
+                              __private const int key_seq_len,
+                              __private const int key_max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int lid = get_local_id(0);
+    if (get_local_size(0) != 32 || lid >= 32 || head_dim != 64) {
+        return;
+    }
+    const int q_index = y;
+    if (q_index >= output_seq_len) {
+        return;
+    }
+
+    const int b = z / head_num;
+    const int h = z - b * head_num;
+    if (b >= batch) {
+        return;
+    }
+    const int kvh = h / NUMHEAD_GROUP_SIZE;
+    if (kvh >= kv_head_num) {
+        return;
+    }
+
+    const int q_logical = sparse_query_active != 0 ? sparse_query[q_index] : base_logical + q_index;
+    const int q_row = query_rows_are_full ? q_logical : q_index;
+    if (q_row < 0 || q_row >= query_seq_len) {
+        return;
+    }
+    const int active_kv_seq_len = clamp(q_logical + 1, 0, key_seq_len);
+
+    COMPUTE_FLOAT local local_m[32];
+    COMPUTE_FLOAT local local_l[32];
+    COMPUTE_FLOAT8 local local_o[256];
+    COMPUTE_FLOAT8 o0 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o1 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o2 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o3 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o4 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o5 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o6 = (COMPUTE_FLOAT8)0;
+    COMPUTE_FLOAT8 o7 = (COMPUTE_FLOAT8)0;
+
+    COMPUTE_FLOAT m = (COMPUTE_FLOAT)-FLT_MAX;
+    COMPUTE_FLOAT l = (COMPUTE_FLOAT)0;
+    const int query_offset = ((b * query_seq_len + q_row) * head_num + h) * head_dim;
+
+    for (int k = lid; k < active_kv_seq_len; k += 32) {
+        const int slot = slot_table[k];
+        if (slot < 0 || slot >= key_max_len) {
+            continue;
+        }
+        COMPUTE_FLOAT score = (COMPUTE_FLOAT)0;
+        const int key_offset = ((slot * batch + b) * kv_head_num + kvh) * head_dim;
+        for (int d4 = 0; d4 < 64; d4 += 4) {
+            COMPUTE_FLOAT4 qv = CONVERT_COMPUTE_FLOAT4(vload4(0, query + query_offset + d4));
+            COMPUTE_FLOAT4 kv = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset + d4));
+            score += dot(qv, kv);
+        }
+        score *= (COMPUTE_FLOAT)scale;
+        const COMPUTE_FLOAT new_m = fmax(m, score);
+        const COMPUTE_FLOAT alpha = l > (COMPUTE_FLOAT)0 ? exp(m - new_m) : (COMPUTE_FLOAT)0;
+        const COMPUTE_FLOAT beta = exp(score - new_m);
+        const int value_offset = ((b * kv_head_num + kvh) * key_max_len + slot) * head_dim;
+        const COMPUTE_FLOAT8 beta8 = (COMPUTE_FLOAT8)beta;
+        o0 = o0 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset));
+        o1 = o1 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 8));
+        o2 = o2 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 16));
+        o3 = o3 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 24));
+        o4 = o4 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 32));
+        o5 = o5 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 40));
+        o6 = o6 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 48));
+        o7 = o7 * alpha + beta8 * CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + 56));
+        l = l * alpha + beta;
+        m = new_m;
+    }
+    local_m[lid] = m;
+    local_l[lid] = l;
+    local_o[lid * 8] = o0;
+    local_o[lid * 8 + 1] = o1;
+    local_o[lid * 8 + 2] = o2;
+    local_o[lid * 8 + 3] = o3;
+    local_o[lid * 8 + 4] = o4;
+    local_o[lid * 8 + 5] = o5;
+    local_o[lid * 8 + 6] = o6;
+    local_o[lid * 8 + 7] = o7;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = 16; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            const COMPUTE_FLOAT m0 = local_m[lid];
+            const COMPUTE_FLOAT l0 = local_l[lid];
+            const COMPUTE_FLOAT m1 = local_m[lid + stride];
+            const COMPUTE_FLOAT l1 = local_l[lid + stride];
+            const COMPUTE_FLOAT merged_m = fmax(m0, m1);
+            const COMPUTE_FLOAT a = l0 > (COMPUTE_FLOAT)0 ? exp(m0 - merged_m) : (COMPUTE_FLOAT)0;
+            const COMPUTE_FLOAT b_scale = l1 > (COMPUTE_FLOAT)0 ? exp(m1 - merged_m) : (COMPUTE_FLOAT)0;
+            for (int d8 = 0; d8 < 8; ++d8) {
+                local_o[lid * 8 + d8] =
+                    local_o[lid * 8 + d8] * a + local_o[(lid + stride) * 8 + d8] * b_scale;
+            }
+            local_l[lid] = l0 * a + l1 * b_scale;
+            local_m[lid] = merged_m;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        const COMPUTE_FLOAT denom = local_l[0] > (COMPUTE_FLOAT)0 ? local_l[0] : (COMPUTE_FLOAT)1;
+        const int output_offset = ((b * output_seq_len + q_index) * head_num + h) * head_dim;
+        for (int d8 = 0; d8 < 8; ++d8) {
+            vstore8(CONVERT_FLOAT8(local_o[d8] / (COMPUTE_FLOAT8)denom), 0,
+                    output + output_offset + (d8 << 3));
+        }
+    }
+}
 __kernel void matmul_qkv_decode_b8(GLOBAL_SIZE_2_DIMS
                               __global const FLOAT *qk, // qk [1 head_num qk_seq_len 1]
                               __global const FLOAT *past_value, // [1 head_num max_len head_dim]

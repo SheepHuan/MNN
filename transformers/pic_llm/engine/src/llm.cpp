@@ -6,6 +6,7 @@
 //
 // #define MNN_OPEN_TIME_TRACE 1
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -404,7 +405,6 @@ bool Llm::load() {
     if (needHiddenState) {
         outputNames.emplace_back("hidden_states");
     }
-
     mRuntimeManager->setExternalFile(weight_path);
     if (mConfig->has_deepstack()) {
         inputNames.emplace_back("deepstack_embeds");
@@ -964,7 +964,325 @@ bool Llm::prefillFixedGraphExternalPagedKV(const std::vector<int>& full_prompt_t
     return ok;
 }
 
+bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_token_ids,
+                                 const std::vector<int>& ranked_pic_local_indices,
+                                 const std::vector<int>& seed_selected_pic_local_indices,
+                                 int tokens_per_decode_step) {
+    clearPicDecodeRepair();
+    const int picTokenCount = static_cast<int>(pic_token_ids.size());
+    if (!mConfig->paged_attention()) {
+        MNN_ERROR("PIC decode repair requires paged_attention in exported model\n");
+        return false;
+    }
+    if (mConfig->has_deepstack() || mConfig->has_ple()) {
+        MNN_ERROR("PIC decode repair token-id sparse decode currently does not support deepstack or PLE models\n");
+        return false;
+    }
+    if (mConfig->attention_mask() != "float" || mConfig->attention_type() != "full") {
+        MNN_ERROR("PIC decode repair token-id sparse decode currently supports only float full-attention masks\n");
+        return false;
+    }
+    if (pic_start < 0 || picTokenCount <= 0 || tokens_per_decode_step <= 0) {
+        return false;
+    }
+    std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
+    std::vector<int> ranked;
+    ranked.reserve(static_cast<size_t>(picTokenCount));
+    auto appendRank = [&](int local) {
+        if (local < 0 || local >= picTokenCount || seen[static_cast<size_t>(local)] != 0) {
+            return;
+        }
+        seen[static_cast<size_t>(local)] = 1;
+        ranked.emplace_back(pic_start + local);
+    };
+    for (int local : ranked_pic_local_indices) {
+        appendRank(local);
+    }
+    for (int local = 0; local < picTokenCount; ++local) {
+        appendRank(local);
+    }
+    mPicDecodeRepair.enabled = true;
+    mPicDecodeRepair.picStart = pic_start;
+    mPicDecodeRepair.picTokenCount = picTokenCount;
+    mPicDecodeRepair.tokensPerDecodeStep = tokens_per_decode_step;
+    mPicDecodeRepair.cursor = 0;
+    mPicDecodeRepair.stepIdx = 0;
+    mPicDecodeRepair.picTokenIds = pic_token_ids;
+    mPicDecodeRepair.rankedLogicalIndices = std::move(ranked);
+    mPicDecodeRepair.repairedPicLocal.assign(static_cast<size_t>(picTokenCount), 0);
+    mPicDecodeRepair.picTokenEmbeddings.clear();
+    mPicDecodeRepair.picTokenEmbeddingHiddenSize = 0;
+    const size_t decodeRepairRows = static_cast<size_t>(tokens_per_decode_step + 1);
+    mPicDecodeRepair.scratchLogicalIndices.reserve(decodeRepairRows);
+    mPicDecodeRepair.scratchSparseTokenIds.reserve(decodeRepairRows);
+    const int hiddenSize = mConfig->hidden_size();
+    if (hiddenSize > 0 && !mPicDecodeRepair.picTokenIds.empty()) {
+        mPicDecodeRepair.picTokenEmbeddings.resize(
+            static_cast<size_t>(mPicDecodeRepair.picTokenIds.size()) * static_cast<size_t>(hiddenSize));
+        mDiskEmbedding->embedding(mPicDecodeRepair.picTokenIds, mPicDecodeRepair.picTokenEmbeddings.data());
+        mPicDecodeRepair.picTokenEmbeddingHiddenSize = hiddenSize;
+    }
+    for (int local : seed_selected_pic_local_indices) {
+        if (local >= 0 && local < picTokenCount) {
+            mPicDecodeRepair.repairedPicLocal[static_cast<size_t>(local)] = 1;
+        }
+    }
+    mPicDecodeRepair.pendingRepairLogicalIndices = selectPicDecodeRepairLogicalIndices();
+    MNN_PRINT("Prepared PIC decode repair token-id sparse decode pic_start=%d pic_tokens=%d budget_per_step=%d "
+              "ranked_tokens=%d first_scheduled=%d\n",
+              pic_start, picTokenCount, tokens_per_decode_step,
+              static_cast<int>(mPicDecodeRepair.rankedLogicalIndices.size()),
+              static_cast<int>(mPicDecodeRepair.pendingRepairLogicalIndices.size()));
+    return true;
+}
+
+void Llm::clearPicDecodeRepair() {
+    mPicDecodeRepair = PicDecodeRepairRuntimeState();
+}
+
+std::vector<int> Llm::selectPicDecodeRepairLogicalIndices() {
+    std::vector<int> selected;
+    if (!mPicDecodeRepair.enabled || mPicDecodeRepair.tokensPerDecodeStep <= 0) {
+        return selected;
+    }
+    selected.reserve(static_cast<size_t>(mPicDecodeRepair.tokensPerDecodeStep));
+    while (mPicDecodeRepair.cursor < static_cast<int>(mPicDecodeRepair.rankedLogicalIndices.size()) &&
+           static_cast<int>(selected.size()) < mPicDecodeRepair.tokensPerDecodeStep) {
+        const int logical = mPicDecodeRepair.rankedLogicalIndices[mPicDecodeRepair.cursor++];
+        const int local = logical - mPicDecodeRepair.picStart;
+        if (local < 0 || local >= mPicDecodeRepair.picTokenCount) {
+            continue;
+        }
+        if (mPicDecodeRepair.repairedPicLocal[static_cast<size_t>(local)] != 0) {
+            continue;
+        }
+        selected.emplace_back(logical);
+    }
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+    return selected;
+}
+
+int Llm::picDecodeRepairCandidateCount() const {
+    return static_cast<int>(mPicDecodeRepair.rankedLogicalIndices.size());
+}
+
+std::vector<int> Llm::picDecodeRepairRepairedLogicalIndices() const {
+    std::vector<int> repaired;
+    if (!mPicDecodeRepair.enabled || mPicDecodeRepair.picTokenCount <= 0 ||
+        mPicDecodeRepair.repairedPicLocal.empty()) {
+        return repaired;
+    }
+    for (int local = 0; local < mPicDecodeRepair.picTokenCount; ++local) {
+        if (mPicDecodeRepair.repairedPicLocal[static_cast<size_t>(local)] != 0) {
+            repaired.emplace_back(mPicDecodeRepair.picStart + local);
+        }
+    }
+    return repaired;
+}
+
+std::vector<std::vector<int>> Llm::picDecodeRepairStepLogicalIndices() const {
+    return mPicDecodeRepair.stepLogicalIndices;
+}
+
+VARP Llm::embeddingForPicDecodeRepair(const std::vector<int>& inputIds) {
+    if (inputIds.empty()) {
+        return nullptr;
+    }
+    MNN::Express::ExecutorScope s(mExecutor);
+    AUTOTIME;
+    const int hiddenSize = mConfig->hidden_size();
+    const int seqLen = static_cast<int>(inputIds.size());
+    auto& cached = mPicDecodeRepair.embeddingByLen[seqLen];
+    if (cached == nullptr) {
+        cached = _Input({seqLen, 1, hiddenSize}, NCHW);
+    }
+    auto* dst = cached->writeMap<float>();
+    const int repairRows = std::max(0, seqLen - 1);
+    const bool canUsePicEmbeddingCache =
+        mPicDecodeRepair.picTokenEmbeddingHiddenSize == hiddenSize &&
+        !mPicDecodeRepair.picTokenEmbeddings.empty() &&
+        static_cast<int>(mPicDecodeRepair.scratchLogicalIndices.size()) == seqLen;
+    if (canUsePicEmbeddingCache && repairRows > 0) {
+        for (int i = 0; i < repairRows; ++i) {
+            const int logical = mPicDecodeRepair.scratchLogicalIndices[static_cast<size_t>(i)];
+            const int local = logical - mPicDecodeRepair.picStart;
+            if (local < 0 || local >= static_cast<int>(mPicDecodeRepair.picTokenIds.size())) {
+                mDiskEmbedding->embedding(inputIds, dst);
+                dst = nullptr;
+                break;
+            }
+            const size_t srcOffset = static_cast<size_t>(local) * static_cast<size_t>(hiddenSize);
+            std::memcpy(dst + static_cast<size_t>(i) * static_cast<size_t>(hiddenSize),
+                        mPicDecodeRepair.picTokenEmbeddings.data() + srcOffset,
+                        static_cast<size_t>(hiddenSize) * sizeof(float));
+        }
+        if (dst != nullptr) {
+            const std::vector<int> decodeToken{inputIds.back()};
+            mDiskEmbedding->embedding(decodeToken,
+                                      dst + static_cast<size_t>(repairRows) * static_cast<size_t>(hiddenSize));
+        }
+    } else {
+        mDiskEmbedding->embedding(inputIds, dst);
+    }
+
+    if (mPleEmbedding && (!mPleInput.get() || seqLen == 1)) {
+        const int pleDim = mConfig->ple_embed_dim();
+        const float pleScale = mConfig->ple_embed_scale();
+        mPleInput = _Input({1, seqLen, pleDim}, NCHW);
+        mPleEmbedding->embedding(inputIds, mPleInput->writeMap<float>());
+        if (pleScale != 1.0f) {
+            mPleInput = mPleInput * _Scalar<float>(pleScale);
+        }
+    }
+    return cached;
+}
+
+VARP Llm::genDecodeRepairAttentionMask(const std::vector<int>& logicalIndices) {
+    int queryLen = static_cast<int>(logicalIndices.size());
+    int kvLen = 0;
+    bool fullCausalDecodeRepair = false;
+    if (mConfig->paged_attention()) {
+        auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        if (paged != nullptr && paged->pic_decode_recompute_active) {
+            queryLen = std::max(1, paged->pic_active_count);
+            kvLen = std::max(1, paged->logical_length);
+            fullCausalDecodeRepair = paged->full_causal_attention_mask;
+        }
+    }
+    if (fullCausalDecodeRepair) {
+        auto& cached = mPicDecodeRepair.causalMaskByLen[queryLen];
+        if (cached == nullptr) {
+            cached = _Input({1, 1, queryLen, 1}, NCHW, halide_type_of<float>());
+            auto ptr = cached->writeMap<float>();
+            std::fill(ptr, ptr + queryLen, 0.0f);
+        }
+        attentionMask = cached;
+        return attentionMask;
+    }
+    if (kvLen <= 0) {
+        kvLen = std::max(1, mContext->all_seq_len + 1);
+    }
+    attentionMask = _Input({1, 1, queryLen, kvLen}, NCHW, halide_type_of<float>());
+    auto ptr = attentionMask->writeMap<float>();
+    for (int q = 0; q < queryLen; ++q) {
+        const int logicalQ = q < static_cast<int>(logicalIndices.size()) ? logicalIndices[q] : q;
+        for (int k = 0; k < kvLen; ++k) {
+            ptr[q * kvLen + k] = k > logicalQ ? std::numeric_limits<float>::lowest() : 0.0f;
+        }
+    }
+    return attentionMask;
+}
+
+VARP Llm::genDecodeRepairPositionIds(const std::vector<int>& logicalIndices) {
+    const int seqLen = static_cast<int>(logicalIndices.size());
+    auto& cached = mPicDecodeRepair.positionIdsByLen[seqLen];
+    if (mConfig->is_mrope()) {
+        if (cached == nullptr) {
+            cached = _Input({3, seqLen}, NCHW, halide_type_of<int>());
+        }
+        positionIds = cached;
+        auto ptr = positionIds->writeMap<int>();
+        for (int i = 0; i < seqLen; ++i) {
+            ptr[0 * seqLen + i] = logicalIndices[i];
+            ptr[1 * seqLen + i] = logicalIndices[i];
+            ptr[2 * seqLen + i] = logicalIndices[i];
+        }
+        return positionIds;
+    }
+    if (cached == nullptr) {
+        cached = _Input({1, seqLen}, NCHW, halide_type_of<int>());
+    }
+    positionIds = cached;
+    auto ptr = positionIds->writeMap<int>();
+    for (int i = 0; i < seqLen; ++i) {
+        ptr[i] = logicalIndices[i];
+    }
+    return positionIds;
+}
+
+std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inputIds) {
+    if (!mPicDecodeRepair.enabled || inputIds.size() != 1 || !mConfig->paged_attention()) {
+        return forwardVec(inputIds);
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr || !paged->request_active) {
+        return forwardVec(inputIds);
+    }
+    const int decodeLogical = mContext->all_seq_len;
+    const auto& repairLogical = mPicDecodeRepair.pendingRepairLogicalIndices;
+    auto& logicalIndices = mPicDecodeRepair.scratchLogicalIndices;
+    auto& sparseTokenIds = mPicDecodeRepair.scratchSparseTokenIds;
+    logicalIndices.clear();
+    sparseTokenIds.clear();
+    for (int logical : repairLogical) {
+        const int local = logical - mPicDecodeRepair.picStart;
+        if (local < 0 || local >= mPicDecodeRepair.picTokenCount ||
+            local >= static_cast<int>(mPicDecodeRepair.picTokenIds.size())) {
+            continue;
+        }
+        logicalIndices.emplace_back(logical);
+        sparseTokenIds.emplace_back(mPicDecodeRepair.picTokenIds[static_cast<size_t>(local)]);
+    }
+    logicalIndices.emplace_back(decodeLogical);
+    sparseTokenIds.emplace_back(inputIds[0]);
+
+    if (!paged->beginPicDecodeRecomputeRows(logicalIndices, 0, 1)) {
+        MNN_ERROR("PIC decode repair failed to bind token-id sparse decode rows\n");
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
+    }
+    auto inputEmbeds = embeddingForPicDecodeRepair(sparseTokenIds);
+    if (inputEmbeds == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        paged->finishSparseQuery();
+        return {};
+    }
+    mMeta->add = logicalIndices.size();
+    auto repairMask = genDecodeRepairAttentionMask(logicalIndices);
+    auto repairPos = genDecodeRepairPositionIds(logicalIndices);
+    auto outputs = forwardRaw(inputEmbeds, repairMask, repairPos);
+    if (outputs.empty()) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        paged->finishSparseQuery();
+        return outputs;
+    }
+    for (auto output : outputs) {
+        if (output == nullptr || output->getInfo() == nullptr) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            paged->finishSparseQuery();
+            return outputs;
+        }
+    }
+    paged->finishSparseQuery();
+    const int consumedStepIdx = mPicDecodeRepair.stepIdx;
+    mPicDecodeRepair.stepLogicalIndices.emplace_back(repairLogical);
+    for (int logical : repairLogical) {
+        const int local = logical - mPicDecodeRepair.picStart;
+        if (local >= 0 && local < mPicDecodeRepair.picTokenCount) {
+            mPicDecodeRepair.repairedPicLocal[static_cast<size_t>(local)] = 1;
+        }
+    }
+    ++mPicDecodeRepair.stepIdx;
+    mPicDecodeRepair.pendingRepairLogicalIndices = selectPicDecodeRepairLogicalIndices();
+    mGenerateParam->input_embeds = inputEmbeds;
+    mGenerateParam->outputs = outputs;
+    mGenerateParam->validLogitSize = 0;
+    mGenerateParam->validLogitStart = 0;
+    if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+        std::fprintf(stderr,
+                     "PIC decode repair token-id forward step=%d normal_logical=%d sparse_rows=%d repair_rows=%d "
+                     "next_scheduled=%d\n",
+                     consumedStepIdx, decodeLogical, static_cast<int>(logicalIndices.size()),
+                     static_cast<int>(repairLogical.size()),
+                     static_cast<int>(mPicDecodeRepair.pendingRepairLogicalIndices.size()));
+        std::fflush(stderr);
+    }
+    return outputs;
+}
+
 void Llm::finishExternalPagedKVRequest() {
+    clearPicDecodeRepair();
     finishPagedRequestIfNeeded();
 }
 
@@ -1061,10 +1379,11 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return outputs;
     }
-    // Validate output VARP and readMap
+    // Validate output VARP. Only logits need to be materialized here; auxiliary
+    // hidden outputs are consumed lazily by speculative/decode-repair paths.
     for (size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
         auto o = outputs[outputIndex];
-        if(nullptr == o || nullptr == o->readMap<float>()) {
+        if(nullptr == o || nullptr == o->getInfo()) {
             if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
                 auto info = nullptr != o ? o->getInfo() : nullptr;
                 std::fprintf(stderr,
@@ -1077,6 +1396,16 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
             mContext->status = LlmStatus::INTERNAL_ERROR;
             return outputs;
         }
+    }
+    if (outputs[0]->readMap<float>() == nullptr) {
+        if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+            std::fprintf(stderr,
+                         "PIC forward debug logits materialize failed seq_len=%d add=%d all_seq=%d gen_seq=%d\n",
+                         seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len);
+            std::fflush(stderr);
+        }
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return outputs;
     }
     if (!mAsync) {
         ((MNN::Tensor*)(outputs[0]->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
@@ -1307,6 +1636,7 @@ void Llm::reset() {
     mMeta->remove = mMeta->previous;
     finishPagedRequestIfNeeded();
     mPicRecomputeBudget = nullptr;
+    clearPicDecodeRepair();
     mCachedPromptText.clear();
 }
 

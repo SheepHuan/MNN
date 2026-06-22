@@ -1,0 +1,12 @@
+*.sqlite*
+*tmp*
+shell_snapshots/
+.personality_migration
+installation_id
+sessions/
+attachments
+auth.json
+config.toml
+*.json
+*.jsonl
+.system/

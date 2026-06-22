@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 
 from .model_mapper import ModelMapper
-from .custom_op import FusedAttention, PagedAttention, MoE, FusedLinearAttention
+from .custom_op import FusedAttention, PagedAttention, MoE, FusedLinearAttention, PicSiluMul, PicGateUpWeightOnly, PicGateUpSiluWeightOnly
 
 def _pic_indices(indices):
     if indices is None:
@@ -20,6 +20,17 @@ def _pic_gather_rows(tensor, indices, dim):
     if dim < 0:
         dim += tensor.dim()
     return torch.index_select(tensor, dim, indices)
+
+def _is_silu_activation(act_fn):
+    if act_fn is None:
+        return False
+    if act_fn is torch.nn.SiLU or isinstance(act_fn, torch.nn.SiLU):
+        return True
+    if act_fn is F.silu or act_fn is torch.nn.functional.silu:
+        return True
+    name = getattr(act_fn, '__name__', '') or act_fn.__class__.__name__
+    name = name.lower()
+    return name in ('silu', 'swish', 'siluactivation') or 'silu' in name or 'swish' in name
 
 class Embedding(torch.nn.Module):
     def __init__(self, embed, config):
@@ -1097,12 +1108,30 @@ class Qwen3Expert(torch.nn.Module):
         return out
 
 class Mlp(torch.nn.Module):
-    def __init__(self, mlp, mapper, layer_id):
+    def __init__(self, mlp, mapper, layer_id, config=None):
         super().__init__()
         self.layer_id = layer_id
-        ModelMapper.do_map(self, mlp, mapper['mlp'])
+        dense_mlp_map = {
+            'gate_proj': 'gate_proj',
+            'up_proj': 'up_proj',
+            'down_proj': 'down_proj',
+            'act_fn': 'act_fn',
+        }
+        ModelMapper.do_map(self, mlp, mapper.get('mlp', dense_mlp_map))
+        self.pic_tiny_fusion = bool(getattr(config, 'pic_decode_tiny_fusion', False)) and _is_silu_activation(getattr(self, 'act_fn', None))
+        self.pic_gateup_fusion = self.pic_tiny_fusion and bool(getattr(config, 'pic_decode_gateup_fusion', False))
         self.is_moe = hasattr(self, 'experts')
         self.export_moe = False
+        if not self.is_moe:
+            self.pic_silu_mul = PicSiluMul(f'/layers.{layer_id}/mlp/PicSiluMul')
+            if self.pic_gateup_fusion:
+                self.pic_gate_up_silu = PicGateUpSiluWeightOnly(
+                    self.gate_proj.in_features,
+                    self.gate_proj.out_features,
+                    f'/layers.{layer_id}/mlp/gate_proj/Linear',
+                    f'/layers.{layer_id}/mlp/up_proj/Linear',
+                    f'/layers.{layer_id}/mlp/PicGateUpSiluWeightOnly')
+            return
         self.custom_moe = MoE(self.num_experts, self.top_k, layer_id)
         if isinstance(self.experts, torch.nn.ModuleList):
             self.moe_type = 'qwen3_moe'
@@ -1153,7 +1182,17 @@ class Mlp(torch.nn.Module):
     def forward(self, hidden_states: torch.Tensor):
         if not self.is_moe:
             # general Mlp
-            return self.down_proj(self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
+            if self.pic_gateup_fusion:
+                hidden_states = self.pic_gate_up_silu(hidden_states)
+            elif self.pic_tiny_fusion:
+                gate = self.gate_proj(hidden_states)
+                up = self.up_proj(hidden_states)
+                hidden_states = self.pic_silu_mul(gate, up)
+            else:
+                gate = self.gate_proj(hidden_states)
+                up = self.up_proj(hidden_states)
+                hidden_states = self.act_fn(gate) * up
+            return self.down_proj(hidden_states)
 
         # MoE Mlp
         batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -1264,8 +1303,8 @@ class Decoder(torch.nn.Module):
         if mapper is None:
             mapper = config.model_map
         ModelMapper.do_map(self, decoder, mapper['decoder'])
-        if 'mlp' in mapper and hasattr(self.mlp, 'experts'):
-            self.mlp = Mlp(self.mlp, mapper, layer_id)
+        if hasattr(self, 'mlp') and (hasattr(self.mlp, 'experts') or bool(getattr(config, 'pic_decode_tiny_fusion', False))):
+            self.mlp = Mlp(self.mlp, mapper, layer_id, config)
 
         # gemma4 MoE: router and experts are at decoder layer level (parallel to dense MLP)
         self.has_gemma4_moe = hasattr(self, 'experts') and self.experts is not None

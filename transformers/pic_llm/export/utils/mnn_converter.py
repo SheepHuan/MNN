@@ -399,11 +399,561 @@ class MNNConverter:
             return self.rebuild_attnention(op, graph, op_type)
         if op_type == 'FusedLinearAttention':
             return self.rebuild_linear_attnention(op, graph)
+        if op_type == 'PicGateUpWeightOnly':
+            return self.rebuild_pic_gate_up_weight_only(op, graph)
+        if op_type == 'PicGateUpSiluWeightOnly':
+            return self.rebuild_pic_gate_up_silu_weight_only(op, graph)
+        if op_type == 'PicSiluMul':
+            return self.rebuild_pic_silu_mul(op, graph)
         if op_type == "LayerNorm":
             return self.rebuild_layernorm(op, graph)
         if op_type == 'MoE':
             return self.rebuild_moe(op, graph)
         return None
+
+    @staticmethod
+    def _attr_value(op, key, default=None):
+        for attr in op.get('main', {}).get('attr', []):
+            if attr.get('key') == key:
+                if 's' in attr and attr.get('s') not in (None, ''):
+                    return attr.get('s')
+                if 'i' in attr:
+                    return attr.get('i')
+                if 'b' in attr:
+                    return attr.get('b')
+                if 'f' in attr:
+                    return attr.get('f')
+        return default
+
+    def _linear_quant_settings(self, name, is_lm=False):
+        quant_bit = self.args.quant_bit
+        quant_block = self.args.quant_block
+        if is_lm:
+            quant_bit = self.args.lm_quant_bit
+            quant_block = self.args.lm_quant_block
+        quant_sym = self.args.sym
+        if self.args.quant_config is not None:
+            with open(self.args.quant_config, 'r') as f:
+                quant_config = json.load(f)
+            if name in quant_config:
+                op_config = quant_config[name]
+                quant_bit = op_config.get('bits', quant_bit)
+                quant_block = op_config.get('block_size', quant_block)
+                quant_sym = op_config.get('symmetric', quant_sym)
+        return quant_bit, quant_block, quant_sym
+
+    def _linear_quant_plan(self, name, ic, oc):
+        linear = self.weight_ops[name]
+        assert(linear.in_features == ic and linear.out_features == oc)
+
+        quant_bit, quant_block, quant_sym = self._linear_quant_settings(name)
+        block_size = ic if quant_block == 0 else quant_block
+        external, q_min, shape_int32, header_len = self.build_weight(linear, quant_bit, quant_block, quant_sym)
+        if quant_bit == 16:
+            read_type = 0
+            a_min = 0
+        else:
+            if quant_sym:
+                read_type = 0
+                a_min = 0
+            else:
+                read_type = oc * (ic // block_size)
+                a_min = q_min
+        return {
+            'external': external,
+            'q_min': q_min,
+            'shape_int32': shape_int32,
+            'quant_bit': quant_bit,
+            'quant_block': quant_block,
+            'read_type': read_type,
+            'a_min': a_min,
+            'has_bias': linear.bias is not None,
+            'header_len': header_len,
+        }
+
+    @staticmethod
+    def _external_to_string(external):
+        return ','.join(str(int(v)) for v in external)
+
+    def _pic_gate_up_conv_attrs(self, prefix, name, ic, oc, plan):
+        attrs = [
+            {"key": f"{prefix}_name", "s": name},
+            {"key": f"{prefix}_external", "s": self._external_to_string(plan['external'])},
+            {"key": f"{prefix}_in_features", "i": int(ic)},
+            {"key": f"{prefix}_out_features", "i": int(oc)},
+            {"key": f"{prefix}_quant_bit", "i": int(plan['quant_bit'])},
+            {"key": f"{prefix}_quant_block", "i": int(plan['quant_block'])},
+            {"key": f"{prefix}_a_min", "i": int(plan['a_min'])},
+            {"key": f"{prefix}_read_type", "i": int(plan['read_type'])},
+            {"key": f"{prefix}_shape_int32", "i": int(bool(plan['shape_int32']))},
+            {"key": f"{prefix}_has_bias", "i": int(bool(plan['has_bias']))},
+        ]
+        return attrs
+
+    def _pic_gate_up_concat_plan(self, gate_name, up_name, ic, oc):
+        gate = self.weight_ops[gate_name]
+        up = self.weight_ops[up_name]
+        assert(gate.in_features == ic and gate.out_features == oc)
+        assert(up.in_features == ic and up.out_features == oc)
+        gate_settings = self._linear_quant_settings(gate_name)
+        up_settings = self._linear_quant_settings(up_name)
+        if gate_settings != up_settings:
+            return None
+        if (gate.bias is None) != (up.bias is None):
+            return None
+
+        class _TensorHolder:
+            def __init__(self, data):
+                self.data = data
+
+        class _LinearHolder:
+            pass
+
+        combined = _LinearHolder()
+        combined.in_features = ic
+        combined.out_features = oc * 2
+        combined.weight = _TensorHolder(torch.cat([gate.weight.data, up.weight.data], dim=0))
+        if gate.bias is not None:
+            combined.bias = _TensorHolder(torch.cat([gate.bias.data, up.bias.data], dim=0))
+        else:
+            combined.bias = None
+
+        quant_bit, quant_block, quant_sym = gate_settings
+        block_size = ic if quant_block == 0 else quant_block
+        external, q_min, shape_int32, header_len = self.build_weight(combined, quant_bit, quant_block, quant_sym)
+        if quant_bit == 16:
+            read_type = 0
+            a_min = 0
+        else:
+            if quant_sym:
+                read_type = 0
+                a_min = 0
+            else:
+                read_type = combined.out_features * (ic // block_size)
+                a_min = q_min
+        return {
+            'external': external,
+            'q_min': q_min,
+            'shape_int32': shape_int32,
+            'quant_bit': quant_bit,
+            'quant_block': quant_block,
+            'read_type': read_type,
+            'a_min': a_min,
+            'has_bias': combined.bias is not None,
+            'header_len': header_len,
+        }
+
+    def rebuild_pic_gate_up_weight_only(self, op, graph):
+        name = self._attr_value(op, 'name', 'PicGateUpWeightOnly')
+        gate_name = self._attr_value(op, 'gate_name')
+        up_name = self._attr_value(op, 'up_name')
+        ic = int(self._attr_value(op, 'in_features', 0))
+        oc = int(self._attr_value(op, 'out_features', 0))
+        if not gate_name or not up_name or ic <= 0 or oc <= 0:
+            raise RuntimeError(f'Invalid PicGateUpWeightOnly attrs: {op}')
+
+        origin_input = op['inputIndexes']
+        origin_outputs = op['outputIndexes']
+        if len(origin_outputs) != 2:
+            raise RuntimeError(f'PicGateUpWeightOnly expects two outputs, got {len(origin_outputs)}')
+
+        concat_plan = self._pic_gate_up_concat_plan(gate_name, up_name, ic, oc)
+        if concat_plan is not None:
+            pre_reshape_name = f'{name}/pre_reshape'
+            pre_convert_name = f'{name}/pre_convert'
+            concat_conv_name = f'{name}/concat_conv'
+            concat_post_convert_name = f'{name}/concat_post_convert'
+            split_name = f'{name}/split'
+            gate_post_reshape_name = f'{name}/gate_post_reshape'
+            up_post_reshape_name = f'{name}/up_post_reshape'
+
+            pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+            pre_convert_output = self.build_tensor(graph, pre_convert_name)
+            concat_conv_output = self.build_tensor(graph, concat_conv_name)
+            concat_post_convert_output = self.build_tensor(graph, concat_post_convert_name)
+            gate_split_output = self.build_tensor(graph, f'{name}/gate_split')
+            up_split_output = self.build_tensor(graph, f'{name}/up_split')
+
+            pre_reshape = {
+                "name": pre_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": origin_input,
+                "outputIndexes": pre_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [-1, ic, 1, 1],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            pre_convert = {
+                "name": pre_convert_name,
+                "inputIndexes": pre_reshape_output,
+                "outputIndexes": pre_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NCHW",
+                    "dest": "NC4HW4"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            quant_bit = concat_plan['quant_bit']
+            quant_block = concat_plan['quant_block']
+            block_size = ic if quant_block == 0 else quant_block
+            if quant_bit == 16:
+                quanParameter = { "type": 3 }
+            else:
+                if self.args.sym:
+                    aMin = 0
+                    readType = 0
+                else:
+                    aMin = concat_plan['a_min']
+                    readType = (oc * 2) * (ic // block_size)
+                quanParameter = {
+                    "quantScale": 1.0, "scaleIn": 0.0, "scaleOut": 0.0,
+                    "useInt32": False, "has_scaleInt": False, "shapeInt32": concat_plan['shape_int32'],
+                    "type": 1, "aMaxOrBits": quant_bit, "aMin": aMin,
+                    "readType": readType, "weightSize": 0
+                }
+            concat_conv = {
+                "name": concat_conv_name,
+                "inputIndexes": pre_convert_output,
+                "outputIndexes": concat_conv_output,
+                "type": "Convolution",
+                "main_type": "Convolution2D",
+                "main": {
+                    'common': {
+                        'dilateX': 1, 'dilateY': 1, 'strideX': 1, 'strideY': 1,
+                        'kernelX': 1, 'kernelY': 1, 'padX': 0, 'padY': 0, 'group': 1,
+                        'outputCount': oc * 2, 'relu': False, 'padMode': 'CAFFE',
+                        'relu6': False, 'inputCount': ic, 'hasOutputShape': False
+                    },
+                    "quanParameter": quanParameter,
+                    "external": concat_plan['external']
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            concat_post_convert = {
+                "name": concat_post_convert_name,
+                "inputIndexes": concat_conv_output,
+                "outputIndexes": concat_post_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NC4HW4",
+                    "dest": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            split = {
+                "name": split_name,
+                "inputIndexes": concat_post_convert_output,
+                "outputIndexes": gate_split_output + up_split_output,
+                "type": "Slice",
+                "main_type": "Slice",
+                "main": {
+                    "axis": 1,
+                    "slicePoints": [oc],
+                    "sourceType": "CAFFE"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            gate_post_reshape = {
+                "name": gate_post_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": gate_split_output,
+                "outputIndexes": [origin_outputs[0]],
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            up_post_reshape = {
+                "name": up_post_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": up_split_output,
+                "outputIndexes": [origin_outputs[1]],
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            return [
+                pre_reshape, pre_convert, concat_conv, concat_post_convert,
+                split, gate_post_reshape, up_post_reshape
+            ]
+
+        gate_plan = self._linear_quant_plan(gate_name, ic, oc)
+        up_plan = self._linear_quant_plan(up_name, ic, oc)
+
+        pre_reshape_name = f'{name}/pre_reshape'
+        pre_convert_name = f'{name}/pre_convert'
+        gate_conv_name = f'{name}/gate_conv'
+        up_conv_name = f'{name}/up_conv'
+        gate_post_convert_name = f'{name}/gate_post_convert'
+        up_post_convert_name = f'{name}/up_post_convert'
+        gate_post_reshape_name = f'{name}/gate_post_reshape'
+        up_post_reshape_name = f'{name}/up_post_reshape'
+
+        pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+        pre_convert_output = self.build_tensor(graph, pre_convert_name)
+        gate_conv_output = self.build_tensor(graph, gate_conv_name)
+        up_conv_output = self.build_tensor(graph, up_conv_name)
+        gate_post_convert_output = self.build_tensor(graph, gate_post_convert_name)
+        up_post_convert_output = self.build_tensor(graph, up_post_convert_name)
+
+        pre_reshape = {
+            "name": pre_reshape_name,
+            "type": "Reshape",
+            "inputIndexes": origin_input,
+            "outputIndexes": pre_reshape_output,
+            "main_type": "Reshape",
+            "main": {
+                "dims": [-1, ic, 1, 1],
+                "dimType": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        pre_convert = {
+            "name": pre_convert_name,
+            "inputIndexes": pre_reshape_output,
+            "outputIndexes": pre_convert_output,
+            "type": "ConvertTensor",
+            "main_type": "TensorConvertInfo",
+            "main": {
+                "source": "NCHW",
+                "dest": "NC4HW4"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        attrs = [
+            {"key": "name", "s": name},
+            {"key": "in_features", "i": ic},
+            {"key": "out_features", "i": oc},
+        ]
+        attrs += self._pic_gate_up_conv_attrs('gate', gate_name, ic, oc, gate_plan)
+        attrs += self._pic_gate_up_conv_attrs('up', up_name, ic, oc, up_plan)
+        fused = {
+            "inputIndexes": pre_convert_output,
+            "main_type": "Extra",
+            "main": {
+                "type": "PicGateUpWeightOnly",
+                "engine": "MNN",
+                "attr": attrs
+            },
+            "name": name,
+            "outputIndexes": gate_conv_output + up_conv_output,
+            "type": "Extra",
+            "defaultDimentionFormat": "NHWC"
+        }
+        gate_post_convert = {
+            "name": gate_post_convert_name,
+            "inputIndexes": gate_conv_output,
+            "outputIndexes": gate_post_convert_output,
+            "type": "ConvertTensor",
+            "main_type": "TensorConvertInfo",
+            "main": {
+                "source": "NC4HW4",
+                "dest": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        up_post_convert = {
+            "name": up_post_convert_name,
+            "inputIndexes": up_conv_output,
+            "outputIndexes": up_post_convert_output,
+            "type": "ConvertTensor",
+            "main_type": "TensorConvertInfo",
+            "main": {
+                "source": "NC4HW4",
+                "dest": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        gate_post_reshape = {
+            "name": gate_post_reshape_name,
+            "type": "Reshape",
+            "inputIndexes": gate_post_convert_output,
+            "outputIndexes": [origin_outputs[0]],
+            "main_type": "Reshape",
+            "main": {
+                "dims": [1, -1, oc],
+                "dimType": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        up_post_reshape = {
+            "name": up_post_reshape_name,
+            "type": "Reshape",
+            "inputIndexes": up_post_convert_output,
+            "outputIndexes": [origin_outputs[1]],
+            "main_type": "Reshape",
+            "main": {
+                "dims": [1, -1, oc],
+                "dimType": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        return [
+            pre_reshape, pre_convert, fused,
+            gate_post_convert, gate_post_reshape,
+            up_post_convert, up_post_reshape
+        ]
+
+    def rebuild_pic_gate_up_silu_weight_only(self, op, graph):
+        name = self._attr_value(op, 'name', 'PicGateUpSiluWeightOnly')
+        gate_name = self._attr_value(op, 'gate_name')
+        up_name = self._attr_value(op, 'up_name')
+        ic = int(self._attr_value(op, 'in_features', 0))
+        oc = int(self._attr_value(op, 'out_features', 0))
+        if not gate_name or not up_name or ic <= 0 or oc <= 0:
+            raise RuntimeError(f'Invalid PicGateUpSiluWeightOnly attrs: {op}')
+
+        origin_input = op['inputIndexes']
+        origin_outputs = op['outputIndexes']
+        if len(origin_outputs) != 1:
+            raise RuntimeError(f'PicGateUpSiluWeightOnly expects one output, got {len(origin_outputs)}')
+
+        concat_plan = self._pic_gate_up_concat_plan(gate_name, up_name, ic, oc)
+        if concat_plan is None:
+            gate_output = self.build_tensor(graph, f'{name}/fallback_gate')
+            up_output = self.build_tensor(graph, f'{name}/fallback_up')
+            gateup_op = copy.deepcopy(op)
+            gateup_op['main']['type'] = 'PicGateUpWeightOnly'
+            gateup_op['outputIndexes'] = gate_output + up_output
+            silu_op = {
+                "inputIndexes": gate_output + up_output,
+                "main_type": "Extra",
+                "main": {
+                    "type": "PicSiluMul",
+                    "engine": "MNN",
+                    "attr": [
+                        {"key": "name", "s": f'{name}/fallback_silu'}
+                    ]
+                },
+                "name": f'{name}/fallback_silu',
+                "outputIndexes": origin_outputs,
+                "type": "Extra",
+                "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
+            }
+            return self.rebuild_pic_gate_up_weight_only(gateup_op, graph) + [silu_op]
+
+        pre_reshape_name = f'{name}/pre_reshape'
+        pre_convert_name = f'{name}/pre_convert'
+        concat_conv_name = f'{name}/concat_conv'
+        packed_silu_name = f'{name}/packed_silu'
+
+        pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+        pre_convert_output = self.build_tensor(graph, pre_convert_name)
+        concat_conv_output = self.build_tensor(graph, concat_conv_name)
+
+        pre_reshape = {
+            "name": pre_reshape_name,
+            "type": "Reshape",
+            "inputIndexes": origin_input,
+            "outputIndexes": pre_reshape_output,
+            "main_type": "Reshape",
+            "main": {
+                "dims": [-1, ic, 1, 1],
+                "dimType": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        pre_convert = {
+            "name": pre_convert_name,
+            "inputIndexes": pre_reshape_output,
+            "outputIndexes": pre_convert_output,
+            "type": "ConvertTensor",
+            "main_type": "TensorConvertInfo",
+            "main": {
+                "source": "NCHW",
+                "dest": "NC4HW4"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        quant_bit = concat_plan['quant_bit']
+        quant_block = concat_plan['quant_block']
+        block_size = ic if quant_block == 0 else quant_block
+        if quant_bit == 16:
+            quanParameter = { "type": 3 }
+        else:
+            if self.args.sym:
+                aMin = 0
+                readType = 0
+            else:
+                aMin = concat_plan['a_min']
+                readType = (oc * 2) * (ic // block_size)
+            quanParameter = {
+                "quantScale": 1.0, "scaleIn": 0.0, "scaleOut": 0.0,
+                "useInt32": False, "has_scaleInt": False, "shapeInt32": concat_plan['shape_int32'],
+                "type": 1, "aMaxOrBits": quant_bit, "aMin": aMin,
+                "readType": readType, "weightSize": 0
+            }
+        concat_conv = {
+            "name": concat_conv_name,
+            "inputIndexes": pre_convert_output,
+            "outputIndexes": concat_conv_output,
+            "type": "Convolution",
+            "main_type": "Convolution2D",
+            "main": {
+                'common': {
+                    'dilateX': 1, 'dilateY': 1, 'strideX': 1, 'strideY': 1,
+                    'kernelX': 1, 'kernelY': 1, 'padX': 0, 'padY': 0, 'group': 1,
+                    'outputCount': oc * 2, 'relu': False, 'padMode': 'CAFFE',
+                    'relu6': False, 'inputCount': ic, 'hasOutputShape': False
+                },
+                "quanParameter": quanParameter,
+                "external": concat_plan['external']
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        packed_silu = {
+            "name": packed_silu_name,
+            "inputIndexes": concat_conv_output,
+            "outputIndexes": origin_outputs,
+            "type": "Extra",
+            "main_type": "Extra",
+            "main": {
+                "type": "PicPackedSiluMul",
+                "engine": "MNN",
+                "attr": [
+                    {"key": "name", "s": packed_silu_name},
+                    {"key": "out_features", "i": oc},
+                    {"key": "packed_input_nc4", "i": 1}
+                ]
+            },
+            "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
+        }
+        return [
+            pre_reshape, pre_convert, concat_conv, packed_silu
+        ]
+
+    def rebuild_pic_silu_mul(self, op, graph):
+        name = op.get('name', 'PicSiluMul')
+        for attr in op.get('main', {}).get('attr', []):
+            if attr.get('key') == 'name':
+                name = attr.get('s', name)
+                break
+        return [{
+            "inputIndexes": op['inputIndexes'],
+            "main_type": "Extra",
+            "main": {
+                "type": "PicSiluMul",
+                "engine": "MNN",
+                "attr": [
+                    {"key": "name", "s": name}
+                ]
+            },
+            "name": name,
+            "outputIndexes": op['outputIndexes'],
+            "type": "Extra",
+            "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
+        }]
 
     def rebuild_moe(self, op, graph):
         moe = copy.deepcopy(op)

@@ -72,6 +72,9 @@ class LlmModel(PreTrainedModel):
             config.paged_kv_max_tokens = getattr(args, 'paged_kv_max_tokens', 0)
             config.pic_recompute_budget = bool(getattr(args, 'pic_recompute_budget', True))
             config.pic_recompute_score_layer_idx = max(0, getattr(args, 'pic_recompute_score_layer_idx', 1))
+            config.pic_decode_repair_outputs = bool(getattr(args, 'pic_decode_repair_outputs', False))
+            config.pic_decode_tiny_fusion = bool(getattr(args, 'pic_decode_tiny_fusion', False))
+            config.pic_decode_gateup_fusion = bool(getattr(args, 'pic_decode_gateup_fusion', False))
         model_type = config.model_type
         model_class = cls.get_model_class(model_type)
 
@@ -361,6 +364,7 @@ class LlmModel(PreTrainedModel):
         )
         pic_score_layer_idx = int(getattr(self.config, 'pic_recompute_score_layer_idx', 1))
         active_indices = None
+        pic_decode_repair_hidden_states = None
 
         # KV sharing cache (gemma4: layers 15-34 share KV with layers 13/14)
         shared_kv_cache = {}
@@ -394,6 +398,8 @@ class LlmModel(PreTrainedModel):
                 if active_indices is not None and i > pic_score_layer_idx:
                     layer_per_input = _pic_gather_rows(layer_per_input, active_indices, 1)
                 self.blocks[i]._per_layer_input = layer_per_input
+            if bool(getattr(self.config, 'pic_decode_repair_outputs', False)) and i == pic_score_layer_idx:
+                pic_decode_repair_hidden_states = hidden_states
             block_result = self.blocks[i](
                 hidden_states,
                 layer_rotary,
@@ -438,6 +444,12 @@ class LlmModel(PreTrainedModel):
         if self.args and self.args.eagle_path is not None:
             final_layernorm = torch.cat(eagle_hidden_states, dim=-1)
 
+        if bool(getattr(self.config, 'pic_decode_repair_outputs', False)):
+            if pic_decode_repair_hidden_states is None:
+                pic_decode_repair_hidden_states = hidden_states
+            if talker_embeds is not None:
+                return logits, final_layernorm, talker_embeds, pic_decode_repair_hidden_states
+            return logits, final_layernorm, pic_decode_repair_hidden_states
         return logits, final_layernorm, talker_embeds
 
     def get_attention_mask(self, seq_len: int, new_tokens: int = 0):

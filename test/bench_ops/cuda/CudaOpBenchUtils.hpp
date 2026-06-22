@@ -158,13 +158,13 @@ public:
         return mType == MNN_FORWARD_CUDA;
     }
 
-    Tensor* tensor(const std::vector<int>& shape, Tensor::DimensionType dim = Tensor::CAFFE) {
+    Tensor* tensor(const std::vector<int>& shape, Tensor::DimensionType dim = Tensor::CAFFE, bool zero = true) {
         auto t = std::shared_ptr<Tensor>(Tensor::createDevice<float>(shape, dim));
         if (!t || !mBackend->onAcquireBuffer(t.get(), Backend::STATIC)) {
             MNN_ERROR("failed to allocate tensor for backend %d\n", mType);
             return nullptr;
         }
-        if (!zeroTensor(t.get())) {
+        if (zero && !zeroTensor(t.get())) {
             return nullptr;
         }
         mTensors.emplace_back(std::move(t));

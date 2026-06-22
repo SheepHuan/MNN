@@ -575,7 +575,7 @@ static __device__ __forceinline__ float pagedWarpMax(float v) {
     for (int offset = 16; offset > 0; offset >>= 1) {
         v = fmaxf(v, __shfl_down_sync(0xffffffff, v, offset));
     }
-    return v;
+    return __shfl_sync(0xffffffff, v, 0);
 }
 
 static __device__ __forceinline__ float pagedWarpSum(float v) {
@@ -583,7 +583,7 @@ static __device__ __forceinline__ float pagedWarpSum(float v) {
     for (int offset = 16; offset > 0; offset >>= 1) {
         v += __shfl_down_sync(0xffffffff, v, offset);
     }
-    return v;
+    return __shfl_sync(0xffffffff, v, 0);
 }
 
 template <typename T, int Q_TILE, int K_TILE>
@@ -2069,6 +2069,33 @@ static ErrorCode emitIdentityIndicesCUDA(int count, Tensor* output) {
     return NO_ERROR;
 }
 
+static ErrorCode emitDecodeRecomputeIndicesCUDA(PagedKVMeta* meta, int count, Tensor* output) {
+    if (output == nullptr) {
+        return NO_ERROR;
+    }
+    count = std::min(count, static_cast<int>(output->elementSize()));
+    if (count <= 0) {
+        return NO_ERROR;
+    }
+    if (meta == nullptr || static_cast<int>(meta->sparse_query_logical_indices.size()) < count) {
+        return INVALID_VALUE;
+    }
+    return emitIdentityIndicesCUDA(count, output);
+}
+
+static uint64_t sparseLogicalWorkCUDA(const PagedKVMeta* meta, int activeLen, int kvLen) {
+    if (meta == nullptr || activeLen <= 0 || kvLen <= 0 ||
+        static_cast<int>(meta->sparse_query_logical_indices.size()) < activeLen) {
+        return 0;
+    }
+    uint64_t work = 0;
+    for (int i = 0; i < activeLen; ++i) {
+        const int logical = meta->sparse_query_logical_indices[static_cast<size_t>(i)];
+        work += static_cast<uint64_t>(std::max(0, std::min(kvLen, logical + 1)));
+    }
+    return work;
+}
+
 static bool writeShapeFile(const std::string& path, int batch, int kvHeads, int headDim, int tokenCount, int bytes,
                            const KVMeta* meta) {
     std::ofstream os(path, std::ios::binary);
@@ -2235,6 +2262,7 @@ ErrorCode CUDAPagedAttention::ensureCache(int maxSlots, int batch, int kvHeads, 
     mCache->precision = mPrecision;
     mCache->slotTableVersion = -1;
     mCache->slotTableLength = 0;
+    mCache->sparseQueryHost.clear();
     return NO_ERROR;
 }
 
@@ -2298,6 +2326,35 @@ ErrorCode CUDAPagedAttention::syncSlotTable(int requiredSlots) {
     return NO_ERROR;
 }
 
+ErrorCode CUDAPagedAttention::syncSparseQuery(int attnLen, const int** devicePtr) {
+    if (devicePtr != nullptr) {
+        *devicePtr = nullptr;
+    }
+    if (attnLen <= 0 || mMeta == nullptr || !mMeta->sparse_query_active) {
+        return NO_ERROR;
+    }
+    if (!mCache || !mCache->sparseQuery || attnLen > mCache->maxSlots) {
+        return OUT_OF_MEMORY;
+    }
+    if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+        return INVALID_VALUE;
+    }
+    const int* hostPtr = mMeta->sparse_query_logical_indices.data();
+    if (static_cast<int>(mCache->sparseQueryHost.size()) != attnLen ||
+        !std::equal(mCache->sparseQueryHost.begin(), mCache->sparseQueryHost.end(), hostPtr)) {
+        if (cudaMemcpy(pagedDevPtr<int>(mCache->sparseQuery.get()), hostPtr,
+                       static_cast<size_t>(attnLen) * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) {
+            mCache->sparseQueryHost.clear();
+            return INVALID_VALUE;
+        }
+        mCache->sparseQueryHost.assign(hostPtr, hostPtr + attnLen);
+    }
+    if (devicePtr != nullptr) {
+        *devicePtr = pagedDevPtr<int>(mCache->sparseQuery.get());
+    }
+    return NO_ERROR;
+}
+
 ErrorCode CUDAPagedAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
     if (inputs.size() < 3 || outputs.empty()) {
         return INVALID_VALUE;
@@ -2341,20 +2398,17 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         mMeta->previous > 0 && !mMeta->cacheblend_score_active && !mMeta->pic_graph_active_plan_ready;
     const bool picRuntimeActive = mMeta != nullptr &&
         (mMeta->sparse_query_active || mMeta->cacheblend_score_active || mMeta->pic_graph_active_plan_ready);
-    const int effectivePicAttentionMode = (decodeStep || !picRuntimeActive) ? 0 : mPicAttentionMode;
-    if (!decodeStep && mMeta != nullptr && mMeta->sparseQueryBlockedBeforeLayer(layerIndex)) {
-        MNN_ERROR("CUDAPagedAttention layer %d received sparse query before sparse_start_layer=%d. "
-                  "Run full prompt until the score layer, crop active hidden states, then resume sparse.\n",
-                  layerIndex, mMeta->sparse_query_start_layer_idx);
-        return INVALID_VALUE;
-    }
+    const bool sparseBlockedBeforeStart =
+        !decodeStep && mMeta != nullptr && mMeta->sparseQueryBlockedBeforeLayer(layerIndex);
+    const int effectivePicAttentionMode = (decodeStep || !picRuntimeActive || sparseBlockedBeforeStart) ? 0 : mPicAttentionMode;
 
     int reverse = reverseCount(mMeta);
     int baseLogical = 0;
     int kvWriteLen = mNewKvSeqLen;
     int attnLen = output->length(1);
-    bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
-    const bool scoreAttention = effectivePicAttentionMode == 1;
+    bool sparseQuery = mMeta != nullptr && !sparseBlockedBeforeStart && mMeta->sparseQueryActiveForLayer(layerIndex);
+    const bool picDecodeRecompute = mMeta != nullptr && mMeta->pic_decode_recompute_active;
+    const bool scoreAttention = effectivePicAttentionMode == 1 && !picDecodeRecompute;
     if (scoreAttention) {
         sparseQuery = false;
     }
@@ -2395,9 +2449,10 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     }
     const int* sparseQueryDevice = nullptr;
     if (sparseQuery) {
-        cudaMemcpy(pagedDevPtr<int>(mCache->sparseQuery.get()), mMeta->sparse_query_logical_indices.data(),
-                   attnLen * sizeof(int), cudaMemcpyHostToDevice);
-        sparseQueryDevice = pagedDevPtr<int>(mCache->sparseQuery.get());
+        err = syncSparseQuery(attnLen, &sparseQueryDevice);
+        if (err != NO_ERROR) {
+            return err;
+        }
     }
 
     cudaStream_t stream = 0;
@@ -2448,8 +2503,9 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         return cacheBlendScore;
     }
 
-    if (scoreAttention && outputs.size() > 1) {
-        err = emitActiveIndicesCUDA(mMeta, layerIndex, kvLen, outputs[1]);
+    if ((scoreAttention || picDecodeRecompute) && outputs.size() > 1) {
+        err = picDecodeRecompute ? emitDecodeRecomputeIndicesCUDA(mMeta, attnLen, outputs[1])
+                                 : emitActiveIndicesCUDA(mMeta, layerIndex, kvLen, outputs[1]);
         if (err != NO_ERROR) {
             return err;
         }
@@ -2460,12 +2516,10 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
             }
             baseLogical = 0;
             kvLen = std::max(0, mMeta->logical_length);
-            if (cudaMemcpy(pagedDevPtr<int>(mCache->sparseQuery.get()),
-                           mMeta->sparse_query_logical_indices.data(), attnLen * sizeof(int),
-                           cudaMemcpyHostToDevice) != cudaSuccess) {
-                return INVALID_VALUE;
+            err = syncSparseQuery(attnLen, &sparseQueryDevice);
+            if (err != NO_ERROR) {
+                return err;
             }
-            sparseQueryDevice = pagedDevPtr<int>(mCache->sparseQuery.get());
         }
     } else if (outputs.size() > 1) {
         err = emitIdentityIndicesCUDA(attnLen, outputs[1]);
@@ -2572,34 +2626,53 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     const uint64_t attentionStartUs = profile ? nowUs() : 0;
     const bool benchForceV2Kernel = envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
     const bool queryRowsAreFull = sparseQuery && mQuerySeqLen > attnLen;
-    if (benchForceV2Kernel) {
+    const bool fullCausalMask = mMeta != nullptr && mMeta->full_causal_attention_mask;
+    const bool repairDecodeCausal = picDecodeRecompute && sparseQuery && fullCausalMask;
+    const bool ordinaryDecodeCausal = decodeStep && !sparseQuery && !picDecodeRecompute && fullCausalMask &&
+        attnLen == 1 && mQuerySeqLen == 1 && mNewKvSeqLen == 1;
+    if (benchForceV2Kernel || picDecodeRecompute || ordinaryDecodeCausal) {
         const int v2BlockSize = 128;
         const int v2SharedBytes = (mHeadDim * 2 + v2BlockSize * 2) * static_cast<int>(sizeof(float));
-        ScopedNvtxRange v2Nvtx(nvtxLayerRangeName("paged_attention_v2_row_compressed_mask", layerIndex,
+        const bool skipCausalMask = fullCausalMask;
+        const bool decodeCausalAttention = repairDecodeCausal || ordinaryDecodeCausal;
+        const char* v2OpName = decodeCausalAttention ? "decode_causal_attention" : "v2_row_compressed_mask";
+        const float* v2Mask = (!skipCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
+        const int v2MaskElements = v2Mask != nullptr ? maskElements : 0;
+        ScopedNvtxRange v2Nvtx(nvtxLayerRangeName(v2OpName, layerIndex,
                                                   mQuerySeqLen, attnLen, kvLen), nvtx);
         dim3 v2Grid(attnLen, mNumHead, mBatch);
         if (mPrecision == 4) {
             pagedAttentionRowCompressedMaskKernel<float><<<v2Grid, v2BlockSize, v2SharedBytes, stream>>>(
                 pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()),
-                pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output),
-                useMask ? pagedDevPtr<float>(mask) : nullptr, pagedDevPtr<int>(mCache->slotTable.get()),
-                maskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                pagedDevPtr<float>(mCache->value.get()), pagedDevPtr<float>(output), v2Mask,
+                pagedDevPtr<int>(mCache->slotTable.get()),
+                v2MaskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
                 baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
         } else {
             pagedAttentionRowCompressedMaskKernel<half><<<v2Grid, v2BlockSize, v2SharedBytes, stream>>>(
                 pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()),
-                pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output),
-                useMask ? pagedDevPtr<float>(mask) : nullptr, pagedDevPtr<int>(mCache->slotTable.get()),
-                maskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<half>(output), v2Mask,
+                pagedDevPtr<int>(mCache->slotTable.get()),
+                v2MaskElements, mBatch, mQuerySeqLen, attnLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
                 baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice, queryRowsAreFull ? 1 : 0);
         }
         checkKernelErrors;
         if (profile) {
             cudaDeviceSynchronize();
-            MNN_PRINT("CUDAPagedAttention profile op=v2_row_compressed_mask layer=%d query=%d attn=%d "
-                      "kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d us=%llu\n",
-                      layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
-                      queryRowsAreFull ? 1 : 0, maskElements,
+            const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+            uint64_t causalWork = denseWork;
+            if (repairDecodeCausal) {
+                causalWork = sparseLogicalWorkCUDA(mMeta, attnLen, kvLen);
+            } else if (ordinaryDecodeCausal) {
+                causalWork = static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + 1)));
+            }
+            MNN_PRINT("CUDAPagedAttention profile op=%s layer=%d query=%d attn=%d "
+                      "kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d input_mask_elements=%d "
+                      "causal_mask_skipped=%d dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
+                      v2OpName, layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                      queryRowsAreFull ? 1 : 0, v2MaskElements, maskElements, skipCausalMask ? 1 : 0,
+                      static_cast<unsigned long long>(denseWork),
+                      static_cast<unsigned long long>(causalWork),
                       static_cast<unsigned long long>(nowUs() - attentionStartUs));
         }
         return NO_ERROR;
@@ -2661,7 +2734,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         }
         return NO_ERROR;
     }
-    if (attnLen > 1) {
+    if (attnLen > 1 && !picDecodeRecompute) {
         int qSplitNum = 1;
         if (attnLen > 1024) {
             qSplitNum = UP_DIV(attnLen, 1024);
@@ -2741,20 +2814,24 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     dim3 grid(attnLen, mNumHead, mBatch);
     int blockSize = 128;
     int sharedBytes = (kvLen + blockSize) * sizeof(float);
+    const bool genericSkipCausalMask = decodeStep && !sparseQuery && !picDecodeRecompute &&
+        mMeta != nullptr && mMeta->full_causal_attention_mask;
+    const float* genericMask = (!genericSkipCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
+    const int genericMaskElements = genericMask != nullptr ? maskElements : 0;
     ScopedNvtxRange genericNvtx(nvtxLayerRangeName("prefill_attention_generic_kernel", layerIndex, mQuerySeqLen,
                                                    attnLen, kvLen), nvtx);
     if (mPrecision == 4) {
         pagedAttentionKernel<float><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), pagedDevPtr<float>(mCache->value.get()),
-            pagedDevPtr<float>(output), useMask ? pagedDevPtr<float>(mask) : nullptr,
-            pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, attnLen, attnLen,
+            pagedDevPtr<float>(output), genericMask,
+            pagedDevPtr<int>(mCache->slotTable.get()), genericMaskElements, mBatch, mQuerySeqLen, attnLen, attnLen,
             mNumHead, mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
             queryRowsAreFull ? 1 : 0);
     } else {
         pagedAttentionKernel<half><<<grid, blockSize, sharedBytes, stream>>>(
             pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), pagedDevPtr<half>(mCache->value.get()),
-            pagedDevPtr<half>(output), useMask ? pagedDevPtr<float>(mask) : nullptr,
-            pagedDevPtr<int>(mCache->slotTable.get()), maskElements, mBatch, mQuerySeqLen, attnLen, attnLen,
+            pagedDevPtr<half>(output), genericMask,
+            pagedDevPtr<int>(mCache->slotTable.get()), genericMaskElements, mBatch, mQuerySeqLen, attnLen, attnLen,
             mNumHead, mKvNumHead, mHeadDim, baseLogical, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
             queryRowsAreFull ? 1 : 0);
     }
@@ -2762,9 +2839,10 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     if (profile) {
         cudaDeviceSynchronize();
         MNN_PRINT("CUDAPagedAttention profile op=generic layer=%d query=%d attn=%d kv_write=%d kv_len=%d "
-                  "sparse=%d full_q=%d mask_elements=%d us=%llu\n",
+                  "sparse=%d full_q=%d mask_elements=%d input_mask_elements=%d causal_mask_skipped=%d us=%llu\n",
                   layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
-                  queryRowsAreFull ? 1 : 0, maskElements,
+                  queryRowsAreFull ? 1 : 0, genericMaskElements, maskElements,
+                  genericSkipCausalMask ? 1 : 0,
                   static_cast<unsigned long long>(nowUs() - attentionStartUs));
     }
     return NO_ERROR;

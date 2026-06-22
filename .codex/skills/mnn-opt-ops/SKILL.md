@@ -168,6 +168,124 @@ ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
   python3 .codex/skills/mnn-ops-bench/scripts/summarize_attention_logs.py .cache/bench_ops/cross_cuda_latest'
 ```
 
+## Decode Repair Tune Utilities
+
+PIC decode repair 做正式 TPOT 前，先把算子级 tune 和 server 启动配置 warm 分开：
+
+- 算子级 CUDA event tune：用 `.codex/skills/mnn-opt-ops/scripts/run_remote_weight_only_conv_tune.sh` 在 Jetson 上跑 `bench_ops/cuda/perf/WeightOnlyConv`，筛 rows=2..8 的 weight-only / fused kernel shape policy。
+- Server warm + cache 固化：用 `.codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_config_tune.sh` 枚举候选启动配置；每个配置会在独立 workdir 启动 `pic_server`，再调用 `.codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_tune_warm.sh` 发 `tpd=0..4` warm 请求和 `/v1/tune/update_cache`，把 `tmp/mnn_cachefile.bin` 固化到该候选目录。正式 TPOT 需要重启同一配置并复用该 cache 文件，最后比较各配置的热态 TPOT / smoke 结果。
+
+聚焦 rows=4/5 的 MLP/Linear direct-op tune：
+
+```bash
+MNN_TUNE_CASES="hidden_to_inter inter_to_hidden hidden_to_gateup_concat" \
+MNN_TUNE_ROWS=4-5 \
+MNN_TUNE_WARMUP=20 \
+MNN_TUNE_REPEAT=80 \
+MNN_TUNE_MEMORY=2 \
+bash .codex/skills/mnn-opt-ops/scripts/run_remote_weight_only_conv_tune.sh
+```
+
+汇总 `WeightOnlyConv` log 并计算 gate/up concat 理论收益：
+
+```bash
+python3 .codex/skills/mnn-opt-ops/scripts/summarize_weight_only_conv_tune.py \
+  .cache/bench_ops/decode_repair_tune/weight_only_rows4_5_20260622_134205.log
+```
+
+`tpd=3/4` 到 50ms 目标通常还缺约 5ms/token；以 16 层 Llama-3.2-1B 粗略折算，rows=4/5 MLP/Linear 候选需要接近 0.31ms/layer 的真实节省才值得作为主线进入 strict TPOT。汇总器会输出 `decision`：`strong_candidate_for_strict_tpot` 可以进长测，`partial_candidate_needs_end_to_end_check` 需要结合风险判断，`cleanup_only_do_not_use_as_main_tpot_candidate` 只作为小 cleanup。
+
+`WeightOnlyConv` direct-op 必须使用 `run_test.out ... 2 <precision> 1 x 2`，即 `memory=2 (Memory_Low)`；否则 CUDA 会创建普通 Conv/CUTLASS execution，而不是 `ConvFpAIntBExecution`，rows policy、GEMV profile 或任何 weight-only 策略验证都不会生效。
+
+评估 rows=4/5 新 weight-only kernel family 前，先用 dense FP16 GEMM floor 判断普通 GEMM 路线是否有足够理论空间：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  ART=.cache/output/mnn/artifacts/jetson_cross_cuda && \
+  CUDA_LIB=/usr/local/cuda-12.2/targets/aarch64-linux/lib && \
+  export LD_LIBRARY_PATH="$PWD/$ART/lib:$CUDA_LIB:${LD_LIBRARY_PATH:-}" && \
+  env MNN_BENCH_WEIGHT_ONLY_ROWS=4-5 MNN_BENCH_MLP_GEMM_WARMUP=20 MNN_BENCH_MLP_GEMM_REPEAT=80 \
+  "$ART/bin/run_test.out" bench_ops/cuda/perf/DecodeRepairMlpGemmFloor 2 2 1 x 2'
+```
+
+若 FP16 GEMM floor 仍慢于当前 `PicDecodeMlp` weight-only chain，则不要把主线放到 generic dense GEMM、cuBLAS batched 或继续调现有 GEMV/CUTLASS 阈值上；新的 rows=4/5 kernel 必须是 INT4-native 小批量 weight-only kernel，或真正融合 `SwiGLU + down` 的输入读取/累加路径。
+
+例外是已验证的 real-layout static-dequant cuBLAS shape policy：`MNN_CUDA_PIC_INT4_ROWS45_CUBLAS` 默认 `all`，`0` 禁用，`down` 只启用 `8192->2048` down。该分支只在 PIC decode repair sparse、fp16、static dequant cache 已存在、无 runtime dequant 时命中 rows4/5 的 `2048->8192` gate/up 和 `8192->2048` down；它复用 MNN 的 `mDequantFilter [ocp, icp]`，不是上面 synthetic floor 的 layout。
+
+rows4/5 cuBLAS policy 的最小验证命令：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  ART=.cache/output/mnn/artifacts/jetson_cross_cuda && \
+  CUDA_LIB=/usr/local/cuda-12.2/targets/aarch64-linux/lib && \
+  export LD_LIBRARY_PATH="$PWD/$ART/lib:$CUDA_LIB:${LD_LIBRARY_PATH:-}" && \
+  "$ART/bin/run_test.out" bench_ops/cuda/accuracy/Rows45Cublas 2 2 1 x 2 && \
+  env MNN_BENCH_WEIGHT_ONLY_ROWS=4-5 MNN_BENCH_MLP_WARMUP=10 MNN_BENCH_MLP_REPEAT=30 \
+  "$ART/bin/run_test.out" bench_ops/cuda/perf/PicDecodeMlp 2 2 1 x 2 && \
+  env MNN_CUDA_PIC_INT4_ROWS45_CUBLAS=0 MNN_BENCH_WEIGHT_ONLY_ROWS=4-5 MNN_BENCH_MLP_WARMUP=10 MNN_BENCH_MLP_REPEAT=30 \
+  "$ART/bin/run_test.out" bench_ops/cuda/perf/PicDecodeMlp 2 2 1 x 2'
+```
+
+Jetson 参考结果：accuracy rows4/5 gate/up/down/down_all 全部 `bad=0`；default cuBLAS rows4/5 chain `1.2768/1.2819ms`，禁用回退 chain `1.5966/1.6076ms`，节省约 `0.32ms/layer`，按 16 层约 `5.1ms/token`。这类结果可标记为 `strong_candidate_for_strict_tpot`，但必须再跑 strict `tpd=0..4` 和自然语言 smoke；若端到端回归或 server path 未稳定命中 static dequant cache，默认应收窄为 `down` 或退回 opt-in。
+
+2026-06-22 strict follow-up：在 warm + `/v1/tune/update_cache` 后重启同一 Jetson server，rows4/5 cuBLAS 默认策略跑 1B decode-repair silumul strict `tpd=0..4` 得到 `37.54 / 42.02 / 49.54 / 50.71 / 50.64 ms/token`，`tpd>=1` runtime 均为 `mnn_token_id_sparse_decode`，failures=0。它比上一组 gateup-packed-silu 的 `55.10/54.79ms` 明显改善，但 `tpd=3/4` 仍高于 50ms 约 `0.6-0.7ms/token`，因此目标仍未完成；后续需要再找约 `0.04-0.05ms/layer` 的真实节省，或优化 rows3/4 周边小算子/调度。
+
+同日继续 tune rows4/5 cuBLAS 启动策略：`MNN_CUDA_PIC_INT4_ROWS45_CUBLAS=all/down/0` 的 direct-op chain 分别为 rows4 `1.2747/1.4741/1.5957ms`、rows5 `1.2804/1.4798/1.6019ms`，因此 `all` 仍是默认最优，不能收窄为 `down`。新增 tune-only env：`MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_MATH=keep/default/tensor`、`MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_COMPUTE=32f/fast16/16f`、`MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_ALGO=default/tensor/<cublas algo id>`；默认保持 `tensor + 32f + CUBLAS_GEMM_DEFAULT_TENSOR_OP`。direct-op 上 `math_keep`、`compute_fast16`、`algo_default` 只有约 `0.0-0.01ms/layer` 波动，`compute_16f` 的 down 变慢。`math_keep` 经过 warm + `/v1/tune/update_cache` 后短 strict `tpd=3/4` 为 `51.76/50.49ms/token`，failures=0 但没有稳定进 50ms，且 `tpd=3` 回退；这些 cuBLAS 参数只保留为诊断/tune 开关，不进入默认主线。
+
+已验证过的负向 rows=4/5 weight-only 分支不要重复作为主线：
+
+- 把 PIC decode repair 的 `int4GemvBatchLimit` 从 3 放宽到 5 会让 rows4/5 MLP chain 变慢。
+- 强制 rows4/5 回到现有 `GEMV_FpAInt4B_V14_MB` 并枚举 `OC_PER_BLK=2/3/4/8/16` 也变慢；代表数据为 default rows4/5 chain `1.5962/1.6088ms`，`OC_PER_BLK=2` 退到 `2.1377/2.6379ms`，`OC_PER_BLK=16` 退到 `6.7765/8.3407ms`。
+- 相关临时 env 分支 `MNN_CUDA_PIC_INT4_ROWS45_PROTO_OC` 已从 CUDA path 移除；后续 rows4/5 主线必须是新的 INT4-native kernel family，或真正融合 `SwiGLU + down` 的累加路径。
+
+汇总 config tune warm 结果：
+
+```bash
+python3 .codex/skills/mnn-opt-ops/scripts/summarize_pic_decode_repair_config_tune.py \
+  .cache/decode_repair_config_tune/<run_id> \
+  --output-tsv .cache/decode_repair_config_tune/<run_id>/warm_summary.tsv
+```
+
+对已启动 PIC server 做 decode-repair warm 和 runtime cache 写回：
+
+```bash
+PIC_TUNE_BASE_URL=http://127.0.0.1:18091 \
+PIC_TUNE_SELECTION_ALGORITHM=full-reuse \
+PIC_TUNE_TPDS="0 1 2 3 4" \
+PIC_TUNE_MAX_TOKENS=32 \
+bash .codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_tune_warm.sh
+```
+
+`tpd=0` 是 baseline，请求不启用 `decode_refine`；`tpd>=1` 的 warm 请求会把 `decode_refine.enabled=true` 放在 `pic_cache` 内，触发 `mnn_token_id_sparse_decode`。`/v1/tune/update_cache` 的成功响应表示当前已 warm 配置的 runtime cache 已提交；候选搜索是否完成，要看外层配置矩阵的重启后热态 TPOT 和正确性 smoke。
+
+枚举候选启动配置并为每个候选执行 warm/update_cache：
+
+```bash
+PIC_CONFIG_TUNE_CONFIG=.cache/weight/AI-ModelScope__Llama-3___2-1B-Instruct-decode-repair-silumul/config_cuda_greedy.json \
+PIC_CONFIG_TUNE_ENV_DIR=.cache/decode_repair_candidates \
+PIC_CONFIG_TUNE_CANDIDATES="baseline candidate_a candidate_b" \
+PIC_CONFIG_TUNE_TPDS="0 1 2 3 4" \
+PIC_CONFIG_TUNE_MAX_TOKENS=32 \
+bash .codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_config_tune.sh
+```
+
+每个候选可以有可选 env 文件：`${PIC_CONFIG_TUNE_ENV_DIR}/<name>.server.env` 放 `MNN_PIC_*`、`MNN_PAGED_ATTENTION_*`、CUDA policy env 等启动参数；`<name>.warm.env` 放 `PIC_TUNE_*` 请求矩阵覆盖。脚本会输出 `summary.tsv` 和 `warm_summary.tsv`，其中 `summary.tsv.cache_file` 指向该候选的 `server_work/tmp/mnn_cachefile.bin`，`warm_summary.tsv` 会检查 `update_cache`、cache 文件、`tpd>=1` 的 `mnn_token_id_sparse_decode` runtime。若 strict TPOT 需要在另一套脚本中执行，必须用同一候选 workdir 和同一组 server env 重启；`warm_summary.tsv` 有 `fail` 的候选不能进入正式计时。
+
+`warm_summary.tsv.cache_policy` 默认为 `auto` 推断：OpenCL/OrangePi 候选缺 `tmp/mnn_cachefile.bin` 是 `fail`，因为正式 OpenCL 测试必须复用 warm 后的 MNN autotune cache；CUDA/Jetson 候选缺该文件只记为 `warn/missing_optional`，因为当前 CUDA decode repair shape 通常不会产生可写 runtime cache 条目。无论 backend，`/v1/tune/update_cache` 必须成功，`tpd>=1` 必须进入 `mnn_token_id_sparse_decode`，否则候选不能进入正式 TPOT。
+
+在 Jetson 上跑同一流程时，从本机通过 SSH 进入远端 MNN 根目录执行：
+
+```bash
+ssh jetson@192.168.101.192 'cd /home/jetson/code/kvshare-edge/impl/MNN && \
+  PIC_CONFIG_TUNE_CONFIG=.cache/weight/AI-ModelScope__Llama-3___2-1B-Instruct-decode-repair-silumul/config_cuda_greedy.json \
+  PIC_CONFIG_TUNE_CANDIDATES="baseline sched_a" \
+  PIC_CONFIG_TUNE_TPDS="0 1 2 3 4" \
+  PIC_CONFIG_TUNE_MAX_TOKENS=32 \
+  bash .codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_config_tune.sh'
+```
+
+当前 PIC server 已禁用 placeholder 分段 tokenization，带 PIC 的 chat 请求必须显式提供 full prompt token span。`run_pic_decode_repair_tune_warm.sh` 默认从 `/v1/kv/pic_caches` 响应读取 `token_ids`，写入 `pic_cache.full_prompt_token_ids`，设置 `pic_token_start=0` / `token_count=<cache tokens>`，并追加 1 个 cache token 作为 suffix 以满足 suffix prefill 要求。若要用真实 fixture，可通过 `PIC_TUNE_FULL_PROMPT_TOKEN_IDS`、`PIC_TUNE_PIC_TOKEN_START`、`PIC_TUNE_PIC_TOKEN_COUNT` 和 `PIC_TUNE_SUFFIX_FROM_CACHE_TOKENS=0` 覆盖。
+
 ## PagedAttention / PIC 优化约束
 
 优化 PagedAttention、PIC full-reuse、cacheblend、epic 或 kvshare 时，先区分执行语义，再选择专用路径；不要把所有模式都塞进一个通用慢 kernel 或 CPU fallback。

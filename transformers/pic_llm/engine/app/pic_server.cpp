@@ -701,6 +701,18 @@ struct ExplicitCacheTokenSpan {
     int tokenCount = 0;
 };
 
+struct PicDecodeRefineConfig {
+    bool enabled = false;
+    int tokensPerDecodeStep = 1;
+    int topM = 32;
+    double scoreThreshold = 1e-6;
+    double scoreMargin = 0.0;
+    double scoreDecay = 0.8;
+    std::string selector = "top_hkvd";
+    int attentionLayerIdx = -1;
+    std::vector<int> attentionHeadIds;
+};
+
 struct PreparedPicCache {
     std::string id;
     std::string cacheName;
@@ -715,6 +727,7 @@ struct PreparedPicCache {
     std::vector<int> tokenIds;
     json textCaches = json::array();
     std::vector<MNN::PagedKVExternalSegment> segments;
+    PicDecodeRefineConfig decodeRefine;
 };
 
 struct PicExecutionPlan {
@@ -734,6 +747,7 @@ struct PicExecutionPlan {
     std::vector<int> sparseTokenIds;
     bool fullCompute = false;
     bool sparseRecompute = false;
+    PicDecodeRefineConfig decodeRefine;
 };
 
 KvShape kvShapeFromSegment(const MNN::PagedKVExternalSegment& segment) {
@@ -835,6 +849,89 @@ std::vector<int> jsonIntVectorAlias(const json& j, const std::vector<const char*
         }
     }
     return {};
+}
+
+bool parsePicDecodeRefineConfig(const json& request, PicDecodeRefineConfig& config, std::string& error) {
+    config = PicDecodeRefineConfig();
+    if (!request.contains("decode_refine")) {
+        return true;
+    }
+    if (!request["decode_refine"].is_object()) {
+        error = "decode_refine must be an object when provided";
+        return false;
+    }
+    const json& src = request["decode_refine"];
+    config.enabled = jsonBool(src, "enabled", config.enabled);
+    config.tokensPerDecodeStep = std::max(0, jsonInt(src, "tokens_per_decode_step",
+                                                     config.tokensPerDecodeStep));
+    config.topM = std::max(0, jsonInt(src, "top_m", config.topM));
+    config.scoreThreshold = std::max(0.0, jsonDouble(src, "score_threshold", config.scoreThreshold));
+    config.scoreMargin = std::max(0.0, jsonDouble(src, "score_margin", config.scoreMargin));
+    config.scoreDecay = clampDouble(jsonDouble(src, "score_decay", config.scoreDecay), 0.0, 1.0);
+    config.selector = jsonString(src, "selector", config.selector);
+    config.attentionLayerIdx = jsonInt(src, "attention_layer_idx", config.attentionLayerIdx);
+    config.attentionHeadIds = jsonIntVector(src.value("attention_head_ids", json::array()));
+
+    if (config.selector != "top_hkvd" && config.selector != "lagged_attention_hkvd") {
+        error = "Unsupported decode refine selector: " + config.selector;
+        return false;
+    }
+    if (config.enabled && config.selector == "lagged_attention_hkvd" && config.attentionLayerIdx < 0) {
+        error = "decode_refine selector lagged_attention_hkvd requires attention_layer_idx";
+        return false;
+    }
+    return true;
+}
+
+json decodeRefineSummary(const PicDecodeRefineConfig& config, const std::string& disabledReason = "") {
+    json summary = {
+        {"enabled", config.enabled},
+        {"tokens_per_decode_step", config.tokensPerDecodeStep},
+        {"top_m", config.topM},
+        {"score_threshold", config.scoreThreshold},
+        {"score_margin", config.scoreMargin},
+        {"score_decay", config.scoreDecay},
+        {"selector", config.selector},
+        {"attention_layer_idx", config.attentionLayerIdx},
+        {"attention_head_ids", config.attentionHeadIds},
+        {"candidate_count", 0},
+        {"refined_token_count", 0},
+        {"refined_logical_indices", json::array()},
+        {"steps", json::array()},
+    };
+    if (!disabledReason.empty()) {
+        summary["disabled_reason"] = disabledReason;
+    } else if (!config.enabled) {
+        summary["disabled_reason"] = "not_requested";
+    }
+    return summary;
+}
+
+json decodeRefineRuntimeSummary(const PicDecodeRefineConfig& config, MNN::Transformer::Llm* llm,
+                                const std::string& disabledReason = "") {
+    json summary = decodeRefineSummary(config, disabledReason);
+    if (!config.enabled || !disabledReason.empty() || llm == nullptr) {
+        return summary;
+    }
+    const auto steps = llm->picDecodeRepairStepLogicalIndices();
+    std::vector<int> refinedLogicalIndices;
+    json stepSummaries = json::array();
+    refinedLogicalIndices.reserve(steps.size() * static_cast<size_t>(std::max(0, config.tokensPerDecodeStep)));
+    for (size_t i = 0; i < steps.size(); ++i) {
+        const auto& step = steps[i];
+        refinedLogicalIndices.insert(refinedLogicalIndices.end(), step.begin(), step.end());
+        stepSummaries.push_back({
+            {"step_idx", static_cast<int>(i)},
+            {"repair_token_count", step.size()},
+            {"repair_logical_indices", step},
+        });
+    }
+    summary["candidate_count"] = llm->picDecodeRepairCandidateCount();
+    summary["refined_token_count"] = refinedLogicalIndices.size();
+    summary["refined_logical_indices"] = refinedLogicalIndices;
+    summary["steps"] = std::move(stepSummaries);
+    summary["runtime"] = "mnn_token_id_sparse_decode";
+    return summary;
 }
 
 bool parseExplicitCacheTokenSpans(const json& request, std::vector<ExplicitCacheTokenSpan>& spans,
@@ -1427,6 +1524,9 @@ bool preparePicCacheFromRequest(const std::string& kvCacheDir, const std::string
     prepared.recomputeRatio = clampDouble(jsonDouble(request, "pic_recompute_ratio", 0.20), 0.0, 1.0);
     const int defaultScoreLayer = 1;
     prepared.scoreLayerIdx = std::max(0, jsonInt(request, "pic_recompute_score_layer_idx", defaultScoreLayer));
+    if (!parsePicDecodeRefineConfig(request, prepared.decodeRefine, error)) {
+        return false;
+    }
     prepared.explicitLogicalIndices = jsonIntVector(request.value("pic_recompute_logical_indices", json::array()));
     prepared.explicitPicLocalIndices = jsonIntVector(request.value("pic_recompute_pic_local_indices", json::array()));
     prepared.fullPromptTokenIds = jsonIntVectorAlias(
@@ -1595,6 +1695,7 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
                                     const json* scoreMetadata = nullptr) {
     PicExecutionPlan plan;
     plan.selectionAlgorithm = pic.selectionAlgorithm;
+    plan.decodeRefine = pic.decodeRefine;
     const int picStart = preludeTokenCount;
     const int picLength = static_cast<int>(pic.tokenIds.size());
     const int picEnd = picStart + picLength;
@@ -1763,7 +1864,8 @@ PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeToke
     return plan;
 }
 
-json precisionRecoverySummary(const PicExecutionPlan& plan, double ratio, int requestedScoreLayerIdx) {
+json precisionRecoverySummary(const PicExecutionPlan& plan, double ratio, int requestedScoreLayerIdx,
+                              const json* decodeRefine = nullptr) {
     return {
         {"selection_algorithm", plan.selectionAlgorithm},
         {"pic_recompute_ratio", ratio},
@@ -1775,14 +1877,7 @@ json precisionRecoverySummary(const PicExecutionPlan& plan, double ratio, int re
         {"execution_mode", plan.executionMode},
         {"fallback_reason", plan.fallbackReason},
         {"metadata", plan.metadata},
-        {"decode_refine", {
-            {"enabled", false},
-            {"disabled_reason", "mnn_pic_server_prefill_only"},
-            {"candidate_count", 0},
-            {"refined_token_count", 0},
-            {"refined_logical_indices", json::array()},
-            {"steps", json::array()},
-        }},
+        {"decode_refine", decodeRefine != nullptr ? *decodeRefine : decodeRefineSummary(plan.decodeRefine)},
     };
 }
 
@@ -2198,12 +2293,10 @@ bool PicServer::buildPicCache(const json& request, json& response, std::string& 
         {"pic_recompute_score_layer_idx", pic.scoreLayerIdx},
         {"pic_recompute_logical_indices", pic.explicitLogicalIndices},
         {"pic_recompute_pic_local_indices", pic.explicitPicLocalIndices},
-        {"pic_decode_refine_enabled", false},
-        {"pic_decode_refine_tokens_per_decode_step", 1},
-        {"pic_decode_refine_top_m", 32},
-        {"pic_decode_refine_score_threshold", 1e-6},
-        {"pic_decode_refine_score_margin", 0.0},
-        {"pic_decode_refine_score_decay", 0.8},
+        {"decode_refine", decodeRefineSummary(pic.decodeRefine,
+                                              pic.decodeRefine.enabled
+                                                  ? "not_prepared_until_chat_decode"
+                                                  : "")},
         {"text_caches", pic.textCaches},
         {"backend", backend},
         {"attention_mode", jsonBool(cfg, "paged_attention", false) ? "paged" : "standard"},
@@ -2422,11 +2515,11 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         traceInfo.hasPicCache = true;
 
         PicExecutionPlan plan;
+        std::vector<int> nativeSelectedLocalIndices;
+        bool hasNativeSelectedLocalIndices = false;
         {
             MnnLlmPerfettoSlice prefillSlice("prefill", traceInfo);
-            std::vector<int> nativeSelectedLocalIndices;
             json scoreMetadata = json::object();
-            bool hasNativeSelectedLocalIndices = false;
             bool graphBoundaryPrefillDone = false;
             const bool graphBoundaryEnabled =
                 jsonBool(modelConfig(), "pic_recompute_budget", false) &&
@@ -2615,6 +2708,35 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 }
             }
         }
+        if (pic.decodeRefine.enabled && maxTokens != 0) {
+            if (pic.decodeRefine.selector != "top_hkvd") {
+                error = "pic decode_refine selector " + pic.decodeRefine.selector +
+                        " is parsed but not implemented in MNN runtime yet";
+                return false;
+            }
+            std::vector<int> seedSelectedPicLocalIndices;
+            seedSelectedPicLocalIndices.reserve(plan.recomputeLogicalIndices.size());
+            for (int logical : plan.recomputeLogicalIndices) {
+                const int local = logical - static_cast<int>(preludeTokenIds.size());
+                if (local >= 0 && local < static_cast<int>(pic.tokenIds.size())) {
+                    seedSelectedPicLocalIndices.emplace_back(local);
+                }
+            }
+            std::vector<int> rankedPicLocalIndices = nativeSelectedLocalIndices;
+            if (rankedPicLocalIndices.empty()) {
+                rankedPicLocalIndices = seedSelectedPicLocalIndices;
+            }
+            if (!mLlm->preparePicDecodeRepair(
+                    static_cast<int>(preludeTokenIds.size()), pic.tokenIds, rankedPicLocalIndices,
+                    seedSelectedPicLocalIndices, pic.decodeRefine.tokensPerDecodeStep)) {
+                error = "Failed to prepare PIC decode_refine runtime state";
+                return false;
+            }
+            plan.metadata["decode_refine_runtime"] = "mnn_token_id_sparse_decode";
+            plan.metadata["decode_refine_ranking_source"] =
+                hasNativeSelectedLocalIndices ? "native_selected_indices_then_pic_order"
+                                              : "seed_selected_indices_then_pic_order";
+        }
         if (maxTokens != 0) {
             if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
                 auto context = mLlm->getContext();
@@ -2633,6 +2755,11 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             if (context != nullptr) {
                 outputTokens = context->output_tokens;
             }
+        }
+        json decodeRefineInfo = decodeRefineSummary(pic.decodeRefine);
+        if (pic.decodeRefine.enabled) {
+            const std::string disabledReason = maxTokens == 0 ? "max_tokens_zero_prefill_only" : "";
+            decodeRefineInfo = decodeRefineRuntimeSummary(pic.decodeRefine, mLlm.get(), disabledReason);
         }
         mLlm->finishExternalPagedKVRequest();
         promptTokens = static_cast<int>(suffixTokenIds.size());
@@ -2671,13 +2798,9 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             {"pic_recompute_score_layer_idx", pic.scoreLayerIdx},
             {"pic_recompute_logical_indices", plan.recomputeLogicalIndices},
             {"pic_recompute_pic_local_indices", recomputePicLocalIndices},
-            {"pic_decode_refine_enabled", false},
-            {"pic_decode_refine_tokens_per_decode_step", 1},
-            {"pic_decode_refine_top_m", 32},
-            {"pic_decode_refine_score_threshold", 1e-6},
-            {"pic_decode_refine_score_margin", 0.0},
-            {"pic_decode_refine_score_decay", 0.8},
-            {"precision_recovery", precisionRecoverySummary(plan, pic.recomputeRatio, pic.scoreLayerIdx)},
+            {"decode_refine", decodeRefineInfo},
+            {"precision_recovery", precisionRecoverySummary(plan, pic.recomputeRatio, pic.scoreLayerIdx,
+                                                            &decodeRefineInfo)},
             {"kv_layout", makeKvLayout(cfg, static_cast<int>(pic.tokenIds.size()), shape)},
             {"backend", runtimeBackend()},
             {"attention_mode", jsonBool(cfg, "paged_attention", false) ? "paged" : "standard"},

@@ -4,6 +4,7 @@
 #include "backend/cuda/core/CUDABackend.hpp"
 #include "core/Execution.hpp"
 #include "core/PagedKVMeta.hpp"
+#include <vector>
 
 namespace MNN {
 namespace CUDA {
@@ -27,6 +28,7 @@ public:
         int precision = 4;
         int slotTableVersion = -1;
         int slotTableLength = 0;
+        std::vector<int> sparseQueryHost;
         bool zeroCopyKV = false;
     };
 
@@ -39,6 +41,7 @@ public:
 private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
     ErrorCode syncSlotTable(int requiredSlots);
+    ErrorCode syncSparseQuery(int attnLen, const int** devicePtr);
     bool ensurePrefillTemp(size_t elements);
 
     CUDABackend* mCudaBackend = nullptr;

@@ -76,6 +76,8 @@ struct PagedKVMeta : public KVMeta {
     int pic_active_start_layer_idx = 0;
     int pic_active_count = 0;
     std::vector<int> sparse_query_logical_indices;
+    bool pic_decode_recompute_active = false;
+    int pic_decode_recompute_append_count = 0;
     bool cacheblend_score_active = false;
     bool cacheblend_score_ready = false;
     int cacheblend_score_layer_idx = -1;
@@ -112,6 +114,9 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_recompute_active = false;
+        pic_decode_recompute_append_count = 0;
+        pic_decode_repair_sparse_active = false;
         finishCacheBlendScoring();
         finishPicGraphActivePlan();
         slot_table_host.resize(request_capacity);
@@ -133,6 +138,9 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_recompute_active = false;
+        pic_decode_recompute_append_count = 0;
+        pic_decode_repair_sparse_active = false;
         finishCacheBlendScoring();
         finishPicGraphActivePlan();
     }
@@ -221,6 +229,49 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = sparse_query_start_layer_idx;
         pic_active_count = static_cast<int>(logicalIndices.size());
         sparse_query_logical_indices = logicalIndices;
+        pic_decode_repair_sparse_active = false;
+        return true;
+    }
+
+    bool beginPicDecodeRecomputeRows(const std::vector<int>& logicalIndices, int sparseStartLayerIdx,
+                                     int appendCount = 1) {
+        if (!request_active || logicalIndices.empty() || appendCount < 0 ||
+            appendCount > static_cast<int>(logicalIndices.size())) {
+            return false;
+        }
+        const int oldLength = std::max(0, logical_length);
+        const int newLength = oldLength + appendCount;
+        if (!ensureLogicalCapacity(static_cast<size_t>(newLength))) {
+            return false;
+        }
+        int appended = 0;
+        for (int i = 0; i < static_cast<int>(logicalIndices.size()); ++i) {
+            const int index = logicalIndices[i];
+            if (i > 0 && index <= logicalIndices[i - 1]) {
+                return false;
+            }
+            if (index >= 0 && index < oldLength) {
+                continue;
+            }
+            if (index >= oldLength && index < newLength) {
+                ++appended;
+                continue;
+            }
+            return false;
+        }
+        if (appended != appendCount) {
+            return false;
+        }
+        logical_length = newLength;
+        sparse_query_active = true;
+        sparse_query_start_layer_idx = std::max(0, sparseStartLayerIdx);
+        pic_active_rows = true;
+        pic_active_start_layer_idx = sparse_query_start_layer_idx;
+        pic_active_count = static_cast<int>(logicalIndices.size());
+        sparse_query_logical_indices = logicalIndices;
+        pic_decode_recompute_active = true;
+        pic_decode_recompute_append_count = appendCount;
+        pic_decode_repair_sparse_active = true;
         return true;
     }
 
@@ -231,6 +282,9 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_recompute_active = false;
+        pic_decode_recompute_append_count = 0;
+        pic_decode_repair_sparse_active = false;
         add = 0;
         remove = 0;
         n_reserve = 0;

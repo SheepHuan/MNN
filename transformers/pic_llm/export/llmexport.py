@@ -105,6 +105,9 @@ class LlmExporter(torch.nn.Module):
             'paged_attention': bool(getattr(self.args, 'paged_attention', False)),
             'pic_recompute_budget': bool(getattr(self.args, 'pic_recompute_budget', True)),
             'pic_recompute_score_layer_idx': max(0, getattr(self.args, 'pic_recompute_score_layer_idx', 1)),
+            'pic_decode_repair_outputs': bool(getattr(self.args, 'pic_decode_repair_outputs', False)),
+            'pic_decode_tiny_fusion': bool(getattr(self.args, 'pic_decode_tiny_fusion', False)),
+            'pic_decode_gateup_fusion': bool(getattr(self.args, 'pic_decode_gateup_fusion', False)),
             'is_mrope': self.model.rotary.is_mrope
         }
         for key in [
@@ -489,6 +492,9 @@ class LlmExporter(torch.nn.Module):
             output_names = ['logits', 'hidden_states', 'talker_embeds']
         else:
             output_names = ['logits', 'hidden_states']
+        if bool(getattr(self.args, 'pic_decode_repair_outputs', False)):
+            output_names.append('pic_decode_repair_score_hidden_states')
+            self.model_dynamic_axes['pic_decode_repair_score_hidden_states'] = {1: 'seq_len'}
 
         # Qwen3-VL
         if self.model_type in ['qwen3_vl', 'qwen3_vl_moe']:
@@ -878,6 +884,9 @@ def build_args(parser):
     parser.add_argument('--pic_recompute_budget', dest='pic_recompute_budget', action='store_true', default=True, help='Expose PIC sparse recompute budget as a scalar graph input, default is True.')
     parser.add_argument('--no_pic_recompute_budget', dest='pic_recompute_budget', action='store_false', help='Export without graph-level PIC recompute budget input.')
     parser.add_argument('--pic_recompute_score_layer_idx', type=int, default=1, help='Static score-layer boundary where PIC sparse recompute gathers compact active rows.')
+    parser.add_argument('--pic_decode_repair_outputs', action='store_true', help='Expose score-layer hidden states needed by PIC decode repair.')
+    parser.add_argument('--pic_decode_tiny_fusion', action='store_true', help='Export PIC decode tiny elementwise fusion ops such as PicSiluMul.')
+    parser.add_argument('--pic_decode_gateup_fusion', action='store_true', help='Opt in to experimental PicGateUpWeightOnly export; keep disabled for formal TPOT unless its fused/fallback paths are validated.')
     # omni quant
     parser.add_argument('--omni_epochs', type=int, default=20, help='OmniQuant 优化的轮数')
     parser.add_argument('--omni_lr', type=float, default=5e-3, help='OmniQuant 的学习率')

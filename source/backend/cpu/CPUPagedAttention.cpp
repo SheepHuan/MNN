@@ -84,7 +84,15 @@ static ErrorCode _emitActiveIndicesCPU(PagedKVMeta* meta, int layerIndex, int kv
     }
     const int budget = static_cast<int>(output->elementSize());
     std::vector<int> active;
-    if (activateRows && meta != nullptr) {
+    if (meta != nullptr && meta->pic_decode_recompute_active && budget > 0) {
+        if (static_cast<int>(meta->sparse_query_logical_indices.size()) < budget) {
+            return INVALID_VALUE;
+        }
+        active.reserve(static_cast<size_t>(budget));
+        for (int i = 0; i < budget; ++i) {
+            active.emplace_back(i);
+        }
+    } else if (activateRows && meta != nullptr) {
         active = meta->buildBudgetActiveLogicalIndices(kvLen, budget);
     }
     if (active.empty() && budget > 0) {
@@ -606,7 +614,8 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         (mMeta->sparse_query_active || mMeta->cacheblend_score_active || mMeta->pic_graph_active_plan_ready);
     const int effectivePicAttentionMode = picRuntimeActive ? mPicAttentionMode : 0;
     bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
-    const bool scoreAttention = effectivePicAttentionMode == 1;
+    const bool picDecodeRecompute = mMeta != nullptr && mMeta->pic_decode_recompute_active;
+    const bool scoreAttention = effectivePicAttentionMode == 1 && !picDecodeRecompute;
     if (scoreAttention) {
         sparseQuery = false;
     }

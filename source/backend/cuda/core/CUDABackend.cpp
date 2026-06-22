@@ -291,10 +291,16 @@ Execution* CUDABackend::onCreate(const std::vector<Tensor*>& inputs, const std::
         return NULL;
     }
 
-    #ifdef MNN_CODEGEN_CUDA
+#ifdef MNN_CODEGEN_CUDA
     if(op->type() == OpType_Extra) {
-        if (!FuseExecutionV2::check(op)) {
-            auto extra = op->main_as_Extra();
+        auto extra = op->main_as_Extra();
+        const bool backendNativeExtra = extra != nullptr && extra->type() != nullptr &&
+            (extra->type()->str() == "PicSiluMul" || extra->type()->str() == "PicPackedSiluMul" ||
+             extra->type()->str() == "PicGateUpWeightOnly");
+        if (!backendNativeExtra && !FuseExecutionV2::check(op)) {
+            if (extra == nullptr || extra->type() == nullptr || extra->info() == nullptr) {
+                return NULL;
+            }
             std::string source(reinterpret_cast<const char*>(extra->info()->data()));
             auto kernel_name = extra->type()->c_str();
             std::string kernel_source = source;

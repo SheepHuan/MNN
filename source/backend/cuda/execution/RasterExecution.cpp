@@ -9,6 +9,7 @@
 #include "RasterExecution.hpp"
 #include "core/OpCommonUtils.hpp"
 #include "core/BufferAllocator.hpp"
+#include "core/KVMeta.hpp"
 #include "Raster.cuh"
 #include "Transpose.cuh"
 #include "MNNCUDADefine.hpp"
@@ -373,12 +374,18 @@ ErrorCode RasterExecution::onExecute(const std::vector<Tensor *> &inputs, const 
         }
         auto srcPtr = (void*)realInput->deviceId();
         auto dstPtr = (void*)output->deviceId();
+        auto meta = static_cast<KVMeta*>(static_cast<CUDABackend*>(backend())->getMetaPtr());
+        const bool picDecodeRepairSparse = meta != nullptr && meta->pic_decode_repair_sparse_active;
         if (MNN_DATA_FORMAT_NC4HW4 == sourceFormat) {
             // Unpack: NC4HW4 (NHWC8 on device) -> NCHW
             if (realInput->dimensions() <= 1 || (srcArea == 1 && srcChannel % 8 == 0)) {
                 // When area=1 and channel%8==0, NHWC8 and NCHW have identical memory layout
                 auto copySize = srcBatch * srcChannel * bytes;
-                cudaMemcpy(dstPtr, srcPtr, copySize, cudaMemcpyDeviceToDevice);
+                if (picDecodeRepairSparse) {
+                    runtime->memcpy(dstPtr, srcPtr, copySize, MNNMemcpyDeviceToDevice, false);
+                } else {
+                    cudaMemcpy(dstPtr, srcPtr, copySize, cudaMemcpyDeviceToDevice);
+                }
                 return NO_ERROR;
             }
             UnpackBuffer(dstPtr, srcPtr, &pack, bytes, runtime);
@@ -387,7 +394,11 @@ ErrorCode RasterExecution::onExecute(const std::vector<Tensor *> &inputs, const 
             // Pack: NCHW -> NC4HW4 (NHWC8 on device)
             if (output->dimensions() <= 1 || (srcArea == 1 && srcChannel % 8 == 0)) {
                 auto copySize = srcBatch * srcChannel * bytes;
-                cudaMemcpy(dstPtr, srcPtr, copySize, cudaMemcpyDeviceToDevice);
+                if (picDecodeRepairSparse) {
+                    runtime->memcpy(dstPtr, srcPtr, copySize, MNNMemcpyDeviceToDevice, false);
+                } else {
+                    cudaMemcpy(dstPtr, srcPtr, copySize, cudaMemcpyDeviceToDevice);
+                }
                 return NO_ERROR;
             }
             PackBuffer(dstPtr, srcPtr, &pack, bytes, runtime);

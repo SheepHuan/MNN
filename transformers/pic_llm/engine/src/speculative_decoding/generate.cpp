@@ -76,7 +76,7 @@ void ArGeneration::generate(GenerationParams& param) {
         }
         // Compute Next Logits
         MNN::Timer _t;
-        auto outputs = mLlm->forwardVec({mContext->current_token});
+        auto outputs = mLlm->forwardVecWithPicDecodeRepair({mContext->current_token});
         if(outputs.empty()) {
             break;
         }

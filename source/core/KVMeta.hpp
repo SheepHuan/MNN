@@ -31,6 +31,9 @@ struct KVMeta {
     int seqlen_in_disk = 0;
     int layer_index = 0;
     int layer_nums = 0;
+    // Decode-only PIC repair marker. Backends can use this to pick tiny-row
+    // kernels without changing prefill/sparse-prefill heuristics.
+    bool pic_decode_repair_sparse_active = false;
     std::vector<int> reserveHost;
     // Attention scaling override (gemma4 uses 1.0 instead of 1/sqrt(head_dim))
     float attn_scale = 0.0f; // 0 means use default 1/sqrt(head_dim)

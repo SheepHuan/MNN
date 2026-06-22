@@ -1,16 +1,16 @@
 ---
 name: mnn-pic-benchmark
-description: 当用户要求把本 MNN 仓库本机交叉编译出的 pic_server/libpic_llm/CUDA 产物推送到 Jetson，远端启动 MNN PIC server，并在本机用 impl/pic_bench 数据集 benchmark 向 Jetson 发 /v1/prefill/text、/v1/chat/completions 请求，测试 HotpotQA/AmbigQA/2Wiki/MuSiQue/SAMSum/MultiNews 上 full-reuse/full-compute/cacheblend/epic/kvshare 精度、稳定性或延迟时使用。
+description: 当用户要求把本 MNN 仓库本机交叉编译出的 pic_server/libpic_llm/CUDA/OpenCL 产物推送到 Jetson、Orange Pi 5 Plus 或 AidLux/Adreno，远端启动 MNN PIC server，并在本机用 impl/pic_bench 数据集 benchmark 发 /v1/prefill/text、/v1/chat/completions 请求，测试 HotpotQA/AmbigQA/2Wiki/MuSiQue/SAMSum/MultiNews 上 full-reuse/full-compute/cacheblend/epic/kvshare 精度、稳定性或延迟时使用。
 ---
 
 # MNN PIC Benchmark
 
-本 Skill 负责 MNN PIC server 的端到端数据集验证闭环：本机编译 MNN 产物，推送到 Jetson 运行服务，本机启动数据集 bench，通过 SSH tunnel 或远端地址向 Jetson 发请求。
+本 Skill 负责 MNN PIC server 的端到端数据集验证闭环：本机编译 MNN 产物，推送到 Jetson CUDA、Orange Pi 5 Plus OpenCL 或 AidLux/Adreno OpenCL 设备运行服务，本机启动数据集 bench，通过 SSH tunnel 或远端地址向目标设备发请求。
 
 ## 相关 Skills
 
 - 构建和 artifact 检查：读 `.codex/skills/mnn-build-artifacts/SKILL.md`。
-- Jetson 设备、rsync 和 PIC server smoke：读 `.codex/skills/mnn-opt-ops/SKILL.md`。
+- Jetson/Orange Pi/AidLux 设备、rsync 和 PIC server smoke：读 `.codex/skills/mnn-opt-ops/SKILL.md`。
 - LLM/PIC server 输出判断：读 `.codex/skills/mnn-llm-bench/SKILL.md`。
 
 参考实现来源是 kvshare-edge 顶层 skills：
@@ -25,13 +25,96 @@ description: 当用户要求把本 MNN 仓库本机交叉编译出的 pic_server
 
 ## 固定设备
 
+设备速查（本 Skill 的目标设备入口；Orange Pi 5 Plus / AidLux 信息必须保留在这里，不只写到其它 skill）：
+
+```text
+Jetson CUDA:
+  ssh:          jetson@192.168.101.192
+  remote repo:  /home/jetson/code/kvshare-edge/impl/MNN
+  artifact:     .cache/output/mnn/artifacts/jetson_cross_cuda
+
+Orange Pi 5 Plus OpenCL:
+  ssh:          orangepi@192.168.101.113
+  auth:         key-based login works from this host
+  target env:   MNN_TARGET_DEVICE=orangepi5plus
+  build dir:    .cache/build/mnn/orangepi5plus
+  remote repo:  /home/orangepi/code/kvshare-edge/impl/MNN
+  artifact:     .cache/output/mnn/artifacts/orangepi5plus
+  cache root:   /mnt/ssd/code/.cache/mnn_opencl_pic
+  backend:      OpenCL GPU
+
+AidLux / Adreno OpenCL:
+  ssh:          aidlux@192.168.101.227
+  password:     aidlux
+  artifact:     .cache/output/mnn/artifacts/aidlux_adreno_opencl
+  backend:      OpenCL / Adreno GPU
+```
+
+当前本机到这三台设备均按 SSH 登录流程使用；Orange Pi 已验证可从本机 key-based 登录。AidLux 如需密码登录，密码为 `aidlux`，若后续配置免密登录也按同一套 `--remote` / `--remote-art-rel` 参数跑。
+
 Jetson：
 
 ```text
 jetson@192.168.101.192
 ```
 
-远端 MNN 仓库：
+Orange Pi 5 Plus / OpenCL：
+
+```text
+orangepi@192.168.101.113
+ssh: key-based login works from this host
+```
+
+Orange Pi 5 Plus 是 Linux AArch64 目标，默认使用 Arm GNU 11.3 AArch64 Linux toolchain 从本机交叉编译；PIC benchmark 主要验证 OpenCL GPU 路径，不使用 Jetson CUDA artifact、CUDA sysroot 或 `libMNN_Cuda_Main.so`。构建时使用：
+
+```text
+MNN_TARGET_DEVICE=orangepi5plus
+```
+
+默认 build / artifact：
+
+```text
+.cache/build/mnn/orangepi5plus
+.cache/output/mnn/artifacts/orangepi5plus
+```
+
+远端 MNN 仓库默认：
+
+```text
+/home/orangepi/code/kvshare-edge/impl/MNN
+```
+
+默认同步目标：
+
+```bash
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/home/orangepi/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/orangepi5plus/
+```
+
+Orange Pi 实验 run/log/KV cache 优先放到 SSD-backed cache root，避免写满远端仓库所在根分区；当前可写路径优先使用：
+
+```text
+/mnt/ssd/code/.cache/mnn_opencl_pic
+```
+
+OpenCL 正式性能测试前需要 warm 目标 shape / ratio，并写回 MNN OpenCL autotune cache；冷启动 kernel build、LWS tuning 和 cachefile 生成不计入正式 latency。
+
+AidLux / Adreno OpenCL：
+
+```text
+aidlux@192.168.101.227
+password: aidlux
+```
+
+AidLux 也是 Linux AArch64 目标，默认使用 Arm GNU 11.3 AArch64 Linux toolchain 从本机交叉编译；性能测试走 OpenCL backend，目标 GPU 是 Adreno。不要沿用 Jetson CUDA artifact、CUDA sysroot 或 `libMNN_Cuda_Main.so`；AidLux artifact 应单独放到设备专用目录，例如：
+
+```text
+.cache/output/mnn/artifacts/aidlux_adreno_opencl
+```
+
+AidLux OpenCL benchmark 只验证 GPU/OpenCL 路径，启动前检查远端 `LD_LIBRARY_PATH` 包含对应 artifact `lib/`，并确认运行日志没有 CUDA backend、CPU fallback 或 OpenCL target unavailable。
+
+Jetson 远端 MNN 仓库：
 
 ```text
 /home/jetson/code/kvshare-edge/impl/MNN
@@ -49,7 +132,7 @@ jetson@192.168.101.192
 /root/code/kvshare-edge
 ```
 
-默认 artifact：
+Jetson 默认 artifact：
 
 ```text
 .cache/output/mnn/artifacts/jetson_cross_cuda
@@ -98,6 +181,47 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
 7. 结束时清理 tunnel 和远端同端口 `pic_server`。
 
 默认 bench 参数未传时使用 HotpotQA 20 case、`kvshare`、20% recompute、score layer 1。
+
+注意：当前 `run_mnn_pic_dataset_bench.sh` 的默认构建路径仍是 Jetson CUDA。Orange Pi 5 Plus / AidLux 的设备信息属于本 Skill，并记录在上面的“固定设备”段；但用这个脚本跑 OpenCL 设备时，不要直接沿用默认构建步骤。先按目标设备单独构建 OpenCL artifact，然后用 `--skip-build` 配合对应 remote / artifact / config 参数启动服务和 bench。
+
+Orange Pi 5 Plus 常用方式：
+
+```bash
+MNN_TARGET_DEVICE=orangepi5plus \
+BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+
+bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
+  --skip-build \
+  --remote orangepi@192.168.101.113 \
+  --remote-repo /home/orangepi/code/kvshare-edge/impl/MNN \
+  --build-dir "$PWD/.cache/build/mnn/orangepi5plus" \
+  --install-prefix "$PWD/.cache/output/mnn/artifacts/orangepi5plus" \
+  --remote-art-rel .cache/output/mnn/artifacts/orangepi5plus \
+  --remote-cuda-lib "" \
+  --remote-kv-dir /mnt/ssd/code/.cache/mnn_opencl_pic/mnn_pic_dataset_bench_<run_id> \
+  --remote-config /home/orangepi/code/kvshare-edge/impl/MNN/.cache/weight/<opencl-model>/config_opencl_greedy.json \
+  --port 18096 \
+  --local-port 18096 \
+  --run-id <run_id> \
+  -- \
+  --dataset hotpotqa \
+  --mode pic_cache_reuse \
+  --phase both \
+  --cases 20 \
+  --context-len 1500 \
+  --max-tokens 64 \
+  --temperature 0.0 \
+  --local-files-only \
+  --min-doc-tokens 0 \
+  --force-cache \
+  --reset-before-each-infer \
+  --pic-selection-algorithm kvshare \
+  --pic-recompute-ratio 0.20 \
+  --pic-recompute-score-layer-idx 1
+```
+
+AidLux / Adreno 也按同样原则处理：artifact 使用 `.cache/output/mnn/artifacts/aidlux_adreno_opencl`，远端使用 `aidlux@192.168.101.227`，启动日志必须确认走 OpenCL/Adreno GPU，不能出现 CUDA backend、CPU fallback 或 OpenCL target unavailable。
 
 常用覆盖：
 

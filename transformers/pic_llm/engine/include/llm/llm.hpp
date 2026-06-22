@@ -176,6 +176,14 @@ public:
                                           const std::vector<MNN::PagedKVExternalSegment>& segments,
                                           int pic_start, int pic_token_count, int score_layer_idx,
                                           const std::vector<int>& selected_local_indices);
+    bool preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_token_ids,
+                                const std::vector<int>& ranked_pic_local_indices,
+                                const std::vector<int>& seed_selected_pic_local_indices,
+                                int tokens_per_decode_step);
+    int picDecodeRepairCandidateCount() const;
+    std::vector<int> picDecodeRepairRepairedLogicalIndices() const;
+    std::vector<std::vector<int>> picDecodeRepairStepLogicalIndices() const;
+    void clearPicDecodeRepair();
     void finishExternalPagedKVRequest();
     virtual void response(const std::vector<int>& input_ids, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
     void response(const std::string& user_content, std::ostream* os = &std::cout, const char* end_with = nullptr, int max_new_tokens = -1);
@@ -274,6 +282,11 @@ private:
     std::shared_ptr<Express::Module> cloneModuleWithRuntime(const Express::Module* module);
     std::shared_ptr<Express::Module> getCacheBlendScoreModule(int scoreLayerIdx);
     bool runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, int scoreLayerIdx);
+    std::vector<Express::VARP> forwardVecWithPicDecodeRepair(const std::vector<int>& inputIds);
+    Express::VARP embeddingForPicDecodeRepair(const std::vector<int>& inputIds);
+    Express::VARP genDecodeRepairPositionIds(const std::vector<int>& logicalIndices);
+    Express::VARP genDecodeRepairAttentionMask(const std::vector<int>& logicalIndices);
+    std::vector<int> selectPicDecodeRepairLogicalIndices();
     bool mPrefixCacheMode = false;
     std::string mPrefixCacheFileName;
     int mCallIndex;
@@ -283,6 +296,27 @@ private:
     // Prompt cache state
     std::string mCachedPromptText;
     void updateCachedPromptText(const ChatMessages& chat_prompts, size_t history_before);
+    struct PicDecodeRepairRuntimeState {
+        bool enabled = false;
+        int picStart = 0;
+        int picTokenCount = 0;
+        int tokensPerDecodeStep = 0;
+        int cursor = 0;
+        int stepIdx = 0;
+        std::vector<int> picTokenIds;
+        std::vector<int> rankedLogicalIndices;
+        std::vector<uint8_t> repairedPicLocal;
+        std::vector<int> pendingRepairLogicalIndices;
+        std::vector<int> scratchLogicalIndices;
+        std::vector<int> scratchSparseTokenIds;
+        std::vector<std::vector<int>> stepLogicalIndices;
+        std::vector<float> picTokenEmbeddings;
+        int picTokenEmbeddingHiddenSize = 0;
+        std::map<int, Express::VARP> embeddingByLen;
+        std::map<int, Express::VARP> causalMaskByLen;
+        std::map<int, Express::VARP> positionIdsByLen;
+    };
+    PicDecodeRepairRuntimeState mPicDecodeRepair;
 };
 
 // Embedding start

@@ -332,6 +332,19 @@ static uint32_t _sparseFlashLaneWidth(const PagedKVMeta* meta, int activeLen) {
     return 32u;
 }
 
+static uint64_t _sparseLogicalWork(const PagedKVMeta* meta, int activeLen, int kvLen) {
+    if (meta == nullptr || activeLen <= 0 || kvLen <= 0 ||
+        static_cast<int>(meta->sparse_query_logical_indices.size()) < activeLen) {
+        return 0;
+    }
+    uint64_t work = 0;
+    for (int i = 0; i < activeLen; ++i) {
+        const int logical = meta->sparse_query_logical_indices[static_cast<size_t>(i)];
+        work += static_cast<uint64_t>(std::max(0, std::min(kvLen, logical + 1)));
+    }
+    return work;
+}
+
 static bool _useStaticFullPrefill(int seqLen, int kvLen, int batch, int numHeads, int kvHeads, int headDim) {
     if (seqLen <= 0 || kvLen <= 0 || batch <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0) {
         return false;
@@ -1274,6 +1287,7 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     mCache->bytes = mBytes;
     mCache->slotTableVersion = -1;
     mCache->slotTableLength = 0;
+    mCache->sparseQueryHost.clear();
     if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
         _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
                                            mCache->key, mCache->value,
@@ -1316,12 +1330,25 @@ ErrorCode PagedAttentionBufExecution::syncSparseQuery(int attnLen) {
     if (attnLen <= 0 || mMeta == nullptr || !mMeta->sparse_query_active) {
         return NO_ERROR;
     }
+    if (!mCache || !mCache->sparseQuery || attnLen > mCache->maxSlots) {
+        return OUT_OF_MEMORY;
+    }
     if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
         return INVALID_VALUE;
     }
-    mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueWriteBuffer(
-        openCLBuffer(mCache->sparseQuery.get()), CL_TRUE, 0, attnLen * sizeof(int),
-        mMeta->sparse_query_logical_indices.data());
+    const int* hostPtr = mMeta->sparse_query_logical_indices.data();
+    if (static_cast<int>(mCache->sparseQueryHost.size()) == attnLen &&
+        std::equal(mCache->sparseQueryHost.begin(), mCache->sparseQueryHost.end(), hostPtr)) {
+        return NO_ERROR;
+    }
+    auto ret = mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueWriteBuffer(
+        openCLBuffer(mCache->sparseQuery.get()), CL_TRUE, 0, static_cast<size_t>(attnLen) * sizeof(int),
+        hostPtr);
+    if (ret != CL_SUCCESS) {
+        mCache->sparseQueryHost.clear();
+        return INVALID_VALUE;
+    }
+    mCache->sparseQueryHost.assign(hostPtr, hostPtr + attnLen);
     return NO_ERROR;
 }
 
@@ -1375,6 +1402,21 @@ static ErrorCode _emitIdentityIndicesOpenCL(int count, Tensor* output, OpenCLBac
         return INVALID_VALUE;
     }
     return NO_ERROR;
+}
+
+static ErrorCode _emitDecodeRecomputeIndicesOpenCL(PagedKVMeta* meta, int count, Tensor* output,
+                                                   OpenCLBackend* backend) {
+    if (output == nullptr) {
+        return NO_ERROR;
+    }
+    count = std::min(count, static_cast<int>(output->elementSize()));
+    if (count <= 0) {
+        return NO_ERROR;
+    }
+    if (meta == nullptr || static_cast<int>(meta->sparse_query_logical_indices.size()) < count) {
+        return INVALID_VALUE;
+    }
+    return _emitIdentityIndicesOpenCL(count, output, backend);
 }
 
 ErrorCode PagedAttentionBufExecution::ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen,
@@ -1449,6 +1491,27 @@ ErrorCode PagedAttentionBufExecution::ensureSparseFlashKernel() {
     OPENCL_CHECK_KERNEL(mSparseFlashKernel32);
     OPENCL_CHECK_KERNEL(mSparseFlashKernel64);
     mSparseFlashKernelGroupSize = groupSize;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernel() {
+    if (mHeadDim != 64 || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    const int groupSize = mNumHead / mKvNumHead;
+    if (mDecodeCausalKernel32 && mDecodeCausalKernel64 && mDecodeCausalKernelGroupSize == groupSize) {
+        return NO_ERROR;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    mDecodeCausalKernel32 = runtime->buildKernel("attention_buf", "decode_causal_attention_row32",
+                                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                                 mOpenCLBackend->getPrecision());
+    mDecodeCausalKernel64 = runtime->buildKernel("attention_buf", "decode_causal_attention_row64",
+                                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                                 mOpenCLBackend->getPrecision());
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernel32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernel64);
+    mDecodeCausalKernelGroupSize = groupSize;
     return NO_ERROR;
 }
 
@@ -2170,6 +2233,86 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttention(const std::vector<Tensor*>& inputs,
+                                                               const std::vector<Tensor*>& outputs, int kvLen,
+                                                               int attnLen, int baseLogical, bool sparseQuery,
+                                                               bool queryRowsAreFull) {
+    if (attnLen <= 0 || kvLen <= 0 || mHeadDim != 64) {
+        return INVALID_VALUE;
+    }
+    if (sparseQuery &&
+        (mMeta == nullptr || static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen)) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeCausalKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto query = inputs[0];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    const bool profile = _profilePagedAttention();
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    const uint32_t lanes = _sparseFlashLaneWidth(sparseQuery ? mMeta : nullptr, attnLen);
+    auto kernel = lanes == 32u ? mDecodeCausalKernel32 : mDecodeCausalKernel64;
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    std::vector<uint32_t> gws = {
+        lanes,
+        static_cast<uint32_t>(attnLen),
+        static_cast<uint32_t>(mNumHead * mBatch),
+    };
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    ret |= kernel->get().setArg(idx++, gws[0]);
+    ret |= kernel->get().setArg(idx++, gws[1]);
+    ret |= kernel->get().setArg(idx++, gws[2]);
+    ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+    ret |= kernel->get().setArg(idx++, mScale);
+    ret |= kernel->get().setArg(idx++, mBatch);
+    ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= kernel->get().setArg(idx++, attnLen);
+    ret |= kernel->get().setArg(idx++, baseLogical);
+    ret |= kernel->get().setArg(idx++, sparseQuery ? 1 : 0);
+    ret |= kernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
+    ret |= kernel->get().setArg(idx++, kvLen);
+    ret |= kernel->get().setArg(idx++, mCache->maxSlots);
+    ret |= kernel->get().setArg(idx++, mNumHead);
+    ret |= kernel->get().setArg(idx++, mKvNumHead);
+    ret |= kernel->get().setArg(idx++, mHeadDim);
+    MNN_CHECK_CL_SUCCESS(ret, lanes == 32u ? "setArg decode_causal_attention_row32"
+                                           : "setArg decode_causal_attention_row64");
+    run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profile) {
+        runtime->commandQueue().finish();
+        const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        uint64_t causalWork = 0;
+        if (sparseQuery) {
+            causalWork = _sparseLogicalWork(mMeta, attnLen, kvLen);
+        } else {
+            for (int i = 0; i < attnLen; ++i) {
+                causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
+            }
+        }
+        int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention layer=%d "
+                  "query=%d input_query=%d sparse=%d full_q=%d kv_len=%d lane=%u "
+                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
+                  layerIndex, attnLen, mQuerySeqLen, sparseQuery ? 1 : 0, queryRowsAreFull ? 1 : 0,
+                  kvLen, lanes,
+                  static_cast<unsigned long long>(denseWork),
+                  static_cast<unsigned long long>(causalWork),
+                  static_cast<unsigned long long>(_nowUs() - startUs));
+    }
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>& inputs,
                                                      const std::vector<Tensor*>& outputs, int kvLen, int maskKeyLen) {
     if (maskKeyLen <= 0 || maskKeyLen > kvLen) {
@@ -2545,7 +2688,8 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     int kvWriteLen = mNewKvSeqLen;
     int attnLen = output->length(1);
     bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
-    const bool scoreAttention = effectivePicAttentionMode == 1;
+    const bool picDecodeRecompute = mMeta != nullptr && mMeta->pic_decode_recompute_active;
+    const bool scoreAttention = effectivePicAttentionMode == 1 && !picDecodeRecompute;
     if (scoreAttention) {
         sparseQuery = false;
     }
@@ -2558,7 +2702,13 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
             return INVALID_VALUE;
         }
+        if (mNewKvSeqLen < attnLen) {
+            MNN_ERROR("OpenCLPagedAttention layer %d sparse K/V rows %d smaller than active attention rows %d\n",
+                      layerIndex, mNewKvSeqLen, attnLen);
+            return INVALID_VALUE;
+        }
         baseLogical = 0;
+        kvWriteLen = attnLen;
     } else if (effectivePicAttentionMode == 2) {
         MNN_ERROR("OpenCL PicSparseAttention layer %d requires active sparse rows from PicScoreAttention\n",
                   layerIndex);
@@ -2665,8 +2815,9 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         }
         return err;
     }
-    if (scoreAttention && outputs.size() > 1) {
-        err = _emitActiveIndicesOpenCL(mMeta, layerIndex, kvLen, outputs[1], mOpenCLBackend);
+    if ((scoreAttention || picDecodeRecompute) && outputs.size() > 1) {
+        err = picDecodeRecompute ? _emitDecodeRecomputeIndicesOpenCL(mMeta, attnLen, outputs[1], mOpenCLBackend)
+                                 : _emitActiveIndicesOpenCL(mMeta, layerIndex, kvLen, outputs[1], mOpenCLBackend);
         if (err != NO_ERROR) {
             return err;
         }
@@ -2786,6 +2937,15 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     bool externalHydrated = !shouldHydrateExternal || mMeta->externalLayerLoaded(layerIndex);
     const bool queryRowsAreFull = sparseQuery && mQuerySeqLen > attnLen;
     int fastMaskKeyLen = 0;
+    const bool decodeCausalMask = !useMask || (mMeta != nullptr && mMeta->full_causal_attention_mask);
+    const bool repairDecodeCausal = picDecodeRecompute && sparseQuery;
+    const bool ordinaryDecodeCausal = decodeStep && !sparseQuery && attnLen == 1 &&
+        mQuerySeqLen == 1 && mNewKvSeqLen == 1;
+    if ((repairDecodeCausal || ordinaryDecodeCausal) && decodeCausalMask && mHeadDim == 64 &&
+        mCache != nullptr && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery) {
+        return runDecodeCausalAttention(inputs, outputs, kvLen, attnLen, baseLogical, sparseQuery,
+                                        queryRowsAreFull);
+    }
     if (canUseFastPrefill(mask, baseLogical, attnLen, kvLen, sparseQuery, externalHydrated, &fastMaskKeyLen)) {
         return runFastPrefill(inputs, outputs, kvLen, fastMaskKeyLen);
     }

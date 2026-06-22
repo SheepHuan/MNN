@@ -35,6 +35,20 @@ if(MNN_CUDA)
   find_package(CUDA 8.0 REQUIRED)
   target_include_directories(run_test.out PRIVATE ${CUDA_INCLUDE_DIRS})
   target_link_libraries(run_test.out ${CUDA_LIBRARIES})
+  if(CUDA_CUBLAS_LIBRARIES)
+    target_link_libraries(run_test.out ${CUDA_CUBLAS_LIBRARIES})
+  else()
+    find_library(CUDA_CUBLAS_LIBRARY cublas
+      HINTS
+        ${CUDA_TOOLKIT_ROOT_DIR}/lib64
+        ${CUDA_TOOLKIT_ROOT_DIR}/lib
+        ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    if(CUDA_CUBLAS_LIBRARY)
+      target_link_libraries(run_test.out ${CUDA_CUBLAS_LIBRARY})
+    else()
+      target_link_libraries(run_test.out -lcublas)
+    endif()
+  endif()
 endif()
 target_link_libraries(run_test.out ${MNN_DEPS})
 if (MSVC)
