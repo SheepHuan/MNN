@@ -10,3 +10,4 @@ config.toml
 *.json
 *.jsonl
 .system/
+rules/

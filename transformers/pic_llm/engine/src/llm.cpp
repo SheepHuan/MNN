@@ -115,6 +115,17 @@ bool Llm::set_config(const std::string& content) {
     setChatTemplate();
     mAsync = mConfig->config_.value("async", true);
     mGenerateParam->timeout_ms = mConfig->timeout_ms();
+    if (mConfig->paged_attention()) {
+        auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        if (paged != nullptr && !paged->request_active) {
+            paged->max_tokens = mConfig->paged_kv_max_tokens();
+            paged->full_causal_attention_mask =
+                mConfig->attention_mask() == "float" && mConfig->attention_type() == "full";
+        }
+    }
+    if (mSampler != nullptr) {
+        mSampler.reset(Sampler::createSampler(mContext, mConfig));
+    }
     mValidBlockSize.clear();
     mBlockSize = mConfig->config_.value("chunk", 0);
     if (mConfig->config_.contains("chunk_limits")) {
@@ -1371,6 +1382,26 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     std::vector<Express::VARP> outputs = selectModule->onForward(inputs);
 
     if (outputs.empty()) {
+        std::ostringstream err;
+        err << "forwardRaw outputs empty seq_len=" << seqLen
+            << " add=" << static_cast<int>(mMeta->add)
+            << " all_seq=" << mContext->all_seq_len
+            << " gen_seq=" << mContext->gen_seq_len;
+        if (mConfig->paged_attention()) {
+            auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+            err << " paged_max=" << paged->max_tokens
+                << " request_capacity=" << paged->request_capacity
+                << " logical_length=" << paged->logical_length
+                << " previous=" << static_cast<int>(paged->previous)
+                << " remove=" << static_cast<int>(paged->remove);
+        }
+        mLastError = err.str();
+        MNN_ERROR("PIC forward failed: outputs empty, seq_len=%d add=%d all_seq=%d gen_seq=%d paged_max=%d "
+                  "request_capacity=%d logical_length=%d\n",
+                  seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len,
+                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->max_tokens : 0,
+                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->request_capacity : 0,
+                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->logical_length : 0);
         if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
             std::fprintf(stderr, "PIC forward debug outputs empty seq_len=%d add=%d all_seq=%d gen_seq=%d\n",
                          seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len);
@@ -1384,6 +1415,18 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     for (size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
         auto o = outputs[outputIndex];
         if(nullptr == o || nullptr == o->getInfo()) {
+            std::ostringstream err;
+            err << "forwardRaw invalid output index=" << outputIndex
+                << " null=" << (o == nullptr ? 1 : 0)
+                << " seq_len=" << seqLen
+                << " add=" << static_cast<int>(mMeta->add)
+                << " all_seq=" << mContext->all_seq_len
+                << " gen_seq=" << mContext->gen_seq_len;
+            mLastError = err.str();
+            MNN_ERROR("PIC forward failed: invalid output index=%d null=%d seq_len=%d add=%d all_seq=%d "
+                      "gen_seq=%d\n",
+                      static_cast<int>(outputIndex), o == nullptr ? 1 : 0, seqLen, static_cast<int>(mMeta->add),
+                      mContext->all_seq_len, mContext->gen_seq_len);
             if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
                 auto info = nullptr != o ? o->getInfo() : nullptr;
                 std::fprintf(stderr,
@@ -1398,6 +1441,26 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
         }
     }
     if (outputs[0]->readMap<float>() == nullptr) {
+        std::ostringstream err;
+        err << "forwardRaw logits materialize failed seq_len=" << seqLen
+            << " add=" << static_cast<int>(mMeta->add)
+            << " all_seq=" << mContext->all_seq_len
+            << " gen_seq=" << mContext->gen_seq_len;
+        if (mConfig->paged_attention()) {
+            auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+            err << " paged_max=" << paged->max_tokens
+                << " request_capacity=" << paged->request_capacity
+                << " logical_length=" << paged->logical_length
+                << " previous=" << static_cast<int>(paged->previous)
+                << " remove=" << static_cast<int>(paged->remove);
+        }
+        mLastError = err.str();
+        MNN_ERROR("PIC forward failed: logits materialize failed, seq_len=%d add=%d all_seq=%d gen_seq=%d "
+                  "paged_max=%d request_capacity=%d logical_length=%d\n",
+                  seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len,
+                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->max_tokens : 0,
+                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->request_capacity : 0,
+                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->logical_length : 0);
         if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
             std::fprintf(stderr,
                          "PIC forward debug logits materialize failed seq_len=%d add=%d all_seq=%d gen_seq=%d\n",
@@ -1642,6 +1705,7 @@ void Llm::reset() {
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
     // init status
+    mLastError.clear();
     mContext->os = os;
     if (nullptr != end_with) {
         mContext->end_with = end_with;
@@ -1752,12 +1816,33 @@ bool Llm::prefill(const std::vector<int>& input_ids) {
         if (0 == mBlockSize || input_ids.size() <= mBlockSize) {
             auto hidden_states = embedding(input_ids);
             if(hidden_states == nullptr) {
+                std::ostringstream err;
+                err << "prefill embedding null tokens=" << input_ids.size()
+                    << " status=" << static_cast<int>(mContext->status)
+                    << " all_seq=" << mContext->all_seq_len;
+                mLastError = err.str();
+                MNN_ERROR("PIC prefill failed: embedding returned null, tokens=%d status=%d all_seq=%d\n",
+                          static_cast<int>(input_ids.size()), static_cast<int>(mContext->status),
+                          mContext->all_seq_len);
                 return false;
             }
             generate(hidden_states, 0);
             if (mContext->status == LlmStatus::INTERNAL_ERROR ||
                 mContext->status == LlmStatus::TIMEOUT ||
                 mContext->status == LlmStatus::USER_CANCEL) {
+                if (mLastError.empty()) {
+                    std::ostringstream err;
+                    err << "prefill forward failed tokens=" << input_ids.size()
+                        << " status=" << static_cast<int>(mContext->status)
+                        << " all_seq=" << mContext->all_seq_len
+                        << " prompt=" << mContext->prompt_len
+                        << " prefill_us=" << static_cast<long long>(mContext->prefill_us);
+                    mLastError = err.str();
+                }
+                MNN_ERROR("PIC prefill failed after forward, tokens=%d status=%d all_seq=%d prompt=%d prefill_us=%lld\n",
+                          static_cast<int>(input_ids.size()), static_cast<int>(mContext->status),
+                          mContext->all_seq_len, mContext->prompt_len,
+                          static_cast<long long>(mContext->prefill_us));
                 return false;
             }
             completePrefixWrite();
@@ -1775,12 +1860,37 @@ bool Llm::prefill(const std::vector<int>& input_ids) {
             std::vector<int> chunk_ids(input_ids.begin() + start, input_ids.begin() + end);
             auto input_embeds = embedding(chunk_ids);
             if(input_embeds == nullptr) {
+                std::ostringstream err;
+                err << "prefill chunk embedding null chunk=" << (i + 1) << "/" << loop_size
+                    << " tokens=" << chunk_ids.size()
+                    << " status=" << static_cast<int>(mContext->status)
+                    << " all_seq=" << mContext->all_seq_len;
+                mLastError = err.str();
+                MNN_ERROR("PIC prefill failed: chunk embedding returned null, chunk=%d/%d tokens=%d status=%d "
+                          "all_seq=%d\n",
+                          i + 1, loop_size, static_cast<int>(chunk_ids.size()), static_cast<int>(mContext->status),
+                          mContext->all_seq_len);
                 return false;
             }
             generate(input_embeds, 0);
             if (mContext->status == LlmStatus::INTERNAL_ERROR ||
                 mContext->status == LlmStatus::TIMEOUT ||
                 mContext->status == LlmStatus::USER_CANCEL) {
+                if (mLastError.empty()) {
+                    std::ostringstream err;
+                    err << "prefill chunk forward failed chunk=" << (i + 1) << "/" << loop_size
+                        << " tokens=" << chunk_ids.size()
+                        << " status=" << static_cast<int>(mContext->status)
+                        << " all_seq=" << mContext->all_seq_len
+                        << " prompt=" << mContext->prompt_len
+                        << " prefill_us=" << static_cast<long long>(mContext->prefill_us);
+                    mLastError = err.str();
+                }
+                MNN_ERROR("PIC prefill failed after chunk forward, chunk=%d/%d tokens=%d status=%d all_seq=%d "
+                          "prompt=%d prefill_us=%lld\n",
+                          i + 1, loop_size, static_cast<int>(chunk_ids.size()), static_cast<int>(mContext->status),
+                          mContext->all_seq_len, mContext->prompt_len,
+                          static_cast<long long>(mContext->prefill_us));
                 return false;
             }
         }
@@ -2519,12 +2629,20 @@ VARP Llm::gen_attention_mask(int seq_len) {
             return attentionMask;
         }
         // Use square mask just for new generation token, save memory of attention mask
-        kv_seq_len = seq_len;
+        bool useFullPagedExternalMask = false;
+        if (mConfig->paged_attention()) {
+            auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+            useFullPagedExternalMask = paged != nullptr && paged->request_active &&
+                !paged->external_segments.empty() && !paged->sparse_query_active;
+        }
+        if (!useFullPagedExternalMask) {
+            kv_seq_len = seq_len;
+        }
         if (mAttentionMaskVarVec.size() > 0) {
-            if(seq_len == 1) {
+            if(seq_len == 1 && !useFullPagedExternalMask) {
                 return mAttentionMaskVarVec[0];
             }
-            if (mAttentionMaskVarVec.size() > 1 && seq_len == mDraftLength + 1) {
+            if (mAttentionMaskVarVec.size() > 1 && seq_len == mDraftLength + 1 && !useFullPagedExternalMask) {
                 return mAttentionMaskVarVec[1];
             }
         }
@@ -2537,9 +2655,11 @@ VARP Llm::gen_attention_mask(int seq_len) {
        } else {
             attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
             auto ptr = attentionMask->writeMap<float>();
+            const int queryOffset = kv_seq_len - seq_len;
             for (int i = 0; i < seq_len; i++) {
+                const int queryPos = queryOffset + i;
                 for (int j = 0; j < kv_seq_len; j++) {
-                    ptr[kv_seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();
+                    ptr[kv_seq_len * i + j] = (j > queryPos) * std::numeric_limits<float>::lowest();
                 }
             }
        }

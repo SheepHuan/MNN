@@ -119,10 +119,10 @@ resolve_device() {
       printf '%s\t%s\n' "jetson@192.168.101.192" "/home/jetson/code/kvshare-edge/impl/MNN/.cache/device-io-bench"
       ;;
     orangepi)
-      printf '%s\t%s\n' "orangepi@192.168.101.113" "/home/orangepi/code/kvshare-edge/impl/MNN/.cache/device-io-bench"
+      printf '%s\t%s\n' "orangepi@192.168.101.113" "/mnt/ssd/code/.cache/device-io-bench"
       ;;
     aidlux)
-      printf '%s\t%s\n' "aidlux@192.168.101.227" "/home/aidlux/.cache/mnn-device-io-bench"
+      printf '%s\t%s\n' "aidlux@192.168.101.227" "/mnt/nvme/mnn_pic_opencl/cache/device-io-bench"
       ;;
     *)
       echo "Unknown device alias: $alias" >&2

@@ -856,6 +856,24 @@ tile 反复读取 gate/up，代价远大于省掉的 `PicSiluMul`/memory traffic
 的中间片段、应用 SwiGLU，并直接累加 down，同时保持或替代 tensor-core 级吞吐；单独把
 `PicSiluMul` 融入 down 不能提供足够收益。
 
+当前清理状态和后续判断边界：
+
+- `SwiGLUDownInt4Proto` 只保留为本文档中的负向实验记录；源码树和 `test/bench_ops/cuda/`
+  中不再保留 standalone proto 文件、注册名或编译入口，`.cache/decode_repair_fusion` 临时目录也
+  不作为后续测试产物保留。后续 benchmark / review 不应再把该测试分支当作候选实现或默认路径。
+- `MNN_CUDA_PIC_INT4_ROWS45_PROTO_OC` 同样只保留负向数据；生产 CUDA path 已移除该临时 env 分支。
+  它只用于排除“继续调现有 V14_MB GEMV family”的路线，不参与后续默认策略选择。
+- 当前正式保留的最佳实现是 rows4/5 real-layout static-dequant cuBLAS shape policy：
+  `MNN_CUDA_PIC_INT4_ROWS45_CUBLAS` 默认等价于 `all`，覆盖 gate/up/down 三个 MLP projection；
+  该路径在 rows4/5 direct-op accuracy 中 `bad=0`，并且 direct-op chain 明显优于禁用回退。
+- `PicSiluMul` 的 3D feature-dim 修正保留为通用正确性/命中率修正；`PicPackedSiluMul`
+  只作为 `--pic_decode_gateup_fusion` 的 opt-in cleanup 保留，不进入默认 `--pic_decode_tiny_fusion`
+  的完成判据。它可以减少少量 layout/slice 开销，但不能单独解释或解决 `tpd=3/4` 的 50ms 缺口。
+- 因此后续新候选只和上述保留路径比较：默认 rows4/5 cuBLAS policy、默认 token-id sparse decode、
+  以及 opt-in `PicPackedSiluMul` gate/up cleanup。已删除的 `SwiGLUDownInt4Proto`、普通 dense
+  FP16 GEMM floor、NC4 swiglu-down 输入绕行和 decode-only sparse flash tile 都只作为负向边界，
+  不能影响“当前最佳实现”的判断。
+
 1. `PicGateUpWeightOnly`。
 
    - 合并 MLP 的 `gate_proj + up_proj` 两个 weight-only projection。

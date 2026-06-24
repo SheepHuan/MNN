@@ -175,6 +175,19 @@ PIC decode repair 做正式 TPOT 前，先把算子级 tune 和 server 启动配
 - 算子级 CUDA event tune：用 `.codex/skills/mnn-opt-ops/scripts/run_remote_weight_only_conv_tune.sh` 在 Jetson 上跑 `bench_ops/cuda/perf/WeightOnlyConv`，筛 rows=2..8 的 weight-only / fused kernel shape policy。
 - Server warm + cache 固化：用 `.codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_config_tune.sh` 枚举候选启动配置；每个配置会在独立 workdir 启动 `pic_server`，再调用 `.codex/skills/mnn-opt-ops/scripts/run_pic_decode_repair_tune_warm.sh` 发 `tpd=0..4` warm 请求和 `/v1/tune/update_cache`，把 `tmp/mnn_cachefile.bin` 固化到该候选目录。正式 TPOT 需要重启同一配置并复用该 cache 文件，最后比较各配置的热态 TPOT / smoke 结果。
 
+### Decode selector 与 prefill 预算正交
+
+PIC decode repair 的 `decode_refine.selector` 与 PIC prefill 的 `selection_algorithm` / `pic_recompute_ratio` 是两条正交边界，不能互相冒充：
+
+- `selection_algorithm=full-reuse/full-compute/epic/cacheblend/kvshare` 只决定 prefill 阶段如何构建当前请求 PagedCache：是否 hydrate 持久 PIC KV、是否做 prefill sparse recompute、以及 prefill sparse recompute 的预算和 score layer。它不能被 decode selector 改写。
+- `pic_recompute_ratio=0.05/0.10/0.20` 等预算只属于 prefill sparse recompute。它不是 decode repair 每步 repair token 数，也不能用来解释 `tokens_per_decode_step`。
+- `decode_refine.tokens_per_decode_step` 只属于 decode 阶段。`tpd=0` 是 normal/no-repair decode baseline，请求不启用 `decode_refine`；`tpd>=1` 时，每个 decode step 使用 `decode_refine.selector` 从 decode 候选集合中选择最多 `tpd` 个 PIC logical rows，与当前 generated token 一起进入 token-id sparse decode，active rows 为 `tpd + 1`。
+- decode selector 的实现位置是 LLM runtime 的 decode step 选择逻辑，例如 `Llm::selectPicDecodeRepairLogicalIndices()` 及其 state；不能通过修改 `buildExecutionPlan()`、`nativeSelectedLocalIndices`、`plan.recomputeLogicalIndices`、`plan.sparseTokenIds` 或 prefill `recomputeTokenCount` 来实现。
+- prefill 可以产出 decode selector 消费的初始信息，例如 PIC token ids、prefill 已重算 bitmap、HKVD rank、attention layer/head 摘要或 high-attention interval state；但 decode 阶段只能读取这些请求内内存态信息，不重新执行 cacheblend/epic/kvshare scoring，不重新 top-k，不改 prefill score layer，不写 scratch `.k/.v`。
+- `lagged_attention_hkvd` 是 decode selector，不是 prefill selection algorithm。它的 `attention_layer_idx` / `attention_head_ids` 参数必须进入 decode selector runtime state，用于每个 decode step 基于上一 decode token/step 的 lagged attention 区间筛选 HKVD 候选。若 runtime 尚未实现这个 selector，必须明确返回 unsupported/fallback，并在结果中标注；不能静默退化成 `top_hkvd`，也不能复用 prefill selected indices 后把结果命名为 lagged attention。
+- `top_hkvd` 与 `lagged_attention_hkvd` 可以共享同一个 token-id sparse decode 计算图和 backend kernel；差异只在 decode step 的 repair logical rows 选择策略和 selector state，不允许导出不同 prefill graph 或改变 prefill sparse recompute token 集合。
+- benchmark / CSV 必须分别记录 prefill 与 decode 两套字段，例如 `mode=epic`、`budget=0.05/0.10/0.20`、`decode_selector=lagged_attention_hkvd`、`repair_tokens=tokens_per_decode_step`、`generated_tokens=32`、`decode_tpot_ms`、`decode_tps`。不要把 prefill budget 列命名或解释成 repair token 数。
+
 聚焦 rows=4/5 的 MLP/Linear direct-op tune：
 
 ```bash

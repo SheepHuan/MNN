@@ -985,31 +985,30 @@ static int maxSlotsWithPicSourceSlotsCUDA(const PagedKVMeta* meta, int kvLen) {
     return std::max(kvLen, sourceBase + static_cast<int>(sourceSlots));
 }
 
-static bool writeBinaryFile(const std::string& path, const std::vector<int8_t>& data) {
+static bool writeBinaryFile(const std::string& path, const void* data, size_t bytes) {
     std::ofstream os(path, std::ios::binary);
     if (!os.good()) {
         return false;
     }
-    if (!data.empty()) {
-        os.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (data != nullptr && bytes > 0) {
+        const char* cursor = reinterpret_cast<const char*>(data);
+        size_t remaining = bytes;
+        while (remaining > 0) {
+            const auto chunk = static_cast<std::streamsize>(
+                std::min<size_t>(remaining, static_cast<size_t>(std::numeric_limits<std::streamsize>::max())));
+            os.write(cursor, chunk);
+            if (!os.good()) {
+                return false;
+            }
+            cursor += chunk;
+            remaining -= static_cast<size_t>(chunk);
+        }
     }
     return os.good();
 }
 
-static bool readBinaryFileRange(const std::string& path, size_t offsetBytes, void* dst, size_t expectedBytes) {
+static bool readStreamRange(std::ifstream& is, size_t offsetBytes, void* dst, size_t expectedBytes) {
     if (dst == nullptr || expectedBytes == 0) {
-        return false;
-    }
-    std::ifstream is(path, std::ios::binary | std::ios::ate);
-    if (!is.good()) {
-        return false;
-    }
-    auto size = is.tellg();
-    if (size < 0) {
-        return false;
-    }
-    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(size));
-    if (offsetBytes > fileBytes || fileBytes - offsetBytes < expectedBytes) {
         return false;
     }
     is.seekg(static_cast<std::streamoff>(offsetBytes), std::ios::beg);
@@ -1028,9 +1027,28 @@ static bool readBinaryFileRange(const std::string& path, size_t offsetBytes, voi
     return true;
 }
 
-static bool readExternalValueSegment(const std::string& path, std::vector<int8_t>& data, int batch, int kvHeads,
-                                     size_t sourceTokenCount, size_t sourceTokenOffset, size_t tokenCount,
-                                     int headDim, int bytes) {
+static bool readBinaryFileRange(const std::string& path, size_t offsetBytes, void* dst, size_t expectedBytes) {
+    if (dst == nullptr || expectedBytes == 0) {
+        return false;
+    }
+    std::ifstream is(path, std::ios::binary | std::ios::ate);
+    if (!is.good()) {
+        return false;
+    }
+    auto size = is.tellg();
+    if (size < 0) {
+        return false;
+    }
+    const auto fileBytes = static_cast<uint64_t>(static_cast<std::streamoff>(size));
+    if (offsetBytes > fileBytes || fileBytes - offsetBytes < expectedBytes) {
+        return false;
+    }
+    return readStreamRange(is, offsetBytes, dst, expectedBytes);
+}
+
+static bool readExternalValueSegmentToBuffer(const std::string& path, void* dstBuffer, size_t dstBytes, int batch,
+                                             int kvHeads, size_t sourceTokenCount, size_t sourceTokenOffset,
+                                             size_t tokenCount, int headDim, int bytes) {
     if (batch <= 0 || kvHeads <= 0 || headDim <= 0 || bytes <= 0 || tokenCount == 0) {
         return false;
     }
@@ -1049,15 +1067,17 @@ static bool readExternalValueSegment(const std::string& path, std::vector<int8_t
     if (sourceTokenOffset + tokenCount > sourceTokenCount || fileBytes < requiredBytes) {
         return false;
     }
-    data.resize(static_cast<size_t>(batch) * kvHeads * segmentBytes);
+    const size_t outputBytes = static_cast<size_t>(batch) * kvHeads * segmentBytes;
+    if (dstBuffer == nullptr || dstBytes < outputBytes) {
+        return false;
+    }
+    auto* dstBase = reinterpret_cast<int8_t*>(dstBuffer);
     for (int b = 0; b < batch; ++b) {
         for (int h = 0; h < kvHeads; ++h) {
             const size_t src = ((static_cast<size_t>(b) * kvHeads + h) * sourceTokenCount +
                                 sourceTokenOffset) * tokenBytes;
             const size_t dst = (static_cast<size_t>(b) * kvHeads + h) * segmentBytes;
-            is.seekg(static_cast<std::streamoff>(src), std::ios::beg);
-            is.read(reinterpret_cast<char*>(data.data() + dst), static_cast<std::streamsize>(segmentBytes));
-            if (is.gcount() != static_cast<std::streamsize>(segmentBytes)) {
+            if (!readStreamRange(is, src, dstBase + dst, segmentBytes)) {
                 return false;
             }
         }
@@ -1095,9 +1115,7 @@ static bool readExternalValueSegmentToPagedCache(const std::string& path, void* 
                                 sourceTokenOffset) * tokenBytes;
             const size_t dst = ((static_cast<size_t>(b) * kvHeads + h) * static_cast<size_t>(maxSlots) +
                                 logicalStart) * tokenBytes;
-            is.seekg(static_cast<std::streamoff>(src), std::ios::beg);
-            is.read(reinterpret_cast<char*>(dstBase + dst), static_cast<std::streamsize>(segmentBytes));
-            if (is.gcount() != static_cast<std::streamsize>(segmentBytes)) {
+            if (!readStreamRange(is, src, dstBase + dst, segmentBytes)) {
                 return false;
             }
         }
@@ -1244,6 +1262,26 @@ static std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> makeM
     out->bytes = bytes;
     out->deviceId = deviceId;
     return out;
+}
+
+static bool ensureMappedHostWorkspace(
+    std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer>* buffer, size_t bytes, int deviceId) {
+    if (buffer == nullptr || bytes == 0) {
+        return false;
+    }
+    if (*buffer != nullptr && (*buffer)->host != nullptr && (*buffer)->device != nullptr &&
+        (*buffer)->bytes >= bytes) {
+        return true;
+    }
+    *buffer = makeMappedPagedBuffer(bytes, deviceId);
+    return *buffer != nullptr && (*buffer)->host != nullptr && (*buffer)->device != nullptr;
+}
+
+static int cudaBackendDeviceId(CUDABackend* backend) {
+    if (backend == nullptr || backend->getCUDARuntime() == nullptr) {
+        return -1;
+    }
+    return backend->getCUDARuntime()->device_id();
 }
 
 static bool shouldUseMappedPagedCache(CUDABackend* backend) {
@@ -1749,8 +1787,10 @@ static ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, 
 static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
                                           int bytes, int maxSlots, int kvLen, const void* valueCacheDevice,
                                           void* valueCacheHost, int sourceSlotBase, const int* slotTableDevice,
-                                          void** valueWorkspace, size_t* valueWorkspaceBytes, float** scoreWorkspace,
-                                          size_t* scoreWorkspaceCount, int** indexWorkspace,
+                                          int deviceId,
+                                          std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer>*
+                                              valueWorkspace,
+                                          float** scoreWorkspace, size_t* scoreWorkspaceCount, int** indexWorkspace,
                                           size_t* indexWorkspaceCount, unsigned char** usedWorkspace,
                                           size_t* usedWorkspaceCount) {
     if (meta == nullptr || !meta->needsCacheBlendScoring(layerIndex)) {
@@ -1784,9 +1824,9 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
         }
         totalStartUs = nowUs();
     }
-    if (valueWorkspace == nullptr || valueWorkspaceBytes == nullptr || scoreWorkspace == nullptr ||
-        scoreWorkspaceCount == nullptr || indexWorkspace == nullptr || indexWorkspaceCount == nullptr ||
-        usedWorkspace == nullptr || usedWorkspaceCount == nullptr) {
+    if (valueWorkspace == nullptr || scoreWorkspace == nullptr || scoreWorkspaceCount == nullptr ||
+        indexWorkspace == nullptr || indexWorkspaceCount == nullptr || usedWorkspace == nullptr ||
+        usedWorkspaceCount == nullptr) {
         return INVALID_VALUE;
     }
     uint64_t allocStartUs = profile ? nowUs() : 0;
@@ -1879,43 +1919,25 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
             sourceSlotTokens += segment.tokenCount;
             ++sourceSlotSegments;
         } else {
-            std::vector<int8_t> cachedValue;
+            const size_t tokenBytes = static_cast<size_t>(headDim) * bytes;
+            const size_t segmentBytes = segment.tokenCount * tokenBytes;
+            const size_t valueBytes = static_cast<size_t>(batch) * kvHeads * segmentBytes;
+            uint64_t valueAllocStartUs = profile ? nowUs() : 0;
+            if (!ensureMappedHostWorkspace(valueWorkspace, valueBytes, deviceId)) {
+                return OUT_OF_MEMORY;
+            }
+            if (profile) {
+                allocUs += nowUs() - valueAllocStartUs;
+            }
             uint64_t readStartUs = profile ? nowUs() : 0;
-            if (!readExternalValueSegment(layer->valuePath, cachedValue, batch, kvHeads, sourceTokenCount,
-                                          sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
+            if (!readExternalValueSegmentToBuffer(layer->valuePath, (*valueWorkspace)->host,
+                                                  (*valueWorkspace)->bytes, batch, kvHeads, sourceTokenCount,
+                                                  sourceTokenOffset, segment.tokenCount, headDim, bytes)) {
                 return INVALID_VALUE;
             }
+            std::atomic_thread_fence(std::memory_order_seq_cst);
             if (profile) {
                 readUs += nowUs() - readStartUs;
-            }
-            const size_t valueBytes = cachedValue.size();
-            if (*valueWorkspace == nullptr || *valueWorkspaceBytes < valueBytes) {
-                uint64_t valueAllocStartUs = profile ? nowUs() : 0;
-                if (*valueWorkspace != nullptr) {
-                    cudaFree(*valueWorkspace);
-                    *valueWorkspace = nullptr;
-                    *valueWorkspaceBytes = 0;
-                }
-                if (cudaMalloc(valueWorkspace, valueBytes) != cudaSuccess) {
-                    return OUT_OF_MEMORY;
-                }
-                *valueWorkspaceBytes = valueBytes;
-                if (profile) {
-                    if (cudaDeviceSynchronize() != cudaSuccess) {
-                        return INVALID_VALUE;
-                    }
-                    allocUs += nowUs() - valueAllocStartUs;
-                }
-            }
-            uint64_t h2dStartUs = profile ? nowUs() : 0;
-            if (cudaMemcpy(*valueWorkspace, cachedValue.data(), valueBytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-                return INVALID_VALUE;
-            }
-            if (profile) {
-                if (cudaDeviceSynchronize() != cudaSuccess) {
-                    return INVALID_VALUE;
-                }
-                h2dUs += nowUs() - h2dStartUs;
             }
         }
         uint64_t scoreStartUs = profile ? nowUs() : 0;
@@ -1931,12 +1953,14 @@ static ErrorCode runCacheBlendScoringCUDA(PagedKVMeta* meta, int layerIndex, int
                 static_cast<int>(segment.logicalStart), static_cast<int>(scoreOffset));
         } else if (bytes == 4) {
             cacheBlendValueScoreKernel<float><<<blocks, threads>>>(
-                reinterpret_cast<const float*>(valueCacheDevice), reinterpret_cast<const float*>(*valueWorkspace),
+                reinterpret_cast<const float*>(valueCacheDevice),
+                reinterpret_cast<const float*>((*valueWorkspace)->device),
                 slotTableDevice, *scoreWorkspace, batch, static_cast<int>(segment.tokenCount), kvHeads, headDim,
                 maxSlots, static_cast<int>(segment.logicalStart), static_cast<int>(scoreOffset));
         } else {
             cacheBlendValueScoreKernel<half><<<blocks, threads>>>(
-                reinterpret_cast<const half*>(valueCacheDevice), reinterpret_cast<const half*>(*valueWorkspace),
+                reinterpret_cast<const half*>(valueCacheDevice),
+                reinterpret_cast<const half*>((*valueWorkspace)->device),
                 slotTableDevice, *scoreWorkspace, batch, static_cast<int>(segment.tokenCount), kvHeads, headDim,
                 maxSlots, static_cast<int>(segment.logicalStart), static_cast<int>(scoreOffset));
         }
@@ -2496,9 +2520,9 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     auto cacheBlendScore = runCacheBlendScoringCUDA(
         mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mPrecision, mCache->maxSlots, kvLen,
         pagedDevPtr<void>(mCache->value.get()), mappedValueHost, sourceSlotBase,
-        pagedDevPtr<int>(mCache->slotTable.get()), &mExternalValue, &mExternalValueBytes, &mCacheBlendScores,
-        &mCacheBlendScoreCount, &mCacheBlendIndices, &mCacheBlendIndexCount, &mCacheBlendUsed,
-        &mCacheBlendUsedCount);
+        pagedDevPtr<int>(mCache->slotTable.get()), cudaBackendDeviceId(mCudaBackend), &mExternalValueMapped,
+        &mCacheBlendScores, &mCacheBlendScoreCount, &mCacheBlendIndices, &mCacheBlendIndexCount,
+        &mCacheBlendUsed, &mCacheBlendUsedCount);
     if (cacheBlendScore != NO_ERROR) {
         return cacheBlendScore;
     }
@@ -2534,12 +2558,13 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         int layerIndex = mLayerIndex >= 0 ? mLayerIndex : mMeta->layer_index;
         std::string basePath = MNNFilePathConcat(prefixDir, mMeta->file_name) + "_" + std::to_string(layerIndex);
 
+        const int deviceId = cudaBackendDeviceId(mCudaBackend);
+        const size_t keyBytes = static_cast<size_t>(kvLen) * mBatch * mKvNumHead * mHeadDim * mPrecision;
         size_t valueStorageBytes = static_cast<size_t>(mBatch) * mKvNumHead * mCache->maxSlots * mHeadDim * mPrecision;
-        std::vector<int8_t> valueStorage(valueStorageBytes);
-        std::vector<int8_t> keyData(static_cast<size_t>(kvLen) * mBatch * mKvNumHead * mHeadDim * mPrecision);
-        void* keyExportDevice = nullptr;
-        cudaError_t keyCopy = cudaMalloc(&keyExportDevice, keyData.size());
-        if (keyCopy == cudaSuccess) {
+        const size_t valueBytes = static_cast<size_t>(mBatch) * mKvNumHead * kvLen * mHeadDim * mPrecision;
+        bool keyReady = false;
+        auto exportKeyMapped = makeMappedPagedBuffer(keyBytes, deviceId);
+        if (exportKeyMapped != nullptr) {
             int ropeDim = ropeDimForExport(mMeta, mHeadDim);
             ropeDim = std::min(ropeDim, mHeadDim);
             ropeDim = (ropeDim / 2) * 2;
@@ -2551,7 +2576,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                          UP_DIV(mBatch * mKvNumHead, keyBlock.z));
             if (mPrecision == 4) {
                 exportCanonicalPagedKeyKernel<float><<<keyGrid, keyBlock, 0, stream>>>(
-                    pagedDevPtr<float>(mCache->key.get()), reinterpret_cast<float*>(keyExportDevice),
+                    pagedDevPtr<float>(mCache->key.get()), reinterpret_cast<float*>(exportKeyMapped->device),
                     pagedDevPtr<int>(mCache->slotTable.get()), mBatch, kvLen, mKvNumHead, mHeadDim,
                     mCache->maxSlots, ropeDim, mMeta && mMeta->rope_theta > 0.0f ? mMeta->rope_theta : 10000.0f,
                     ropeTypeCode(mMeta), mMeta ? std::max(mMeta->rope_scaling_factor, 1.0f) : 1.0f,
@@ -2560,7 +2585,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     oldContext, mMeta ? mMeta->rope_attention_scaling : 1.0f);
             } else {
                 exportCanonicalPagedKeyKernel<half><<<keyGrid, keyBlock, 0, stream>>>(
-                    pagedDevPtr<half>(mCache->key.get()), reinterpret_cast<half*>(keyExportDevice),
+                    pagedDevPtr<half>(mCache->key.get()), reinterpret_cast<half*>(exportKeyMapped->device),
                     pagedDevPtr<int>(mCache->slotTable.get()), mBatch, kvLen, mKvNumHead, mHeadDim,
                     mCache->maxSlots, ropeDim, mMeta && mMeta->rope_theta > 0.0f ? mMeta->rope_theta : 10000.0f,
                     ropeTypeCode(mMeta), mMeta ? std::max(mMeta->rope_scaling_factor, 1.0f) : 1.0f,
@@ -2568,20 +2593,38 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     mMeta ? std::max(mMeta->rope_scaling_high_freq_factor, 1.0e-6f) : 4.0f,
                     oldContext, mMeta ? mMeta->rope_attention_scaling : 1.0f);
             }
-            keyCopy = cudaGetLastError();
-            if (keyCopy == cudaSuccess) {
-                keyCopy = cudaMemcpy(keyData.data(), keyExportDevice, keyData.size(), cudaMemcpyDeviceToHost);
+            auto keyKernel = cudaGetLastError();
+            if (keyKernel == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess) {
+                keyReady = true;
             }
-            cudaFree(keyExportDevice);
         }
-        cudaError_t valueCopy = cudaMemcpy(valueStorage.data(), pagedDevPtr<void>(mCache->value.get()), valueStorageBytes,
-                                           cudaMemcpyDeviceToHost);
-        if (keyCopy == cudaSuccess && valueCopy == cudaSuccess) {
+        bool valueStorageReady = false;
+        const int8_t* valueStorageHost = nullptr;
+        std::shared_ptr<SharedPagedCache::MappedBuffer> exportValueStorageMapped;
+        if (mCache->zeroCopyKV && mCache->mappedValue != nullptr && mCache->mappedValue->host != nullptr &&
+            mCache->mappedValue->bytes >= valueStorageBytes) {
+            valueStorageHost = reinterpret_cast<const int8_t*>(mCache->mappedValue->host);
+            valueStorageReady = true;
+        } else {
+            exportValueStorageMapped = makeMappedPagedBuffer(valueStorageBytes, deviceId);
+            if (exportValueStorageMapped != nullptr &&
+                cudaMemcpy(exportValueStorageMapped->host, pagedDevPtr<void>(mCache->value.get()),
+                           valueStorageBytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
+                valueStorageHost = reinterpret_cast<const int8_t*>(exportValueStorageMapped->host);
+                valueStorageReady = true;
+            }
+        }
+        std::shared_ptr<SharedPagedCache::MappedBuffer> exportValueDataMapped;
+        if (keyReady && valueStorageReady) {
+            exportValueDataMapped = makeMappedPagedBuffer(valueBytes, deviceId);
+        }
+        if (keyReady && valueStorageReady && exportValueDataMapped != nullptr) {
             std::vector<int> physicalSlots(kvLen);
             for (int l = 0; l < kvLen; ++l) {
                 physicalSlots[l] = mMeta ? mMeta->physicalSlot(l) : l;
             }
-            std::vector<int8_t> valueData(static_cast<size_t>(mBatch) * mKvNumHead * kvLen * mHeadDim * mPrecision);
+            auto* valueData = reinterpret_cast<int8_t*>(exportValueDataMapped->host);
+            ::memset(valueData, 0, valueBytes);
             for (int l = 0; l < kvLen; ++l) {
                 int slot = physicalSlots[l];
                 if (slot < 0 || slot >= mCache->maxSlots) {
@@ -2589,25 +2632,25 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                 }
                 for (int b = 0; b < mBatch; ++b) {
                     for (int h = 0; h < mKvNumHead; ++h) {
-                        const int8_t* srcV = valueStorage.data() +
+                        const int8_t* srcV = valueStorageHost +
                             ((b * mKvNumHead + h) * mCache->maxSlots + slot) * mHeadDim * mPrecision;
-                        int8_t* dstV = valueData.data() +
+                        int8_t* dstV = valueData +
                             ((b * mKvNumHead + h) * kvLen + l) * mHeadDim * mPrecision;
                         ::memcpy(dstV, srcV, mHeadDim * mPrecision);
                     }
                 }
             }
-            if (!writeBinaryFile(basePath + ".k", keyData)) {
+            if (!writeBinaryFile(basePath + ".k", exportKeyMapped->host, keyBytes)) {
                 MNN_PRINT("CUDAPagedAttention: failed to export key cache: %s\n", (basePath + ".k").c_str());
             }
-            if (!writeBinaryFile(basePath + ".v", valueData)) {
+            if (!writeBinaryFile(basePath + ".v", valueData, valueBytes)) {
                 MNN_PRINT("CUDAPagedAttention: failed to export value cache: %s\n", (basePath + ".v").c_str());
             }
             if (!writeShapeFile(basePath + ".json", mBatch, mKvNumHead, mHeadDim, kvLen, mPrecision, mMeta)) {
                 MNN_PRINT("CUDAPagedAttention: failed to export shape metadata: %s\n", (basePath + ".json").c_str());
             }
         } else {
-            MNN_PRINT("CUDAPagedAttention: failed to copy paged KV to host for export\n");
+            MNN_PRINT("CUDAPagedAttention: failed to stage mapped paged KV for export\n");
         }
         if (mLayerIndex < 0) {
             mMeta->layer_index = (mMeta->layer_index + 1) % std::max(1, mMeta->layer_nums);

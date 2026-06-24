@@ -36,6 +36,10 @@ Common:
   --local-port PORT             Local SSH tunnel port. Default: same as --port
   --run-id ID                   Run id for logs/output.
   --remote-config PATH          Remote model config path.
+  --remote-log-dir PATH         Remote log/PID directory. Default: <remote-repo>/.cache/logs
+  --remote-ld-library-path PATH Exact remote LD_LIBRARY_PATH for pic_server.
+  --remote-server-env ENV       Extra env assignments before pic_server, e.g. LD_PRELOAD=/usr/lib/libOpenCL_adreno.so.
+  --line-buffer                 Start remote server through stdbuf when available.
   --bench-command run|compare   impl/pic_bench/cli.py subcommand. Default: run
 
 Everything after -- is forwarded to impl/pic_bench/cli.py.
@@ -56,6 +60,10 @@ INSTALL_PREFIX="${MNN_ROOT}/.cache/output/mnn/artifacts/jetson_cross_cuda"
 REMOTE_ART_REL=".cache/output/mnn/artifacts/jetson_cross_cuda"
 REMOTE_CONFIG=""
 REMOTE_KV_DIR=""
+REMOTE_LOG_DIR=""
+REMOTE_LD_LIBRARY_PATH=""
+REMOTE_SERVER_ENV=""
+REMOTE_LINE_BUFFER="0"
 SKIP_BUILD="0"
 SKIP_RSYNC="0"
 READY_TIMEOUT_SEC="180"
@@ -95,6 +103,14 @@ while (($#)); do
       REMOTE_CONFIG="$2"; shift 2 ;;
     --remote-kv-dir)
       REMOTE_KV_DIR="$2"; shift 2 ;;
+    --remote-log-dir)
+      REMOTE_LOG_DIR="$2"; shift 2 ;;
+    --remote-ld-library-path)
+      REMOTE_LD_LIBRARY_PATH="$2"; shift 2 ;;
+    --remote-server-env)
+      REMOTE_SERVER_ENV="$2"; shift 2 ;;
+    --line-buffer)
+      REMOTE_LINE_BUFFER="1"; shift ;;
     --skip-build)
       SKIP_BUILD="1"; shift ;;
     --skip-rsync)
@@ -124,8 +140,10 @@ LOCAL_PORT="${LOCAL_PORT:-${REMOTE_PORT}}"
 REMOTE_CONFIG="${REMOTE_CONFIG:-${REMOTE_REPO}/.cache/weight/AI-ModelScope__Llama-3___2-3B-Instruct/config_cuda_greedy.json}"
 REMOTE_KV_DIR="${REMOTE_KV_DIR:-${REMOTE_REPO}/.cache/kvshare/mnn_pic_dataset_bench_${RUN_ID}}"
 REMOTE_ART="${REMOTE_REPO}/${REMOTE_ART_REL}"
-REMOTE_LOG="${REMOTE_REPO}/.cache/logs/mnn_pic_dataset_bench_${RUN_ID}.log"
-REMOTE_PID_FILE="${REMOTE_REPO}/.cache/logs/mnn_pic_dataset_bench_${RUN_ID}.pid"
+REMOTE_LD_LIBRARY_PATH="${REMOTE_LD_LIBRARY_PATH:-${REMOTE_ART}/lib${REMOTE_CUDA_LIB:+:${REMOTE_CUDA_LIB}}}"
+REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-${REMOTE_REPO}/.cache/logs}"
+REMOTE_LOG="${REMOTE_LOG_DIR}/mnn_pic_dataset_bench_${RUN_ID}.log"
+REMOTE_PID_FILE="${REMOTE_LOG_DIR}/mnn_pic_dataset_bench_${RUN_ID}.pid"
 LOG_DIR="${KVSHARE_ROOT}/.cache/mnn-pic-benchmark/logs/${RUN_ID}"
 RUN_OUTPUT_DIR="${KVSHARE_ROOT}/.cache/mnn-pic-benchmark/runs/${RUN_ID}"
 BENCH_LOG="${LOG_DIR}/bench.log"
@@ -156,6 +174,9 @@ cleanup() {
     printf 'remote_art=%s\n' "${REMOTE_ART}"
     printf 'remote_config=%s\n' "${REMOTE_CONFIG}"
     printf 'remote_kv_dir=%s\n' "${REMOTE_KV_DIR}"
+    printf 'remote_log_dir=%s\n' "${REMOTE_LOG_DIR}"
+    printf 'remote_ld_library_path=%s\n' "${REMOTE_LD_LIBRARY_PATH}"
+    printf 'remote_server_env=%s\n' "${REMOTE_SERVER_ENV}"
     printf 'remote_log=%s\n' "${REMOTE_LOG}"
     printf 'base_url=%s\n' "${BASE_URL}"
     printf 'run_output_dir=%s\n' "${RUN_OUTPUT_DIR}"
@@ -202,10 +223,12 @@ fi
 
 log "starting remote MNN pic_server on ${REMOTE}:${REMOTE_PORT}"
 ssh "${REMOTE}" "cd '${REMOTE_REPO}' && \
-  mkdir -p '${REMOTE_REPO}/.cache/logs' && \
+  mkdir -p '${REMOTE_LOG_DIR}' && \
   { pkill -f 'pic_server.*--port ${REMOTE_PORT}' >/dev/null 2>&1 || true; } && \
   rm -rf '${REMOTE_KV_DIR}' && \
-  nohup env LD_LIBRARY_PATH='${REMOTE_ART}/lib:${REMOTE_CUDA_LIB}' \
+  LAUNCHER='' && \
+  if [[ '${REMOTE_LINE_BUFFER}' == '1' ]] && command -v stdbuf >/dev/null 2>&1; then LAUNCHER='stdbuf -oL -eL'; fi && \
+  nohup \${LAUNCHER} env ${REMOTE_SERVER_ENV} LD_LIBRARY_PATH='${REMOTE_LD_LIBRARY_PATH}' \
     '${REMOTE_ART}/bin/pic_server' --config '${REMOTE_CONFIG}' --host '${REMOTE_HOST}' --port '${REMOTE_PORT}' \
     --kv-cache-dir '${REMOTE_KV_DIR}' --model '${SERVED_MODEL}' > '${REMOTE_LOG}' 2>&1 & \
   echo \$! > '${REMOTE_PID_FILE}'"

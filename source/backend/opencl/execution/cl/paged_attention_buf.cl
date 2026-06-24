@@ -141,6 +141,129 @@ __kernel void pack_paged_kv_prefill(GLOBAL_SIZE_3_DIMS
     vstore4(v3, 0, packed_value + value_offset + head_dim_pack * 3);
 }
 
+__kernel void rearrange_paged_q_gemm_prefill(GLOBAL_SIZE_3_DIMS
+    __global const FLOAT* query,          // [batch, query_seq_len, head_num, head_dim]
+    __global FLOAT* packed_query,         // [batch * head_num, head_dim_pack, query_seq_len_pack]
+    const int seq_len,
+    const int head_dim,
+    const int head_num,
+    const int seq_len_pack) {
+    const int x = get_global_id(0); // query token / 4
+    const int y = get_global_id(1); // head dim / 4
+    int z = get_global_id(2);       // batch * head_num
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int x4 = x << 2;
+    const int y4 = y << 2;
+    const int b = z / head_num;
+    const int h = z - b * head_num;
+    FLOAT4 q0 = (FLOAT4)0;
+    FLOAT4 q1 = (FLOAT4)0;
+    FLOAT4 q2 = (FLOAT4)0;
+    FLOAT4 q3 = (FLOAT4)0;
+    if (x4 < seq_len && y4 < head_dim) {
+        const int stride = head_num * head_dim;
+        int query_offset = ((b * seq_len + x4) * head_num + h) * head_dim + y4;
+        q0 = vload4(0, query + query_offset);
+        q1 = x4 + 1 < seq_len ? vload4(0, query + query_offset + stride) : (FLOAT4)0;
+        q2 = x4 + 2 < seq_len ? vload4(0, query + query_offset + stride * 2) : (FLOAT4)0;
+        q3 = x4 + 3 < seq_len ? vload4(0, query + query_offset + stride * 3) : (FLOAT4)0;
+        if (y4 + 3 >= head_dim) {
+            if (y4 + 1 >= head_dim) {
+                q0.yzw = (FLOAT3)0; q1.yzw = (FLOAT3)0; q2.yzw = (FLOAT3)0; q3.yzw = (FLOAT3)0;
+            } else if (y4 + 2 >= head_dim) {
+                q0.zw = (FLOAT2)0; q1.zw = (FLOAT2)0; q2.zw = (FLOAT2)0; q3.zw = (FLOAT2)0;
+            } else {
+                q0.w = (FLOAT)0; q1.w = (FLOAT)0; q2.w = (FLOAT)0; q3.w = (FLOAT)0;
+            }
+        }
+    }
+    const int out_offset = ((z * head_dim + y4) * seq_len_pack + x4);
+    vstore4((FLOAT4)(q0.s0, q1.s0, q2.s0, q3.s0), 0, packed_query + out_offset);
+    vstore4((FLOAT4)(q0.s1, q1.s1, q2.s1, q3.s1), 0, packed_query + out_offset + seq_len_pack);
+    vstore4((FLOAT4)(q0.s2, q1.s2, q2.s2, q3.s2), 0, packed_query + out_offset + seq_len_pack * 2);
+    vstore4((FLOAT4)(q0.s3, q1.s3, q2.s3, q3.s3), 0, packed_query + out_offset + seq_len_pack * 3);
+}
+
+__kernel void pack_paged_kv_prefill_gemm(GLOBAL_SIZE_3_DIMS
+    __global const FLOAT* key_cache,      // [max_slots, batch, kv_heads, head_dim]
+    __global const FLOAT* value_cache,    // [batch, kv_heads, max_slots, head_dim]
+    __global FLOAT* packed_key,           // [batch * kv_heads, head_dim_pack, kv_len_pack]
+    __global FLOAT* packed_value,         // [batch * kv_heads, kv_len_pack, head_dim_pack]
+    __global const int* slot_table,
+    const int batch,
+    const int kv_len,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots,
+    const int kv_len_pack,
+    const int head_dim_pack) {
+    const int x = get_global_id(0); // kv token / 4
+    const int y = get_global_id(1); // head dim / 4
+    int z = get_global_id(2);       // batch * kv_heads
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int logical4 = x << 2;
+    const int dim4 = y << 2;
+    const int b = z / kv_heads;
+    const int h = z - b * kv_heads;
+    FLOAT4 k0 = (FLOAT4)0;
+    FLOAT4 k1 = (FLOAT4)0;
+    FLOAT4 k2 = (FLOAT4)0;
+    FLOAT4 k3 = (FLOAT4)0;
+    FLOAT4 v0 = (FLOAT4)0;
+    FLOAT4 v1 = (FLOAT4)0;
+    FLOAT4 v2 = (FLOAT4)0;
+    FLOAT4 v3 = (FLOAT4)0;
+
+    if (dim4 < head_dim) {
+        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
+        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
+        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
+        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        if (slot0 >= 0 && slot0 < max_slots) {
+            k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
+            v0 = vload4(0, value_cache + ((b * kv_heads + h) * max_slots + slot0) * head_dim + dim4);
+        }
+        if (slot1 >= 0 && slot1 < max_slots) {
+            k1 = vload4(0, key_cache + ((slot1 * batch + b) * kv_heads + h) * head_dim + dim4);
+            v1 = vload4(0, value_cache + ((b * kv_heads + h) * max_slots + slot1) * head_dim + dim4);
+        }
+        if (slot2 >= 0 && slot2 < max_slots) {
+            k2 = vload4(0, key_cache + ((slot2 * batch + b) * kv_heads + h) * head_dim + dim4);
+            v2 = vload4(0, value_cache + ((b * kv_heads + h) * max_slots + slot2) * head_dim + dim4);
+        }
+        if (slot3 >= 0 && slot3 < max_slots) {
+            k3 = vload4(0, key_cache + ((slot3 * batch + b) * kv_heads + h) * head_dim + dim4);
+            v3 = vload4(0, value_cache + ((b * kv_heads + h) * max_slots + slot3) * head_dim + dim4);
+        }
+        if (dim4 + 3 >= head_dim) {
+            if (dim4 + 1 >= head_dim) {
+                k0.yzw = (FLOAT3)0; k1.yzw = (FLOAT3)0; k2.yzw = (FLOAT3)0; k3.yzw = (FLOAT3)0;
+                v0.yzw = (FLOAT3)0; v1.yzw = (FLOAT3)0; v2.yzw = (FLOAT3)0; v3.yzw = (FLOAT3)0;
+            } else if (dim4 + 2 >= head_dim) {
+                k0.zw = (FLOAT2)0; k1.zw = (FLOAT2)0; k2.zw = (FLOAT2)0; k3.zw = (FLOAT2)0;
+                v0.zw = (FLOAT2)0; v1.zw = (FLOAT2)0; v2.zw = (FLOAT2)0; v3.zw = (FLOAT2)0;
+            } else {
+                k0.w = (FLOAT)0; k1.w = (FLOAT)0; k2.w = (FLOAT)0; k3.w = (FLOAT)0;
+                v0.w = (FLOAT)0; v1.w = (FLOAT)0; v2.w = (FLOAT)0; v3.w = (FLOAT)0;
+            }
+        }
+    }
+
+    const int key_offset = (z * head_dim_pack + dim4) * kv_len_pack + logical4;
+    vstore4((FLOAT4)(k0.s0, k1.s0, k2.s0, k3.s0), 0, packed_key + key_offset);
+    vstore4((FLOAT4)(k0.s1, k1.s1, k2.s1, k3.s1), 0, packed_key + key_offset + kv_len_pack);
+    vstore4((FLOAT4)(k0.s2, k1.s2, k2.s2, k3.s2), 0, packed_key + key_offset + kv_len_pack * 2);
+    vstore4((FLOAT4)(k0.s3, k1.s3, k2.s3, k3.s3), 0, packed_key + key_offset + kv_len_pack * 3);
+
+    const int value_offset = (z * kv_len_pack + logical4) * head_dim_pack + dim4;
+    vstore4(v0, 0, packed_value + value_offset);
+    vstore4(v1, 0, packed_value + value_offset + head_dim_pack);
+    vstore4(v2, 0, packed_value + value_offset + head_dim_pack * 2);
+    vstore4(v3, 0, packed_value + value_offset + head_dim_pack * 3);
+}
+
 __kernel void pack_paged_k_prefill(GLOBAL_SIZE_3_DIMS
     __global const FLOAT* key_cache,      // [max_slots, batch, kv_heads, head_dim]
     __global FLOAT* packed_key,           // [batch * kv_heads, head_dim_pack, kv_len_pack]
@@ -240,6 +363,8 @@ __kernel void pic_page_attention_hydrate_kv(
     const int logical_start,
     const int token_count,
     const int key_source_logical_start,
+    const int value_source_start,
+    const int value_source_stride,
     const int hydrate_value,
     const int rope_dim_in,
     const float rope_theta,
@@ -278,13 +403,13 @@ __kernel void pic_page_attention_hydrate_kv(
             return;
         }
     }
-    int value_source_token = local_index;
-    if (value_source_token < 0 || value_source_token >= token_count) {
+    int value_source_token = value_source_start + local_index;
+    if (value_source_token < 0 || value_source_token >= value_source_stride) {
         return;
     }
     int key_src_base = ((source_token * batch + b) * kv_heads + h) * head_dim;
     int key_dst_base = ((slot * batch + b) * kv_heads + h) * head_dim;
-    int value_src = ((b * kv_heads + h) * token_count + value_source_token) * head_dim + d;
+    int value_src = ((b * kv_heads + h) * value_source_stride + value_source_token) * head_dim + d;
     int value_dst = ((b * kv_heads + h) * max_slots + slot) * head_dim + d;
     int rope_dim = min(rope_dim_in > 0 ? rope_dim_in : head_dim, head_dim);
     rope_dim = (rope_dim / 2) * 2;

@@ -80,6 +80,7 @@ bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
 - Jetson 本机：走原有 CUDA 构建流程，使用 `/usr/local/cuda`、`nvcc`、自动探测或使用 `CUDA_ARCHS`。
 - Linux x86_64：自动下载并校验 AArch64 Linux 交叉工具链到 `.cache/toolchains/`，再交叉编译 Jetson Linux 可运行产物。默认交叉编译不启用 CUDA，因为 x86 主机通常没有 Jetson CUDA sysroot；需要自行提供 CUDA/sysroot 时设置 `ENABLE_CROSS_CUDA=ON` 或 `MNN_CROSS_CUDA=ON`。
 - `MNN_TARGET_DEVICE=orangepi5plus`：Linux x86_64 主机下载 Arm GNU 11.3 AArch64 Linux toolchain，交叉编译 Orange Pi 5 Plus Linux 产物，并默认打开 OpenCL/Vulkan。
+- `MNN_TARGET_DEVICE=aidlux_adreno_opencl`：Linux x86_64 主机使用同一 Arm GNU 11.3 AArch64 Linux toolchain，交叉编译 Rhino Pi-X1 / Adreno Linux 用户态产物，并默认打开 OpenCL、关闭 Vulkan。
 - `MNN_TARGET_DEVICE=oneplus13t`：Linux x86_64 主机下载 Android NDK r29，交叉编译 Android arm64-v8a 产物，并默认打开 OpenCL/Vulkan。
 
 Jetson 本机预期配置日志包含：
@@ -185,6 +186,38 @@ ssh orangepi@192.168.101.113
 ```
 
 需要推送产物或远端验证时，优先使用这个 SSH 目标；不要把它写成 Jetson 用户名或旧平台名。
+
+## Linux x86_64 交叉编译 Rhino Pi-X1 / Adreno OpenCL 产物
+
+目标是 Rhino Pi-X1 / Adreno OpenCL 时使用：
+
+```bash
+MNN_TARGET_DEVICE=aidlux_adreno_opencl CLEAN=1 \
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+```
+
+Rhino Pi-X1 默认按 Linux AArch64 glibc 用户态构建，不走 Android NDK。默认打开：
+
+```text
+MNN_OPENCL=ON
+MNN_VULKAN=OFF
+MNN_CUDA=OFF
+```
+
+默认输出：
+
+```text
+.cache/build/mnn/aidlux_adreno_opencl/
+.cache/output/mnn/artifacts/aidlux_adreno_opencl/
+```
+
+Rhino Pi-X1 设备默认登录方式：
+
+```bash
+ssh aidlux@192.168.101.227
+```
+
+运行时通常需要把 artifact `lib/`、`/usr/lib` 和 `/usr/lib/aarch64-linux-gnu` 放进 `LD_LIBRARY_PATH`；若 OpenCL loader 没有选中 Adreno，按 PIC benchmark skill 使用 `LD_PRELOAD=/usr/lib/libOpenCL_adreno.so` 做服务端 sanity。
 
 ## Linux x86_64 交叉编译 OnePlus 13T Android 产物
 

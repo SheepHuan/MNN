@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN Git Commit Message"
+  short_description: "Draft commit messages from MNN workspace diffs"
+  default_prompt: "Use $mnn-git-commit-message to draft a commit message for the current MNN workspace changes."

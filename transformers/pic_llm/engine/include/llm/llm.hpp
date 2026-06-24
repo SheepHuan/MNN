@@ -224,6 +224,9 @@ public:
     const LlmContext* getContext() const {
         return mContext.get();
     }
+    const std::string& lastError() const {
+        return mLastError;
+    }
     virtual void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {}
     virtual void generateWavform() {}
 protected:
@@ -289,6 +292,7 @@ private:
     std::vector<int> selectPicDecodeRepairLogicalIndices();
     bool mPrefixCacheMode = false;
     std::string mPrefixCacheFileName;
+    std::string mLastError;
     int mCallIndex;
     int mPrefixLength;
     bool mIsPrefixFileExist = false;

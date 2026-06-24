@@ -1,4 +1,4 @@
 interface:
   display_name: "MNN Device IO Bench"
   short_description: "Benchmark device storage and DRAM read bandwidth"
-  default_prompt: "Use $mnn-device-io-bench from .codex/skills to benchmark Jetson, Orange Pi, and AidLux storage plus DRAM read bandwidth."
+  default_prompt: "Use $mnn-device-io-bench from .codex/skills to benchmark Jetson, Orange Pi, and Rhino Pi-X1 storage plus DRAM read bandwidth."

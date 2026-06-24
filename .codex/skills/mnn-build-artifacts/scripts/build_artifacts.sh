@@ -57,11 +57,14 @@ case "${TARGET_DEVICE}" in
     orangepi5plus|orange_pi_5_plus|orange_pi5_plus|opi5plus|opi_5_plus)
         TARGET_DEVICE="orangepi5plus"
         ;;
+    aidlux|aidlux_adreno|aidlux_adreno_opencl)
+        TARGET_DEVICE="aidlux_adreno_opencl"
+        ;;
     oneplus13t|oneplus_13t)
         TARGET_DEVICE="oneplus13t"
         ;;
     *)
-        printf '[build_artifacts] ERROR: unsupported TARGET_DEVICE=%s. Use jetson, orangepi5plus, or oneplus13t.\n' "${TARGET_DEVICE}" >&2
+        printf '[build_artifacts] ERROR: unsupported TARGET_DEVICE=%s. Use jetson, orangepi5plus, aidlux_adreno_opencl, or oneplus13t.\n' "${TARGET_DEVICE}" >&2
         exit 1
         ;;
 esac
@@ -537,7 +540,7 @@ normalize_cuda_archs() {
     printf '%s' "${normalized[*]}"
 }
 
-if [[ "${TARGET_DEVICE}" == "orangepi5plus" ]]; then
+if [[ "${TARGET_DEVICE}" == "orangepi5plus" || "${TARGET_DEVICE}" == "aidlux_adreno_opencl" ]]; then
     TOOLCHAIN_URL="${TOOLCHAIN_URL:-${DEFAULT_ORANGEPI_TOOLCHAIN_URL}}"
     TOOLCHAIN_HASH_ALG="${TOOLCHAIN_HASH_ALG:-${DEFAULT_ORANGEPI_TOOLCHAIN_HASH_ALG}}"
     TOOLCHAIN_HASH="${TOOLCHAIN_HASH:-${DEFAULT_ORANGEPI_TOOLCHAIN_HASH}}"
@@ -572,7 +575,7 @@ require_cmd install
 
 if [[ "${ENABLE_OPENCL}" == "auto" ]]; then
     case "${TARGET_DEVICE}" in
-        orangepi5plus|oneplus13t) ENABLE_OPENCL="ON" ;;
+        orangepi5plus|aidlux_adreno_opencl|oneplus13t) ENABLE_OPENCL="ON" ;;
         *) ENABLE_OPENCL="OFF" ;;
     esac
 fi
@@ -580,6 +583,7 @@ fi
 if [[ "${ENABLE_VULKAN}" == "auto" ]]; then
     case "${TARGET_DEVICE}" in
         orangepi5plus|oneplus13t) ENABLE_VULKAN="ON" ;;
+        aidlux_adreno_opencl) ENABLE_VULKAN="OFF" ;;
         *) ENABLE_VULKAN="OFF" ;;
     esac
 fi
@@ -619,10 +623,10 @@ elif [[ "${IS_NATIVE_JETSON}" == "1" ]]; then
             ;;
     esac
 else
-    if [[ "${TARGET_DEVICE}" == "orangepi5plus" ]]; then
-        ARTIFACT_PLATFORM="orangepi5plus"
-        BUILD_DIR="${REQUESTED_BUILD_DIR:-${ROOT_DIR}/.cache/build/mnn/orangepi5plus}"
-        INSTALL_PREFIX="${REQUESTED_INSTALL_PREFIX:-${ROOT_DIR}/.cache/output/mnn/artifacts/orangepi5plus}"
+    if [[ "${TARGET_DEVICE}" == "orangepi5plus" || "${TARGET_DEVICE}" == "aidlux_adreno_opencl" ]]; then
+        ARTIFACT_PLATFORM="${TARGET_DEVICE}"
+        BUILD_DIR="${REQUESTED_BUILD_DIR:-${ROOT_DIR}/.cache/build/mnn/${ARTIFACT_PLATFORM}}"
+        INSTALL_PREFIX="${REQUESTED_INSTALL_PREFIX:-${ROOT_DIR}/.cache/output/mnn/artifacts/${ARTIFACT_PLATFORM}}"
     else
         ARTIFACT_PLATFORM="jetson"
         BUILD_DIR="${REQUESTED_BUILD_DIR:-${ROOT_DIR}/.cache/build/mnn/jetson_cross}"

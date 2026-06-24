@@ -1089,6 +1089,25 @@ std::string finishReasonForStatus(const MNN::Transformer::LlmContext* context, i
     return "stop";
 }
 
+std::string llmContextSuffix(const MNN::Transformer::Llm* llm) {
+    const auto* context = llm != nullptr ? llm->getContext() : nullptr;
+    if (context == nullptr) {
+        return " [llm_context=null]";
+    }
+    std::ostringstream os;
+    os << " [status=" << static_cast<int>(context->status)
+       << ", current=" << context->current_token
+       << ", all_seq=" << context->all_seq_len
+       << ", prompt=" << context->prompt_len
+       << ", gen_seq=" << context->gen_seq_len
+       << ", output_tokens=" << context->output_tokens.size();
+    if (!llm->lastError().empty()) {
+        os << ", last_error=" << llm->lastError();
+    }
+    os << "]";
+    return os.str();
+}
+
 int64_t unixSecondsNow() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -1881,15 +1900,65 @@ json precisionRecoverySummary(const PicExecutionPlan& plan, double ratio, int re
     };
 }
 
+json performanceSummary(const MNN::Transformer::LlmContext* context, int completionTokens,
+                        int activeTokensPerDecodeStep, int64_t requestWallUs) {
+    int64_t prefillUs = 0;
+    int64_t decodeUs = 0;
+    int64_t sampleUs = 0;
+    int64_t ttfaUs = 0;
+    if (context != nullptr) {
+        prefillUs = context->prefill_us;
+        decodeUs = context->decode_us;
+        sampleUs = context->sample_us;
+        ttfaUs = context->ttfa_us;
+    }
+    // ArGeneration reuses the prefill logits for the first generated token and
+    // records decode_us for the following next-logits forwards.
+    const int measuredDecodeTokens = decodeUs > 0 ? std::max(1, completionTokens - 1) : 0;
+    const double prefillS = static_cast<double>(prefillUs) / 1000000.0;
+    const double decodeS = static_cast<double>(decodeUs) / 1000000.0;
+    const double wallS = static_cast<double>(requestWallUs) / 1000000.0;
+    const double decodeTpotMs = measuredDecodeTokens > 0
+        ? static_cast<double>(decodeUs) / 1000.0 / static_cast<double>(measuredDecodeTokens)
+        : 0.0;
+    const double decodeTps = decodeS > 0.0
+        ? static_cast<double>(measuredDecodeTokens) / decodeS
+        : 0.0;
+    return {
+        {"prefill_us", prefillUs},
+        {"prefill_latency_s", prefillS},
+        {"decode_us", decodeUs},
+        {"decode_latency_s", decodeS},
+        {"decode_measured_tokens", measuredDecodeTokens},
+        {"decode_tpot_ms", decodeTpotMs},
+        {"decode_tps", decodeTps},
+        {"completion_tokens", completionTokens},
+        {"active_tokens_per_decode_step", activeTokensPerDecodeStep},
+        {"sample_us", sampleUs},
+        {"ttfa_us", ttfaUs},
+        {"request_wall_us", requestWallUs},
+        {"request_wall_s", wallS},
+    };
+}
+
 } // namespace
 
 PicServer::PicServer(PicServerConfig config) : mConfig(std::move(config)) {
 }
 
 bool PicServer::load() {
-    mLlm.reset(MNN::Transformer::Llm::createLLM(mConfig.configPath));
-    if (!mLlm) {
-        std::cerr << "Failed to create LLM from " << mConfig.configPath << "\n";
+    return loadLlmInstance(nullptr);
+}
+
+bool PicServer::loadLlmInstance(std::string* error) {
+    std::unique_ptr<MNN::Transformer::Llm> llm(MNN::Transformer::Llm::createLLM(mConfig.configPath));
+    if (!llm) {
+        std::string message = "Failed to create LLM from " + mConfig.configPath;
+        if (error != nullptr) {
+            *error = message;
+        } else {
+            std::cerr << message << "\n";
+        }
         return false;
     }
     std::error_code ec;
@@ -1910,9 +1979,9 @@ bool PicServer::load() {
         std::cout << "PIC server graph profile enabled: MNN_PIC_GRAPH_PROFILE=1\n";
     }
     std::string config = runtimeConfig.dump();
-    mLlm->set_config(config);
+    llm->set_config(config);
     if (picGraphProfileEnabled()) {
-        mLlm->setDebugCallback(
+        llm->setDebugCallback(
             [](const std::vector<MNN::Tensor*>& inputs, const MNN::OperatorInfo* info) {
                 return PicGraphProfiler::get().before(inputs, info);
             },
@@ -1920,10 +1989,16 @@ bool PicServer::load() {
                 return PicGraphProfiler::get().after(outputs, info);
             });
     }
-    if (!mLlm->load()) {
-        std::cerr << "Failed to load LLM from " << mConfig.configPath << "\n";
+    if (!llm->load()) {
+        std::string message = "Failed to load LLM from " + mConfig.configPath;
+        if (error != nullptr) {
+            *error = message;
+        } else {
+            std::cerr << message << "\n";
+        }
         return false;
     }
+    mLlm = std::move(llm);
     return true;
 }
 
@@ -2184,7 +2259,21 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     mLlm->setPrefixCacheFile(fileStem);
     std::ostringstream sink;
     mLlm->response(tokenIds, &sink, "", 0);
+    auto contextAfterPrefill = mLlm->getContext();
+    const bool prefillFailed =
+        contextAfterPrefill == nullptr ||
+        contextAfterPrefill->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR ||
+        contextAfterPrefill->status == MNN::Transformer::LlmStatus::TIMEOUT ||
+        contextAfterPrefill->status == MNN::Transformer::LlmStatus::USER_CANCEL;
+    if (prefillFailed) {
+        error = "Failed to build persistent text cache" + llmContextSuffix(mLlm.get());
+        mLlm->clearPrefixCacheFile();
+        mLlm->finishExternalPagedKVRequest();
+        mLlm->reset();
+        return false;
+    }
     mLlm->clearPrefixCacheFile();
+    mLlm->finishExternalPagedKVRequest();
     mLlm->reset();
 
     auto cfg = modelConfig();
@@ -2262,6 +2351,12 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     };
     if (!writeJsonFile(metaPath, response)) {
         error = "Failed to write cache metadata";
+        return false;
+    }
+    std::string reloadError;
+    if (!loadLlmInstance(&reloadError)) {
+        error = "Text cache was built, but failed to reload LLM runtime after persistent cache export: " +
+                reloadError;
         return false;
     }
     return true;
@@ -2363,6 +2458,7 @@ bool PicServer::completeChatBatch(const std::vector<json>& requests, json& respo
 }
 
 bool PicServer::completeChatBatchItem(const json& request, json& response, std::string& error) {
+    const int64_t requestStartUs = monotonicUs();
     PicGraphProfileRequestScope graphProfileScope(picGraphProfileLabel(request));
     if (!mLlm) {
         error = "LLM is not loaded";
@@ -2413,6 +2509,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
     int promptTokens = 0;
     int preludeTokensCount = 0;
     int picTokensCount = 0;
+    int activeTokensPerDecodeStep = 1;
     json picInfo;
     auto cfg = modelConfig();
     int layerCount = jsonInt(cfg, "layer_nums", 0);
@@ -2440,7 +2537,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         {
             MnnLlmPerfettoSlice prefillSlice("prefill", traceInfo);
             if (!mLlm->prefill(inputTokenIds)) {
-                error = "Failed to prefill no-PIC chat request";
+                error = "Failed to prefill no-PIC chat request" + llmContextSuffix(mLlm.get());
                 return false;
             }
         }
@@ -2542,7 +2639,8 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                         fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, nativeSelectedLocalIndices)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Native graph-level epic prefill failed on backend " + runtimeBackend();
+                    error = "Native graph-level epic prefill failed on backend " + runtimeBackend() +
+                            llmContextSuffix(mLlm.get());
                     return false;
                 }
                 graphBoundaryPrefillDone = true;
@@ -2564,7 +2662,8 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
                         nativeSelectedLocalIndices)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Native graph-level cacheblend score/top-k failed on backend " + runtimeBackend();
+                    error = "Native graph-level cacheblend score/top-k failed on backend " + runtimeBackend() +
+                            llmContextSuffix(mLlm.get());
                     return false;
                 }
                 graphBoundaryPrefillDone = true;
@@ -2589,7 +2688,8 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                         fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
                         nativeSelectedLocalIndices)) {
-                    error = "Native cacheblend score/top-k failed on backend " + runtimeBackend();
+                    error = "Native cacheblend score/top-k failed on backend " + runtimeBackend() +
+                            llmContextSuffix(mLlm.get());
                     return false;
                 }
                 hasNativeSelectedLocalIndices = true;
@@ -2620,17 +2720,11 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             if (!graphBoundaryPrefillDone) {
                 mLlm->reset();
                 mLlm->generate_init(&sink, "");
-                if (!plan.externalTokenIds.empty() &&
-                    !mLlm->reserveExternalPagedKVSourceSlots(plan.externalTokenIds.size())) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to reserve OpenCL PagedCache source slots for persistent PIC cache";
-                    return false;
-                }
             }
             if (!graphBoundaryPrefillDone && plan.fullCompute) {
                 if (!mLlm->prefill(fullPromptTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to prefill full-compute PIC chat request";
+                    error = "Failed to prefill full-compute PIC chat request" + llmContextSuffix(mLlm.get());
                     return false;
                 }
                 if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
@@ -2649,7 +2743,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 if (!firstPrefill.empty()) {
                     if (!mLlm->prefill(firstPrefill)) {
                         mLlm->finishExternalPagedKVRequest();
-                        error = "Failed to prefill prelude/PIC prefix tokens";
+                        error = "Failed to prefill prelude/PIC prefix tokens" + llmContextSuffix(mLlm.get());
                         return false;
                     }
                     if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
@@ -2667,7 +2761,8 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 if (!plan.externalTokenIds.empty() &&
                     !mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to bind persistent PIC cache source into current request PagedCache";
+                    error = "Failed to bind persistent PIC cache source into current request PagedCache" +
+                            llmContextSuffix(mLlm.get());
                     return false;
                 }
                 if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
@@ -2683,7 +2778,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     !mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds,
                                                     plan.scoreLayerIdx)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to sparse-recompute selected PIC KV tokens";
+                    error = "Failed to sparse-recompute selected PIC KV tokens" + llmContextSuffix(mLlm.get());
                     return false;
                 }
                 if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr && plan.sparseRecompute) {
@@ -2695,7 +2790,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 }
                 if (!mLlm->prefill(suffixTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to prefill PIC prompt suffix tokens";
+                    error = "Failed to prefill PIC prompt suffix tokens" + llmContextSuffix(mLlm.get());
                     return false;
                 }
                 if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
@@ -2732,6 +2827,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 error = "Failed to prepare PIC decode_refine runtime state";
                 return false;
             }
+            activeTokensPerDecodeStep = pic.decodeRefine.tokensPerDecodeStep + 1;
             plan.metadata["decode_refine_runtime"] = "mnn_token_id_sparse_decode";
             plan.metadata["decode_refine_ranking_source"] =
                 hasNativeSelectedLocalIndices ? "native_selected_indices_then_pic_order"
@@ -2828,6 +2924,8 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             {"completion_tokens", completionTokens},
             {"total_tokens", totalPromptTokens + completionTokens},
         }},
+        {"performance", performanceSummary(context, completionTokens, activeTokensPerDecodeStep,
+                                           monotonicUs() - requestStartUs)},
     };
     if (!picInfo.is_null()) {
         response["pic_cache"] = picInfo;

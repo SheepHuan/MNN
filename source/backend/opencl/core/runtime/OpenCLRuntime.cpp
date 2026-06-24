@@ -136,7 +136,15 @@ OpenCLRuntime::OpenCLRuntime(int platformSize, int platformId, int deviceId, voi
             }
         #endif
             
-            if (deviceName.find("QUALCOMM Adreno") != std::string::npos || deviceName.find("Qualcomm") != std::string::npos) {
+            const bool isAdrenoDevice =
+                deviceName.find("QUALCOMM Adreno") != std::string::npos ||
+                deviceName.find("Qualcomm") != std::string::npos ||
+                deviceName.find("QUALCOMM") != std::string::npos ||
+                deviceName.find("Adreno") != std::string::npos ||
+                deviceName.find("ADRENO") != std::string::npos ||
+                deviceVendor.find("Qualcomm") != std::string::npos ||
+                deviceVendor.find("QUALCOMM") != std::string::npos;
+            if (isAdrenoDevice) {
                 mGpuType = ADRENO;
                 
                 // if device is QUALCOMM's and version is 2.0 , set spacial optimized param
@@ -147,7 +155,8 @@ OpenCLRuntime::OpenCLRuntime(int platformSize, int platformId, int deviceId, voi
                     isSetWorkGroupAttribute = true;
                 }
                 // 8Gen1 and after
-                if(adrenoVersion >= "730") {
+                if(adrenoVersion >= "730" || deviceName.find("Adreno 7") != std::string::npos ||
+                   deviceName.find("Adreno7") != std::string::npos) {
                     mGpuLevel = TOP;
                 }
                 mDeviceInfo = deviceVersion.size() <= 14 ? deviceVersion : deviceVersion.substr(deviceVersion.size()-14);

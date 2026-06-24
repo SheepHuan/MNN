@@ -1,25 +1,271 @@
-model_name,mode,buget,latency_s,effective_tps,speedup_vs_normal
-Llama-3.2-3B-Instruct@jetson-cuda,normal-full-compute,full,11.620447,130.202,1.000
-Llama-3.2-3B-Instruct@jetson-cuda,full-reuse,0,0.777268,1946.561,14.950
-Llama-3.2-3B-Instruct@jetson-cuda,full-compute,full,10.974923,137.860,1.059
-Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.01,2.090345,723.804,5.559
-Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.05,2.145238,705.283,5.417
-Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.10,2.625409,576.291,4.426
-Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.20,3.630116,416.791,3.201
-Llama-3.2-3B-Instruct@jetson-cuda,cacheblend,0.30,4.523063,334.508,2.569
-Llama-3.2-3B-Instruct@jetson-cuda,epic,0.01,1.069722,1414.386,10.863
-Llama-3.2-3B-Instruct@jetson-cuda,epic,0.05,1.481764,1021.080,7.842
-Llama-3.2-3B-Instruct@jetson-cuda,epic,0.10,1.964083,770.334,5.916
-Llama-3.2-3B-Instruct@jetson-cuda,epic,0.20,2.939275,514.753,3.954
-Llama-3.2-3B-Instruct@jetson-cuda,epic,0.30,3.815419,396.549,3.046
-Llama-3.2-3B-Instruct@orangepi-opencl-current,full-reuse,full,3.384229,421.957,9.866
-Llama-3.2-3B-Instruct@orangepi-opencl-current,full-compute,full,40.761572,35.033,0.819
-Llama-3.2-3B-Instruct@orangepi-opencl-current,cacheblend,0.30,80.762617,17.681,0.413
-Llama-3.2-3B-Instruct@orangepi-opencl-current,cacheblend,0.40,92.435876,15.449,0.361
-Llama-3.2-3B-Instruct@orangepi-opencl-current,cacheblend,0.50,119.121095,11.988,0.280
-Llama-3.2-3B-Instruct@orangepi-opencl,full-reuse,0,3.486284,409.605,9.477
-Llama-3.2-3B-Instruct@orangepi-opencl,full-compute,full,37.980855,37.598,0.870
-Llama-3.2-3B-Instruct@orangepi-opencl,normal-full-compute,full,33.041143,43.219,1.000
-Llama-3.2-3B-Instruct@orangepi-opencl,cacheblend,0.30,34.230328,41.717,0.965
-Llama-3.2-3B-Instruct@orangepi-opencl,cacheblend,0.40,31.881342,44.791,1.036
-Llama-3.2-3B-Instruct@orangepi-opencl,cacheblend,0.50,38.027881,37.551,0.869
+device,device_display,model,backend,frequency_profile,context_tokens,mode,budget,prefill_latency_s,prefill_tps
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,normal-full-recompute,full,0.41655600000000004,1229.12645598671
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,pic-full-recompute,full,0.7001837599091232,731.2366114667561
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,full-reuse,0,0.3972311057150364,1288.9222234456531
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,cacheblend,0.05,0.1327118040062487,3857.9838759172662
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,cacheblend,0.10,0.14507285598665476,3529.2611875449593
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,cacheblend,0.20,0.1810500780120492,2827.9468621158258
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,cacheblend,0.30,0.2319653518497944,2207.2261909681138
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,cacheblend,0.40,0.2714657220058143,1886.0576437309232
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,cacheblend,0.50,0.28978412691503763,1766.8324536979014
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,epic,0.05,0.11127195274457335,4601.3392177569185
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,epic,0.10,0.12012767186388373,4262.132047145186
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,epic,0.20,0.14743173588067293,3472.793675945037
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,epic,0.30,0.18033808981999755,2839.111806668503
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,epic,0.40,0.223503980319947,2290.78694378091
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,epic,0.50,0.2622775509953499,1952.130474213089
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,normal-full-recompute,full,1.546081,662.3197620305792
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,pic-full-recompute,full,1.6496243267320096,620.7473928494959
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,full-reuse,0,0.4205226260237396,2435.0651704105753
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,cacheblend,0.05,0.25916346814483404,3951.174165595498
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,cacheblend,0.10,0.2959675849415362,3459.8383475078035
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,cacheblend,0.20,0.4262618077918887,2402.279494155248
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,cacheblend,0.30,0.48414718406274915,2115.0592912821357
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,cacheblend,0.40,0.4512453502975404,2269.2754602896157
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,cacheblend,0.50,0.5093229957856238,2010.512010007508
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,epic,0.05,0.21063064876943827,4861.590684843291
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,epic,0.10,0.22298948699608445,4592.144740967007
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,epic,0.20,0.2976750610396266,3439.9925758768377
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,epic,0.30,0.35583953466266394,2877.701604940419
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,epic,0.40,0.38279918394982815,2675.031825914789
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,epic,0.50,0.43185911094769835,2371.1436763551683
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,normal-full-recompute,full,3.028995,507.09888923553854
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,pic-full-recompute,full,2.9319307571277022,523.8868606517703
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,full-reuse,0,0.45431561628356576,3380.909537217602
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,cacheblend,0.05,0.40059757605195045,3834.2718274481217
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,cacheblend,0.10,0.5096975499764085,3013.551860453507
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,cacheblend,0.20,0.6764137870632112,2270.799367749227
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,cacheblend,0.30,0.6743503720499575,2277.747686756239
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,cacheblend,0.40,0.8159729149192572,1882.4154232521205
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,cacheblend,0.50,1.0426642536185682,1473.149189366864
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,epic,0.05,0.32096715411171317,4785.536402473733
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,epic,0.10,0.3513339553028345,4371.908768897772
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,epic,0.20,0.4422169290482998,3473.408409093798
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,epic,0.30,0.47675362788140774,3221.7898515542693
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,epic,0.40,0.5721157537773252,2684.7713768739027
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,epic,0.50,0.7960733822546899,1929.4703657213643
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,normal-full-recompute,full,5.030644,407.1049352727007
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,pic-full-recompute,full,4.59839435108006,445.3728505296573
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,full-reuse,0,0.4912087139673531,4169.307143309585
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,cacheblend,0.05,0.6042299619875848,3389.4380100966932
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,cacheblend,0.10,0.8007025131955743,2557.753930141305
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,cacheblend,0.20,0.6875808890908957,2978.5586430533585
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,cacheblend,0.30,0.8492556000128388,2411.5236920063157
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,cacheblend,0.40,1.1160957608371973,1834.967994559687
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,cacheblend,0.50,1.3547808891162276,1511.6835618606815
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,epic,0.05,0.44236995931714773,4629.609124365812
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,epic,0.10,0.5138855949044228,3985.322842880829
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,epic,0.20,0.6038091629743576,3391.800134187387
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,epic,0.30,0.6941143036819994,2950.5226864454125
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,epic,0.40,0.9540474535897374,2146.6437463819148
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,epic,0.50,1.1648462140001357,1758.1720019221023
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,normal-full-recompute,full,7.548529133776922,339.1389176130925
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,pic-full-recompute,full,8.036989714019,318.5272211478094
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,full-reuse,0,0.7767370529472828,3295.8386500119072
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,cacheblend,0.05,0.8782260501757264,2914.9670514644417
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,cacheblend,0.10,1.0771538182161748,2376.633640160603
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,cacheblend,0.20,1.2125367699190974,2111.2761802438436
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,cacheblend,0.30,1.5858162427321076,1614.3106187319217
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,cacheblend,0.40,1.8040387472137809,1419.0382573288691
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,cacheblend,0.50,2.0436846958473325,1252.6394140944515
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,epic,0.05,0.6226863358169794,4111.219168863275
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,epic,0.10,0.703672731295228,3638.054860087998
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,epic,0.20,0.7932592537254095,3227.192103940027
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,epic,0.30,1.060286046937108,2414.442788712704
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,epic,0.40,1.2813431089743972,1997.9035919965695
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,epic,0.50,1.5354119767434895,1667.304957090146
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,normal-full-recompute,full,10.579523369830547,290.37224954390405
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,pic-full-recompute,full,9.214727533981204,333.37936348865094
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,full-reuse,0,0.5884491838514805,5220.50176005571
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,cacheblend,0.05,1.189121293835342,2583.4202246027403
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,cacheblend,0.10,1.4000630611553788,2194.1868800287343
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,cacheblend,0.20,1.5761026619002223,1949.111611991223
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,cacheblend,0.30,2.156097979284823,1424.796103662683
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,cacheblend,0.40,2.5730726029723883,1193.903349812693
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,cacheblend,0.50,2.89196824003011,1062.2523295650078
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,epic,0.05,0.7982465540990233,3848.435028281895
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,epic,0.10,0.8996037929318845,3414.836647128947
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,epic,0.20,1.0434557399712503,2944.0635403324736
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,epic,0.30,1.3909562351182103,2208.5525931295215
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,epic,0.40,1.690570475999266,1817.1380865883132
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,3072,epic,0.50,2.04246921883896,1504.0618344036911
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,normal-full-recompute,full,3.9934296639345033,128.21059667683116
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,pic-full-recompute,full,5.980009828694165,85.61858837476255
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,full-reuse,0,0.4033309821970761,1269.428887438719
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,cacheblend,0.05,0.9301126105710864,550.470979729684
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,cacheblend,0.10,1.0116244871169329,506.11665348193407
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,cacheblend,0.20,1.4065624312497675,364.008016014671
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,cacheblend,0.30,1.8537478349171579,276.1972207632441
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,cacheblend,0.40,2.3089835387654603,221.74259426455245
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,cacheblend,0.50,2.7110636751167476,188.8557634036211
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,epic,0.05,0.8702672901563346,588.3249959998203
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,epic,0.10,0.957866651006043,534.52116686832
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,epic,0.20,1.4342550178989768,356.97975158561604
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,epic,0.30,1.8649883340112865,274.5325483611853
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,epic,0.40,2.2235228517092764,230.26522961363455
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,512,epic,0.50,2.6280974852852523,194.81773521214257
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,normal-full-recompute,full,6.006731939977573,170.4753949788915
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,pic-full-recompute,full,13.901191587094218,73.66274995811693
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,full-reuse,0,0.4932283032685518,2076.1176785965076
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.05,1.6787978829815984,609.9602640559348
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.10,1.9715475807897747,519.3889358682379
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.20,2.857826031278819,358.3143231226643
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.30,3.5716491281054914,286.7022944505078
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.40,4.428747241850942,231.21662720404683
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.50,4.5370221310295165,225.69870069548008
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.05,1.6183142862282693,632.7571898203962
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.10,1.9589674840681255,522.7243475596092
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.20,2.786589492112398,367.4742917456952
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.30,3.445766632910818,297.17624815902695
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.40,4.278179157990962,239.35416498098962
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.50,4.320406292099506,237.01474601417317
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,normal-full-recompute,full,9.05530437361207,169.62433692190788
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,pic-full-recompute,full,26.865101960022002,57.17454570936391
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,full-reuse,0,0.5803796728141606,2646.543412783914
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.05,2.7273378493264318,563.1865521828711
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.10,3.3148784628137946,463.365404563335
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.20,4.563978239893913,336.54849328021845
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.30,6.027033199090511,254.85175695262222
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.40,6.131475158035755,250.51067816640463
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.50,7.682647153735161,199.93108745769032
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,epic,0.05,2.6818092218600214,572.7476762626228
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,epic,0.10,3.2170467721298337,477.4565335222332
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,epic,0.20,4.303636739961803,356.9074466107548
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,epic,0.30,5.569931495934725,275.76640774147154
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,epic,0.40,5.515371250919998,278.4943986760249
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1536,epic,0.50,6.7538556307554245,227.4256489886203
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,normal-full-recompute,full,13.07453229554599,156.64040240259132
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,pic-full-recompute,full,44.88574573257938,45.62695721268817
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,full-reuse,0,0.7334407931193709,2792.3180974018696
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.05,4.202835537027568,487.2900645187836
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.10,5.301839442923665,386.28102982889345
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.20,7.365574773866683,278.05026259001204
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.30,8.34351104311645,245.46021326233367
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.40,10.173644164577127,201.30446542751935
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.50,12.683047941885889,161.47538110586652
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,epic,0.05,4.001794394571334,511.77042048392855
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,epic,0.10,4.810463037807494,425.73864176980237
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,epic,0.20,6.321986814029515,323.948793353247
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,epic,0.30,6.733312357217073,304.15936337853975
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,epic,0.40,8.122539370786399,252.13789758481886
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2048,epic,0.50,9.990882568061352,204.98689540671856
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,normal-full-recompute,full,16.794484999999998,152.43099148321608
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,pic-full-recompute,full,66.68656744621694,38.38854057175237
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,full-reuse,0,0.7541166180744767,3394.7004198589
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.05,6.39794984087348,400.128176004971
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.10,7.877523650880903,324.97522234842523
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.20,9.815862662158906,260.80234495018414
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.30,11.917647468857467,214.8074950773338
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.40,14.472136296797544,176.89164526224698
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.50,17.185838568024337,148.95985376955014
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,epic,0.05,5.666181659325957,451.80337552123854
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,epic,0.10,6.628030665684491,386.238406115706
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,epic,0.20,7.762072559911758,329.80882106429357
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,epic,0.30,9.363832087256014,273.392343662816
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,epic,0.40,11.408100694883615,224.4019463422274
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,2560,epic,0.50,13.512123540975153,189.45948741786356
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,normal-full-recompute,full,21.674302,141.73466808758133
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,pic-full-recompute,full,97.34971873695031,31.556331542167918
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,full-reuse,0,0.9405548498034477,3266.157205655758
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.05,8.729766565840691,351.89944391189584
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.10,10.719340038020164,286.58480737657345
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.20,13.472601178102195,228.0183284125638
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.30,16.694835225120187,184.0090038970651
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.40,19.81917000329122,155.00144554438234
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.50,23.85387877188623,128.78408703999142
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,epic,0.05,7.784666858613491,394.62189658134537
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,epic,0.10,8.933808587025851,343.862303526552
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,epic,0.20,10.1320520658046,303.1962311334657
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,epic,0.30,12.36069566803053,248.52970111911765
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,epic,0.40,14.749936858657748,208.27207800532602
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,3072,epic,0.50,17.88797528995201,171.7354787338954
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,normal-full-recompute,full,1.6480269304101536,310.67453483455864
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,pic-full-recompute,full,1.8829209641553462,271.9179454405175
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,full-reuse,0,0.32176920492202044,1591.202614072659
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,cacheblend,0.05,0.4360594367608428,1174.1518628819558
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,cacheblend,0.10,0.49862386705353856,1026.8260984487235
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,cacheblend,0.20,0.6436659353785217,795.4436794902115
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,cacheblend,0.30,0.8061086968518794,635.1500759134954
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,cacheblend,0.40,0.9546165186911821,536.3410227826067
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,cacheblend,0.50,1.0903563830070198,469.5712410909083
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,epic,0.05,0.42129163490608335,1215.310149972804
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,epic,0.10,0.48520374158397317,1055.2268173541881
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,epic,0.20,0.6412144261412323,798.4848423968992
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,epic,0.30,0.7893617390654981,648.6253065750838
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,epic,0.40,0.9441392840817571,542.2928678345977
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,512,epic,0.50,1.0890178461559117,470.1484018900994
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,normal-full-recompute,full,3.0149131934427373,339.64493645360704
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,pic-full-recompute,full,3.2095063710585237,319.05217862592235
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,full-reuse,0,0.36446329904720187,2809.610741814037
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.05,0.6571181318722665,1558.319501978146
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.10,0.7697114301845431,1330.3687068210609
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.20,1.0919321030378342,937.7872462501632
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.30,1.432239918038249,714.964013433295
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.40,1.7672682348638773,579.4253412124917
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.50,2.2182880067266524,461.61724577460694
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,epic,0.05,0.6128074717707932,1670.9979025565865
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,epic,0.10,0.748230024240911,1368.5630980110177
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,epic,0.20,1.0554157178848982,970.2337975903403
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,epic,0.30,1.394183469004929,734.4800901497274
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,epic,0.40,1.6519009941257536,619.8918722377416
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1024,epic,0.50,2.0077368239872158,510.027005415188
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,normal-full-recompute,full,4.4926133147108,341.89454831789277
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,pic-full-recompute,full,6.402008825913072,239.9246926656543
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,full-reuse,0,0.39665111573413014,3872.4207220673998
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.05,0.9384582098573446,1636.7271167391546
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.10,1.179730567149818,1301.9922029408078
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.20,1.7350316583178937,885.2864399541538
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.30,2.2483429959975183,683.1697844743327
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.40,2.752925860695541,557.9518220704722
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,cacheblend,0.50,3.589501211885363,427.9146068857923
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,epic,0.05,0.9247381780296564,1661.0106909101144
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,epic,0.10,1.147884570993483,1338.1136386131636
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,epic,0.20,1.6357549498789012,939.0159571968367
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,epic,0.30,2.0561342798173428,747.0329224492338
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,epic,0.40,2.522518004756421,608.9153762644081
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,1536,epic,0.50,3.1258568270131946,491.38526970465
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,normal-full-recompute,full,6.323234265663554,323.88488453148983
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,pic-full-recompute,full,6.696720091160387,305.8213531581442
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,full-reuse,0,0.44275761488825083,4625.555679074886
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.05,1.2303092307411134,1664.622152567551
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.10,1.5822267578914762,1294.3783119489317
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.20,2.3640321511775255,866.3164750022077
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.30,3.1669371728785336,646.6816006136634
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.40,4.228441926650703,484.33915743101994
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,cacheblend,0.50,5.207544039934874,393.2755986880934
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,epic,0.05,1.058595503680408,1934.6388614723373
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,epic,0.10,1.392317920923233,1470.928420315089
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,epic,0.20,1.9598302450031042,1044.9884653131048
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,epic,0.30,2.6000589579343796,787.6744462852629
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,epic,0.40,3.27932570502162,624.5186310295146
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2048,epic,0.50,3.9020656999200583,524.8502094780099
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,normal-full-recompute,full,8.389641804265796,305.13817630430214
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,pic-full-recompute,full,8.68286877963692,294.83343178048676
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,full-reuse,0,0.4852210130002277,5275.946283057611
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.05,1.477051923982799,1733.182130183402
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.10,2.024710669182241,1264.3781844810235
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.20,3.1518812216818333,812.2133481394304
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.30,4.356927094049752,587.5700797234334
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.40,5.222574308980256,490.17971761513485
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,cacheblend,0.50,6.665021932683885,384.0947600556708
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,epic,0.05,1.294183474034071,1978.0812005119183
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,epic,0.10,1.6845147288404405,1519.7255068005325
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,epic,0.20,2.4703986449167132,1036.269998474804
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,epic,0.30,3.3566910731606185,762.6558250978801
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,epic,0.40,4.055455807596445,631.248402511194
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,2560,epic,0.50,5.051511587109417,506.77900186009214
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,normal-full-recompute,full,10.406852339451069,295.1901208739586
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,pic-full-recompute,full,21.269487435929477,144.4322534454039
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,full-reuse,0,0.5137117260001105,5980.007549991839
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.05,1.7504071579314768,1755.020245478372
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.10,2.452488166745752,1252.605432170663
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.20,3.869468729943037,793.9074364984526
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.30,5.5257031987421215,555.94734091026
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.40,7.0868893139995635,433.47650342605436
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,cacheblend,0.50,9.147212170995772,335.8400289151246
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,epic,0.05,1.5320070562884212,2005.2126962407765
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,epic,0.10,2.071925648022443,1482.6786873033218
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,epic,0.20,2.952227396890521,1040.5702498512246
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,epic,0.30,4.0148120410740376,765.1665802960435
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,epic,0.40,4.908214353956282,625.8895350655996
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,max,3072,epic,0.50,6.327216072008014,485.52158880597005

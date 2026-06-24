@@ -43,6 +43,7 @@ private:
     ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
+    ErrorCode ensureAdrenoGemmPrefillTemps(int seqLen, int kvLen, int qSplitNum);
     ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureDecodeCausalKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
@@ -55,6 +56,8 @@ private:
                                  bool queryRowsAreFull) const;
     ErrorCode runFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                              int maskKeyLen);
+    ErrorCode runAdrenoGemmPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                                   int kvLen, int qSplitNum);
     ErrorCode runSparseFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                                    int attnLen, bool queryRowsAreFull);
     ErrorCode runDecodeCausalAttention(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
@@ -78,6 +81,10 @@ private:
     std::shared_ptr<KernelWrap> mQKKernel;
     std::shared_ptr<KernelWrap> mSoftmaxKernel;
     std::shared_ptr<KernelWrap> mQKVKernel;
+    std::shared_ptr<KernelWrap> mAdrenoGemmRearrangeQKernel;
+    std::shared_ptr<KernelWrap> mAdrenoGemmPackPagedKVKernel;
+    std::shared_ptr<KernelWrap> mAdrenoGemmMaskKernel;
+    std::shared_ptr<KernelWrap> mAdrenoGemmClipKernel;
     std::shared_ptr<KernelWrap> mSparseFlashKernel32;
     std::shared_ptr<KernelWrap> mSparseFlashKernel64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel32;
@@ -89,6 +96,7 @@ private:
     std::shared_ptr<Tensor> mTempMask;
     std::shared_ptr<Tensor> mTempQK;
     std::shared_ptr<Tensor> mTempSoftmax;
+    std::shared_ptr<Tensor> mTempQKV;
     std::shared_ptr<Tensor> mExternalKey;
     std::shared_ptr<Tensor> mExternalValue;
     std::shared_ptr<Tensor> mCacheBlendScores;
@@ -111,11 +119,19 @@ private:
     int mFastSeqLen = 0;
     int mFastKvLen = 0;
     int mFastQChunkLen = 0;
+    int mAdrenoGemmSeqLen = 0;
+    int mAdrenoGemmKvLen = 0;
+    int mAdrenoGemmQSplitNum = 0;
+    int mAdrenoGemmQKVElements = 0;
     int mSparseFlashKernelGroupSize = 0;
     int mDecodeCausalKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;
+    std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmQKKernels;
+    std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmSoftmaxKernels;
+    std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmTransKernels;
+    std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmQKVKernels;
     float mScale = 1.0f;
 };
 

@@ -7,6 +7,7 @@
 #ifndef MNN_OPENCL_BUFFER_CLOSED
 
 #include "backend/opencl/execution/buffer/PagedAttentionBufExecution.hpp"
+#include "backend/opencl/core/OpenCLRunningUtils.hpp"
 #include "core/MNNFileUtils.h"
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <atomic>
 #include <sstream>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -61,7 +63,10 @@ static bool _writeBinaryFile(const std::string& path, const std::vector<int8_t>&
 struct ExternalLayerReadSegment {
     bool ok = false;
     bool directWritten = false;
+    bool valueAlreadyHydrated = false;
     int sourceSlotStart = 0;
+    int valueSourceStart = 0;
+    int valueSourceStride = 0;
     std::string error;
     std::vector<int8_t> keyData;
     std::vector<int8_t> valueData;
@@ -282,19 +287,19 @@ static int _prefillQChunkLen(int seqLen, int kvLen, int batch, int numHeads, int
 
 static size_t _fastPrefillScratchBytes(int seqLen, int kvLen, int batch, int numHeads, int kvHeads, int headDim,
                                        int qChunkLen) {
-    const int seqPack = ROUND_UP(seqLen, 4);
+    const int seqPack = ROUND_UP(seqLen, 32);
     const int qChunkPack = ROUND_UP(std::max(1, std::min(qChunkLen, seqLen)), 4);
-    const int kvPack = ROUND_UP(kvLen, 4);
+    const int kvPack = ROUND_UP(kvLen, 32);
     const int headPack4 = ROUND_UP(headDim, 4);
-    const int headPack8 = ROUND_UP(headDim, 8);
+    const int headPackV = ROUND_UP(headDim, 32);
     const size_t elemBytes = sizeof(float);
     size_t bytes = 0;
     bytes += static_cast<size_t>(seqPack) * headPack4 * numHeads * batch * elemBytes;
     bytes += static_cast<size_t>(kvPack) * headPack4 * kvHeads * batch * elemBytes;
-    bytes += static_cast<size_t>(kvPack) * headPack8 * kvHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(kvPack) * headPackV * kvHeads * batch * elemBytes;
     bytes += static_cast<size_t>(seqPack) * kvPack * batch * elemBytes;
-    bytes += static_cast<size_t>(qChunkPack) * kvLen * numHeads * batch * elemBytes;
-    bytes += static_cast<size_t>(qChunkPack) * kvLen * numHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(qChunkPack) * kvPack * numHeads * batch * elemBytes;
+    bytes += static_cast<size_t>(qChunkPack) * kvPack * numHeads * batch * elemBytes;
     return bytes;
 }
 
@@ -367,6 +372,73 @@ static bool _useStaticFullPrefill(int seqLen, int kvLen, int batch, int numHeads
     return _fastPrefillScratchBytes(seqLen, kvLen, batch, numHeads, kvHeads, headDim, seqLen) <= budgetBytes;
 }
 
+static int _adrenoGemmPrefillQSplitNum(int seqLen, int kvLen, int batch, int numHeads) {
+    constexpr int alignQ = 32;
+    constexpr int alignKV = 32;
+    if (seqLen <= 0 || kvLen <= 0 || batch <= 0 || numHeads <= 0) {
+        return 1;
+    }
+    const int seqPack = ROUND_UP(seqLen, alignQ);
+    const int kvPack = ROUND_UP(kvLen, alignKV);
+    float useMemorySize = 1.0f * seqPack / 1024.0f * kvPack / 1024.0f * batch * numHeads;
+    int split = 1;
+    if (useMemorySize > 32.0f) {
+        split = useMemorySize >= 256.0f ? 8 : ((useMemorySize < 128.0f) ? 2 : 4);
+    }
+    split = std::max(1, std::min(split, std::max(1, seqPack / alignQ)));
+    while (split > 1 && ((seqPack / split) % alignQ) != 0) {
+        split >>= 1;
+    }
+    return std::max(1, split);
+}
+
+static bool _useAdrenoGemmFullPrefill(OpenCLRuntime* runtime, int seqLen, int kvLen, int batch, int numHeads,
+                                      int kvHeads, int headDim, int maskKeyLen) {
+    if (runtime == nullptr || runtime->getGpuType() != GpuType::ADRENO || _legacyB863976OpenCL()) {
+        return false;
+    }
+    if (seqLen <= 1 || kvLen < seqLen || batch <= 0 || numHeads <= 0 || kvHeads <= 0 ||
+        numHeads % kvHeads != 0 || headDim <= 0) {
+        return false;
+    }
+    if (maskKeyLen != kvLen) {
+        return false;
+    }
+    return (headDim % 32) == 0;
+}
+
+static bool _useAdrenoSourceSlotValueHydrate(OpenCLRuntime* runtime) {
+    return runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO && !_legacyB863976OpenCL();
+}
+
+static void _appendGemmBuildOptions(std::set<std::string>& buildOptions, const std::vector<uint32_t>& param,
+                                    uint32_t layout, bool adreno) {
+    int KWG = param[0], KWI = param[1], MDIMA = param[2], MDIMC = param[3], MWG = param[4], NDIMB = param[5];
+    int NDIMC = param[6], NWG = param[7], SA = param[8], SB = param[9], STRM = param[10], STRN = param[11];
+    int VWM = param[12], VWN = param[13];
+    buildOptions.emplace("-DKWG=" + std::to_string(KWG));
+    buildOptions.emplace("-DKWI=" + std::to_string(KWI));
+    buildOptions.emplace("-DMDIMA=" + std::to_string(MDIMA));
+    buildOptions.emplace("-DMDIMC=" + std::to_string(MDIMC));
+    buildOptions.emplace("-DMWG=" + std::to_string(MWG));
+    buildOptions.emplace("-DNDIMB=" + std::to_string(NDIMB));
+    buildOptions.emplace("-DNDIMC=" + std::to_string(NDIMC));
+    buildOptions.emplace("-DNWG=" + std::to_string(NWG));
+    buildOptions.emplace("-DSA=" + std::to_string(SA));
+    buildOptions.emplace("-DSB=" + std::to_string(SB));
+    buildOptions.emplace("-DSTRM=" + std::to_string(STRM));
+    buildOptions.emplace("-DSTRN=" + std::to_string(STRN));
+    buildOptions.emplace("-DVWM=" + std::to_string(VWM));
+    buildOptions.emplace("-DVWN=" + std::to_string(VWN));
+    if (layout >= 4) {
+        buildOptions.emplace("-DOUTPUTMN");
+    }
+    if (adreno) {
+        buildOptions.emplace("-DUSE_CL_MAD=1");
+        buildOptions.emplace("-DRELAX_WORKGROUP_SIZE=1");
+    }
+}
+
 static bool _allowDirectPagedCacheOpenCL() {
     if (_legacyB863976OpenCL()) {
         return false;
@@ -417,26 +489,56 @@ static size_t _segmentTokenCount(const std::vector<PagedKVExternalSegment>& segm
     return count;
 }
 
+static int _alignPicCacheSourceSlots(int slots) {
+    constexpr int kSourceSlotAlignment = 32;
+    if (slots <= 0) {
+        return slots;
+    }
+    if (slots > std::numeric_limits<int>::max() - kSourceSlotAlignment) {
+        return std::numeric_limits<int>::max();
+    }
+    return ROUND_UP(slots, kSourceSlotAlignment);
+}
+
+static size_t _segmentSourceSlotSpan(const std::vector<PagedKVExternalSegment>& segments) {
+    size_t cursor = 0;
+    for (const auto& segment : segments) {
+        if (cursor > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            return cursor;
+        }
+        cursor = static_cast<size_t>(_alignPicCacheSourceSlots(static_cast<int>(cursor)));
+        cursor += segment.tokenCount;
+    }
+    if (cursor > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return cursor;
+    }
+    return static_cast<size_t>(_alignPicCacheSourceSlots(static_cast<int>(cursor)));
+}
+
 static int _picCacheSourceSlotBase(const PagedKVMeta* meta, int kvLen) {
     if (meta == nullptr) {
         return kvLen;
     }
-    return std::max(kvLen, meta->request_capacity);
+    return _alignPicCacheSourceSlots(std::max(kvLen, meta->request_capacity));
 }
 
 static size_t _picCacheSourceSlotCount(const PagedKVMeta* meta) {
     if (meta == nullptr) {
         return 0;
     }
-    return std::max({meta->external_source_slot_reserve,
-                     _segmentTokenCount(meta->external_segments),
-                     _segmentTokenCount(meta->cacheblend_score_segments)});
+    return std::max({static_cast<size_t>(_alignPicCacheSourceSlots(
+                         static_cast<int>(std::min<size_t>(
+                             meta->external_source_slot_reserve,
+                             static_cast<size_t>(std::numeric_limits<int>::max()))))),
+                     _segmentSourceSlotSpan(meta->external_segments),
+                     _segmentSourceSlotSpan(meta->cacheblend_score_segments)});
 }
 
 struct ExternalLayerMappedTarget {
     std::shared_ptr<Tensor> key;
     std::shared_ptr<Tensor> value;
     std::shared_ptr<cl::CommandQueue> queue;
+    bool valueSourceHydrate = false;
     int batch = 0;
     int kvHeads = 0;
     int headDim = 0;
@@ -448,6 +550,7 @@ struct ExternalLayerMappedTargetRef {
     std::weak_ptr<Tensor> key;
     std::weak_ptr<Tensor> value;
     std::shared_ptr<cl::CommandQueue> queue;
+    bool valueSourceHydrate = false;
     int batch = 0;
     int kvHeads = 0;
     int headDim = 0;
@@ -470,7 +573,7 @@ static void _registerExternalLayerMappedTarget(const PagedKVMeta* meta, int laye
                                                int headDim, int bytes, int maxSlots,
                                                const std::shared_ptr<Tensor>& key,
                                                const std::shared_ptr<Tensor>& value,
-                                               cl::CommandQueue& queue) {
+                                               cl::CommandQueue& queue, bool valueSourceHydrate) {
     if (!_shouldUseDirectPagedCacheOpenCL() || meta == nullptr || layerIndex < 0 || key == nullptr ||
         value == nullptr || key->deviceId() == 0 || value->deviceId() == 0) {
         return;
@@ -479,6 +582,7 @@ static void _registerExternalLayerMappedTarget(const PagedKVMeta* meta, int laye
     ref.key = key;
     ref.value = value;
     ref.queue.reset(new cl::CommandQueue(queue));
+    ref.valueSourceHydrate = valueSourceHydrate;
     ref.batch = batch;
     ref.kvHeads = kvHeads;
     ref.headDim = headDim;
@@ -504,6 +608,7 @@ static ExternalLayerMappedTarget _lookupExternalLayerMappedTarget(const PagedKVM
     target.key = iter->second.key.lock();
     target.value = iter->second.value.lock();
     target.queue = iter->second.queue;
+    target.valueSourceHydrate = iter->second.valueSourceHydrate;
     target.batch = iter->second.batch;
     target.kvHeads = iter->second.kvHeads;
     target.headDim = iter->second.headDim;
@@ -689,9 +794,17 @@ static bool _readBinaryFileRangeToSourceCLBuffer(const std::string& path, size_t
     if (status == SourceCLReadStatus::ReadFailed) {
         return false;
     }
+    if (!_envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_ALLOW_KV_STAGING_FALLBACK", false)) {
+        static std::once_flag mapRequiredOnce;
+        std::call_once(mapRequiredOnce, []() {
+            MNN_PRINT("OpenCLPagedAttention: mapped source CL buffer is required for PIC cache key hydrate; "
+                      "set MNN_PAGED_ATTENTION_OPENCL_ALLOW_KV_STAGING_FALLBACK=1 only for debug fallback\n");
+        });
+        return false;
+    }
     static std::once_flag fallbackOnce;
     std::call_once(fallbackOnce, []() {
-        MNN_PRINT("OpenCLPagedAttention: mapped source CL buffer unavailable, fallback to enqueueWriteBuffer\n");
+        MNN_PRINT("OpenCLPagedAttention: debug fallback copies PIC cache key source with enqueueWriteBuffer\n");
     });
     return _readBinaryFileRangeToCLBufferFallback(path, offsetBytes, buffer, expectedBytes, queue);
 }
@@ -986,13 +1099,26 @@ static bool _readExternalLayerSegmentOpenCL(const PagedKVMeta* meta, const Paged
         const bool directKeyOk = _readKeySegmentToPagedCacheSourceSlotsOpenCL(
             layer->keyPath, keyBuffer, *target->queue, batch, kvHeads, headDim, bytes, sourceTokenOffset,
             segment.tokenCount, static_cast<size_t>(sourceSlotStart), target->maxSlots);
-        const bool directValueOk = directKeyOk &&
-            _readExternalValueSegmentToPhysicalPagedCacheOpenCL(
+        bool directValueOk = false;
+        bool valueAlreadyHydrated = false;
+        if (directKeyOk && target->valueSourceHydrate) {
+            directValueOk = _readExternalValueSegmentToPagedCacheOpenCL(
+                layer->valuePath, valueBuffer, *target->queue, batch, kvHeads, target->maxSlots,
+                static_cast<size_t>(sourceSlotStart), sourceTokenCount, sourceTokenOffset,
+                segment.tokenCount, headDim, bytes);
+        } else if (directKeyOk) {
+            directValueOk = _readExternalValueSegmentToPhysicalPagedCacheOpenCL(
                 layer->valuePath, valueBuffer, *target->queue, meta, batch, kvHeads, target->maxSlots,
                 segment.logicalStart, sourceTokenCount, sourceTokenOffset, segment.tokenCount, headDim, bytes);
+            valueAlreadyHydrated = directValueOk;
+        }
         if (directKeyOk && directValueOk) {
             out.directWritten = true;
+            out.valueAlreadyHydrated = valueAlreadyHydrated;
             out.sourceSlotStart = sourceSlotStart;
+            out.valueSourceStart = target->valueSourceHydrate ? sourceSlotStart : 0;
+            out.valueSourceStride = target->valueSourceHydrate ? target->maxSlots
+                                                               : static_cast<int>(segment.tokenCount);
             out.ok = true;
             return true;
         }
@@ -1030,6 +1156,7 @@ static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
         target, batch, kvHeads, headDim, bytes, _externalLayerRequiredSlots(meta, kvLen));
     int sourceSlotCursor = _picCacheSourceSlotBase(meta, kvLen);
     for (size_t i = 0; i < segments.size(); ++i) {
+        sourceSlotCursor = _alignPicCacheSourceSlots(sourceSlotCursor);
         const int sourceSlotStart = sourceSlotCursor;
         sourceSlotCursor += static_cast<int>(segments[i].tokenCount);
         if (!_readExternalLayerSegmentOpenCL(meta, segments[i], layerIndex, batch, kvHeads, headDim, bytes, kvLen,
@@ -1235,7 +1362,8 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
         if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
             _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
                                                mCache->key, mCache->value,
-                                               mOpenCLBackend->getOpenCLRuntime()->commandQueue());
+                                               mOpenCLBackend->getOpenCLRuntime()->commandQueue(),
+                                               _useAdrenoSourceSlotValueHydrate(mOpenCLBackend->getOpenCLRuntime()));
         }
         return NO_ERROR;
     }
@@ -1291,7 +1419,8 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
         _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
                                            mCache->key, mCache->value,
-                                           mOpenCLBackend->getOpenCLRuntime()->commandQueue());
+                                           mOpenCLBackend->getOpenCLRuntime()->commandQueue(),
+                                           _useAdrenoSourceSlotValueHydrate(mOpenCLBackend->getOpenCLRuntime()));
     }
     return NO_ERROR;
 }
@@ -1428,17 +1557,17 @@ ErrorCode PagedAttentionBufExecution::ensureFastPrefillTemps(int seqLen, int kvL
     if (!(mTempQ && mTempK && mTempV && mTempMask && mTempQK && mTempSoftmax &&
           mFastSeqLen == seqLen && mFastKvLen == kvLen && mFastQChunkLen == qChunkLen &&
           mFastStaticWorkspace == staticWorkspace)) {
-        const int seqPack = ROUND_UP(seqLen, 4);
+        const int seqPack = ROUND_UP(seqLen, 32);
         const int qChunkPack = ROUND_UP(qChunkLen, 4);
-        const int kvPack = ROUND_UP(kvLen, 4);
+        const int kvPack = ROUND_UP(kvLen, 32);
         const int headPack4 = ROUND_UP(mHeadDim, 4);
-        const int headPack8 = ROUND_UP(mHeadDim, 8);
+        const int headPackV = ROUND_UP(mHeadDim, 32);
         mTempQ.reset(Tensor::createDevice<float>({seqPack * headPack4 * mNumHead * mBatch}));
         mTempK.reset(Tensor::createDevice<float>({kvPack * headPack4 * mKvNumHead * mBatch}));
-        mTempV.reset(Tensor::createDevice<float>({kvPack * headPack8 * mKvNumHead * mBatch}));
+        mTempV.reset(Tensor::createDevice<float>({kvPack * headPackV * mKvNumHead * mBatch}));
         mTempMask.reset(Tensor::createDevice<float>({seqPack * kvPack * mBatch}));
-        mTempQK.reset(Tensor::createDevice<float>({qChunkPack * kvLen * mNumHead * mBatch}));
-        mTempSoftmax.reset(Tensor::createDevice<float>({qChunkPack * kvLen * mNumHead * mBatch}));
+        mTempQK.reset(Tensor::createDevice<float>({qChunkPack * kvPack * mNumHead * mBatch}));
+        mTempSoftmax.reset(Tensor::createDevice<float>({qChunkPack * kvPack * mNumHead * mBatch}));
         if (!mTempQ || !mTempK || !mTempV || !mTempMask || !mTempQK || !mTempSoftmax) {
             return OUT_OF_MEMORY;
         }
@@ -1470,6 +1599,42 @@ ErrorCode PagedAttentionBufExecution::ensureFastPrefillTemps(int seqLen, int kvL
     mOpenCLBackend->onReleaseBuffer(mTempMask.get(), Backend::DYNAMIC_IN_EXECUTION);
     mOpenCLBackend->onReleaseBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION);
     mOpenCLBackend->onReleaseBuffer(mTempSoftmax.get(), Backend::DYNAMIC_IN_EXECUTION);
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureAdrenoGemmPrefillTemps(int seqLen, int kvLen, int qSplitNum) {
+    if (seqLen <= 0 || kvLen <= 0 || qSplitNum <= 0 || mBatch <= 0 || mNumHead <= 0 || mHeadDim <= 0) {
+        return INVALID_VALUE;
+    }
+    const int seqPack = ROUND_UP(seqLen, 32);
+    const int headPack = ROUND_UP(mHeadDim, 32);
+    const size_t qkvElements64 =
+        static_cast<size_t>(seqPack) * headPack * mNumHead * mBatch;
+    if (qkvElements64 > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return OUT_OF_MEMORY;
+    }
+    const int qkvElements = static_cast<int>(qkvElements64);
+    const bool shapeChanged = mAdrenoGemmSeqLen != seqLen || mAdrenoGemmKvLen != kvLen ||
+        mAdrenoGemmQSplitNum != qSplitNum || mAdrenoGemmQKVElements != qkvElements;
+    if (shapeChanged) {
+        mAdrenoGemmQKKernels.clear();
+        mAdrenoGemmSoftmaxKernels.clear();
+        mAdrenoGemmTransKernels.clear();
+        mAdrenoGemmQKVKernels.clear();
+        mAdrenoGemmClipKernel.reset();
+        mAdrenoGemmSeqLen = seqLen;
+        mAdrenoGemmKvLen = kvLen;
+        mAdrenoGemmQSplitNum = qSplitNum;
+        mAdrenoGemmQKVElements = qkvElements;
+    }
+    if (!mTempQKV || shapeChanged) {
+        mTempQKV.reset(Tensor::createDevice<float>({qkvElements}));
+        if (!mTempQKV) {
+            return OUT_OF_MEMORY;
+        }
+    }
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQKV.get(), Backend::DYNAMIC_IN_EXECUTION));
+    mOpenCLBackend->onReleaseBuffer(mTempQKV.get(), Backend::DYNAMIC_IN_EXECUTION);
     return NO_ERROR;
 }
 
@@ -1588,7 +1753,8 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
     if (!legacy && mCache != nullptr && mCache->key != nullptr && mCache->value != nullptr) {
         _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes,
-                                           mCache->maxSlots, mCache->key, mCache->value, queue);
+                                           mCache->maxSlots, mCache->key, mCache->value, queue,
+                                           _useAdrenoSourceSlotValueHydrate(mOpenCLBackend->getOpenCLRuntime()));
     }
     auto prefetched = legacy ? nullptr
                              : _takeExternalLayerRead(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
@@ -1608,6 +1774,7 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
     int sourceSlotCursor = _picCacheSourceSlotBase(mMeta, kvLen);
     for (size_t segmentIndex = 0; segmentIndex < mMeta->external_segments.size(); ++segmentIndex) {
         const auto& segment = mMeta->external_segments[segmentIndex];
+        sourceSlotCursor = _alignPicCacheSourceSlots(sourceSlotCursor);
         const int sourceSlotStart = sourceSlotCursor;
         sourceSlotCursor += static_cast<int>(segment.tokenCount);
         totalTokens += segment.tokenCount;
@@ -1677,12 +1844,18 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         cl::Buffer* sourceKeyBuffer = nullptr;
         cl::Buffer* sourceValueBuffer = nullptr;
         int keySourceLogicalStart = 0;
+        int valueSourceStart = 0;
+        int valueSourceStride = static_cast<int>(segment.tokenCount);
         int hydrateValue = 1;
         if (loadedSegment != nullptr && loadedSegment->directWritten) {
             sourceKeyBuffer = &openCLBuffer(mCache->key.get());
             sourceValueBuffer = &openCLBuffer(mCache->value.get());
             keySourceLogicalStart = loadedSegment->sourceSlotStart;
-            hydrateValue = 0;
+            valueSourceStart = loadedSegment->valueSourceStart;
+            valueSourceStride = loadedSegment->valueSourceStride > 0
+                ? loadedSegment->valueSourceStride
+                : static_cast<int>(segment.tokenCount);
+            hydrateValue = loadedSegment->valueAlreadyHydrated ? 0 : 1;
             directTokens += segment.tokenCount;
             ++directSegments;
         } else {
@@ -1745,6 +1918,8 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
         ret |= mHydrateExternalKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
         ret |= mHydrateExternalKernel->get().setArg(idx++, keySourceLogicalStart);
+        ret |= mHydrateExternalKernel->get().setArg(idx++, valueSourceStart);
+        ret |= mHydrateExternalKernel->get().setArg(idx++, valueSourceStride);
         ret |= mHydrateExternalKernel->get().setArg(idx++, hydrateValue);
         ret |= mHydrateExternalKernel->get().setArg(idx++, ropeDim);
         ret |= mHydrateExternalKernel->get().setArg(idx++, segment.ropeTheta);
@@ -1800,6 +1975,7 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
     size_t scoreOffset = 0;
     int sourceSlotCursor = _picCacheSourceSlotBase(mMeta, kvLen);
     for (const auto& segment : mMeta->cacheblend_score_segments) {
+        sourceSlotCursor = _alignPicCacheSourceSlots(sourceSlotCursor);
         const int sourceSlotStart = sourceSlotCursor;
         sourceSlotCursor += static_cast<int>(segment.tokenCount);
         if (segment.tokenCount == 0) {
@@ -2313,6 +2489,400 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttention(const std::vector
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::runAdrenoGemmPrefill(const std::vector<Tensor*>& inputs,
+                                                           const std::vector<Tensor*>& outputs, int kvLen,
+                                                           int qSplitNum) {
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (runtime == nullptr || runtime->getGpuType() != GpuType::ADRENO || qSplitNum <= 0 || mTempQKV == nullptr) {
+        return INVALID_VALUE;
+    }
+    const int groupSize = mNumHead / mKvNumHead;
+    const int loop = mBatch * mNumHead;
+    const int ePack = ROUND_UP(mQuerySeqLen, 32);
+    const int ePiece = ePack / qSplitNum;
+    const int kvPack = ROUND_UP(kvLen, 32);
+    const int headPackQK = ROUND_UP(mHeadDim, 4);
+    const int headPackV = ROUND_UP(mHeadDim, 32);
+    if (ePiece <= 0 || (ePiece % 32) != 0 || (kvPack % 32) != 0 || (headPackQK % 4) != 0 ||
+        (headPackV % 32) != 0) {
+        return INVALID_VALUE;
+    }
+
+    auto& qBuffer = openCLDeferBuffer(mTempQ.get());
+    auto& kBuffer = openCLDeferBuffer(mTempK.get());
+    auto& vBuffer = openCLDeferBuffer(mTempV.get());
+    auto& maskBuffer = openCLDeferBuffer(mTempMask.get());
+    auto& qkBuffer = openCLDeferBuffer(mTempQK.get());
+    auto& softmaxBuffer = openCLDeferBuffer(mTempSoftmax.get());
+    auto& qkvBuffer = openCLDeferBuffer(mTempQKV.get());
+
+    if (mAdrenoGemmRearrangeQKernel == nullptr) {
+        mAdrenoGemmRearrangeQKernel =
+            runtime->buildKernel("paged_attention_buf", "rearrange_paged_q_gemm_prefill", {},
+                                 mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        OPENCL_CHECK_KERNEL(mAdrenoGemmRearrangeQKernel);
+    }
+    if (mAdrenoGemmPackPagedKVKernel == nullptr) {
+        mAdrenoGemmPackPagedKVKernel =
+            runtime->buildKernel("paged_attention_buf", "pack_paged_kv_prefill_gemm", {},
+                                 mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        OPENCL_CHECK_KERNEL(mAdrenoGemmPackPagedKVKernel);
+    }
+    if (mAdrenoGemmMaskKernel == nullptr) {
+        mAdrenoGemmMaskKernel = runtime->buildKernel("attention_buf", "rearrange_mask", {},
+                                                     mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        OPENCL_CHECK_KERNEL(mAdrenoGemmMaskKernel);
+    }
+    if (static_cast<int>(mAdrenoGemmQKKernels.size()) != qSplitNum ||
+        static_cast<int>(mAdrenoGemmSoftmaxKernels.size()) != qSplitNum ||
+        static_cast<int>(mAdrenoGemmTransKernels.size()) != qSplitNum ||
+        static_cast<int>(mAdrenoGemmQKVKernels.size()) != qSplitNum ||
+        mAdrenoGemmClipKernel == nullptr) {
+        mAdrenoGemmQKKernels.assign(static_cast<size_t>(qSplitNum), nullptr);
+        mAdrenoGemmSoftmaxKernels.assign(static_cast<size_t>(qSplitNum), nullptr);
+        mAdrenoGemmTransKernels.assign(static_cast<size_t>(qSplitNum), nullptr);
+        mAdrenoGemmQKVKernels.assign(static_cast<size_t>(qSplitNum), nullptr);
+        for (int piece = 0; piece < qSplitNum; ++piece) {
+            {
+                std::set<std::string> buildOptions;
+                constexpr uint32_t layout = 14;
+                constexpr int biasType = 2;
+                std::vector<cl::Buffer> buffers = {qBuffer, kBuffer, qkBuffer, maskBuffer};
+                auto param = getGemmParams({static_cast<uint32_t>(ePiece), static_cast<uint32_t>(kvPack),
+                                            static_cast<uint32_t>(headPackQK), layout,
+                                            static_cast<uint32_t>(loop),
+                                            static_cast<uint32_t>(biasType + 10 * (groupSize - 1))},
+                                           buffers, runtime, mOpenCLBackend->getPrecision(),
+                                           mOpenCLBackend->getCLTuneLevel());
+                _appendGemmBuildOptions(buildOptions, param, layout, true);
+                buildOptions.emplace("-DONLY_HAVE_ALPHA");
+                buildOptions.emplace("-DBIAS_TYPE=" + std::to_string(biasType));
+                buildOptions.emplace("-DPRECISION_COMPUTE=float -DCONVERT_PRECISION_COMPUTE=convert_float");
+                buildOptions.emplace("-DPRECISION_COMPUTE2=float2 -DCONVERT_PRECISION_COMPUTE2=convert_float2");
+                buildOptions.emplace("-DPRECISION_COMPUTE4=float4 -DCONVERT_PRECISION_COMPUTE4=convert_float4");
+                buildOptions.emplace("-DPRECISION_COMPUTE8=float8 -DCONVERT_PRECISION_COMPUTE8=convert_float8");
+                buildOptions.emplace("-DPRECISION_COMPUTE16=float16 -DCONVERT_PRECISION_COMPUTE16=convert_float16");
+                mAdrenoGemmQKKernels[static_cast<size_t>(piece)] =
+                    runtime->buildKernel("matmul_params_buf", "XgemmBatched", buildOptions,
+                                         mOpenCLBackend->getPrecision());
+                OPENCL_CHECK_KERNEL(mAdrenoGemmQKKernels[static_cast<size_t>(piece)]);
+            }
+            {
+                std::set<std::string> buildOptions;
+                buildOptions.emplace("-DSOFTMAX_LOCAL_SIZE=64");
+                mAdrenoGemmSoftmaxKernels[static_cast<size_t>(piece)] =
+                    runtime->buildKernel("self_attention_buf", "softmax_inside", buildOptions,
+                                         mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+                OPENCL_CHECK_KERNEL(mAdrenoGemmSoftmaxKernels[static_cast<size_t>(piece)]);
+            }
+            {
+                mAdrenoGemmTransKernels[static_cast<size_t>(piece)] =
+                    runtime->buildKernel("self_attention_buf", "trans_3d_buf", {},
+                                         mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+                OPENCL_CHECK_KERNEL(mAdrenoGemmTransKernels[static_cast<size_t>(piece)]);
+            }
+            {
+                std::set<std::string> buildOptions;
+                constexpr uint32_t layout = 0;
+                std::vector<cl::Buffer> buffers = {qkBuffer, vBuffer, qkvBuffer};
+                auto param = getGemmParams({static_cast<uint32_t>(ePiece), static_cast<uint32_t>(headPackV),
+                                            static_cast<uint32_t>(kvPack), layout, static_cast<uint32_t>(loop),
+                                            static_cast<uint32_t>(0)},
+                                           buffers, runtime, mOpenCLBackend->getPrecision(),
+                                           mOpenCLBackend->getCLTuneLevel());
+                _appendGemmBuildOptions(buildOptions, param, layout, true);
+                mAdrenoGemmQKVKernels[static_cast<size_t>(piece)] =
+                    runtime->buildKernel("matmul_params_buf", "XgemmBatched", buildOptions,
+                                         mOpenCLBackend->getPrecision());
+                OPENCL_CHECK_KERNEL(mAdrenoGemmQKVKernels[static_cast<size_t>(piece)]);
+            }
+        }
+        mAdrenoGemmClipKernel = runtime->buildKernel("attention_buf", "qkv_transpose_output", {},
+                                                     mOpenCLBackend->getPrecision(), inputs[0], outputs[0]);
+        OPENCL_CHECK_KERNEL(mAdrenoGemmClipKernel);
+    }
+
+    const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    uint64_t qkUs = 0;
+    uint64_t softmaxUs = 0;
+    uint64_t transUs = 0;
+    uint64_t qkvUs = 0;
+    uint64_t clipUs = 0;
+    uint64_t opStartUs = 0;
+    cl_int ret = CL_SUCCESS;
+    auto run3D = [&](const std::shared_ptr<KernelWrap>& kernel, std::vector<uint32_t> gws,
+                    const std::string& kernelName, const std::string& programName) {
+        auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
+        auto lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, kernelName, kernel,
+                                    mOpenCLBackend->getCLTuneLevel(), programName).first;
+        gws[0] = ROUND_UP(gws[0], std::max((uint32_t)1, lws[0]));
+        gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
+        gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
+        run3DKernelDefault(kernel, gws, lws, runtime);
+    };
+
+    {
+        std::vector<uint32_t> gws = {static_cast<uint32_t>(UP_DIV(ePack, 4)),
+                                     static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
+                                     static_cast<uint32_t>(loop)};
+        uint32_t idx = 0;
+        ret = CL_SUCCESS;
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, gws[0]);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, gws[1]);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, gws[2]);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, openCLBuffer(inputs[0]));
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, qBuffer);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, mHeadDim);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, mNumHead);
+        ret |= mAdrenoGemmRearrangeQKernel->get().setArg(idx++, ePack);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm rearrange_q");
+        run3D(mAdrenoGemmRearrangeQKernel, gws, "rearrange_paged_q_gemm_prefill", "paged_attention_buf");
+    }
+    {
+        std::vector<uint32_t> gws = {static_cast<uint32_t>(UP_DIV(kvPack, 4)),
+                                     static_cast<uint32_t>(UP_DIV(headPackV, 4)),
+                                     static_cast<uint32_t>(mKvNumHead * mBatch)};
+        uint32_t idx = 0;
+        ret = CL_SUCCESS;
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, gws[0]);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, gws[1]);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, gws[2]);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, kBuffer);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, vBuffer);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, mBatch);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, kvLen);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, mHeadDim);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, mCache->maxSlots);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, kvPack);
+        ret |= mAdrenoGemmPackPagedKVKernel->get().setArg(idx++, headPackV);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm pack_paged_kv");
+        run3D(mAdrenoGemmPackPagedKVKernel, gws, "pack_paged_kv_prefill_gemm", "paged_attention_buf");
+    }
+    {
+        int maskShape[4] = {mQuerySeqLen, kvLen, 32, 32};
+        std::vector<uint32_t> gws = {static_cast<uint32_t>(UP_DIV(ePack, 4)),
+                                     static_cast<uint32_t>(UP_DIV(kvPack, 4)),
+                                     static_cast<uint32_t>(mBatch)};
+        uint32_t idx = 0;
+        ret = CL_SUCCESS;
+        ret |= mAdrenoGemmMaskKernel->get().setArg(idx++, gws[0]);
+        ret |= mAdrenoGemmMaskKernel->get().setArg(idx++, gws[1]);
+        ret |= mAdrenoGemmMaskKernel->get().setArg(idx++, gws[2]);
+        ret |= mAdrenoGemmMaskKernel->get().setArg(idx++, openCLBuffer(inputs[3]));
+        ret |= mAdrenoGemmMaskKernel->get().setArg(idx++, maskBuffer);
+        ret |= mAdrenoGemmMaskKernel->get().setArg(idx++, maskShape);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm rearrange_mask");
+        run3D(mAdrenoGemmMaskKernel, gws, "rearrange_mask", "attention_buf");
+    }
+
+    for (int piece = 0; piece < qSplitNum; ++piece) {
+        const int qOffset = ePiece * piece;
+        {
+            auto kernel = mAdrenoGemmQKKernels[static_cast<size_t>(piece)];
+            auto param = getGemmParams({static_cast<uint32_t>(ePiece), static_cast<uint32_t>(kvPack),
+                                        static_cast<uint32_t>(headPackQK), static_cast<uint32_t>(14),
+                                        static_cast<uint32_t>(loop),
+                                        static_cast<uint32_t>(2 + 10 * (groupSize - 1))},
+                                       {qBuffer, kBuffer, qkBuffer, maskBuffer}, runtime,
+                                       mOpenCLBackend->getPrecision(), mOpenCLBackend->getCLTuneLevel());
+            const int tileM = param[4];
+            const int tileN = param[7];
+            const int localM = param[3];
+            const int localN = param[6];
+            const int outPerThreadM = std::max(1, tileM / localM);
+            const int outPerThreadN = std::max(1, tileN / localN);
+            std::vector<uint32_t> gws = {static_cast<uint32_t>(ePiece / outPerThreadM),
+                                         static_cast<uint32_t>(kvPack / outPerThreadN),
+                                         static_cast<uint32_t>(loop)};
+            std::vector<uint32_t> lws = {static_cast<uint32_t>(localM), static_cast<uint32_t>(localN), 1u};
+            const float alpha = (mMeta && mMeta->attn_scale > 0)
+                ? mMeta->attn_scale
+                : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
+            const float beta = 0.0f;
+            int batchOffset[4] = {ePack * headPackQK, kvPack * headPackQK, ePiece * kvPack, 0};
+            int basePtrOffset[4] = {qOffset, 0, 0, 0};
+            int stride[4] = {ePack, kvPack, kvPack, kvPack};
+            int group[4] = {1, groupSize, 1, loop};
+            uint32_t idx = 0;
+            ret = CL_SUCCESS;
+            ret |= kernel->get().setArg(idx++, ePiece);
+            ret |= kernel->get().setArg(idx++, kvPack);
+            ret |= kernel->get().setArg(idx++, headPackQK);
+            ret |= kernel->get().setArg(idx++, alpha);
+            ret |= kernel->get().setArg(idx++, beta);
+            ret |= kernel->get().setArg(idx++, qBuffer);
+            ret |= kernel->get().setArg(idx++, kBuffer);
+            ret |= kernel->get().setArg(idx++, maskBuffer);
+            ret |= kernel->get().setArg(idx++, qkBuffer);
+            ret |= kernel->get().setArg(idx++, batchOffset);
+            ret |= kernel->get().setArg(idx++, basePtrOffset);
+            ret |= kernel->get().setArg(idx++, stride);
+            ret |= kernel->get().setArg(idx++, group);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm qk");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3DKernelDefault(kernel, gws, lws, runtime);
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                qkUs += _nowUs() - opStartUs;
+            }
+        }
+        {
+            auto kernel = mAdrenoGemmSoftmaxKernels[static_cast<size_t>(piece)];
+            int softmaxShape[4] = {loop, ePiece, kvPack, 0};
+            std::vector<uint32_t> gws = {64u, static_cast<uint32_t>(ePiece), static_cast<uint32_t>(loop)};
+            uint32_t idx = 0;
+            ret = CL_SUCCESS;
+            ret |= kernel->get().setArg(idx++, gws[0]);
+            ret |= kernel->get().setArg(idx++, gws[1]);
+            ret |= kernel->get().setArg(idx++, gws[2]);
+            ret |= kernel->get().setArg(idx++, qkBuffer);
+            ret |= kernel->get().setArg(idx++, softmaxBuffer);
+            ret |= kernel->get().setArg(idx++, kvLen);
+            ret |= kernel->get().setArg(idx++, softmaxShape);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm softmax");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3DKernelDefault(kernel, gws, {64u, 1u, 1u}, runtime);
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                softmaxUs += _nowUs() - opStartUs;
+            }
+        }
+        {
+            auto kernel = mAdrenoGemmTransKernels[static_cast<size_t>(piece)];
+            std::vector<uint32_t> gws = {static_cast<uint32_t>(ePiece / 8),
+                                         static_cast<uint32_t>(kvPack / 8),
+                                         static_cast<uint32_t>(loop)};
+            auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
+            auto lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, "trans_3d_buf", kernel,
+                                        mOpenCLBackend->getCLTuneLevel(), "self_attention_buf").first;
+            gws[0] = ROUND_UP(gws[0], std::max((uint32_t)1, lws[0]));
+            gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
+            gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
+            uint32_t idx = 0;
+            ret = CL_SUCCESS;
+            ret |= kernel->get().setArg(idx++, gws[0]);
+            ret |= kernel->get().setArg(idx++, gws[1]);
+            ret |= kernel->get().setArg(idx++, gws[2]);
+            ret |= kernel->get().setArg(idx++, softmaxBuffer);
+            ret |= kernel->get().setArg(idx++, qkBuffer);
+            ret |= kernel->get().setArg(idx++, loop);
+            ret |= kernel->get().setArg(idx++, ePiece);
+            ret |= kernel->get().setArg(idx++, kvPack);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm transpose");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3DKernelDefault(kernel, gws, lws, runtime);
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                transUs += _nowUs() - opStartUs;
+            }
+        }
+        {
+            auto kernel = mAdrenoGemmQKVKernels[static_cast<size_t>(piece)];
+            auto param = getGemmParams({static_cast<uint32_t>(ePiece), static_cast<uint32_t>(headPackV),
+                                        static_cast<uint32_t>(kvPack), static_cast<uint32_t>(0),
+                                        static_cast<uint32_t>(loop), static_cast<uint32_t>(0)},
+                                       {qkBuffer, vBuffer, qkvBuffer}, runtime, mOpenCLBackend->getPrecision(),
+                                       mOpenCLBackend->getCLTuneLevel());
+            const int tileM = param[4];
+            const int tileN = param[7];
+            const int localM = param[3];
+            const int localN = param[6];
+            const int outPerThreadM = std::max(1, tileM / localM);
+            const int outPerThreadN = std::max(1, tileN / localN);
+            std::vector<uint32_t> gws = {static_cast<uint32_t>(ePiece / outPerThreadM),
+                                         static_cast<uint32_t>(headPackV / outPerThreadN),
+                                         static_cast<uint32_t>(loop)};
+            std::vector<uint32_t> lws = {static_cast<uint32_t>(localM), static_cast<uint32_t>(localN), 1u};
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            int batchOffset[4] = {ePiece * kvPack, headPackV * kvPack, ePack * headPackV, 0};
+            int basePtrOffset[4] = {0, 0, ePiece * piece, 0};
+            int stride[4] = {ePiece, headPackV, ePack, headPackV};
+            int group[4] = {1, groupSize, 1, loop};
+            uint32_t idx = 0;
+            ret = CL_SUCCESS;
+            ret |= kernel->get().setArg(idx++, ePiece);
+            ret |= kernel->get().setArg(idx++, headPackV);
+            ret |= kernel->get().setArg(idx++, kvPack);
+            ret |= kernel->get().setArg(idx++, alpha);
+            ret |= kernel->get().setArg(idx++, beta);
+            ret |= kernel->get().setArg(idx++, qkBuffer);
+            ret |= kernel->get().setArg(idx++, vBuffer);
+            ret |= kernel->get().setArg(idx++, qkvBuffer);
+            ret |= kernel->get().setArg(idx++, batchOffset);
+            ret |= kernel->get().setArg(idx++, basePtrOffset);
+            ret |= kernel->get().setArg(idx++, stride);
+            ret |= kernel->get().setArg(idx++, group);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm qkv");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            run3DKernelDefault(kernel, gws, lws, runtime);
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                qkvUs += _nowUs() - opStartUs;
+            }
+        }
+    }
+
+    {
+        std::vector<uint32_t> gws = {static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)),
+                                     static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
+                                     static_cast<uint32_t>(loop)};
+        auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mAdrenoGemmClipKernel));
+        auto lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, "qkv_transpose_output",
+                                    mAdrenoGemmClipKernel, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
+        gws[0] = ROUND_UP(gws[0], std::max((uint32_t)1, lws[0]));
+        gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
+        gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
+        uint32_t idx = 0;
+        ret = CL_SUCCESS;
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, gws[0]);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, gws[1]);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, gws[2]);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, qkvBuffer);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, 32);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, 32);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, mNumHead);
+        ret |= mAdrenoGemmClipKernel->get().setArg(idx++, mHeadDim);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged adreno gemm qkv_transpose_output");
+        opStartUs = profileDetail ? _nowUs() : 0;
+        run3DKernelDefault(mAdrenoGemmClipKernel, gws, lws, runtime);
+        if (profileDetail) {
+            runtime->commandQueue().finish();
+            clipUs += _nowUs() - opStartUs;
+        }
+    }
+
+    if (profile) {
+        runtime->commandQueue().finish();
+        int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
+        if (profileDetail) {
+            MNN_PRINT("OpenCLPagedAttention profile op=prefill_attention_adreno_gemm layer=%d "
+                      "query=%d kv_len=%d q_split=%d piece=%d us_detail qk=%llu softmax=%llu "
+                      "trans=%llu qkv=%llu clip=%llu\n",
+                      layerIndex, mQuerySeqLen, kvLen, qSplitNum, ePiece,
+                      static_cast<unsigned long long>(qkUs),
+                      static_cast<unsigned long long>(softmaxUs),
+                      static_cast<unsigned long long>(transUs),
+                      static_cast<unsigned long long>(qkvUs),
+                      static_cast<unsigned long long>(clipUs));
+        } else {
+            MNN_PRINT("OpenCLPagedAttention profile op=prefill_attention_adreno_gemm layer=%d "
+                      "query=%d kv_len=%d q_split=%d piece=%d\n",
+                      layerIndex, mQuerySeqLen, kvLen, qSplitNum, ePiece);
+        }
+    }
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>& inputs,
                                                      const std::vector<Tensor*>& outputs, int kvLen, int maskKeyLen) {
     if (maskKeyLen <= 0 || maskKeyLen > kvLen) {
@@ -2326,11 +2896,21 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
     const uint64_t startUs = profile ? _nowUs() : 0;
     const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
     const bool legacy = _legacyB863976OpenCL();
-    bool staticWorkspace = legacy ||
-        _useStaticFullPrefill(mQuerySeqLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
+    const bool useAdrenoGemm = _useAdrenoGemmFullPrefill(runtime, mQuerySeqLen, kvLen, mBatch, mNumHead,
+                                                         mKvNumHead, mHeadDim, maskKeyLen);
+    const int adrenoGemmQSplitNum = useAdrenoGemm
+        ? _adrenoGemmPrefillQSplitNum(mQuerySeqLen, kvLen, mBatch, mNumHead)
+        : 1;
+    bool staticWorkspace = !useAdrenoGemm && (legacy ||
+        _useStaticFullPrefill(mQuerySeqLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim));
     int qChunkLen = staticWorkspace ? mQuerySeqLen
-                                    : _prefillQChunkLen(mQuerySeqLen, kvLen, mBatch, mNumHead, layerCount);
+                                    : (useAdrenoGemm ? (ROUND_UP(mQuerySeqLen, 32) / adrenoGemmQSplitNum)
+                                                     : _prefillQChunkLen(mQuerySeqLen, kvLen, mBatch, mNumHead,
+                                                                         layerCount));
     auto err = ensureFastPrefillTemps(mQuerySeqLen, kvLen, qChunkLen, staticWorkspace);
+    if (err == NO_ERROR && useAdrenoGemm) {
+        err = ensureAdrenoGemmPrefillTemps(mQuerySeqLen, kvLen, adrenoGemmQSplitNum);
+    }
     if (err != NO_ERROR && staticWorkspace && !legacy) {
         static std::once_flag fallbackOnce;
         std::call_once(fallbackOnce, []() {
@@ -2353,7 +2933,20 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
     if (err != NO_ERROR) {
         return err;
     }
-    if (!mQKKernel || !mQKVKernel || mFastKernelStatic != staticWorkspace || mFastKernelSparse) {
+    if (useAdrenoGemm) {
+        auto gemmErr = runAdrenoGemmPrefill(inputs, outputs, kvLen, adrenoGemmQSplitNum);
+        if (gemmErr == NO_ERROR && profile) {
+            runtime->commandQueue().finish();
+            int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
+            MNN_PRINT("OpenCLPagedAttention profile op=prefill_attention_fast_qk_softmax_qkv layer=%d "
+                      "query=%d kv_len=%d mask_key_len=%d q_chunk=%d q_split=%d static=0 adreno_gemm=1 us=%llu\n",
+                      layerIndex, mQuerySeqLen, kvLen, maskKeyLen, qChunkLen, adrenoGemmQSplitNum,
+                      static_cast<unsigned long long>(_nowUs() - startUs));
+        }
+        return gemmErr;
+    }
+    if (!useAdrenoGemm &&
+        (!mQKKernel || !mQKVKernel || mFastKernelStatic != staticWorkspace || mFastKernelSparse)) {
         const int groupSize = mNumHead / mKvNumHead;
         mQKKernel = runtime->buildKernel("attention_buf",
                                          staticWorkspace ? "matmul_qk_div_mask_prefill"
@@ -2766,7 +3359,8 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
     if (!_legacyB863976OpenCL()) {
         _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, mCache->maxSlots,
-                                           mCache->key, mCache->value, queue);
+                                           mCache->key, mCache->value, queue,
+                                           _useAdrenoSourceSlotValueHydrate(mOpenCLBackend->getOpenCLRuntime()));
     }
     if (!_legacyB863976OpenCL() && mMeta != nullptr && mMeta->shouldHydrateExternalLayer(layerIndex)) {
         _scheduleExternalLayerReadsFrom(mMeta, std::max(0, mMeta->external_hydrate_start_layer_idx),

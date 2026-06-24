@@ -1,16 +1,16 @@
 ---
 name: mnn-pic-benchmark
-description: 当用户要求把本 MNN 仓库本机交叉编译出的 pic_server/libpic_llm/CUDA/OpenCL 产物推送到 Jetson、Orange Pi 5 Plus 或 AidLux/Adreno，远端启动 MNN PIC server，并在本机用 impl/pic_bench 数据集 benchmark 发 /v1/prefill/text、/v1/chat/completions 请求，测试 HotpotQA/AmbigQA/2Wiki/MuSiQue/SAMSum/MultiNews 上 full-reuse/full-compute/cacheblend/epic/kvshare 精度、稳定性或延迟时使用。
+description: 当用户要求把本 MNN 仓库本机交叉编译出的 pic_server/libpic_llm/CUDA/OpenCL 产物推送到 Jetson、Orange Pi 5 Plus 或 Rhino Pi-X1/Adreno，远端启动 MNN PIC server，并在本机用 impl/pic_bench 数据集 benchmark 发 /v1/prefill/text、/v1/chat/completions 请求，测试 HotpotQA/AmbigQA/2Wiki/MuSiQue/SAMSum/MultiNews 上 full-reuse/full-compute/cacheblend/epic/kvshare 精度、稳定性或延迟时使用。
 ---
 
 # MNN PIC Benchmark
 
-本 Skill 负责 MNN PIC server 的端到端数据集验证闭环：本机编译 MNN 产物，推送到 Jetson CUDA、Orange Pi 5 Plus OpenCL 或 AidLux/Adreno OpenCL 设备运行服务，本机启动数据集 bench，通过 SSH tunnel 或远端地址向目标设备发请求。
+本 Skill 负责 MNN PIC server 的端到端数据集验证闭环：本机编译 MNN 产物，推送到 Jetson CUDA、Orange Pi 5 Plus OpenCL 或 Rhino Pi-X1/Adreno OpenCL 设备运行服务，本机启动数据集 bench，通过 SSH tunnel 或远端地址向目标设备发请求。
 
 ## 相关 Skills
 
 - 构建和 artifact 检查：读 `.codex/skills/mnn-build-artifacts/SKILL.md`。
-- Jetson/Orange Pi/AidLux 设备、rsync 和 PIC server smoke：读 `.codex/skills/mnn-opt-ops/SKILL.md`。
+- Jetson/Orange Pi/Rhino Pi-X1 设备、rsync 和 PIC server smoke：读 `.codex/skills/mnn-opt-ops/SKILL.md`。
 - LLM/PIC server 输出判断：读 `.codex/skills/mnn-llm-bench/SKILL.md`。
 
 参考实现来源是 kvshare-edge 顶层 skills：
@@ -25,7 +25,7 @@ description: 当用户要求把本 MNN 仓库本机交叉编译出的 pic_server
 
 ## 固定设备
 
-设备速查（本 Skill 的目标设备入口；Orange Pi 5 Plus / AidLux 信息必须保留在这里，不只写到其它 skill）：
+设备速查（本 Skill 的目标设备入口；Orange Pi 5 Plus / Rhino Pi-X1 信息必须保留在这里，不只写到其它 skill）：
 
 ```text
 Jetson CUDA:
@@ -43,14 +43,18 @@ Orange Pi 5 Plus OpenCL:
   cache root:   /mnt/ssd/code/.cache/mnn_opencl_pic
   backend:      OpenCL GPU
 
-AidLux / Adreno OpenCL:
+Rhino Pi-X1 / Adreno OpenCL:
   ssh:          aidlux@192.168.101.227
   password:     aidlux
-  artifact:     .cache/output/mnn/artifacts/aidlux_adreno_opencl
+  remote work:  /mnt/nvme/mnn_pic_opencl
+  artifact:     /mnt/nvme/mnn_pic_opencl/artifacts/aidlux_adreno_opencl
+  models:       /mnt/nvme/mnn_pic_opencl/models/{pic,normal}/...
+  cache root:   /mnt/nvme/mnn_pic_opencl/cache
+  logs:         /mnt/nvme/mnn_pic_opencl/logs
   backend:      OpenCL / Adreno GPU
 ```
 
-当前本机到这三台设备均按 SSH 登录流程使用；Orange Pi 已验证可从本机 key-based 登录。AidLux 如需密码登录，密码为 `aidlux`，若后续配置免密登录也按同一套 `--remote` / `--remote-art-rel` 参数跑。
+当前本机到这三台设备均按 SSH 登录流程使用；Orange Pi 已验证可从本机 key-based 登录。Rhino Pi-X1 如需密码登录，密码为 `aidlux`，若后续配置免密登录也按同一套 `--remote` / `--remote-art-rel` 参数跑。
 
 Jetson：
 
@@ -99,20 +103,20 @@ Orange Pi 实验 run/log/KV cache 优先放到 SSD-backed cache root，避免写
 
 OpenCL 正式性能测试前需要 warm 目标 shape / ratio，并写回 MNN OpenCL autotune cache；冷启动 kernel build、LWS tuning 和 cachefile 生成不计入正式 latency。
 
-AidLux / Adreno OpenCL：
+Rhino Pi-X1 / Adreno OpenCL：
 
 ```text
 aidlux@192.168.101.227
 password: aidlux
 ```
 
-AidLux 也是 Linux AArch64 目标，默认使用 Arm GNU 11.3 AArch64 Linux toolchain 从本机交叉编译；性能测试走 OpenCL backend，目标 GPU 是 Adreno。不要沿用 Jetson CUDA artifact、CUDA sysroot 或 `libMNN_Cuda_Main.so`；AidLux artifact 应单独放到设备专用目录，例如：
+Rhino Pi-X1 也是 Linux AArch64 目标，默认使用 Arm GNU 11.3 AArch64 Linux toolchain 从本机交叉编译；性能测试走 OpenCL backend，目标 GPU 是 Adreno。不要沿用 Jetson CUDA artifact、CUDA sysroot 或 `libMNN_Cuda_Main.so`；Rhino Pi-X1 artifact 应单独放到设备专用目录，例如：
 
 ```text
 .cache/output/mnn/artifacts/aidlux_adreno_opencl
 ```
 
-AidLux OpenCL benchmark 只验证 GPU/OpenCL 路径，启动前检查远端 `LD_LIBRARY_PATH` 包含对应 artifact `lib/`，并确认运行日志没有 CUDA backend、CPU fallback 或 OpenCL target unavailable。
+Rhino Pi-X1 OpenCL benchmark 只验证 GPU/OpenCL 路径，启动前检查远端 `LD_LIBRARY_PATH` 包含对应 artifact `lib/`，并确认运行日志没有 CUDA backend、CPU fallback 或 OpenCL target unavailable。
 
 Jetson 远端 MNN 仓库：
 
@@ -182,7 +186,7 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
 
 默认 bench 参数未传时使用 HotpotQA 20 case、`kvshare`、20% recompute、score layer 1。
 
-注意：当前 `run_mnn_pic_dataset_bench.sh` 的默认构建路径仍是 Jetson CUDA。Orange Pi 5 Plus / AidLux 的设备信息属于本 Skill，并记录在上面的“固定设备”段；但用这个脚本跑 OpenCL 设备时，不要直接沿用默认构建步骤。先按目标设备单独构建 OpenCL artifact，然后用 `--skip-build` 配合对应 remote / artifact / config 参数启动服务和 bench。
+注意：当前 `run_mnn_pic_dataset_bench.sh` 的默认构建路径仍是 Jetson CUDA。Orange Pi 5 Plus / Rhino Pi-X1 的设备信息属于本 Skill，并记录在上面的“固定设备”段；但用这个脚本跑 OpenCL 设备时，不要直接沿用默认构建步骤。先按目标设备单独构建 OpenCL artifact，然后用 `--skip-build` 配合对应 remote / artifact / config 参数启动服务和 bench。
 
 Orange Pi 5 Plus 常用方式：
 
@@ -221,7 +225,55 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
   --pic-recompute-score-layer-idx 1
 ```
 
-AidLux / Adreno 也按同样原则处理：artifact 使用 `.cache/output/mnn/artifacts/aidlux_adreno_opencl`，远端使用 `aidlux@192.168.101.227`，启动日志必须确认走 OpenCL/Adreno GPU，不能出现 CUDA backend、CPU fallback 或 OpenCL target unavailable。
+Rhino Pi-X1 / Adreno 也按同样原则处理：本机 artifact 使用 `.cache/output/mnn/artifacts/aidlux_adreno_opencl`，远端统一使用 `/mnt/nvme/mnn_pic_opencl` 专用工作目录，启动日志必须确认走 OpenCL/Adreno GPU，不能出现 CUDA backend、CPU fallback 或 OpenCL target unavailable。
+
+Rhino Pi-X1 已按 Linux AArch64/OpenCL 目标接入构建脚本；不要使用 Jetson CUDA 或 Android OnePlus artifact。默认构建：
+
+```bash
+MNN_TARGET_DEVICE=aidlux_adreno_opencl \
+BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+```
+
+Rhino Pi-X1 远端是 Ubuntu/glibc 用户态跑在 Android kernel 上，Adreno OpenCL 通常通过 `/usr/lib/libOpenCL.so` / `/usr/lib/libOpenCL_adreno.so` 暴露，不一定有标准 `/etc/OpenCL/vendors`。启动服务时显式设置 OpenCL library path；必要时加 `LD_PRELOAD=/usr/lib/libOpenCL_adreno.so`：
+
+```bash
+REMOTE_WORK=/mnt/nvme/mnn_pic_opencl
+
+bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
+  --skip-build \
+  --remote aidlux@192.168.101.227 \
+  --remote-repo "${REMOTE_WORK}" \
+  --install-prefix "$PWD/.cache/output/mnn/artifacts/aidlux_adreno_opencl" \
+  --remote-art-rel artifacts/aidlux_adreno_opencl \
+  --remote-cuda-lib "" \
+  --remote-ld-library-path "${REMOTE_WORK}/artifacts/aidlux_adreno_opencl/lib:/usr/lib:/usr/lib/aarch64-linux-gnu" \
+  --remote-server-env "LD_PRELOAD=/usr/lib/libOpenCL_adreno.so" \
+  --remote-config "${REMOTE_WORK}/models/pic/<opencl-model>/config_opencl_greedy.json" \
+  --remote-kv-dir "${REMOTE_WORK}/cache/mnn_pic_dataset_bench_<run_id>" \
+  --remote-log-dir "${REMOTE_WORK}/logs" \
+  --line-buffer \
+  --port 18096 \
+  --local-port 18096 \
+  --run-id <run_id> \
+  -- \
+  --dataset hotpotqa \
+  --mode pic_cache_reuse \
+  --phase both \
+  --cases 20 \
+  --context-len 1500 \
+  --max-tokens 64 \
+  --temperature 0.0 \
+  --local-files-only \
+  --min-doc-tokens 0 \
+  --force-cache \
+  --reset-before-each-infer \
+  --pic-selection-algorithm cacheblend \
+  --pic-recompute-ratio 0.20 \
+  --pic-recompute-score-layer-idx 1
+```
+
+正式 Rhino Pi-X1 OpenCL 性能测试前必须先做 backend sanity：`/dev/kgsl-3d0` 存在、`/sys/class/kgsl/kgsl-3d0/gpu_model` 为 Adreno、服务日志没有 `target unavailable` / CPU fallback，并且 warm 目标 shape 后 `/v1/tune/update_cache` 成功。
 
 常用覆盖：
 
@@ -316,6 +368,59 @@ context_tokens, algorithm, ratio, algo_s, normal_full_compute_s, speedup_vs_norm
 ```
 
 只读取 JSON 中 `results[].type == "prefill"` 的 `prompt_len` 和 `tps`，计算 `prefill_s = prompt_len / tps`；不要把 decode 或 `ttft_est` 加进这张对比表。
+
+## Decode Repair TPOT/TPS Benchmark
+
+Decode repair benchmark 与 prefill-only benchmark 是两张表。正式输出文件使用 `benchmark_decode.csv`，至少包含 `device,device_display,model,model_config,backend,frequency_profile,target_context_tokens,context_tokens,mode,budget,decode_selector,repair_tokens,generated_tokens,decode_tpot_ms,decode_tps,baseline_decode_tpot_ms,overhead_vs_normal_decode,decode_tps_vs_normal_decode,execution_mode,decode_runtime,benchmark_status,error_message`。
+
+正式矩阵：
+
+```text
+devices:        Jetson AGX Xavier, Orange Pi 5 Plus, Rhino Pi X1
+model:          Llama3.2 3B
+mode:           epic
+budgets:        0.05, 0.10, 0.20
+contexts:       512, 1024, 1536, 2048, 2560, 3072
+max_tokens:     32
+repair_tokens:  0, 1, 2, 3, 4, 5, 6, 7
+```
+
+`mode` / `budget` 只描述 prefill sparse recompute，`decode_selector` / `repair_tokens` 只描述 decode repair。`repair_tokens=0` 是 normal/no-repair decode baseline，请求不得启用 `decode_refine`；`repair_tokens>=1` 时才在 `pic_cache.decode_refine` 内设置 `enabled=true`、`selector` 和 `tokens_per_decode_step`。
+
+`lagged_attention_hkvd` 是 decode selector，不是 prefill selection algorithm。若 MNN runtime 尚未真正实现它，正式结果必须写 `benchmark_status=unsupported` 或明确失败，不能静默退化为 `top_hkvd`，也不能把 prefill selected indices 复用后命名为 lagged attention。需要临时做 token-id sparse decode smoke 时，可以显式传 `--decode-selector top_hkvd`，但这类结果不能标成 `lagged_attention_hkvd`。
+
+OpenCL 设备正式计时前必须 warm 每个目标 context/budget/repair shape，并调用 `/v1/tune/update_cache` 写回 MNN OpenCL autotune cache。冷启动 kernel build、LWS tuning、cachefile 生成或首轮 text cache 探测不计入正式 TPOT/TPS。run log 需确认没有 `Cache invalid`、`target unavailable`、`async persistent PIC cache read failed` 或 `ERROR`。
+
+采集脚本入口：
+
+```bash
+python3 .codex/skills/mnn-pic-benchmark/scripts/run_pic_decode_repair_benchmark.py \
+  --base-url http://127.0.0.1:18096 \
+  --output-csv benchmark_decode.csv \
+  --append \
+  --device jetson \
+  --device-display "Jetson AGX Xavier" \
+  --backend CUDA \
+  --model-name "Llama3.2 3B" \
+  --model-config "<remote config path>" \
+  --mode epic \
+  --budgets 0.05,0.10,0.20 \
+  --contexts 512,1024,1536,2048,2560,3072 \
+  --repair-tokens 0,1,2,3,4,5,6,7 \
+  --decode-selector lagged_attention_hkvd \
+  --attention-layer-idx 1 \
+  --max-tokens 32 \
+  --repeats 3 \
+  --warm-repeats 1
+```
+
+设备参数替换：
+
+```text
+Jetson:    --device jetson   --device-display "Jetson AGX Xavier" --backend CUDA
+OrangePi:  --device orangepi --device-display "Orange Pi 5 Plus"  --backend OpenCL
+Rhino:     --device rhino    --device-display "Rhino Pi X1"       --backend OpenCL
+```
 
 ## 手动流程
 

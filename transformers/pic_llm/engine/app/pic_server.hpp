@@ -44,6 +44,7 @@ private:
     void handlePicCaches(const httplib::Request& req, httplib::Response& res);
     void handleChatCompletions(const httplib::Request& req, httplib::Response& res);
 
+    bool loadLlmInstance(std::string* error = nullptr);
     bool buildTextCache(const json& request, json& response, std::string& error);
     bool buildPicCache(const json& request, json& response, std::string& error);
     bool completeChatBatch(const std::vector<json>& requests, json& response, std::string& error);

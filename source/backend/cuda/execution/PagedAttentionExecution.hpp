@@ -4,6 +4,7 @@
 #include "backend/cuda/core/CUDABackend.hpp"
 #include "core/Execution.hpp"
 #include "core/PagedKVMeta.hpp"
+#include <memory>
 #include <vector>
 
 namespace MNN {
@@ -66,6 +67,7 @@ private:
     size_t mExternalKeyBytes = 0;
     void* mExternalValue = nullptr;
     size_t mExternalValueBytes = 0;
+    std::shared_ptr<SharedPagedCache::MappedBuffer> mExternalValueMapped;
     float* mCacheBlendScores = nullptr;
     size_t mCacheBlendScoreCount = 0;
     int* mCacheBlendIndices = nullptr;
