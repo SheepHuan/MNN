@@ -3827,3 +3827,601 @@ Conclusion:
 - full-reuse remains dominated by hydrate/suffix work and is 8.27x faster than normal at 1024, 14.28x at 2048.
 - cacheblend and epic remain faster than normal even at 50% recompute on Rhino/Adreno. Epic is consistently faster than cacheblend at high budgets because its selected rows are prefix-contiguous rather than cacheblend's scattered top-k rows.
 - No production env fallback or temporary branch is required; keep the Adreno GEMM q-split scratch fix as the default path.
+
+## 2026-06-25 Investigation: MiniCPM5-1B / Llama3.2 3B / Qwen3-8B OpenCL Sparse Slow Path
+
+Goal:
+
+- Determine whether the very poor OpenCL `cacheblend` / `epic` numbers seen for `MiniCPM5-1B` are model-specific, and whether the current OpenCL fast-prefill implementation is the direct root cause.
+
+Evidence:
+
+```text
+MiniCPM5-1B 1024 / OrangePi OpenCL:
+  normal=4.54s, pic-full=16.06s, full-reuse=0.53s
+  cacheblend 5%=3.94s, 10%=4.26s, 50%=21.72s
+  epic       5%=3.85s, 10%=4.08s, 50%=13.49s
+
+MiniCPM5-1B 1024 / Rhino OpenCL:
+  normal=2.32s, pic-full=2.57s, full-reuse=0.33s
+  cacheblend 5%=5.43s, 10%=6.63s, 50%=24.11s
+  epic       5%=5.22s, 10%=5.42s, 50%=24.46s
+
+Llama3.2 3B 1024 / Jetson CUDA:
+  normal=3.76s, pic-full=4.17s, full-reuse=1.12s
+  cacheblend 5%=0.50s, epic 5%=0.49s
+
+Llama3.2 3B 1024 / OrangePi OpenCL:
+  normal=15.90s, pic-full=36.00s, full-reuse=1.11s
+  cacheblend 5%=7.20s, epic 5%=6.73s
+
+Llama3.2 3B 1024 / Rhino OpenCL:
+  normal=7.74s, pic-full=8.19s, full-reuse=0.73s
+  cacheblend 5%=8.89s, epic 5%=8.19s
+
+Qwen3-8B 1024 / Rhino OpenCL targeted rerun on fixed ports 18133/19133:
+  prefill/text cache_status=reused, 0.041s
+  full-compute=20.85s, full-reuse=1.89s
+  cacheblend 5%=23.02s, 10%=34.84s
+  epic       5%=12.51s, 10%=14.22s
+```
+
+Observed pattern:
+
+- This is not a MiniCPM-only issue. `Llama3.2 3B` and `Qwen3-8B` show the same OpenCL sparse-path pathology.
+- `full-reuse` stays fast on all three models, so hydrate + suffix is not the main bottleneck.
+- The regression is concentrated in sparse prefill (`cacheblend` / `epic`), and it is large enough that low-budget sparse requests can be slower than PIC `full-compute`.
+- Jetson CUDA does not show the same behavior on the same workload class.
+
+Implementation findings:
+
+- The OpenCL prefill trial policy already treats these exact model shapes as special long-context tuples:
+  - `MiniCPM5-1B`
+  - `Llama-3.2-3B-Instruct`
+  - `Qwen3-8B`
+  See `source/backend/opencl/execution/buffer/AttentionBufExecution.cpp`.
+- In OpenCL `PagedAttentionBufExecution`, dense fast prefill is explicitly disabled for sparse query:
+
+```cpp
+if (sparseQuery) {
+    return false;
+}
+```
+
+- OpenCL sparse fast prefill is also gated to `mHeadDim == 64`:
+
+```cpp
+if (mHeadDim != 64 || mNumHead % mKvNumHead != 0) {
+    return false;
+}
+```
+
+- Dispatch order in OpenCL is:
+  - decode causal path
+  - `runFastPrefill()` when `canUseFastPrefill(...)`
+  - `runSparseFastPrefill()` when `canUseSparseFastPrefill(...)`
+  - otherwise `row` kernel or generic kernel
+- Because `MiniCPM5-1B`, `Llama3.2 3B`, and `Qwen3-8B` all use `headDim=128`, their sparse requests do not hit the current OpenCL sparse fast-prefill path. They also cannot use the dense fast-prefill path once `sparseQuery` is active. So they fall through to the slower `row` / `generic` path.
+
+CUDA comparison:
+
+- CUDA also keeps a headDim-64 sparse flash tile path, but unlike OpenCL it still has a general q-split prefill accelerator after that check.
+- In `source/backend/cuda/execution/PagedAttentionExecution.cu`, if the sparse tile path does not apply, CUDA still enters `prefill_attention_fast_qk_softmax_qkv` for `attnLen > 1`, and that path accepts sparse query metadata (`sparseQueryDevice`, `queryRowsAreFull`).
+- This means Jetson does not need the headDim-64 sparse flash tile path to stay fast on `headDim=128` sparse prefill. OpenCL currently does.
+
+Conclusion:
+
+- The main issue is not that the current OpenCL sparse fast-prefill kernel is miscomputing these models. Most bad `MiniCPM5-1B` / `Llama3.2 3B` / `Qwen3-8B` sparse requests never reach that path.
+- The real gap is that OpenCL has no headDim-128 sparse fast fallback analogous to CUDA's q-split QK/softmax/QKV prefill path.
+- Score layer is hit especially hard because its `full-Q + compact-output` sparse shape also cannot use the existing OpenCL headDim-64 fast path.
+- OrangePi has an additional line to optimize: PIC `full-compute` is already much slower than normal full-compute for `MiniCPM5-1B` and `Llama3.2 3B`, so dense PIC full-path overhead should be treated separately from sparse-path collapse.
+
+Kernel-level bottleneck:
+
+- The OpenCL fallback kernels are much more naive than the dense fast-prefill path:
+  - `paged_attention_row` does two full score sweeps over `valid_len`, and each sweep does a scalar `head_dim` loop. It also keeps a scalar `acc[256]` and accumulates value row-by-row.
+  - `paged_attention` does the same work per output channel, again with two passes over `valid_len`.
+- For sparse query this means the fallback cost is still close to:
+
+```text
+O(attnLen * validLen * headDim)
+```
+
+  with very limited reuse, poor vectorization, and repeated query/key loads.
+- The kernels do honor causal truncation through:
+
+```cpp
+valid_len = min(kv_len, q_logical + 1)
+```
+
+  but for cacheblend and for suffix rows in epic, many selected logical positions still reach near the end of the prompt, so `valid_len` remains close to full context.
+- This explains why `full-reuse` can be fast while sparse attention is still very poor: hydrate is not the issue, the attention kernel choice is.
+
+Why Rhino and OrangePi differ:
+
+- Rhino/Adreno has an extra dense-only optimization path:
+  - `_useAdrenoGemmFullPrefill(...)` is enabled only for Adreno, only for dense full prefill, and only when `maskKeyLen == kvLen`.
+  - `runFastPrefill()` can then enter `runAdrenoGemmPrefill()` with q-split GEMM-style kernels.
+- Sparse requests never enter this path because OpenCL dense fast prefill rejects `sparseQuery`.
+- So Rhino can still look healthy on `normal-full-recompute` or `pic-full-recompute`, but collapse on `cacheblend` / `epic` because sparse requests drop from Adreno GEMM/q-split back to the naive fallback kernels.
+- OrangePi lacks the Adreno-only GEMM branch and also shows extra PIC full-path overhead, so it suffers both from sparse fallback and from slower dense PIC full-compute.
+
+Borrowable ideas from CUDA / current OpenCL implementation:
+
+1. Keep the current graph/runtime boundary:
+   - OpenCL already runs `runCacheBlendScoring()` before attention dispatch, then writes active indices into `PagedKVMeta` and `mCache->sparseQuery`.
+   - This means the sparse active set is already available before selecting the attention kernel. No control-flow rewrite is needed first.
+2. Reuse the existing q-split dense fast-prefill structure for sparse headDim-128:
+   - `runFastPrefill()` already has `rearrange_q`
+   - `pack_paged_kv_prefill`
+   - `matmul_qk_div_mask_prefill_piece`
+   - `softmax_v4_buf`
+   - `matmul_qkv_prefill_piece`
+   - This is the most practical base to extend, instead of starting from a brand-new flash kernel for headDim-128.
+3. Add sparse-query awareness to the q-split path:
+   - gather/rearrange compact active query rows from either:
+     - full query rows (`queryRowsAreFull == 1`, score layer), or
+     - already compact query rows (later sparse layers)
+   - feed `attnLen` compact rows into the piece kernels
+   - keep packed K/V from current request PagedCache
+4. Borrow the existing sparse-flash piece planning:
+   - current OpenCL sparse flash already builds range-aware pieces and per-piece `activeKvLen`
+   - apply the same piece planner to the headDim-128 q-split path so each q-piece only scans:
+
+```text
+activeKvLen = max(selected_logical_in_piece) + 1
+```
+
+   - this is the direct way to reduce K work for scattered cacheblend rows without changing algorithm semantics.
+5. Treat score layer separately but on the same base:
+   - score layer already has scoring/top-k done before kernel dispatch
+   - the remaining gap is only that `full-Q / compact-output` cannot use the headDim-64 sparse flash path
+   - a sparse q-split path that supports `queryRowsAreFull` closes that gap without introducing another special fallback.
+
+Next actions:
+
+1. Add a headDim-128 sparse q-split fast path on top of the existing dense `runFastPrefill()` kernel family.
+2. Support both:
+   - score-layer `full-Q / compact-output`
+   - later-layer compact-Q sparse attention
+3. Reuse sparse-flash's range-aware piece builder and per-piece `activeKvLen` to cap K work for scattered cacheblend rows.
+4. Keep the current headDim-64 sparse flash path focused on the 1B class; do not expect it to solve `MiniCPM5-1B` / `Llama3.2 3B` / `Qwen3-8B`.
+5. After sparse headDim-128 routing is fixed, separately optimize OrangePi PIC `full-compute`, because its dense PIC full-path is already slower than normal full-compute.
+
+Implementation sketch: headDim-128 sparse q-split path
+
+- The smallest useful change is not a new graph/runtime path. It is a new OpenCL attention dispatch branch that reuses:
+  - `ensureFastPrefillTemps(...)`
+  - `mRearrangeQKernel`
+  - `mPackPagedKVKernel`
+  - `mSoftmaxKernel`
+  - `matmul_qkv_prefill_piece`
+- Only the QK piece kernel truly needs sparse-aware semantics.
+
+Recommended control flow:
+
+```text
+if (canUseFastPrefill(...)) -> dense q-split / dense Adreno GEMM
+else if (canUseSparseFastPrefill(...)) -> current headDim-64 sparse flash
+else if (canUseSparseQSplitPrefill(...)) -> new headDim-128 sparse q-split
+else -> row/generic fallback
+```
+
+Recommended `canUseSparseQSplitPrefill(...)` scope:
+
+- `mMeta->sparse_query_active == true`
+- `externalHydrated == true`
+- `attnLen > 1`, `kvLen > 0`
+- `mHeadDim % 8 == 0`
+- `mNumHead % mKvNumHead == 0`
+- allow both:
+  - score-layer `queryRowsAreFull == true`
+  - later-layer compact-Q `queryRowsAreFull == false`
+
+Kernel/dataflow plan:
+
+1. Keep `qStorageLen` identical to current sparse-flash logic:
+   - score layer: `qStorageLen = mQuerySeqLen`
+   - later sparse layers: `qStorageLen = attnLen`
+2. Reuse current `rearrange_q`:
+   - it already works for contiguous inputs of length `qStorageLen`
+   - no separate gather kernel is required for the first version
+3. Reuse current `pack_paged_kv_prefill`:
+   - pack all current-request K/V from PagedCache once
+4. Reuse `_buildRangeAwareSparsePieces(...)`:
+   - this already gives `qStart`, `qLen`, and per-piece `activeKvLen`
+5. Add a sparse-aware QK piece kernel, for example:
+
+```text
+matmul_qk_div_mask_prefill_piece_sparse
+```
+
+   It should mirror CUDA `pagedPrefillQKKernel` behavior:
+   - take `sparse_query`
+   - take `query_rows_are_full`
+   - compute:
+
+```text
+qLogical = sparse_query[q]
+qRow     = query_rows_are_full ? qLogical : q
+validScore = (k <= qLogical)
+```
+
+   - use `activeKvLen` as the piece axis limit
+   - apply mask indexing with logical-row semantics on score layer
+6. Reuse existing `softmax_v4_buf` on the piece-local QK tensor, but set axis length to `activeKvLen`, not full `kvLen`
+7. Reuse `matmul_qkv_prefill_piece` with:
+   - compact query count = `qPieceLen`
+   - K/V axis length = `activeKvLen`
+   - output written in compact row order
+
+Why this is lower risk than a new flash kernel:
+
+- CUDA already proves that q-split QK/softmax/QKV is enough to make sparse headDim-128 practical when it consumes:
+  - sparse logical indices
+  - `queryRowsAreFull`
+- OpenCL already has:
+  - sparse score/top-k before dispatch
+  - `sparse_query` device buffer
+  - range-aware sparse pieces
+  - score-layer `full-Q / compact-output` semantics in the headDim-64 sparse flash path
+- So the missing part is not semantics, only the headDim-128 fast kernel route.
+
+Suggested phase order:
+
+1. Phase A:
+   - implement generic sparse q-split path on top of existing dense fast-prefill kernels
+   - target both OrangePi and Rhino
+   - do not touch Adreno dense GEMM path yet
+2. Phase B:
+   - after stable correctness/perf recovery, consider Adreno-specific sparse GEMM reuse if profiling still shows Rhino sparse path behind OrangePi
+3. Phase C:
+   - revisit headDim-128 flash-style sparse kernels only if q-split path still leaves a major gap versus CUDA
+
+## 2026-06-25 Result: headDim-128 sparse q-split recovery on OrangePi
+
+Implementation summary:
+
+- Added a new OpenCL sparse q-split fast path for `headDim=128` in:
+  - `source/backend/opencl/execution/buffer/PagedAttentionBufExecution.cpp`
+  - `source/backend/opencl/execution/buffer/PagedAttentionBufExecution.hpp`
+  - `source/backend/opencl/execution/cl/attention_buf.cl`
+- New dispatch order is:
+  - dense fast prefill
+  - existing headDim-64 sparse flash
+  - new headDim-128 sparse q-split
+  - row/generic fallback
+- The new sparse q-split path supports both:
+  - score-layer `full-Q / compact-output` (`queryRowsAreFull=1`)
+  - later-layer compact-Q sparse attention
+- It reuses the existing dense q-split components:
+  - `ensureFastPrefillTemps(...)`
+  - `rearrange_q`
+  - `pack_paged_kv_prefill`
+  - `softmax_v4_buf`
+  - `matmul_qkv_prefill_piece`
+- The new QK kernel is `matmul_qk_div_mask_prefill_piece_sparse`, with:
+  - `sparse_query`
+  - `query_rows_are_full`
+  - range-aware piece-local `activeKvLen`
+  - per-row causal limit `k <= qLogical`
+
+Formal OrangePi 1024 results after the new path:
+
+```text
+MiniCPM5-1B:
+  normal=4.549767s, pic-full=16.065021s, full-reuse=0.514472s
+  cacheblend 5%=1.622333s, 50%=7.719177s
+  epic       5%=1.532307s, 50%=6.465034s
+
+Llama3.2 3B:
+  normal=15.885084s, pic-full=36.038463s, full-reuse=1.109441s
+  cacheblend 5%=3.815022s, 50%=17.435609s
+  epic       5%=3.654728s, 50%=15.614366s
+
+Qwen3-8B:
+  normal=35.687321s, pic-full=70.809410s, full-reuse=2.174056s
+  cacheblend 5%=8.247438s, 50%=38.789479s
+  epic       5%=6.874020s, 50%=32.053950s
+```
+
+Compared with the old bad OrangePi MiniCPM run:
+
+```text
+cacheblend 5%:  3.938678s -> 1.622333s
+cacheblend 50%: 21.721183s -> 7.719177s
+epic 5%:        3.846015s -> 1.532307s
+epic 50%:       13.486879s -> 6.465034s
+```
+
+Observed pattern after the fix:
+
+- The catastrophic `headDim=128` sparse fallback collapse is gone on OrangePi.
+- `full-reuse` remains fast on all three models, so the persistent PIC cache source read + hydrate path is not the main remaining bottleneck.
+- Low-budget sparse requests are now consistently much faster than `pic-full-recompute`:
+  - MiniCPM5-1B: `cacheblend5 / pic-full ~= 9.90x`, `epic5 / pic-full ~= 10.48x`
+  - Llama3.2 3B: `cacheblend5 / pic-full ~= 9.45x`, `epic5 / pic-full ~= 9.86x`
+  - Qwen3-8B: `cacheblend5 / pic-full ~= 8.59x`, `epic5 / pic-full ~= 10.30x`
+- But sparse requests are still around `3.0x-3.8x` slower than `full-reuse`, which means the remaining cost is the request-internal compute after hydrate:
+  - score-layer attention
+  - later sparse attention
+  - compact dense graph work (`Convolution` / MLP / activation / residual)
+
+Updated conclusion:
+
+- The main `headDim=128` routing bug is fixed: OrangePi no longer misses a sparse fast path for `MiniCPM5-1B`, `Llama3.2 3B`, and `Qwen3-8B`.
+- The next OrangePi optimization round should no longer treat this as a pure attention-routing problem.
+- The correct reference is now OrangePi `Llama3.2 1B`, not the old broken `headDim=128` runs:
+  - `Llama3.2 1B` 1024: `cacheblend5=1.678798s`, `epic5=1.618314s`
+  - `MiniCPM5-1B` 1024 is already close in absolute low-budget latency.
+  - The larger remaining gap is on wider `headDim=128` models, especially `Llama3.2 3B` and `Qwen3-8B`, where compact dense graph cost scales up.
+
+Next actions:
+
+1. Run OrangePi graph + attention attribution on `MiniCPM5-1B`, `Llama3.2 3B`, and `Qwen3-8B` with:
+   - `MNN_PIC_GRAPH_PROFILE=1`
+   - `MNN_PIC_GRAPH_PROFILE_TOP=1000`
+   - `MNN_PAGED_ATTENTION_PROFILE=1`
+   - `MNN_PAGED_ATTENTION_PROFILE_DETAIL=1`
+2. Compare against OrangePi `Llama3.2 1B` at the same `ctx=1024` and low/high budgets.
+3. If the profile shows dense dominates after the q-split recovery, move the next P1 focus to OpenCL compact dense rows:
+   - compact `Convolution` / MLP kernels
+   - `UnaryOp` / activation overhead on compact rows
+   - ratio-sensitive tune keys for medium/high active-row counts
+
+### MiniCPM5-1B / OrangePi / 1024 / cacheblend 50% attribution
+
+Run:
+
+```text
+.cache/latency_budget_20260625/profile_orangepi_minicpm5_cb50_20260625_054345
+server_env=MNN_PIC_GRAPH_PROFILE=1,MNN_PIC_GRAPH_PROFILE_TOP=1000,MNN_PAGED_ATTENTION_PROFILE=1,MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
+prefill/text cache_status=reused
+measure cacheblend50 prefill_latency_s=7.882146   # profile-inflated; attribution only
+```
+
+Attention profile:
+
+```text
+layer0 full prefill:
+  op=prefill_attention_fast_qk_softmax_qkv
+  us=526864
+
+layer1 score boundary:
+  op=cacheblend_score
+  us=7176
+  read_us=6175 score_kernel_us=579 topk_us=386
+
+layer1 score attention:
+  op=score_qsplit_attention
+  query=519 input_query=1024 full_q=1 q_split=2
+  us=331312
+  qk_us=247962 qkv_us=59957 softmax_us=2440
+
+layer>=2 later sparse attention:
+  op=sparse_qsplit_attention
+  query=519 input_query=519 full_q=0 q_split=2
+  per-layer us ~= 212-213 ms
+  per-layer qk_us ~= 139 ms
+  per-layer qkv_us ~= 60 ms
+```
+
+Graph profile summary:
+
+```text
+MNN_PIC_GRAPH_PROFILE_SUMMARY total_ms=8049.975
+PicSparseAttention total=4689.729 ms calls=22
+Convolution      total=2153.987 ms calls=169
+PagedAttention   total=526.946 ms calls=1
+PicScoreAttention total=339.899 ms calls=1
+Raster           total=218.448 ms calls=396
+```
+
+Key per-op shapes:
+
+```text
+layer0 full attention:
+  [1x1024x16x128] x [1x1024x2x128] -> [1x1024x2048]
+
+layer1 score attention:
+  [1x1024x16x128] x [1x1024x2x128] -> [1x519x2048]
+
+layer>=2 sparse attention:
+  [1x519x16x128] x [1x519x2x128] -> [1x519x2048]
+
+compact MLP:
+  [519x1536] -> [519x4608] gate/up
+  [519x4608] -> [519x1536] down
+```
+
+Interpretation:
+
+- The new `headDim=128` q-split path is definitely active. This request no longer falls back to `row` / `generic`.
+- The remaining bottleneck is not a single block:
+  - later `PicSparseAttention` is still the largest class at about `4.69 s`
+  - compact dense `Convolution` is already the second largest class at about `2.15 s`
+- `cacheblend_score` itself is small (`~7 ms`), and hydrate is negligible (`~0.35-0.45 ms` per layer).
+- So the next OrangePi headDim-128 round must optimize both:
+  1. later sparse q-split attention, especially QK cost;
+  2. compact MLP / dense linear on active rows.
+
+Refined next-step order:
+
+1. Collect the same attribution for `Llama3.2 3B` and `Qwen3-8B` on OrangePi.
+2. Compare whether their type split is still:
+   - `PicSparseAttention` first
+   - `Convolution` second
+3. If that pattern repeats, treat `headDim=128` OrangePi optimization as a two-track problem:
+   - P0: later sparse attention kernel work
+   - P1: compact dense OpenCL kernels for medium/high active-row MLP shapes
+
+### Llama3.2 3B / OrangePi / 1024 / cacheblend 50% attribution
+
+Run:
+
+```text
+.cache/latency_budget_20260625/profile_orangepi_llama32_3b_cb50_20260625_054726
+server_env=MNN_PIC_GRAPH_PROFILE=1,MNN_PIC_GRAPH_PROFILE_TOP=1000,MNN_PAGED_ATTENTION_PROFILE=1,MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
+prefill/text cache_status=reused
+measure cacheblend50 prefill_latency_s=17.722298   # profile-inflated; attribution only
+```
+
+Attention profile:
+
+```text
+layer0 full prefill:
+  op=prefill_attention_fast_qk_softmax_qkv
+  us=785637
+
+layer1 score boundary:
+  op=cacheblend_score
+  us=9841
+  read_us=7685 score_kernel_us=1771 topk_us=349
+
+layer1 score attention:
+  op=score_qsplit_attention
+  query=519 input_query=1024 full_q=1 q_split=2
+  us=474550
+  qk_us=353887 qkv_us=85572 softmax_us=3714
+
+layer>=2 later sparse attention:
+  op=sparse_qsplit_attention
+  query=519 input_query=519 full_q=0 q_split=2
+  per-layer us ~= 309 ms
+  per-layer qk_us ~= 197 ms
+  per-layer qkv_us ~= 86 ms
+```
+
+Graph profile summary:
+
+```text
+MNN_PIC_GRAPH_PROFILE_SUMMARY total_ms=18185.615
+Convolution      total=8212.915 ms calls=197
+PicSparseAttention total=8088.347 ms calls=26
+PagedAttention   total=785.736 ms calls=1
+PicScoreAttention total=485.760 ms calls=1
+Raster           total=414.303 ms calls=460
+```
+
+Key per-op shapes:
+
+```text
+layer0 full attention:
+  [1x1024x24x128] x [1x1024x8x128] -> [1x1024x3072]
+
+layer1 score attention:
+  [1x1024x24x128] x [1x1024x8x128] -> [1x519x3072]
+
+layer>=2 sparse attention:
+  [1x519x24x128] x [1x519x8x128] -> [1x519x3072]
+
+compact MLP:
+  [519x3072] -> [519x8192] gate/up
+  [519x8192] -> [519x3072] down
+```
+
+Interpretation:
+
+- `headDim=128` sparse q-split is active here too; this is not a row/generic fallback artifact.
+- On `Llama3.2 3B`, compact dense `Convolution` is already as expensive as later sparse attention, slightly higher in this run:
+  - `Convolution ~= 8.21 s`
+  - `PicSparseAttention ~= 8.09 s`
+- That is stronger evidence than MiniCPM that OrangePi `headDim=128` high-budget optimization is not an attention-only problem.
+- The next default-path wins must therefore come from both sides:
+  1. reduce later sparse q-split attention cost, especially QK;
+  2. reduce compact MLP / q_proj / o_proj cost on medium/high active rows.
+
+Updated direction:
+
+- MiniCPM5-1B shows `PicSparseAttention > Convolution`.
+- Llama3.2 3B shows `Convolution ~= PicSparseAttention`, with dense slightly ahead.
+- So the stable cross-model statement is:
+  - OrangePi `headDim=128` sparse routing is fixed;
+  - the remaining gap versus the OrangePi `Llama3.2 1B` reference and versus Jetson now comes from a two-track hotspot split, not from a missing fast path.
+
+### Qwen3-8B / OrangePi / 1024 / cacheblend 50% attribution
+
+Run:
+
+```text
+.cache/latency_budget_20260625/profile_orangepi_qwen3_8b_cb50_20260625_055213
+server_env=MNN_PIC_GRAPH_PROFILE=1,MNN_PIC_GRAPH_PROFILE_TOP=1000,MNN_PAGED_ATTENTION_PROFILE=1,MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
+prefill/text cache_status=reused
+measure cacheblend50 prefill_latency_s=39.134997   # profile-inflated; attribution only
+```
+
+Graph profile summary:
+
+```text
+Convolution       total ~= 19652.918 ms
+PicSparseAttention total ~= 17155.160 ms
+PagedAttention    total ~= 1054.427 ms
+PicScoreAttention total ~= 791.107 ms
+```
+
+Interpretation:
+
+- The recovered `headDim=128` sparse q-split path is also active on `Qwen3-8B`; this is no longer a row/generic fallback case.
+- On this wider model, compact dense work is at least as important as later sparse attention:
+  - `Convolution ~= 19.65 s`
+  - `PicSparseAttention ~= 17.16 s`
+- The cross-model OrangePi pattern is now consistent:
+  - `MiniCPM5-1B`: sparse attention first, dense second
+  - `Llama3.2 3B`: dense and sparse nearly tied
+  - `Qwen3-8B`: dense slightly ahead of sparse
+- So the next `headDim=128` OrangePi gains must come from two tracks together:
+  1. later sparse q-split attention, especially QK;
+  2. compact dense MLP / q_proj / o_proj on medium/high active rows.
+
+### 519-row compact dense threshold widening (`<=640`) is regressive
+
+Goal:
+
+- Check whether widening `usePicCompactGemmLowMemory()` from `globalY <= 512` to `globalY <= 640` helps the common 1024-token `cacheblend50` compact-row shape (`active rows = 519`).
+
+Code change under test:
+
+```text
+source/backend/opencl/execution/buffer/ConvBufLowMemoryExecution.cpp
+usePicCompactGemmLowMemory(): globalY <= 512 -> globalY <= 640
+```
+
+Runs:
+
+```text
+baseline:
+  .cache/latency_budget_20260625/profile_orangepi_minicpm5_cb50_20260625_054345
+  measure cacheblend50 prefill_latency_s=7.882146   # profile-inflated; attribution only
+
+post-change:
+  .cache/latency_budget_20260625/profile_orangepi_minicpm5_cb50_postcompact_20260625_055838
+  measure cacheblend50 prefill_latency_s=8.531835   # profile-inflated; attribution only
+```
+
+Observed delta on `MiniCPM5-1B` cb50:
+
+```text
+total_ms:       8049.975 -> 8682.909
+Convolution:    2153.987 -> 2817.135
+PicSparseAttention: 4689.729 -> 4685.640
+```
+
+Conclusion:
+
+- This is a dense-only regression. Later sparse attention stayed flat, while compact dense `Convolution` got materially slower.
+- Do not keep `globalY <= 640` as the default gate.
+- Code inspection explains why this is not just a kernel-symbol issue:
+  - `pic_gemm_b4_c8_*` and `gemm_b4_c8_*` share the same kernel implementation body;
+  - but `usePicCompactKernel` also changes the tune namespace and bypasses the generic `mUseFPWeight` best-path selection in `onResize()` for `batch > 16`.
+- So widening the gate can force `519`-row shapes off the generic best-of path without reducing the underlying math cost.
+
+Next:
+
+1. Keep the accepted default gate at `globalY <= 512`.
+2. If `519`-row compact dense is revisited, compare these paths explicitly on device instead of widening the default gate blindly:
+   - generic `gemm_b4_c8_*`
+   - generic `mUseFPWeight` path
+   - `pic_gemm_b4_c8_*` with isolated tune cache
+3. Continue the main OrangePi `headDim=128` line on the two real hotspots:
+   - P0 sparse q-split attention
+   - P1 compact dense graph work

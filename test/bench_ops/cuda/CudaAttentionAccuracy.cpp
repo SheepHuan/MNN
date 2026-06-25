@@ -35,6 +35,15 @@ struct PagedDecodeCase {
     int context;
 };
 
+struct PagedAttentionSpecialCompareCase {
+    const char* name;
+    int qHeads;
+    int kvHeads;
+    int headDim;
+    int context;
+    int requestCapacity;
+};
+
 static bool runLinearSequence(MNNForwardType type, LinearOutputs* outputs) {
     if (outputs == nullptr) {
         return false;
@@ -365,6 +374,88 @@ static bool runPagedSequenceConfig(MNNForwardType type, const PagedDecodeCase& c
     return bench.readTensor(decodeOut, &outputs->decode);
 }
 
+static bool runPagedSequenceConfigWithCapacity(MNNForwardType type, const PagedDecodeCase& c, int requestCapacity,
+                                               AttentionOutputs* outputs) {
+    if (outputs == nullptr) {
+        return false;
+    }
+    constexpr int batch = 1;
+    constexpr int decodeLen = 1;
+    const int capacity = requestCapacity > 0 ? requestCapacity : (c.context + decodeLen + 4);
+
+    PagedKVMeta meta;
+    meta.beginRequest(capacity);
+    DirectOpBench bench(type, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+    auto op = makeAttentionOp(OpType_PagedAttention, true);
+
+    auto qData = makePattern(batch * c.context * c.qHeads * c.headDim, 0.01f);
+    auto kData = makePattern(batch * c.context * c.kvHeads * c.headDim, 0.011f);
+    auto vData = makePattern(batch * c.context * c.kvHeads * c.headDim, 0.009f);
+    auto q = bench.tensor({batch, c.context, c.qHeads, c.headDim});
+    auto k = bench.tensor({batch, c.context, c.kvHeads, c.headDim});
+    auto v = bench.tensor({batch, c.context, c.kvHeads, c.headDim});
+    auto out = bench.tensor({batch, c.context, c.qHeads, c.headDim});
+    if (!q || !k || !v || !out || !bench.writeTensor(q, qData) || !bench.writeTensor(k, kData) ||
+        !bench.writeTensor(v, vData)) {
+        return false;
+    }
+    auto mask = bench.tensor({c.context, c.context});
+    auto maskData = makeCausalMask(c.context, c.context);
+    if (!mask || !bench.writeTensor(mask, maskData)) {
+        return false;
+    }
+    std::vector<Tensor*> inputs = {q, k, v, mask};
+    std::vector<Tensor*> outTensors = {out};
+    auto exe = bench.create(inputs, outTensors, op->get());
+    if (!exe) {
+        MNN_ERROR("failed to create PagedAttention special compare execution: %s\n", c.name);
+        return false;
+    }
+    auto code = bench.resize(exe.get(), inputs, outTensors);
+    if (code != NO_ERROR) {
+        MNN_ERROR("PagedAttention special compare prefill onResize failed: %s code=%d\n", c.name, code);
+        return false;
+    }
+    setPagedMeta(meta, 0, c.context);
+    code = bench.execute(exe.get(), inputs, outTensors);
+    if (code != NO_ERROR) {
+        MNN_ERROR("PagedAttention special compare prefill onExecute failed: %s code=%d\n", c.name, code);
+        return false;
+    }
+    if (!bench.readTensor(out, &outputs->prefill)) {
+        return false;
+    }
+
+    auto decodeQData = makePattern(batch * decodeLen * c.qHeads * c.headDim, 0.012f, 0.001f);
+    auto decodeKData = makePattern(batch * decodeLen * c.kvHeads * c.headDim, 0.010f, -0.002f);
+    auto decodeVData = makePattern(batch * decodeLen * c.kvHeads * c.headDim, 0.008f, 0.003f);
+    auto decodeQ = bench.tensor({batch, decodeLen, c.qHeads, c.headDim});
+    auto decodeK = bench.tensor({batch, decodeLen, c.kvHeads, c.headDim});
+    auto decodeV = bench.tensor({batch, decodeLen, c.kvHeads, c.headDim});
+    auto decodeOut = bench.tensor({batch, decodeLen, c.qHeads, c.headDim});
+    if (!decodeQ || !decodeK || !decodeV || !decodeOut || !bench.writeTensor(decodeQ, decodeQData) ||
+        !bench.writeTensor(decodeK, decodeKData) || !bench.writeTensor(decodeV, decodeVData)) {
+        return false;
+    }
+    std::vector<Tensor*> decodeInputs = {decodeQ, decodeK, decodeV};
+    std::vector<Tensor*> decodeOutputs = {decodeOut};
+    code = bench.resize(exe.get(), decodeInputs, decodeOutputs);
+    if (code != NO_ERROR) {
+        MNN_ERROR("PagedAttention special compare decode onResize failed: %s code=%d\n", c.name, code);
+        return false;
+    }
+    setPagedMeta(meta, c.context, decodeLen);
+    code = bench.execute(exe.get(), decodeInputs, decodeOutputs);
+    if (code != NO_ERROR) {
+        MNN_ERROR("PagedAttention special compare decode onExecute failed: %s code=%d\n", c.name, code);
+        return false;
+    }
+    return bench.readTensor(decodeOut, &outputs->decode);
+}
+
 static bool runPagedDecodeContext(MNNForwardType type, const PagedDecodeCase& c, std::vector<float>* output) {
     if (output == nullptr) {
         return false;
@@ -430,6 +521,15 @@ static std::vector<PagedDecodeCase> llamaPagedDecodeAccuracyCases() {
 
 static PagedDecodeCase minimalPagedAttentionCompareCase() {
     return {"PagedAttention/minimal/layer0/ctx8/decode", 4, 2, 16, 8};
+}
+
+static std::vector<PagedAttentionSpecialCompareCase> pagedAttentionSpecialCompareCases() {
+    return {
+        {"PagedAttention/minicpm5-1B/ctx1522/cap2048/decode", 16, 2, 128, 1522, 2048},
+        {"PagedAttention/minicpm5-1B/ctx1522/cap4096/decode", 16, 2, 128, 1522, 4096},
+        {"PagedAttention/minicpm5-1B/ctx1521/cap4096/decode", 16, 2, 128, 1521, 4096},
+        {"PagedAttention/minicpm5-1B/ctx1523/cap4096/decode", 16, 2, 128, 1523, 4096},
+    };
 }
 
 static std::string attentionCompareName(const char* backendName, const PagedDecodeCase& c, const char* stage) {
@@ -548,12 +648,37 @@ public:
     }
 };
 
+class CudaPagedAttentionSpecialCompareAttentionAccuracy : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        if (!supportAccuracyPrecision()) {
+            return true;
+        }
+        auto cases = pagedAttentionSpecialCompareCases();
+        for (auto& special : cases) {
+            PagedDecodeCase base{special.name, special.qHeads, special.kvHeads, special.headDim, special.context};
+            AttentionOutputs attention;
+            AttentionOutputs paged;
+            if (!runAttentionSequenceConfig(MNN_FORWARD_CUDA, base, &attention) ||
+                !runPagedSequenceConfigWithCapacity(MNN_FORWARD_CUDA, base, special.requestCapacity, &paged)) {
+                return false;
+            }
+            if (!compareAttentionAndPagedOutputs("special", base, attention, paged)) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(CudaLinearAttentionAccuracy, "bench_ops/cuda/accuracy/LinearAttention");
 MNNTestSuiteRegister(CudaPagedAttentionAccuracy, "bench_ops/cuda/accuracy/PagedAttention");
 MNNTestSuiteRegister(CudaPagedAttentionMinimalCompareAttentionAccuracy,
                      "bench_ops/cuda/accuracy/PagedAttention/MinimalCompareAttention");
 MNNTestSuiteRegister(CudaPagedAttentionCompareAttentionAccuracy,
                      "bench_ops/cuda/accuracy/PagedAttention/CompareAttention");
+MNNTestSuiteRegister(CudaPagedAttentionSpecialCompareAttentionAccuracy,
+                     "bench_ops/cuda/accuracy/PagedAttention/SpecialCompareAttention");
 
 } // namespace
 

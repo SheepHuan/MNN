@@ -686,6 +686,223 @@ __kernel void matmul_qk_div_mask_prefill_piece(GLOBAL_SIZE_3_DIMS
     if(y4 + 3 >= key_seq_len) return;
     vstore4(CONVERT_FLOAT4(out3), 0, qk + qk_offset + q_piece_len4 + q_piece_len4 + q_piece_len4);
 }
+
+__kernel void matmul_qk_div_mask_prefill_piece_sparse(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *query, // [batch head_num head_dim_4 query_seq_len_4]
+                              __global const FLOAT *past_key, // [batch kv_head_num head_dim_4 kv_max_length]
+                              #ifdef ADD_MASK
+                              __global const FLOAT* mask,
+                              #elif defined(SET_MASK)
+                              __global const int* mask,
+                              #endif
+                              __global const int *sparse_query,
+                              __global FLOAT *qk, // [batch head_num active_kv_seq_len q_piece_len_4]
+                              __private const float scale,
+                              __private const int query_seq_len,
+                              __private const int output_seq_len,
+                              __private const int query_rows_are_full,
+                              __private const int q_start,
+                              __private const int q_piece_len,
+                              __private const int mask_key_seq_len,
+                              __private const int active_key_seq_len,
+                              __private const int full_key_seq_len,
+                              __private const int max_len,
+                              __private const int head_num,
+                              __private const int head_dim) {
+
+    const int x = get_global_id(0); // q piece token / 4
+    const int y = get_global_id(1); // active kv token / 4
+    const int z = get_global_id(2); // head_num * batch
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int x4 = x << 2;
+    const int y4 = y << 2;
+    const int q_piece_len4 = (q_piece_len + 3) / 4 * 4;
+    const int query_seq_len4 = (query_seq_len + 3) / 4 * 4;
+    const int q_index0 = q_start + x4;
+    const int q_index1 = q_index0 + 1;
+    const int q_index2 = q_index0 + 2;
+    const int q_index3 = q_index0 + 3;
+
+    const int q_logical0 = q_index0 < output_seq_len ? sparse_query[q_index0] : -1;
+    const int q_logical1 = q_index1 < output_seq_len ? sparse_query[q_index1] : -1;
+    const int q_logical2 = q_index2 < output_seq_len ? sparse_query[q_index2] : -1;
+    const int q_logical3 = q_index3 < output_seq_len ? sparse_query[q_index3] : -1;
+
+    const int q_row0 = query_rows_are_full ? q_logical0 : q_index0;
+    const int q_row1 = query_rows_are_full ? q_logical1 : q_index1;
+    const int q_row2 = query_rows_are_full ? q_logical2 : q_index2;
+    const int q_row3 = query_rows_are_full ? q_logical3 : q_index3;
+
+    const bool q_valid0 = q_index0 < output_seq_len && x4 < q_piece_len && q_row0 >= 0 && q_row0 < query_seq_len;
+    const bool q_valid1 = q_index1 < output_seq_len && x4 + 1 < q_piece_len && q_row1 >= 0 && q_row1 < query_seq_len;
+    const bool q_valid2 = q_index2 < output_seq_len && x4 + 2 < q_piece_len && q_row2 >= 0 && q_row2 < query_seq_len;
+    const bool q_valid3 = q_index3 < output_seq_len && x4 + 3 < q_piece_len && q_row3 >= 0 && q_row3 < query_seq_len;
+
+    const int past_offset = (z / NUMHEAD_GROUP_SIZE) * head_dim * max_len + y4;
+    float4 out0 = 0, out1 = 0, out2 = 0, out3 = 0;
+
+    for (int i = 0; i < head_dim / 4; ++i) {
+        const int i4 = i << 2;
+        const int query_base = z * head_dim * query_seq_len4 + i4 * query_seq_len4;
+
+        float4 query_vec0;
+        float4 query_vec1;
+        float4 query_vec2;
+        float4 query_vec3;
+        if (!query_rows_are_full) {
+            const int query_offset = query_base + q_index0;
+            query_vec0 = convert_float4(vload4(0, query + query_offset));
+            query_vec1 = convert_float4(vload4(0, query + query_offset + query_seq_len4));
+            query_vec2 = convert_float4(vload4(0, query + query_offset + query_seq_len4 + query_seq_len4));
+            query_vec3 = convert_float4(vload4(0, query + query_offset + query_seq_len4 + query_seq_len4 + query_seq_len4));
+        } else {
+            query_vec0 = (float4)(
+                q_valid0 ? (float)(query[query_base + q_row0]) : 0.0f,
+                q_valid1 ? (float)(query[query_base + q_row1]) : 0.0f,
+                q_valid2 ? (float)(query[query_base + q_row2]) : 0.0f,
+                q_valid3 ? (float)(query[query_base + q_row3]) : 0.0f);
+            query_vec1 = (float4)(
+                q_valid0 ? (float)(query[query_base + query_seq_len4 + q_row0]) : 0.0f,
+                q_valid1 ? (float)(query[query_base + query_seq_len4 + q_row1]) : 0.0f,
+                q_valid2 ? (float)(query[query_base + query_seq_len4 + q_row2]) : 0.0f,
+                q_valid3 ? (float)(query[query_base + query_seq_len4 + q_row3]) : 0.0f);
+            query_vec2 = (float4)(
+                q_valid0 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + q_row0]) : 0.0f,
+                q_valid1 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + q_row1]) : 0.0f,
+                q_valid2 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + q_row2]) : 0.0f,
+                q_valid3 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + q_row3]) : 0.0f);
+            query_vec3 = (float4)(
+                q_valid0 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + query_seq_len4 + q_row0]) : 0.0f,
+                q_valid1 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + query_seq_len4 + q_row1]) : 0.0f,
+                q_valid2 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + query_seq_len4 + q_row2]) : 0.0f,
+                q_valid3 ? (float)(query[query_base + query_seq_len4 + query_seq_len4 + query_seq_len4 + q_row3]) : 0.0f);
+        }
+
+        const float4 past_vec0 = convert_float4(vload4(0, past_key + past_offset + i4 * max_len));
+        const float4 past_vec1 = convert_float4(vload4(0, past_key + past_offset + (i4 + 1) * max_len));
+        const float4 past_vec2 = convert_float4(vload4(0, past_key + past_offset + (i4 + 2) * max_len));
+        const float4 past_vec3 = convert_float4(vload4(0, past_key + past_offset + (i4 + 3) * max_len));
+
+        out0 = mad((float4)past_vec0.s0, query_vec0, out0);
+        out0 = mad((float4)past_vec1.s0, query_vec1, out0);
+        out0 = mad((float4)past_vec2.s0, query_vec2, out0);
+        out0 = mad((float4)past_vec3.s0, query_vec3, out0);
+
+        out1 = mad((float4)past_vec0.s1, query_vec0, out1);
+        out1 = mad((float4)past_vec1.s1, query_vec1, out1);
+        out1 = mad((float4)past_vec2.s1, query_vec2, out1);
+        out1 = mad((float4)past_vec3.s1, query_vec3, out1);
+
+        out2 = mad((float4)past_vec0.s2, query_vec0, out2);
+        out2 = mad((float4)past_vec1.s2, query_vec1, out2);
+        out2 = mad((float4)past_vec2.s2, query_vec2, out2);
+        out2 = mad((float4)past_vec3.s2, query_vec3, out2);
+
+        out3 = mad((float4)past_vec0.s3, query_vec0, out3);
+        out3 = mad((float4)past_vec1.s3, query_vec1, out3);
+        out3 = mad((float4)past_vec2.s3, query_vec2, out3);
+        out3 = mad((float4)past_vec3.s3, query_vec3, out3);
+    }
+
+    out0 *= (float4)scale;
+    out1 *= (float4)scale;
+    out2 *= (float4)scale;
+    out3 *= (float4)scale;
+
+    const int k0 = y4;
+    const int k1 = y4 + 1;
+    const int k2 = y4 + 2;
+    const int k3 = y4 + 3;
+
+    #if defined(ADD_MASK) || defined(SET_MASK)
+    const int mask_gap = full_key_seq_len - mask_key_seq_len;
+    const int mask_col0 = k0 - mask_gap;
+    const int mask_col1 = k1 - mask_gap;
+    const int mask_col2 = k2 - mask_gap;
+    const int mask_col3 = k3 - mask_gap;
+    #endif
+
+    #ifdef ADD_MASK
+    if (k0 >= 0 && k0 < active_key_seq_len) {
+        out0.s0 += (q_valid0 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len) ? (float)(mask[q_row0 * mask_key_seq_len + mask_col0]) : 0.0f;
+        out0.s1 += (q_valid1 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len) ? (float)(mask[q_row1 * mask_key_seq_len + mask_col0]) : 0.0f;
+        out0.s2 += (q_valid2 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len) ? (float)(mask[q_row2 * mask_key_seq_len + mask_col0]) : 0.0f;
+        out0.s3 += (q_valid3 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len) ? (float)(mask[q_row3 * mask_key_seq_len + mask_col0]) : 0.0f;
+    }
+    if (k1 >= 0 && k1 < active_key_seq_len) {
+        out1.s0 += (q_valid0 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len) ? (float)(mask[q_row0 * mask_key_seq_len + mask_col1]) : 0.0f;
+        out1.s1 += (q_valid1 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len) ? (float)(mask[q_row1 * mask_key_seq_len + mask_col1]) : 0.0f;
+        out1.s2 += (q_valid2 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len) ? (float)(mask[q_row2 * mask_key_seq_len + mask_col1]) : 0.0f;
+        out1.s3 += (q_valid3 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len) ? (float)(mask[q_row3 * mask_key_seq_len + mask_col1]) : 0.0f;
+    }
+    if (k2 >= 0 && k2 < active_key_seq_len) {
+        out2.s0 += (q_valid0 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len) ? (float)(mask[q_row0 * mask_key_seq_len + mask_col2]) : 0.0f;
+        out2.s1 += (q_valid1 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len) ? (float)(mask[q_row1 * mask_key_seq_len + mask_col2]) : 0.0f;
+        out2.s2 += (q_valid2 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len) ? (float)(mask[q_row2 * mask_key_seq_len + mask_col2]) : 0.0f;
+        out2.s3 += (q_valid3 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len) ? (float)(mask[q_row3 * mask_key_seq_len + mask_col2]) : 0.0f;
+    }
+    if (k3 >= 0 && k3 < active_key_seq_len) {
+        out3.s0 += (q_valid0 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len) ? (float)(mask[q_row0 * mask_key_seq_len + mask_col3]) : 0.0f;
+        out3.s1 += (q_valid1 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len) ? (float)(mask[q_row1 * mask_key_seq_len + mask_col3]) : 0.0f;
+        out3.s2 += (q_valid2 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len) ? (float)(mask[q_row2 * mask_key_seq_len + mask_col3]) : 0.0f;
+        out3.s3 += (q_valid3 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len) ? (float)(mask[q_row3 * mask_key_seq_len + mask_col3]) : 0.0f;
+    }
+    #endif
+
+    out0.s0 = (q_valid0 && k0 < active_key_seq_len && k0 <= q_logical0) ? out0.s0 : -FLT_MAX;
+    out0.s1 = (q_valid1 && k0 < active_key_seq_len && k0 <= q_logical1) ? out0.s1 : -FLT_MAX;
+    out0.s2 = (q_valid2 && k0 < active_key_seq_len && k0 <= q_logical2) ? out0.s2 : -FLT_MAX;
+    out0.s3 = (q_valid3 && k0 < active_key_seq_len && k0 <= q_logical3) ? out0.s3 : -FLT_MAX;
+    out1.s0 = (q_valid0 && k1 < active_key_seq_len && k1 <= q_logical0) ? out1.s0 : -FLT_MAX;
+    out1.s1 = (q_valid1 && k1 < active_key_seq_len && k1 <= q_logical1) ? out1.s1 : -FLT_MAX;
+    out1.s2 = (q_valid2 && k1 < active_key_seq_len && k1 <= q_logical2) ? out1.s2 : -FLT_MAX;
+    out1.s3 = (q_valid3 && k1 < active_key_seq_len && k1 <= q_logical3) ? out1.s3 : -FLT_MAX;
+    out2.s0 = (q_valid0 && k2 < active_key_seq_len && k2 <= q_logical0) ? out2.s0 : -FLT_MAX;
+    out2.s1 = (q_valid1 && k2 < active_key_seq_len && k2 <= q_logical1) ? out2.s1 : -FLT_MAX;
+    out2.s2 = (q_valid2 && k2 < active_key_seq_len && k2 <= q_logical2) ? out2.s2 : -FLT_MAX;
+    out2.s3 = (q_valid3 && k2 < active_key_seq_len && k2 <= q_logical3) ? out2.s3 : -FLT_MAX;
+    out3.s0 = (q_valid0 && k3 < active_key_seq_len && k3 <= q_logical0) ? out3.s0 : -FLT_MAX;
+    out3.s1 = (q_valid1 && k3 < active_key_seq_len && k3 <= q_logical1) ? out3.s1 : -FLT_MAX;
+    out3.s2 = (q_valid2 && k3 < active_key_seq_len && k3 <= q_logical2) ? out3.s2 : -FLT_MAX;
+    out3.s3 = (q_valid3 && k3 < active_key_seq_len && k3 <= q_logical3) ? out3.s3 : -FLT_MAX;
+
+    #ifdef SET_MASK
+    if (k0 >= 0 && k0 < active_key_seq_len) {
+        out0.s0 = (q_valid0 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len && mask[q_row0 * mask_key_seq_len + mask_col0] != 0) ? out0.s0 : -FLT_MAX;
+        out0.s1 = (q_valid1 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len && mask[q_row1 * mask_key_seq_len + mask_col0] != 0) ? out0.s1 : -FLT_MAX;
+        out0.s2 = (q_valid2 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len && mask[q_row2 * mask_key_seq_len + mask_col0] != 0) ? out0.s2 : -FLT_MAX;
+        out0.s3 = (q_valid3 && mask_col0 >= 0 && mask_col0 < mask_key_seq_len && mask[q_row3 * mask_key_seq_len + mask_col0] != 0) ? out0.s3 : -FLT_MAX;
+    }
+    if (k1 >= 0 && k1 < active_key_seq_len) {
+        out1.s0 = (q_valid0 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len && mask[q_row0 * mask_key_seq_len + mask_col1] != 0) ? out1.s0 : -FLT_MAX;
+        out1.s1 = (q_valid1 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len && mask[q_row1 * mask_key_seq_len + mask_col1] != 0) ? out1.s1 : -FLT_MAX;
+        out1.s2 = (q_valid2 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len && mask[q_row2 * mask_key_seq_len + mask_col1] != 0) ? out1.s2 : -FLT_MAX;
+        out1.s3 = (q_valid3 && mask_col1 >= 0 && mask_col1 < mask_key_seq_len && mask[q_row3 * mask_key_seq_len + mask_col1] != 0) ? out1.s3 : -FLT_MAX;
+    }
+    if (k2 >= 0 && k2 < active_key_seq_len) {
+        out2.s0 = (q_valid0 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len && mask[q_row0 * mask_key_seq_len + mask_col2] != 0) ? out2.s0 : -FLT_MAX;
+        out2.s1 = (q_valid1 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len && mask[q_row1 * mask_key_seq_len + mask_col2] != 0) ? out2.s1 : -FLT_MAX;
+        out2.s2 = (q_valid2 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len && mask[q_row2 * mask_key_seq_len + mask_col2] != 0) ? out2.s2 : -FLT_MAX;
+        out2.s3 = (q_valid3 && mask_col2 >= 0 && mask_col2 < mask_key_seq_len && mask[q_row3 * mask_key_seq_len + mask_col2] != 0) ? out2.s3 : -FLT_MAX;
+    }
+    if (k3 >= 0 && k3 < active_key_seq_len) {
+        out3.s0 = (q_valid0 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len && mask[q_row0 * mask_key_seq_len + mask_col3] != 0) ? out3.s0 : -FLT_MAX;
+        out3.s1 = (q_valid1 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len && mask[q_row1 * mask_key_seq_len + mask_col3] != 0) ? out3.s1 : -FLT_MAX;
+        out3.s2 = (q_valid2 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len && mask[q_row2 * mask_key_seq_len + mask_col3] != 0) ? out3.s2 : -FLT_MAX;
+        out3.s3 = (q_valid3 && mask_col3 >= 0 && mask_col3 < mask_key_seq_len && mask[q_row3 * mask_key_seq_len + mask_col3] != 0) ? out3.s3 : -FLT_MAX;
+    }
+    #endif
+
+    const int qk_offset = (z * active_key_seq_len + y4) * q_piece_len4 + x4;
+    vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
+    if (y4 + 1 >= active_key_seq_len) return;
+    vstore4(CONVERT_FLOAT4(out1), 0, qk + qk_offset + q_piece_len4);
+    if (y4 + 2 >= active_key_seq_len) return;
+    vstore4(CONVERT_FLOAT4(out2), 0, qk + qk_offset + q_piece_len4 + q_piece_len4);
+    if (y4 + 3 >= active_key_seq_len) return;
+    vstore4(CONVERT_FLOAT4(out3), 0, qk + qk_offset + q_piece_len4 + q_piece_len4 + q_piece_len4);
+}
 __kernel void matmul_qk_decode(GLOBAL_SIZE_2_DIMS
                               __global const FLOAT *query, // key [1 head_num head_dim]
                               __global const FLOAT *past_key, // [1 head_num head_dim max_length]

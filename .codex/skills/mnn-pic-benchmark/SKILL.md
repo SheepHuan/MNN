@@ -118,6 +118,50 @@ Rhino Pi-X1 也是 Linux AArch64 目标，默认使用 Arm GNU 11.3 AArch64 Linu
 
 Rhino Pi-X1 OpenCL benchmark 只验证 GPU/OpenCL 路径，启动前检查远端 `LD_LIBRARY_PATH` 包含对应 artifact `lib/`，并确认运行日志没有 CUDA backend、CPU fallback 或 OpenCL target unavailable。
 
+## 固定模型权重位置
+
+性能 benchmark 不在测试流程中反复同步模型权重。模型导出在本机完成后，只把每个模型固定放到对应设备 SSD/NVMe 模型目录；后续 `pic_server` 和 `llm_bench` 只引用这些固定路径：
+
+```text
+Jetson AGX Xavier:
+  normal: /home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-llm-export/<model>/
+  pic:    /home/jetson/code/kvshare-edge/impl/MNN/.cache/weight/<model-pic-boundary>/
+
+Orange Pi 5 Plus:
+  normal: /mnt/ssd/code/.cache/mnn_opencl_pic/models/normal/<model>/
+  pic:    /mnt/ssd/code/.cache/mnn_opencl_pic/models/pic/<model-pic-boundary>/
+
+Rhino Pi X1:
+  normal: /mnt/nvme/mnn_pic_opencl/models/normal/<model>/
+  pic:    /mnt/nvme/mnn_pic_opencl/models/pic/<model-pic-boundary>/
+```
+
+验证一致性优先用 dry-run itemize，不直接传输：
+
+```bash
+rsync -anic --delete --out-format='%i %n%L' LOCAL_MODEL_DIR/ user@host:REMOTE_MODEL_DIR/
+```
+
+只有 dry-run 显示缺失或差异时，才针对具体模型和设备执行一次实际 `rsync -a --delete --partial --inplace`。不要在 benchmark run 脚本中自动同步权重；benchmark 脚本最多检查固定路径存在和 graph/config 能力。
+
+## Prefill Benchmark Cache 复用
+
+同一模型、设备、context 和 token span 的 `/v1/prefill/text` 持久 text cache 要复用固定 KV cache 目录，不要每个 run-id 重建一份：
+
+```text
+Jetson:    /home/jetson/code/kvshare-edge/impl/MNN/.cache/pic_prefill_latency_sweep/shared_kv/<model-key>/
+OrangePi:  /mnt/ssd/code/.cache/mnn_opencl_pic/pic_prefill_latency_sweep/shared_kv/<model-key>/
+Rhino:     /mnt/nvme/mnn_pic_opencl/cache/pic_prefill_latency_sweep/shared_kv/<model-key>/
+```
+
+benchmark 客户端应为文档 cache 使用稳定 id，例如 `bench-<model-key>-<backend>-ctx<context>-<token_hash>`，并默认发送 `force=false`。第二次及后续测试应直接命中已有 persistent text cache；只有显式要求重建或改变模型/token span 时才设置 `force=true`。run-id 只用于日志、summary 和临时服务目录，不应进入 text cache id，也不应作为 KV cache 存储目录的一部分。
+
+正式 prefill latency sweep 不要使用按 run-id 命名的 KV cache 目录，例如 `<run_id>/kv` 或 `mnn_pic_dataset_bench_<run_id>`。这类目录只适合一次性数据集正确性实验；MiniCPM5-1B、Qwen3-8B 和 Llama3.2 3B 的重复性能测试必须使用上面的 `shared_kv/<model-key>/`。脚本需要在 run metadata 里记录 shared cache root、stable doc id、`cache_hit` 和 `cache_status`；若第二次跑同一模型/设备/context/token span 仍显示 `cache_status=built`，应先查为什么没有命中缓存，不要继续把该轮当正式性能数据。
+
+`--force-cache-build` 只用于模型权重、KV layout、RoPE metadata 或 token span 确认改变后的主动重建；正常补测、重复测、换 budget 或换 `cacheblend`/`epic` ratio 都不应打开它。改变 budget/ratio 只影响 `/v1/chat/completions` 内的 sparse recompute/scoring，不改变 `/v1/prefill/text` 的持久 text cache。
+
+为了避免连续构建不同 context 时污染 LLM 请求状态，prefill benchmark 可以按 context 重启 `pic_server`；但服务启动和 cache-hit 检查不计入 `prefill_latency_s`。正式计时仍只取 `/v1/chat/completions max_tokens=0` 的独立请求耗时。
+
 Jetson 远端 MNN 仓库：
 
 ```text
@@ -359,6 +403,44 @@ PIC full-compute / cacheblend speedup     仅作为 PagedAttention / PagedCache 
 context_tokens, algorithm, ratio, algo_s, normal_full_compute_s, speedup_vs_normal_full_compute, pic_full_compute_s, speedup_vs_pic_full_compute_ref
 ```
 
+正式 sweep 已下沉到 skill 脚本，不要再依赖 `.cache/` 里的临时脚本。统一入口：
+
+```bash
+python .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep.py \
+  --model-key minicpm5-1b \
+  --devices orangepi,rhino \
+  --benchmark-csv benchmark.csv \
+  --only-missing-contexts \
+  --run-id prefill_minicpm5_missing_$(date +%Y%m%d_%H%M%S)
+```
+
+关键约定：
+
+- `--benchmark-csv benchmark.csv --only-missing-contexts` 会直接以 `benchmark.csv` 中 `Llama3.2 1B` 为模板，只重跑目标模型当前缺口 context。
+- 脚本固定使用设备约定端口，并在启动前直接杀掉旧端口监听进程；不要换端口规避旧进程。
+- `summary.csv` 只写本次真实成功返回的行；失败/超时/500 会写到 `failures.jsonl`，不要把失败行直接合进 `benchmark.csv`。
+- OpenCL 默认会先做本次 run 的 warm，再测正式请求；这属于当前实跑流程，不是复用历史 warm 数据。
+- 当前内置模型 key：`minicpm5-1b`、`llama3.2-3b`、`qwen3-8b`。
+
+如果只想看缺口，不立刻开跑：
+
+```bash
+python .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep.py \
+  --model-key qwen3-8b \
+  --devices jetson,orangepi,rhino \
+  --benchmark-csv benchmark.csv \
+  --only-missing-contexts \
+  --print-gap-only
+```
+
+把成功 sweep 结果增量合并回 `benchmark.csv`：
+
+```bash
+python .codex/skills/mnn-pic-benchmark/scripts/merge_prefill_benchmark_csv.py \
+  benchmark.csv \
+  .cache/latency_budget_20260625/<run_id>/summary.csv
+```
+
 报告里如果写“同一份 text cache / suffix”，只表示输入条件对齐；不表示多个 ratio 共享一次 scoring。若脚本做了多 ratio sweep，必须确认每个 ratio 的 HTTP 请求、metadata 和计时都是独立记录。
 
 普通 MNN LLM baseline 用真实普通导出模型目录跑 `llm_bench`，建议用同等 prompt token 长度并设 `-n 0`。`NORMAL_CONFIG` 必须来自 `.cache/mnn-llm-export/<model>/`，不能来自 `.cache/weight/<model>/` 的 PIC/PagedAttention 导出目录：
@@ -371,7 +453,13 @@ context_tokens, algorithm, ratio, algo_s, normal_full_compute_s, speedup_vs_norm
 
 ## Decode Repair TPOT/TPS Benchmark
 
-Decode repair benchmark 与 prefill-only benchmark 是两张表。正式输出文件使用 `benchmark_decode.csv`，至少包含 `device,device_display,model,model_config,backend,frequency_profile,target_context_tokens,context_tokens,mode,budget,decode_selector,repair_tokens,generated_tokens,decode_tpot_ms,decode_tps,baseline_decode_tpot_ms,overhead_vs_normal_decode,decode_tps_vs_normal_decode,execution_mode,decode_runtime,benchmark_status,error_message`。
+Decode repair benchmark 与 prefill-only benchmark 是两张表。正式输出文件使用 `benchmark_decode.csv`，保持和 `benchmark.csv` 类似的精简主表，只包含：
+
+```text
+device,device_display,model,backend,frequency_profile,context_tokens,mode,budget,decode_selector,repair_tokens,generated_tokens,decode_latency_s,decode_tpot_ms,decode_tps,benchmark_status
+```
+
+`repair_tokens=0` 行就是 normal/no-repair decode baseline；其它 repair 行和 baseline 的对比由同一 `device/context/mode/budget` 下的 `decode_tpot_ms` / `decode_tps` 直接计算，不在主 CSV 里冗余写 baseline 或 overhead 列。`model_config`、runtime、execution mode、unsupported 详细错误、payload/response 等调试信息保留在 run 的 raw JSON / log 中，不进入正式主表。
 
 正式矩阵：
 
@@ -386,6 +474,8 @@ repair_tokens:  0, 1, 2, 3, 4, 5, 6, 7
 ```
 
 `mode` / `budget` 只描述 prefill sparse recompute，`decode_selector` / `repair_tokens` 只描述 decode repair。`repair_tokens=0` 是 normal/no-repair decode baseline，请求不得启用 `decode_refine`；`repair_tokens>=1` 时才在 `pic_cache.decode_refine` 内设置 `enabled=true`、`selector` 和 `tokens_per_decode_step`。
+
+decode selector 是 decode runtime 的选择器，必须由 decode 侧状态和调度实现，例如 `Llm::selectPicDecodeRepairLogicalIndices()` 及其 runtime state。不得通过修改 prefill sparse recompute 的 `buildExecutionPlan()`、`plan.recomputeLogicalIndices`、`nativeSelectedLocalIndices`、`sparseTokenIds` 或 `recomputeTokenCount` 来实现或冒充 decode selector；这些字段只属于 prefill 的重算计划和本次 prefill metadata。
 
 `lagged_attention_hkvd` 是 decode selector，不是 prefill selection algorithm。若 MNN runtime 尚未真正实现它，正式结果必须写 `benchmark_status=unsupported` 或明确失败，不能静默退化为 `top_hkvd`，也不能把 prefill selected indices 复用后命名为 lagged attention。需要临时做 token-id sparse decode smoke 时，可以显式传 `--decode-selector top_hkvd`，但这类结果不能标成 `lagged_attention_hkvd`。
 

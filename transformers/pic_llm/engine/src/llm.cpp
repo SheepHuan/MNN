@@ -2483,6 +2483,32 @@ void Llm::clearPrefixCacheFile() {
     mMeta->layer_index = 0;
 }
 
+bool Llm::beginTextCacheExport(const std::string& filename) {
+    if (filename.empty()) {
+        return false;
+    }
+    clearPrefixCacheFile();
+    mPrefixCacheMode = false;
+    mPrefixCacheFileName.clear();
+    mCallIndex = 0;
+    mPrefixLength = 0;
+    mIsPrefixFileExist = false;
+    mMeta->file_name = filename;
+    mMeta->file_flag = KVMeta::PendingWrite;
+    mMeta->seqlen_in_disk = 0;
+    mMeta->layer_index = 0;
+    return true;
+}
+
+void Llm::clearTextCacheExport() {
+    if (mMeta->file_flag == KVMeta::PendingWrite) {
+        mMeta->file_flag = KVMeta::NoChange;
+        mMeta->file_name = "";
+        mMeta->seqlen_in_disk = 0;
+        mMeta->layer_index = 0;
+    }
+}
+
 void Llm::completePrefixWrite() {
     if (!mPrefixCacheMode || mCallIndex != 1 || mIsPrefixFileExist) {
         return;

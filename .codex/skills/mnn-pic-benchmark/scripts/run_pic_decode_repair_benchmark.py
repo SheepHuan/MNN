@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import sys
 import time
 import urllib.error
@@ -22,6 +21,8 @@ from typing import Any
 DEFAULT_CONTEXTS = "512,1024,1536,2048,2560,3072"
 DEFAULT_BUDGETS = "0.05,0.10,0.20"
 DEFAULT_REPAIR_TOKENS = "0,1,2,3,4,5,6,7"
+MNN_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_TOKEN_IDS_JSON = MNN_ROOT / ".cache/latency_budget_20260611/opencl_pic_1024_current_20260622_191527/tokens.json"
 
 
 def parse_csv_ints(value: str) -> list[int]:
@@ -80,6 +81,28 @@ def make_doc_content(target_tokens: int, seed: str) -> str:
     # server-reported token_count remains authoritative in the CSV.
     n = max(1, int(target_tokens))
     return (f"{seed} " + " token" * n).strip()
+
+
+def load_doc_token_ids(path: str) -> list[int]:
+    if not path:
+        return []
+    token_path = Path(path)
+    if not token_path.exists():
+        return []
+    obj = json.loads(token_path.read_text(encoding="utf-8"))
+    source = obj.get("doc_token_ids") or obj.get("token_ids") or obj.get("full_prompt_token_ids") or []
+    if not isinstance(source, list):
+        return []
+    return [int(item) for item in source if isinstance(item, int)]
+
+
+def make_doc_token_ids(target_tokens: int, base_doc_token_ids: list[int]) -> list[int]:
+    if target_tokens <= 0 or not base_doc_token_ids:
+        return []
+    token_ids: list[int] = []
+    while len(token_ids) < target_tokens:
+        token_ids.extend(base_doc_token_ids)
+    return token_ids[:target_tokens]
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -293,6 +316,9 @@ def main() -> int:
     parser.add_argument("--suffix-from-cache-tokens", type=int, default=1)
     parser.add_argument("--question", default="Answer briefly using the cached text.")
     parser.add_argument("--doc-seed", default="MNN PIC decode repair benchmark document.")
+    parser.add_argument("--token-ids-json", default=str(DEFAULT_TOKEN_IDS_JSON))
+    parser.add_argument("--text-contexts", action="store_true",
+                        help="Use generated text instead of exact token_ids for /v1/prefill/text")
     parser.add_argument("--force-text-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reset-before-each", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--update-cache", action=argparse.BooleanOptionalAction, default=True)
@@ -309,40 +335,25 @@ def main() -> int:
     budgets = parse_csv_floats(args.budgets)
     repair_tokens = parse_csv_ints(args.repair_tokens)
     head_ids = parse_head_ids(args.attention_head_ids)
+    base_doc_token_ids = [] if args.text_contexts else load_doc_token_ids(args.token_ids_json)
     output_csv = Path(args.output_csv)
     output_root = Path(args.output_dir)
     fields = [
         "device",
         "device_display",
         "model",
-        "model_config",
         "backend",
         "frequency_profile",
-        "target_context_tokens",
         "context_tokens",
         "mode",
         "budget",
         "decode_selector",
-        "attention_layer_idx",
-        "attention_head_ids",
         "repair_tokens",
-        "active_tokens_per_decode_step",
         "generated_tokens",
-        "decode_measured_tokens",
-        "repeat_count",
-        "prefill_latency_s",
         "decode_latency_s",
         "decode_tpot_ms",
         "decode_tps",
-        "request_wall_s",
-        "baseline_decode_tpot_ms",
-        "overhead_vs_normal_decode",
-        "decode_tps_vs_normal_decode",
-        "execution_mode",
-        "decode_runtime",
-        "decode_selection_source",
         "benchmark_status",
-        "error_message",
     ]
     ensure_header(output_csv, fields, args.append)
 
@@ -350,13 +361,22 @@ def main() -> int:
     run_id = time.strftime("%Y%m%d_%H%M%S")
     for target_context in contexts:
         doc_id = f"decode_bench_doc_ctx{target_context}_{run_id}"
-        content = make_doc_content(target_context, args.doc_seed)
-        prefill_payload = {
-            "id": doc_id,
-            "type": "text",
-            "content": content,
-            "force": bool(args.force_text_cache),
-        }
+        doc_token_ids = make_doc_token_ids(target_context, base_doc_token_ids)
+        if doc_token_ids:
+            prefill_payload = {
+                "id": doc_id,
+                "type": "text",
+                "token_ids": doc_token_ids,
+                "force": bool(args.force_text_cache),
+            }
+        else:
+            content = make_doc_content(target_context, args.doc_seed)
+            prefill_payload = {
+                "id": doc_id,
+                "type": "text",
+                "content": content,
+                "force": bool(args.force_text_cache),
+            }
         prefill_response = post_json(args.base_url, "/v1/prefill/text", prefill_payload, args.timeout)
         write_json(output_root / run_id / f"context_{target_context}" / "prefill_text.response.json", prefill_response)
         actual_context = int(prefill_response.get("token_count", 0) or 0)
@@ -456,48 +476,25 @@ def main() -> int:
                     samples.append(metrics)
                 by_repair[repair] = average_metrics(samples)
 
-            baseline = by_repair.get(0, {})
-            baseline_tpot = float(baseline.get("decode_tpot_ms", 0.0) or 0.0)
-            baseline_tps = float(baseline.get("decode_tps", 0.0) or 0.0)
             rows: list[dict[str, Any]] = []
             for repair in repair_tokens:
                 metrics = by_repair[repair]
-                tpot = float(metrics.get("decode_tpot_ms", 0.0) or 0.0)
-                tps = float(metrics.get("decode_tps", 0.0) or 0.0)
-                overhead = tpot / baseline_tpot if baseline_tpot > 0.0 and tpot > 0.0 else math.nan
-                tps_ratio = tps / baseline_tps if baseline_tps > 0.0 and tps > 0.0 else math.nan
                 row = {
                     "device": args.device,
                     "device_display": args.device_display,
                     "model": args.model_name,
-                    "model_config": args.model_config,
                     "backend": args.backend,
                     "frequency_profile": args.frequency_profile,
-                    "target_context_tokens": target_context,
                     "context_tokens": actual_context or target_context,
                     "mode": args.mode,
                     "budget": fmt_budget(budget),
                     "decode_selector": args.decode_selector if repair > 0 else "none",
-                    "attention_layer_idx": args.attention_layer_idx if repair > 0 else "",
-                    "attention_head_ids": ",".join(str(item) for item in head_ids) if repair > 0 else "",
                     "repair_tokens": repair,
-                    "active_tokens_per_decode_step": metrics.get("active_tokens_per_decode_step", repair + 1),
                     "generated_tokens": int(args.max_tokens),
-                    "decode_measured_tokens": metrics.get("decode_measured_tokens", ""),
-                    "repeat_count": int(args.repeats),
-                    "prefill_latency_s": metrics.get("prefill_latency_s", ""),
                     "decode_latency_s": metrics.get("decode_latency_s", ""),
                     "decode_tpot_ms": metrics.get("decode_tpot_ms", ""),
                     "decode_tps": metrics.get("decode_tps", ""),
-                    "request_wall_s": metrics.get("request_wall_s", ""),
-                    "baseline_decode_tpot_ms": baseline_tpot,
-                    "overhead_vs_normal_decode": overhead,
-                    "decode_tps_vs_normal_decode": tps_ratio,
-                    "execution_mode": metrics.get("execution_mode", ""),
-                    "decode_runtime": metrics.get("decode_runtime", ""),
-                    "decode_selection_source": metrics.get("decode_selection_source", ""),
                     "benchmark_status": metrics.get("benchmark_status", ""),
-                    "error_message": metrics.get("error_message", ""),
                 }
                 rows.append(row)
             append_rows(output_csv, fields, rows)

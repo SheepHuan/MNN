@@ -54,12 +54,16 @@ private:
                            bool externalHydrated, int* maskKeyLen) const;
     bool canUseSparseFastPrefill(const Tensor* mask, int attnLen, int kvLen, bool externalHydrated,
                                  bool queryRowsAreFull) const;
+    bool canUseSparseQSplitPrefill(const Tensor* mask, int attnLen, int kvLen, bool externalHydrated,
+                                   bool queryRowsAreFull, int* maskKeyLen) const;
     ErrorCode runFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                              int maskKeyLen);
     ErrorCode runAdrenoGemmPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                                    int kvLen, int qSplitNum);
     ErrorCode runSparseFastPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
                                    int attnLen, bool queryRowsAreFull);
+    ErrorCode runSparseQSplitPrefill(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                                     int kvLen, int attnLen, bool queryRowsAreFull, int maskKeyLen);
     ErrorCode runDecodeCausalAttention(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                                        int kvLen, int attnLen, int baseLogical, bool sparseQuery,
                                        bool queryRowsAreFull);
@@ -128,6 +132,7 @@ private:
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;
+    bool mFastKernelAddMask = false;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmQKKernels;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmSoftmaxKernels;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmTransKernels;

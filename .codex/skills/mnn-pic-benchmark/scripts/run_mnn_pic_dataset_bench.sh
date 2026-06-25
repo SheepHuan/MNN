@@ -19,6 +19,58 @@ die() {
   exit 1
 }
 
+kill_local_port_users() {
+  local port="$1"
+  local pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null | tr '\n' ' ')"
+  elif command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser -n tcp "${port}" 2>/dev/null | tr '\n' ' ')"
+  elif command -v ss >/dev/null 2>&1; then
+    pids="$(ss -ltnpH "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | tr '\n' ' ')"
+  fi
+  if [[ -n "${pids// /}" ]]; then
+    log "killing local tcp/${port} listeners: ${pids}"
+    kill ${pids} >/dev/null 2>&1 || true
+    sleep 1
+    kill -9 ${pids} >/dev/null 2>&1 || true
+    sleep 1
+  fi
+}
+
+kill_remote_port_users() {
+  local port="$1"
+  ssh "${REMOTE}" "bash -lc '
+set +e
+port=${port}
+collect_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:\$port -sTCP:LISTEN 2>/dev/null
+    return 0
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp \$port 2>/dev/null | tr \" \" \"\n\" | sed \"/^$/d\"
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH \"sport = :\$port\" 2>/dev/null | sed -n \"s/.*pid=\\([0-9]\\+\\).*/\\1/p\"
+    return 0
+  fi
+  pgrep -f \"pic_server.*--port \$port\" 2>/dev/null
+}
+pids=\"\$(collect_pids | sort -u | tr \"\n\" \" \")\"
+if [[ -n \"\${pids// /}\" ]]; then
+  kill \$pids >/dev/null 2>&1 || true
+  sleep 1
+  pids=\"\$(collect_pids | sort -u | tr \"\n\" \" \")\"
+  if [[ -n \"\${pids// /}\" ]]; then
+    kill -9 \$pids >/dev/null 2>&1 || true
+    sleep 1
+  fi
+fi
+' " >/dev/null 2>&1 || true
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -162,8 +214,10 @@ cleanup() {
     kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
     wait "${TUNNEL_PID}" >/dev/null 2>&1 || true
   fi
+  kill_local_port_users "${LOCAL_PORT}"
   if [[ "${REMOTE_SERVER_STARTED}" == "1" ]]; then
-    ssh "${REMOTE}" "if [[ -f '${REMOTE_PID_FILE}' ]]; then kill \$(cat '${REMOTE_PID_FILE}') >/dev/null 2>&1 || true; fi; pkill -f 'pic_server.*--port ${REMOTE_PORT}' >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    ssh "${REMOTE}" "if [[ -f '${REMOTE_PID_FILE}' ]]; then kill \$(cat '${REMOTE_PID_FILE}') >/dev/null 2>&1 || true; fi" >/dev/null 2>&1 || true
+    kill_remote_port_users "${REMOTE_PORT}"
   fi
   {
     printf 'run_id=%s\n' "${RUN_ID}"
@@ -221,10 +275,12 @@ if [[ "${SKIP_RSYNC}" != "1" ]]; then
   rsync -a --delete "${INSTALL_PREFIX}/" "${REMOTE}:${REMOTE_REPO}/${REMOTE_ART_REL}/"
 fi
 
+kill_local_port_users "${LOCAL_PORT}"
+kill_remote_port_users "${REMOTE_PORT}"
+
 log "starting remote MNN pic_server on ${REMOTE}:${REMOTE_PORT}"
 ssh "${REMOTE}" "cd '${REMOTE_REPO}' && \
   mkdir -p '${REMOTE_LOG_DIR}' && \
-  { pkill -f 'pic_server.*--port ${REMOTE_PORT}' >/dev/null 2>&1 || true; } && \
   rm -rf '${REMOTE_KV_DIR}' && \
   LAUNCHER='' && \
   if [[ '${REMOTE_LINE_BUFFER}' == '1' ]] && command -v stdbuf >/dev/null 2>&1; then LAUNCHER='stdbuf -oL -eL'; fi && \
@@ -249,7 +305,8 @@ if [[ "${ready}" != "1" ]]; then
 fi
 
 log "opening SSH tunnel ${LOCAL_HOST}:${LOCAL_PORT} -> ${REMOTE_HOST}:${REMOTE_PORT}"
-ssh -N -L "${LOCAL_HOST}:${LOCAL_PORT}:${REMOTE_HOST}:${REMOTE_PORT}" "${REMOTE}" >"${TUNNEL_LOG}" 2>&1 &
+ssh -N -L "${LOCAL_HOST}:${LOCAL_PORT}:${REMOTE_HOST}:${REMOTE_PORT}" \
+  -o ExitOnForwardFailure=yes "${REMOTE}" >"${TUNNEL_LOG}" 2>&1 &
 TUNNEL_PID="$!"
 sleep 1
 if ! curl -fsS "${BASE_URL}/healthz" >/dev/null; then

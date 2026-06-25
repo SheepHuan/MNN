@@ -158,6 +158,8 @@ public:
     void eraseHistory(size_t begin, size_t end);
     bool setPrefixCacheFile(const std::string& filename, int flag = 0);
     void clearPrefixCacheFile();
+    bool beginTextCacheExport(const std::string& filename);
+    void clearTextCacheExport();
     bool beginExternalPagedKVRequest();
     bool reserveExternalPagedKVSourceSlots(size_t token_count);
     bool appendExternalPagedKV(const std::vector<int>& token_ids, const std::vector<MNN::PagedKVExternalSegment>& segments);

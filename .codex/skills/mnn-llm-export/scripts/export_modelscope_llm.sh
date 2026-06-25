@@ -322,12 +322,19 @@ RESOLVED_MNNCONVERT_PATH="$(resolve_mnnconvert || true)"
 if [[ -n "${RESOLVED_MNNCONVERT_PATH}" ]]; then
   mnnconvert_args=(--mnnconvert "${RESOLVED_MNNCONVERT_PATH}")
   converter_bin_dir="$(dirname "${RESOLVED_MNNCONVERT_PATH}")"
-  converter_lib_dir="$(cd "${converter_bin_dir}/../lib" 2>/dev/null && pwd || true)"
-  if [[ -n "${converter_lib_dir}" ]]; then
-    export LD_LIBRARY_PATH="${converter_lib_dir}:${converter_bin_dir}:${LD_LIBRARY_PATH:-}"
-  else
-    export LD_LIBRARY_PATH="${converter_bin_dir}:${LD_LIBRARY_PATH:-}"
-  fi
+  converter_lib_dirs=("${converter_bin_dir}")
+  for candidate in \
+    "${converter_bin_dir}/../lib" \
+    "${converter_bin_dir}/lib" \
+    "${converter_bin_dir}/express" \
+    "${converter_bin_dir}/tools/converter"
+  do
+    if [[ -d "${candidate}" ]]; then
+      converter_lib_dirs+=("$(cd "${candidate}" && pwd)")
+    fi
+  done
+  converter_ld_path="$(IFS=:; printf '%s' "${converter_lib_dirs[*]}")"
+  export LD_LIBRARY_PATH="${converter_ld_path}:${LD_LIBRARY_PATH:-}"
 elif [[ "${EXPORTER}" == "pic" || "${EXPORTER}" == "prefix" ]]; then
   echo "MNNConvert not found for ${EXPORTER} export." >&2
   echo "Build artifacts first, or set MNNCONVERT_PATH explicitly." >&2

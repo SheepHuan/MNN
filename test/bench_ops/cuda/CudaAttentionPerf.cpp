@@ -8,6 +8,7 @@
 #include "CudaOpBenchUtils.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 
 using namespace MNN;
 using namespace MNN::BenchOpsCuda;
@@ -57,6 +58,65 @@ static bool printPagedAttentionV1V2TimedResult(const char* impl, const BenchCase
               c.name, impl, c.batch, c.qHeads, c.kvHeads, c.headDim, c.pastLen, c.seqLen, kvLen, ratio, avgMs);
     ::fflush(stdout);
     return true;
+}
+
+struct PagedAttentionSpecialShapeCase {
+    BenchCase bench;
+    int requestCapacity;
+};
+
+struct PagedAttentionPendingWriteCase {
+    const char* name;
+    int batch;
+    int qHeads;
+    int kvHeads;
+    int headDim;
+    int seqLen;
+    int requestCapacity;
+    int layers;
+};
+
+static bool printPagedAttentionSpecialTimedResult(const char* impl, const PagedAttentionSpecialShapeCase& c,
+                                                  float avgMs) {
+    const int kvLen = c.bench.pastLen + c.bench.seqLen;
+    const float ratio = kvLen > 0 ? static_cast<float>(c.bench.seqLen) / static_cast<float>(kvLen) : 0.0f;
+    MNN_PRINT("[bench_ops/cuda/perf/PagedAttention/SpecialShapes] %-28s impl=%-9s "
+              "B=%d qH=%d kvH=%d D=%d past=%d add=%d kv=%d cap=%d q_over_kv=%.4f avg=%.4f ms\n",
+              c.bench.name, impl, c.bench.batch, c.bench.qHeads, c.bench.kvHeads, c.bench.headDim,
+              c.bench.pastLen, c.bench.seqLen, kvLen, c.requestCapacity, ratio, avgMs);
+    ::fflush(stdout);
+    return true;
+}
+
+static bool printPagedAttentionPendingWriteTimedResult(const char* impl, const PagedAttentionPendingWriteCase& c,
+                                                       float avgMs) {
+    MNN_PRINT("[bench_ops/cuda/perf/PagedAttention/PendingWriteSubgraph] %-28s impl=%-9s "
+              "B=%d qH=%d kvH=%d D=%d add=%d cap=%d layers=%d avg=%.4f ms\n",
+              c.name, impl, c.batch, c.qHeads, c.kvHeads, c.headDim, c.seqLen, c.requestCapacity, c.layers, avgMs);
+    ::fflush(stdout);
+    return true;
+}
+
+static std::string sanitizePrefixCacheName(const char* name) {
+    std::string out = name != nullptr ? name : "paged_attention";
+    for (char& ch : out) {
+        if (!std::isalnum(static_cast<unsigned char>(ch))) {
+            ch = '_';
+        }
+    }
+    return out;
+}
+
+static std::unique_ptr<OpHolder> makePagedAttentionOpForLayer(int layerIndex) {
+    OpT op;
+    op.type = OpType_PagedAttention;
+    op.main.type = OpParameter_AttentionParam;
+    op.main.value = new AttentionParamT;
+    auto* param = op.main.AsAttentionParam();
+    param->kv_cache = true;
+    param->layer_index = layerIndex;
+    param->kv_shared_layer_index = -1;
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
 static bool runLinearAttentionCase(const BenchCase& c) {
@@ -236,12 +296,13 @@ static bool runAttentionCase(const BenchCase& c) {
     return printTimedResult("Attention", c, avgMs);
 }
 
-static bool measurePagedAttentionCase(const BenchCase& c, float* avgMs) {
+static bool measurePagedAttentionCaseWithCapacity(const BenchCase& c, int requestCapacity, bool syncEachRun,
+                                                  float* avgMs) {
     if (avgMs == nullptr) {
         return false;
     }
     PagedKVMeta meta;
-    const int capacity = c.pastLen + c.seqLen + 64;
+    const int capacity = requestCapacity > 0 ? requestCapacity : (c.pastLen + c.seqLen + 64);
     meta.beginRequest(capacity);
     DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
     if (!bench.valid()) {
@@ -280,12 +341,23 @@ static bool measurePagedAttentionCase(const BenchCase& c, float* avgMs) {
     CudaEventPair timer;
     auto run = [&]() {
         setPagedMeta(meta, c.pastLen, c.seqLen);
-        return bench.execute(exe.get(), inputs, outputs);
+        auto code = bench.execute(exe.get(), inputs, outputs);
+        if (code != NO_ERROR) {
+            return code;
+        }
+        if (syncEachRun && !checkCuda(cudaDeviceSynchronize(), "PagedAttention special-shape sync")) {
+            return INVALID_VALUE;
+        }
+        return NO_ERROR;
     };
     if (!timer.measure(run, c.warmup, c.repeat, avgMs)) {
         return false;
     }
     return true;
+}
+
+static bool measurePagedAttentionCase(const BenchCase& c, float* avgMs) {
+    return measurePagedAttentionCaseWithCapacity(c, 0, false, avgMs);
 }
 
 static bool runPagedAttentionCase(const BenchCase& c) {
@@ -341,6 +413,23 @@ static std::vector<BenchCase> pagedAttentionV1V2RatioCases() {
     };
 }
 
+static std::vector<PagedAttentionSpecialShapeCase> pagedAttentionSpecialShapeCases() {
+    return {
+        {{"minicpm5-1B_q1522_cap1536", 1, 16, 2, 128, 1522, 0, 0, 1}, 1536},
+        {{"minicpm5-1B_q1522_cap2048", 1, 16, 2, 128, 1522, 0, 0, 1}, 2048},
+        {{"minicpm5-1B_q1522_cap4096", 1, 16, 2, 128, 1522, 0, 0, 1}, 4096},
+        {{"minicpm5-1B_q1521_cap4096", 1, 16, 2, 128, 1521, 0, 0, 1}, 4096},
+        {{"minicpm5-1B_q1523_cap4096", 1, 16, 2, 128, 1523, 0, 0, 1}, 4096},
+    };
+}
+
+static std::vector<PagedAttentionPendingWriteCase> pagedAttentionPendingWriteCases() {
+    return {
+        {"minicpm5-1B_q1522_cap4096_l8", 1, 16, 2, 128, 1522, 4096, 8},
+        {"minicpm5-1B_q1522_cap2048_l8", 1, 16, 2, 128, 1522, 2048, 8},
+    };
+}
+
 static bool runPagedAttentionV1V2Case(const BenchCase& c) {
     struct ImplCase {
         const char* label;
@@ -357,6 +446,119 @@ static bool runPagedAttentionV1V2Case(const BenchCase& c) {
             return false;
         }
         if (!printPagedAttentionV1V2TimedResult(impl.label, c, avgMs)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool runPagedAttentionSpecialShapeCase(const PagedAttentionSpecialShapeCase& c) {
+    struct ImplCase {
+        const char* label;
+        const char* forceV2Kernel;
+    };
+    const ImplCase impls[] = {
+        {"v1", nullptr},
+        {"v2_kernel", "1"},
+    };
+    for (auto impl : impls) {
+        ScopedEnvVar forceEnv("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", impl.forceV2Kernel);
+        float avgMs = 0.0f;
+        if (!measurePagedAttentionCaseWithCapacity(c.bench, c.requestCapacity, true, &avgMs)) {
+            return false;
+        }
+        if (!printPagedAttentionSpecialTimedResult(impl.label, c, avgMs)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool runPagedAttentionPendingWriteCase(const PagedAttentionPendingWriteCase& c) {
+    struct ImplCase {
+        const char* label;
+        const char* forceV2Kernel;
+    };
+    const ImplCase impls[] = {
+        {"v1", nullptr},
+        {"v2_kernel", "1"},
+    };
+    for (auto impl : impls) {
+        ScopedEnvVar forceEnv("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", impl.forceV2Kernel);
+        PagedKVMeta meta;
+        meta.beginRequest(c.requestCapacity);
+        meta.layer_nums = c.layers;
+        meta.file_flag = KVMeta::PendingWrite;
+        meta.file_name = sanitizePrefixCacheName(c.name) + "_" + impl.label;
+
+        DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+        if (!bench.valid()) {
+            return false;
+        }
+        RuntimeHint hint;
+        hint.prefixcacheDirPath = ".cache/bench_ops";
+        bench.setRuntimeHint(hint);
+
+        auto q = bench.tensor({c.batch, c.seqLen, c.qHeads, c.headDim});
+        auto k = bench.tensor({c.batch, c.seqLen, c.kvHeads, c.headDim});
+        auto v = bench.tensor({c.batch, c.seqLen, c.kvHeads, c.headDim});
+        auto o = bench.tensor({c.batch, c.seqLen, c.qHeads, c.headDim});
+        auto mask = bench.tensor({c.seqLen, c.seqLen});
+        auto qData = makePattern(c.batch * c.seqLen * c.qHeads * c.headDim, 0.01f);
+        auto kData = makePattern(c.batch * c.seqLen * c.kvHeads * c.headDim, 0.011f);
+        auto vData = makePattern(c.batch * c.seqLen * c.kvHeads * c.headDim, 0.009f);
+        auto maskData = makeCausalMask(c.seqLen, c.seqLen);
+        if (!q || !k || !v || !o || !mask || !bench.writeTensor(q, qData) || !bench.writeTensor(k, kData) ||
+            !bench.writeTensor(v, vData) || !bench.writeTensor(mask, maskData)) {
+            return false;
+        }
+        std::vector<Tensor*> inputs = {q, k, v, mask};
+        std::vector<Tensor*> outputs = {o};
+        std::vector<std::unique_ptr<OpHolder>> ops;
+        std::vector<std::unique_ptr<Execution>> exes;
+        ops.reserve(c.layers);
+        exes.reserve(c.layers);
+        for (int layerIndex = 0; layerIndex < c.layers; ++layerIndex) {
+            ops.emplace_back(makePagedAttentionOpForLayer(layerIndex));
+            auto exe = bench.create(inputs, outputs, ops.back()->get());
+            if (!exe) {
+                MNN_ERROR("failed to create PagedAttention pending-write execution: %s layer=%d impl=%s\n",
+                          c.name, layerIndex, impl.label);
+                return false;
+            }
+            auto code = bench.resize(exe.get(), inputs, outputs);
+            if (code != NO_ERROR) {
+                MNN_ERROR("PagedAttention pending-write onResize failed: %s layer=%d impl=%s code=%d\n",
+                          c.name, layerIndex, impl.label, code);
+                return false;
+            }
+            exes.emplace_back(std::move(exe));
+        }
+
+        CudaEventPair timer;
+        float avgMs = 0.0f;
+        auto run = [&]() {
+            setPagedMeta(meta, 0, c.seqLen);
+            meta.file_flag = KVMeta::PendingWrite;
+            for (int layerIndex = 0; layerIndex < c.layers; ++layerIndex) {
+                auto code = bench.execute(exes[layerIndex].get(), inputs, outputs);
+                if (code != NO_ERROR) {
+                    MNN_ERROR("PagedAttention pending-write onExecute failed: %s layer=%d impl=%s code=%d\n",
+                              c.name, layerIndex, impl.label, code);
+                    return code;
+                }
+                if (!checkCuda(cudaDeviceSynchronize(), "PagedAttention pending-write layer sync")) {
+                    MNN_ERROR("PagedAttention pending-write sync failed: %s layer=%d impl=%s\n",
+                              c.name, layerIndex, impl.label);
+                    return INVALID_VALUE;
+                }
+            }
+            return NO_ERROR;
+        };
+        if (!timer.measure(run, 0, 1, &avgMs)) {
+            return false;
+        }
+        if (!printPagedAttentionPendingWriteTimedResult(impl.label, c, avgMs)) {
             return false;
         }
     }
@@ -475,6 +677,38 @@ public:
     }
 };
 
+class CudaPagedAttentionSpecialShapePerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        if (!supportPerfPrecision()) {
+            return true;
+        }
+        auto cases = pagedAttentionSpecialShapeCases();
+        for (auto& c : cases) {
+            if (!runPagedAttentionSpecialShapeCase(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+class CudaPagedAttentionPendingWritePerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        if (!supportPerfPrecision()) {
+            return true;
+        }
+        auto cases = pagedAttentionPendingWriteCases();
+        for (auto& c : cases) {
+            if (!runPagedAttentionPendingWriteCase(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(CudaLinearAttentionPrefillPerf, "bench_ops/cuda/perf/LinearAttention/Prefill");
 MNNTestSuiteRegister(CudaLinearAttentionDecodePerf, "bench_ops/cuda/perf/LinearAttention/Decode");
 MNNTestSuiteRegister(CudaAttentionPrefillPerf, "bench_ops/cuda/perf/Attention/Prefill");
@@ -482,6 +716,8 @@ MNNTestSuiteRegister(CudaAttentionDecodePerf, "bench_ops/cuda/perf/Attention/Dec
 MNNTestSuiteRegister(CudaPagedAttentionPrefillPerf, "bench_ops/cuda/perf/PagedAttention/Prefill");
 MNNTestSuiteRegister(CudaPagedAttentionDecodePerf, "bench_ops/cuda/perf/PagedAttention/Decode");
 MNNTestSuiteRegister(CudaPagedAttentionV1V2Perf, "bench_ops/cuda/perf/PagedAttention/V1V2");
+MNNTestSuiteRegister(CudaPagedAttentionSpecialShapePerf, "bench_ops/cuda/perf/PagedAttention/SpecialShapes");
+MNNTestSuiteRegister(CudaPagedAttentionPendingWritePerf, "bench_ops/cuda/perf/PagedAttention/PendingWriteSubgraph");
 
 } // namespace
 

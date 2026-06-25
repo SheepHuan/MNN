@@ -1229,10 +1229,23 @@ void runLockedJsonEndpoint(const httplib::Request& req, httplib::Response& res, 
     json response;
     std::string error;
     bool ok = false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+    try {
+        std::lock_guard<std::mutex> lock(mutex);
+        ok = handler(request, response, error);
+    } catch (const std::exception& e) {
+        ok = false;
+        error = e.what();
+    } catch (...) {
+        ok = false;
+        error = "Unhandled exception";
+    }
+#else
     {
         std::lock_guard<std::mutex> lock(mutex);
         ok = handler(request, response, error);
     }
+#endif
     if (!ok) {
         writeJsonError(res, errorStatus, error);
         return;
@@ -1326,6 +1339,42 @@ bool existingCacheMatches(const fs::path& metaPath, const std::string& contentSh
             return false;
         }
     }
+    return true;
+}
+
+std::string uniqueBuildSuffix() {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return ".building-" + std::to_string(static_cast<long long>(now));
+}
+
+bool replaceDirectoryWithBuiltCache(const fs::path& finalRoot, const fs::path& buildRoot, std::string& error) {
+    std::error_code ec;
+    fs::path backupRoot = finalRoot;
+    backupRoot += ".previous-" + std::to_string(
+        static_cast<long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::remove_all(backupRoot, ec);
+    ec.clear();
+    if (fs::exists(finalRoot, ec)) {
+        fs::rename(finalRoot, backupRoot, ec);
+        if (ec) {
+            error = "Failed to move existing cache aside: " + finalRoot.string() + ": " + ec.message();
+            return false;
+        }
+    }
+    ec.clear();
+    fs::rename(buildRoot, finalRoot, ec);
+    if (ec) {
+        const auto renameError = ec.message();
+        std::error_code restoreEc;
+        if (fs::exists(backupRoot, restoreEc)) {
+            fs::rename(backupRoot, finalRoot, restoreEc);
+        }
+        error = "Failed to publish built cache: " + buildRoot.string() + " -> " + finalRoot.string() +
+            ": " + renameError;
+        return false;
+    }
+    ec.clear();
+    fs::remove_all(backupRoot, ec);
     return true;
 }
 
@@ -2216,8 +2265,13 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     fs::path layersDir = cacheRoot / "layers";
     fs::path metaPath = cacheRoot / "meta.json";
     fs::path tokensPath = cacheRoot / "tokens.json";
-    std::string fileStem = pathJoinForMNN(
-        pathJoinForMNN(pathJoinForMNN(pathJoinForMNN("objects", backend), cacheName), "layers"),
+    const std::string buildName = cacheName + uniqueBuildSuffix();
+    fs::path buildRoot = cacheRoot.parent_path() / buildName;
+    fs::path buildLayersDir = buildRoot / "layers";
+    fs::path buildMetaPath = buildRoot / "meta.json";
+    fs::path buildTokensPath = buildRoot / "tokens.json";
+    std::string buildFileStem = pathJoinForMNN(
+        pathJoinForMNN(pathJoinForMNN(pathJoinForMNN("objects", backend), buildName), "layers"),
         cacheName);
 
     std::vector<int> tokenIds;
@@ -2248,15 +2302,20 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     }
 
     std::error_code ec;
-    fs::remove_all(cacheRoot, ec);
-    fs::create_directories(layersDir, ec);
+    fs::remove_all(buildRoot, ec);
+    ec.clear();
+    fs::create_directories(buildLayersDir, ec);
     if (ec) {
-        error = "Failed to create cache directory: " + layersDir.string();
+        error = "Failed to create cache directory: " + buildLayersDir.string();
         return false;
     }
 
     mLlm->reset();
-    mLlm->setPrefixCacheFile(fileStem);
+    if (!mLlm->beginTextCacheExport(buildFileStem)) {
+        error = "Failed to start PIC text cache export";
+        fs::remove_all(buildRoot, ec);
+        return false;
+    }
     std::ostringstream sink;
     mLlm->response(tokenIds, &sink, "", 0);
     auto contextAfterPrefill = mLlm->getContext();
@@ -2267,32 +2326,35 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
         contextAfterPrefill->status == MNN::Transformer::LlmStatus::USER_CANCEL;
     if (prefillFailed) {
         error = "Failed to build persistent text cache" + llmContextSuffix(mLlm.get());
-        mLlm->clearPrefixCacheFile();
+        mLlm->clearTextCacheExport();
         mLlm->finishExternalPagedKVRequest();
         mLlm->reset();
+        fs::remove_all(buildRoot, ec);
         return false;
     }
-    mLlm->clearPrefixCacheFile();
+    mLlm->clearTextCacheExport();
     mLlm->finishExternalPagedKVRequest();
     mLlm->reset();
 
     auto cfg = modelConfig();
     int layerCount = jsonInt(cfg, "layer_nums", 0);
-    int detectedLayers = countLayerFiles(layersDir, cacheName);
+    int detectedLayers = countLayerFiles(buildLayersDir, cacheName);
     if (layerCount <= 0) {
         layerCount = detectedLayers;
     }
     if (layerCount <= 0 || detectedLayers <= 0) {
         error = "Prefill finished but no layer KV files were exported";
+        fs::remove_all(buildRoot, ec);
         return false;
     }
     if (detectedLayers < layerCount) {
         error = "Expected " + std::to_string(layerCount) + " layer KV files, found " +
                 std::to_string(detectedLayers);
+        fs::remove_all(buildRoot, ec);
         return false;
     }
 
-    KvShape kvShape = readKvShape(layersDir, cacheName);
+    KvShape kvShape = readKvShape(buildLayersDir, cacheName);
     json kvLayout = makeKvLayout(cfg, static_cast<int>(tokenIds.size()), kvShape);
     int layoutBatch = kvLayout.value("batch", 1);
     int layoutKvHeads = kvLayout.value("kv_heads", 0);
@@ -2301,12 +2363,14 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
     for (int layer = 0; layer < layerCount; ++layer) {
         fs::path keyPath = layersDir / (cacheName + "_" + std::to_string(layer) + ".k");
         fs::path valuePath = layersDir / (cacheName + "_" + std::to_string(layer) + ".v");
+        fs::path buildKeyPath = buildLayersDir / (cacheName + "_" + std::to_string(layer) + ".k");
+        fs::path buildValuePath = buildLayersDir / (cacheName + "_" + std::to_string(layer) + ".v");
         kvFiles.push_back({
             {"layer_index", layer},
             {"key_path", absoluteString(keyPath)},
             {"value_path", absoluteString(valuePath)},
-            {"key_bytes", fileSizeOrZero(keyPath)},
-            {"value_bytes", fileSizeOrZero(valuePath)},
+            {"key_bytes", fileSizeOrZero(buildKeyPath)},
+            {"value_bytes", fileSizeOrZero(buildValuePath)},
             {"file_format", "raw"},
             {"shape_path", absoluteString(layersDir / (cacheName + "_" + std::to_string(layer) + ".json"))},
             {"key_shape", json::array({static_cast<int>(tokenIds.size()), layoutBatch, layoutKvHeads, layoutHeadDim})},
@@ -2321,8 +2385,9 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
         {"token_count", tokenIds.size()},
         {"token_ids", tokenIds},
     };
-    if (!writeJsonFile(tokensPath, tokensJson)) {
+    if (!writeJsonFile(buildTokensPath, tokensJson)) {
         error = "Failed to write tokens metadata";
+        fs::remove_all(buildRoot, ec);
         return false;
     }
 
@@ -2349,14 +2414,13 @@ bool PicServer::buildTextCache(const json& request, json& response, std::string&
         {"kv_layout", kvLayout},
         {"kv", kvFiles},
     };
-    if (!writeJsonFile(metaPath, response)) {
+    if (!writeJsonFile(buildMetaPath, response)) {
         error = "Failed to write cache metadata";
+        fs::remove_all(buildRoot, ec);
         return false;
     }
-    std::string reloadError;
-    if (!loadLlmInstance(&reloadError)) {
-        error = "Text cache was built, but failed to reload LLM runtime after persistent cache export: " +
-                reloadError;
+    if (!replaceDirectoryWithBuiltCache(cacheRoot, buildRoot, error)) {
+        fs::remove_all(buildRoot, ec);
         return false;
     }
     return true;
@@ -2716,6 +2780,12 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             }
             traceInfo.executionMode = plan.executionMode;
             traceInfo.recomputeBudgetTokens = plan.recomputeTokenCount;
+            if (!graphBoundaryPrefillDone && plan.sparseRecompute && plan.scoreLayerIdx > 0) {
+                error = "PIC sparse prefill score_layer_idx=" + std::to_string(plan.scoreLayerIdx) +
+                        " requires a graph-boundary PIC model with pic_recompute_budget; "
+                        "legacy forwardVec(selected_tokens) sparse recompute from layer 0 is disabled";
+                return false;
+            }
 
             if (!graphBoundaryPrefillDone) {
                 mLlm->reset();

@@ -9,9 +9,75 @@
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 
 #include "backend/opencl/execution/buffer/AttentionBufExecution.hpp"
+#include <cstdint>
 #include <fstream>
 namespace MNN {
 namespace OpenCL {
+
+namespace {
+
+struct KnownPrefillTrialPolicy {
+    const char* modelName;
+    int batch;
+    int numHead;
+    int headDim;
+    int kvNumHead;
+    uint64_t maxShortPrefillScratchBytes;
+};
+
+constexpr uint64_t kMiB = 1024ull * 1024ull;
+constexpr KnownPrefillTrialPolicy kKnownPrefillTrialPolicies[] = {
+    // Known long-context LLM shapes whose short-prefill scratch grows too large for
+    // the current OpenCL tuning path. Keep the tuple explicit so we only clamp the
+    // affected model configs instead of turning the whole backend into a coarse fallback.
+    {"Llama-3.2-1B-Instruct", 1, 32, 64, 8, 768ull * kMiB},
+    {"MiniCPM5-1B",          1, 16, 128, 2, 768ull * kMiB},
+    {"Llama-3.2-3B-Instruct", 1, 24, 128, 8, 768ull * kMiB},
+    {"Qwen3-8B",             1, 32, 128, 8, 768ull * kMiB},
+};
+
+static const KnownPrefillTrialPolicy* findKnownPrefillTrialPolicy(int batch, int numHead, int headDim, int kvNumHead) {
+    for (const auto& policy : kKnownPrefillTrialPolicies) {
+        if (policy.batch == batch && policy.numHead == numHead && policy.headDim == headDim && policy.kvNumHead == kvNumHead) {
+            return &policy;
+        }
+    }
+    return nullptr;
+}
+
+static uint64_t estimateShortPrefillScratchBytes(int batch, int seqlen, int kvSeqlen, int numHead, int headDim,
+                                                 int maskQlen, int maskKvlen, bool hasMask, bool addMask) {
+    const uint64_t qLen = ROUND_UP(static_cast<uint64_t>(seqlen), 4);
+    const uint64_t kvLen = static_cast<uint64_t>(kvSeqlen);
+    const uint64_t headDim4 = ROUND_UP(static_cast<uint64_t>(headDim), 4);
+    const uint64_t batchHeads = static_cast<uint64_t>(batch) * static_cast<uint64_t>(numHead);
+
+    const uint64_t tempQBytes = qLen * headDim4 * batchHeads * sizeof(float);
+    const uint64_t tempQkBytes = qLen * kvLen * batchHeads * sizeof(float);
+    const uint64_t tempSoftmaxBytes = tempQkBytes;
+
+    uint64_t tempMaskBytes = 0;
+    if (hasMask) {
+        const uint64_t maskQ = ROUND_UP(static_cast<uint64_t>(maskQlen), 4);
+        const uint64_t maskKv = ROUND_UP(static_cast<uint64_t>(maskKvlen), 4);
+        const uint64_t maskElementBytes = addMask ? sizeof(float) : sizeof(uint32_t);
+        tempMaskBytes = maskQ * maskKv * static_cast<uint64_t>(batch) * maskElementBytes;
+    }
+    return tempQBytes + tempQkBytes + tempSoftmaxBytes + tempMaskBytes;
+}
+
+static bool shouldSkipShortPrefillTrialForKnownShape(int batch, int seqlen, int kvSeqlen, int numHead, int headDim, int kvNumHead,
+                                                     int maskQlen, int maskKvlen, bool hasMask, bool addMask) {
+    const auto* policy = findKnownPrefillTrialPolicy(batch, numHead, headDim, kvNumHead);
+    if (policy == nullptr) {
+        return false;
+    }
+    const uint64_t scratchBytes =
+        estimateShortPrefillScratchBytes(batch, seqlen, kvSeqlen, numHead, headDim, maskQlen, maskKvlen, hasMask, addMask);
+    return scratchBytes > policy->maxShortPrefillScratchBytes;
+}
+
+} // namespace
 
 KVCacheCLManager::KVCacheCLManager(Backend *backend, bool kv_cahce) : mKVCache(kv_cahce){
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
@@ -460,7 +526,6 @@ int AttentionBufExecution::getLocalSize(int size, int maxGroupSize){
 }
 
 ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs){
-
     auto query = inputs[0];
     auto key = inputs[1];
     auto value = inputs[2];
@@ -939,7 +1004,6 @@ ErrorCode AttentionBufExecution::longPrefillResize(const std::vector<Tensor *> &
 }
 
 ErrorCode AttentionBufExecution::prefillResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs){
-
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     auto query = inputs[0];
     auto key = inputs[1];
@@ -1560,6 +1624,7 @@ ErrorCode AttentionBufExecution::decodeResize(const std::vector<Tensor *> &input
 // [Batch, q_seqlen, HeadNum, HeadDim] -> [Batch, kv_seqlen, HeadNum, HeadDim]
 ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) {
     mOpenCLBackend->startRecord(mRecording);
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
     auto shape = inputs[0]->shape();
 
     int batch = shape[0];
@@ -1579,7 +1644,21 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
     // handle kv_cache, like copy kv
     handleKVCache(inputs, outputs);
 
-    mLongPrefill = false;
+    int maskQlen = seqlen;
+    int maskKvlen = mKvSeqlen;
+    if (mHasMask) {
+        auto mask = inputs[3];
+        auto maskShape = mask->shape();
+        int dim = mask->dimensions();
+        MNN_ASSERT(dim >= 2);
+        maskQlen = maskShape[dim - 2];
+        maskKvlen = maskShape[dim - 1];
+    }
+    const bool forceLongPrefillByPolicy =
+        shouldSkipShortPrefillTrialForKnownShape(batch, seqlen, mKvSeqlen, numHead, headDim, kvNumHead,
+                                                 maskQlen, maskKvlen, mHasMask, mIsAddMask);
+
+    mLongPrefill = forceLongPrefillByPolicy;
     if(mIsDecode) {
         return decodeResize(inputs, outputs);
     } else {
@@ -1589,8 +1668,17 @@ ErrorCode AttentionBufExecution::onResize(const std::vector<Tensor *> &inputs, c
             if(seqlen > 16){
                 if(getTunedInfo(info, {static_cast<unsigned int>(seqlen)}, tuneInfo, mOpenCLBackend->getOpenCLRuntime())){
                     mLongPrefill = tuneInfo.first[0];
+                    if(forceLongPrefillByPolicy && !mLongPrefill){
+                        mLongPrefill = true;
+                        std::pair<std::vector<uint32_t>, uint32_t> tuneInfoTmp = std::make_pair<std::vector<uint32_t>, uint32_t>({static_cast<uint32_t>(mLongPrefill)}, 0);
+                        setTunedInfo(info, {static_cast<unsigned int>(seqlen)}, tuneInfoTmp, runtime, "attention_buf");
+                    }
                 } else{
-                    if (mOpenCLBackend->getCLTuneLevel() == Heavy || mOpenCLBackend->getCLTuneLevel() == Wide){
+                    if (forceLongPrefillByPolicy) {
+                        mLongPrefill = true;
+                        std::pair<std::vector<uint32_t>, uint32_t> tuneInfoTmp = std::make_pair<std::vector<uint32_t>, uint32_t>({static_cast<uint32_t>(mLongPrefill)}, 0);
+                        setTunedInfo(info, {static_cast<unsigned int>(seqlen)}, tuneInfoTmp, runtime, "attention_buf");
+                    } else if (mOpenCLBackend->getCLTuneLevel() == Heavy || mOpenCLBackend->getCLTuneLevel() == Wide){
                         setRecordClose closeRecord(mOpenCLBackend);
                         // tunning choose use witch preill
                         prefillResize(inputs, outputs);

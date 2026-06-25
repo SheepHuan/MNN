@@ -158,6 +158,12 @@ public:
         return mType == MNN_FORWARD_CUDA;
     }
 
+    void setRuntimeHint(const RuntimeHint& hint) {
+        if (mRuntime) {
+            mRuntime->setRuntimeHint(hint);
+        }
+    }
+
     Tensor* tensor(const std::vector<int>& shape, Tensor::DimensionType dim = Tensor::CAFFE, bool zero = true) {
         auto t = std::shared_ptr<Tensor>(Tensor::createDevice<float>(shape, dim));
         if (!t || !mBackend->onAcquireBuffer(t.get(), Backend::STATIC)) {

@@ -831,6 +831,10 @@ bool ConvBufLowMemoryExecution::usePicCompactGemmLowMemory(Tensor * input, Tenso
     // PIC sparse recompute produces compact rows after the score layer. These
     // shapes are large Linear ops with small-M / large-N,K and need their own
     // OpenCL tune namespace instead of reusing generic conv1x1 LWS history.
+    //
+    // Keep this narrow. Extending the gate to 519-row high-budget shapes
+    // regressed OrangePi cb50 because it moved those shapes off the generic
+    // best-path selection without reducing the underlying math cost.
     return globalY > 16 && globalY <= 512 && inputChannels >= 1024 && outChannel >= 1024;
 }
 
@@ -1135,10 +1139,13 @@ ErrorCode ConvBufLowMemoryExecution::onResize(const std::vector<Tensor *> &input
         if(batch == 1){
             tuneGemvLowMemory(input, output);
         } else {
-            const bool usePicCompactKernel = usePicCompactGemmLowMemory(input, output);
             std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
             std::string info = "convBufLowMemory_" + std::to_string(mResource->mInputChannel) + "_" + std::to_string(mResource->mOutputChannel);
-            if(batch > 16 && !usePicCompactKernel){
+            if(batch > 16){
+                // The PIC compact kernel only changes the quant-GEMM kernel name
+                // and tune namespace. It must not bypass the higher-level
+                // FP-weight-vs-quant routing decision, otherwise compact-row
+                // shapes can be forced onto an unbenchmarked path.
                 if(getTunedInfo(info, {static_cast<unsigned int>(batch)}, tuneInfo, mOpenCLBackend->getOpenCLRuntime())){
                     mUseFPWeight = tuneInfo.first[0];
                 } else{

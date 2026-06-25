@@ -36,6 +36,22 @@ static inline T* pagedDevPtr(const Tensor* t) {
     return reinterpret_cast<T*>(t->deviceId());
 }
 
+static std::string tensorShapeString(const Tensor* t) {
+    if (t == nullptr) {
+        return "<null>";
+    }
+    std::ostringstream os;
+    os << "[";
+    for (int i = 0; i < t->dimensions(); ++i) {
+        if (i > 0) {
+            os << ",";
+        }
+        os << t->length(i);
+    }
+    os << "]";
+    return os.str();
+}
+
 template <typename T>
 __device__ inline float pagedToFloat(T v) {
     return static_cast<float>(v);
@@ -64,6 +80,9 @@ __global__ void copyPagedKVKernel(const T* keyInput, const T* valueInput, T* key
     int l = blockIdx.y * blockDim.y + threadIdx.y;
     int bh = blockIdx.z * blockDim.z + threadIdx.z;
     if (d >= headDim || l >= insertLen || bh >= batch * kvHeads) {
+        return;
+    }
+    if (l >= inputLen) {
         return;
     }
     int b = bh / kvHeads;
@@ -1237,6 +1256,30 @@ static bool envFlagEnabled(const char* name, bool defaultValue) {
     return value[0] != '0';
 }
 
+static ErrorCode debugCheckPagedAttentionKernel(bool enabled, const char* op, int layerIndex, int piece, int qStart,
+                                                int qPieceLen, int kvLen, int numHeads, int kvHeads, int headDim) {
+    if (!enabled) {
+        return NO_ERROR;
+    }
+    auto launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        MNN_PRINT("CUDAPagedAttention: debug launch failed op=%s layer=%d piece=%d q_start=%d q_piece=%d kv_len=%d "
+                  "heads=%d kv_heads=%d head_dim=%d err=%s\n",
+                  op, layerIndex, piece, qStart, qPieceLen, kvLen, numHeads, kvHeads, headDim,
+                  cudaGetErrorString(launchErr));
+        return INVALID_VALUE;
+    }
+    auto syncErr = cudaDeviceSynchronize();
+    if (syncErr == cudaSuccess) {
+        return NO_ERROR;
+    }
+    MNN_PRINT("CUDAPagedAttention: debug sync failed op=%s layer=%d piece=%d q_start=%d q_piece=%d kv_len=%d "
+              "heads=%d kv_heads=%d head_dim=%d err=%s\n",
+              op, layerIndex, piece, qStart, qPieceLen, kvLen, numHeads, kvHeads, headDim,
+              cudaGetErrorString(syncErr));
+    return INVALID_VALUE;
+}
+
 static std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> makeMappedPagedBuffer(size_t bytes,
                                                                                                   int deviceId) {
     if (bytes == 0) {
@@ -1264,6 +1307,14 @@ static std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> makeM
     return out;
 }
 
+static size_t roundMappedWorkspaceBytes(size_t bytes) {
+    constexpr size_t kAlign = 64 * 1024 * 1024;
+    if (bytes == 0) {
+        return 0;
+    }
+    return ((bytes + kAlign - 1) / kAlign) * kAlign;
+}
+
 static bool ensureMappedHostWorkspace(
     std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer>* buffer, size_t bytes, int deviceId) {
     if (buffer == nullptr || bytes == 0) {
@@ -1273,8 +1324,25 @@ static bool ensureMappedHostWorkspace(
         (*buffer)->bytes >= bytes) {
         return true;
     }
-    *buffer = makeMappedPagedBuffer(bytes, deviceId);
+    *buffer = makeMappedPagedBuffer(roundMappedWorkspaceBytes(bytes), deviceId);
     return *buffer != nullptr && (*buffer)->host != nullptr && (*buffer)->device != nullptr;
+}
+
+struct MappedPagedExportWorkspace {
+    std::mutex mutex;
+    std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> scratch;
+    std::shared_ptr<CUDAPagedAttention::SharedPagedCache::MappedBuffer> valueStorage;
+};
+
+static MappedPagedExportWorkspace& mappedPagedExportWorkspace(int deviceId) {
+    static std::mutex mutex;
+    static std::unordered_map<int, std::shared_ptr<MappedPagedExportWorkspace>> workspaces;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& workspace = workspaces[deviceId];
+    if (workspace == nullptr) {
+        workspace.reset(new MappedPagedExportWorkspace);
+    }
+    return *workspace;
 }
 
 static int cudaBackendDeviceId(CUDABackend* backend) {
@@ -2209,9 +2277,11 @@ ErrorCode CUDAPagedAttention::ensureCache(int maxSlots, int batch, int kvHeads, 
     if (maxSlots <= 0 || batch <= 0 || kvHeads <= 0 || headDim <= 0) {
         return INVALID_VALUE;
     }
+    const bool prefixCacheWrite =
+        mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite;
     if (mCache && mCache->key && mCache->value && mCache->slotTable && mCache->maxSlots == maxSlots &&
         mCache->batch == batch && mCache->kvHeads == kvHeads && mCache->headDim == headDim &&
-        mCache->precision == mPrecision) {
+        mCache->precision == mPrecision && !(prefixCacheWrite && mCache->zeroCopyKV)) {
         if (mCache->zeroCopyKV && mLayerIndex >= 0) {
             registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mPrecision, maxSlots,
                                               mCache->mappedKey, mCache->mappedValue);
@@ -2238,7 +2308,7 @@ ErrorCode CUDAPagedAttention::ensureCache(int maxSlots, int batch, int kvHeads, 
     }
     const size_t keyBytes = static_cast<size_t>(maxSlots) * batch * kvHeads * headDim * mPrecision;
     const size_t valueBytes = static_cast<size_t>(batch) * kvHeads * maxSlots * headDim * mPrecision;
-    if (shouldUseMappedPagedCache(mCudaBackend)) {
+    if (!prefixCacheWrite && shouldUseMappedPagedCache(mCudaBackend)) {
         const int deviceId = mCudaBackend->getCUDARuntime()->device_id();
         auto mappedKey = makeMappedPagedBuffer(keyBytes, deviceId);
         auto mappedValue = makeMappedPagedBuffer(valueBytes, deviceId);
@@ -2395,7 +2465,7 @@ ErrorCode CUDAPagedAttention::onResize(const std::vector<Tensor*>& inputs, const
     if (mHeadDim <= 0 || mKvNumHead <= 0 || mNumHead % mKvNumHead != 0) {
         return INVALID_VALUE;
     }
-    int maxSlots = mNewKvSeqLen;
+    int maxSlots = std::max(mNewKvSeqLen, mQuerySeqLen);
     if (mMeta != nullptr) {
         maxSlots = std::max(maxSlots, mMeta->request_capacity > 0 ? mMeta->request_capacity : mMeta->max_tokens);
         if (maxSlots <= 0) {
@@ -2458,6 +2528,37 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         return INVALID_VALUE;
     }
     int kvLen = sparseQuery ? std::max(0, mMeta->logical_length) : (baseLogical + kvWriteLen);
+    const bool prefixCacheWrite =
+        mMeta != nullptr && !mMeta->file_name.empty() && mMeta->file_flag == KVMeta::PendingWrite;
+    if (kvWriteLen > mNewKvSeqLen) {
+        MNN_ERROR("CUDAPagedAttention layer %d invalid KV copy length, inputLen=%d kvWriteLen=%d "
+                  "query=%d attn=%d base=%d kvLen=%d\n",
+                  layerIndex, mNewKvSeqLen, kvWriteLen, mQuerySeqLen, attnLen, baseLogical, kvLen);
+        return INVALID_VALUE;
+    }
+    if (prefixCacheWrite) {
+        const bool keyShapeOk = key != nullptr && key->dimensions() >= 4 &&
+            key->length(0) == mBatch && key->length(1) == mNewKvSeqLen &&
+            key->length(2) == mKvNumHead && key->length(3) == mHeadDim;
+        const bool valueShapeOk = value != nullptr && value->dimensions() >= 4 &&
+            value->length(0) == mBatch && value->length(1) == mNewKvSeqLen &&
+            value->length(2) == mKvNumHead && value->length(3) == mHeadDim;
+        if (!keyShapeOk || !valueShapeOk) {
+            MNN_ERROR("CUDAPagedAttention: PendingWrite K/V shape mismatch at layer %d, query=%s key=%s value=%s "
+                      "batch=%d new_kv=%d kv_heads=%d head_dim=%d\n",
+                      layerIndex, tensorShapeString(query).c_str(), tensorShapeString(key).c_str(),
+                      tensorShapeString(value).c_str(), mBatch, mNewKvSeqLen, mKvNumHead, mHeadDim);
+            return INVALID_VALUE;
+        }
+    }
+    if (prefixCacheWrite && mCache != nullptr && mCache->zeroCopyKV) {
+        int stableSlots = std::max({mCache->maxSlots, kvLen, mQuerySeqLen, mNewKvSeqLen,
+                                    mMeta->request_capacity > 0 ? mMeta->request_capacity : mMeta->max_tokens});
+        auto resizeForPrefixWrite = ensureCache(std::max(1, stableSlots), mBatch, mKvNumHead, mHeadDim);
+        if (resizeForPrefixWrite != NO_ERROR) {
+            return resizeForPrefixWrite;
+        }
+    }
     if (kvLen > mCache->maxSlots) {
         MNN_ERROR("CUDAPagedAttention layer %d needs %d slots, cache capacity is %d\n", mLayerIndex, kvLen,
                   mCache->maxSlots);
@@ -2482,6 +2583,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     cudaStream_t stream = 0;
     const bool profile = profilePagedAttention();
     const bool nvtx = nvtxPagedAttention();
+    const bool debugSync = envFlagEnabled("MNN_PAGED_ATTENTION_DEBUG_SYNC", false);
     ScopedNvtxRange layerNvtx(nvtxLayerRangeName("paged_attention_layer_total", layerIndex, mQuerySeqLen, attnLen,
                                                  kvLen), nvtx);
     if (mCache->zeroCopyKV) {
@@ -2499,6 +2601,23 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     if (!mIsKVShared && kvWriteLen > 0) {
         ScopedNvtxRange copyNvtx(nvtxLayerRangeName("write_current_kv_to_paged_cache", layerIndex, mQuerySeqLen,
                                                     kvWriteLen, kvLen), nvtx);
+        if (prefixCacheWrite) {
+            auto previousLaunchError = cudaGetLastError();
+            auto previousSyncError = previousLaunchError == cudaSuccess ? cudaDeviceSynchronize() : previousLaunchError;
+            if (previousSyncError != cudaSuccess) {
+                MNN_PRINT("CUDAPagedAttention: CUDA error before pending-write KV copy at layer %d, "
+                          "query=%s key=%s value=%s maxSlots=%d kvLen=%d kvWriteLen=%d "
+                          "request_capacity=%d logical_length=%d previous=%zu remove=%zu add=%zu "
+                          "slotTableLength=%d launch=%s sync=%s\n",
+                          layerIndex, tensorShapeString(query).c_str(), tensorShapeString(key).c_str(),
+                          tensorShapeString(value).c_str(), mCache->maxSlots, kvLen, kvWriteLen,
+                          mMeta ? mMeta->request_capacity : 0, mMeta ? mMeta->logical_length : 0,
+                          mMeta ? mMeta->previous : 0, mMeta ? mMeta->remove : 0, mMeta ? mMeta->add : 0,
+                          mCache ? mCache->slotTableLength : 0, cudaGetErrorString(previousLaunchError),
+                          cudaGetErrorString(previousSyncError));
+                return INVALID_VALUE;
+            }
+        }
         dim3 block(32, 8, 1);
         dim3 grid(UP_DIV(mHeadDim, block.x), UP_DIV(kvWriteLen, block.y), UP_DIV(mBatch * mKvNumHead, block.z));
         if (mPrecision == 4) {
@@ -2512,7 +2631,32 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                 pagedDevPtr<half>(mCache->value.get()), pagedDevPtr<int>(mCache->slotTable.get()), mBatch,
                 mNewKvSeqLen, kvWriteLen, mKvNumHead, mHeadDim, baseLogical, mCache->maxSlots, sparseQueryDevice);
         }
-        checkKernelErrors;
+        if (debugSync) {
+            err = debugCheckPagedAttentionKernel(true, "copy_paged_kv", layerIndex, -1, baseLogical, kvWriteLen,
+                                                 mNewKvSeqLen, mKvNumHead, mKvNumHead, mHeadDim);
+            if (err != NO_ERROR) {
+                return err;
+            }
+        } else if (prefixCacheWrite) {
+            auto copyLaunch = cudaGetLastError();
+            auto copySync = copyLaunch == cudaSuccess ? cudaDeviceSynchronize() : copyLaunch;
+            if (copySync != cudaSuccess) {
+                MNN_PRINT("CUDAPagedAttention: failed to sync pending-write KV copy at layer %d, "
+                          "inputLen=%d query=%d attn=%d base=%d kvLen=%d maxSlots=%d "
+                          "kvWriteLen=%d request_capacity=%d logical_length=%d previous=%zu "
+                          "remove=%zu add=%zu slotTableLength=%d keyShape=%s valueShape=%s launch=%s sync=%s\n",
+                          layerIndex, mNewKvSeqLen, mQuerySeqLen, attnLen, baseLogical, kvLen,
+                          mCache->maxSlots, kvWriteLen, mMeta ? mMeta->request_capacity : 0,
+                          mMeta ? mMeta->logical_length : 0, mMeta ? mMeta->previous : 0,
+                          mMeta ? mMeta->remove : 0, mMeta ? mMeta->add : 0,
+                          mCache ? mCache->slotTableLength : 0, tensorShapeString(key).c_str(),
+                          tensorShapeString(value).c_str(), cudaGetErrorString(copyLaunch),
+                          cudaGetErrorString(copySync));
+                return INVALID_VALUE;
+            }
+        } else {
+            checkKernelErrors;
+        }
     }
 
     void* mappedValueHost = (mCache->zeroCopyKV && mCache->mappedValue != nullptr) ? mCache->mappedValue->host : nullptr;
@@ -2562,9 +2706,10 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         const size_t keyBytes = static_cast<size_t>(kvLen) * mBatch * mKvNumHead * mHeadDim * mPrecision;
         size_t valueStorageBytes = static_cast<size_t>(mBatch) * mKvNumHead * mCache->maxSlots * mHeadDim * mPrecision;
         const size_t valueBytes = static_cast<size_t>(mBatch) * mKvNumHead * kvLen * mHeadDim * mPrecision;
+        auto& exportWorkspace = mappedPagedExportWorkspace(deviceId);
+        std::lock_guard<std::mutex> exportWorkspaceLock(exportWorkspace.mutex);
         bool keyReady = false;
-        auto exportKeyMapped = makeMappedPagedBuffer(keyBytes, deviceId);
-        if (exportKeyMapped != nullptr) {
+        if (ensureMappedHostWorkspace(&exportWorkspace.scratch, keyBytes, deviceId)) {
             int ropeDim = ropeDimForExport(mMeta, mHeadDim);
             ropeDim = std::min(ropeDim, mHeadDim);
             ropeDim = (ropeDim / 2) * 2;
@@ -2576,7 +2721,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                          UP_DIV(mBatch * mKvNumHead, keyBlock.z));
             if (mPrecision == 4) {
                 exportCanonicalPagedKeyKernel<float><<<keyGrid, keyBlock, 0, stream>>>(
-                    pagedDevPtr<float>(mCache->key.get()), reinterpret_cast<float*>(exportKeyMapped->device),
+                    pagedDevPtr<float>(mCache->key.get()), reinterpret_cast<float*>(exportWorkspace.scratch->device),
                     pagedDevPtr<int>(mCache->slotTable.get()), mBatch, kvLen, mKvNumHead, mHeadDim,
                     mCache->maxSlots, ropeDim, mMeta && mMeta->rope_theta > 0.0f ? mMeta->rope_theta : 10000.0f,
                     ropeTypeCode(mMeta), mMeta ? std::max(mMeta->rope_scaling_factor, 1.0f) : 1.0f,
@@ -2585,7 +2730,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     oldContext, mMeta ? mMeta->rope_attention_scaling : 1.0f);
             } else {
                 exportCanonicalPagedKeyKernel<half><<<keyGrid, keyBlock, 0, stream>>>(
-                    pagedDevPtr<half>(mCache->key.get()), reinterpret_cast<half*>(exportKeyMapped->device),
+                    pagedDevPtr<half>(mCache->key.get()), reinterpret_cast<half*>(exportWorkspace.scratch->device),
                     pagedDevPtr<int>(mCache->slotTable.get()), mBatch, kvLen, mKvNumHead, mHeadDim,
                     mCache->maxSlots, ropeDim, mMeta && mMeta->rope_theta > 0.0f ? mMeta->rope_theta : 10000.0f,
                     ropeTypeCode(mMeta), mMeta ? std::max(mMeta->rope_scaling_factor, 1.0f) : 1.0f,
@@ -2594,36 +2739,46 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     oldContext, mMeta ? mMeta->rope_attention_scaling : 1.0f);
             }
             auto keyKernel = cudaGetLastError();
-            if (keyKernel == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess) {
+            auto keySync = keyKernel == cudaSuccess ? cudaDeviceSynchronize() : keyKernel;
+            if (keyKernel == cudaSuccess && keySync == cudaSuccess) {
                 keyReady = true;
+            } else {
+                MNN_PRINT("CUDAPagedAttention: canonical mapped key export failed at layer %d, launch=%s sync=%s key=%zu maxSlots=%d kvLen=%d\n",
+                          layerIndex, cudaGetErrorString(keyKernel), cudaGetErrorString(keySync),
+                          keyBytes, mCache->maxSlots, kvLen);
             }
+        }
+        if (!keyReady) {
+            MNN_PRINT("CUDAPagedAttention: failed to export canonical mapped key, key=%zu maxSlots=%d kvLen=%d\n",
+                      keyBytes, mCache->maxSlots, kvLen);
+            return OUT_OF_MEMORY;
+        }
+        if (!writeBinaryFile(basePath + ".k", exportWorkspace.scratch->host, keyBytes)) {
+            MNN_PRINT("CUDAPagedAttention: failed to export key cache: %s\n", (basePath + ".k").c_str());
+            return FILE_CREATE_FAILED;
         }
         bool valueStorageReady = false;
         const int8_t* valueStorageHost = nullptr;
-        std::shared_ptr<SharedPagedCache::MappedBuffer> exportValueStorageMapped;
         if (mCache->zeroCopyKV && mCache->mappedValue != nullptr && mCache->mappedValue->host != nullptr &&
             mCache->mappedValue->bytes >= valueStorageBytes) {
             valueStorageHost = reinterpret_cast<const int8_t*>(mCache->mappedValue->host);
             valueStorageReady = true;
         } else {
-            exportValueStorageMapped = makeMappedPagedBuffer(valueStorageBytes, deviceId);
-            if (exportValueStorageMapped != nullptr &&
-                cudaMemcpy(exportValueStorageMapped->host, pagedDevPtr<void>(mCache->value.get()),
+            if (ensureMappedHostWorkspace(&exportWorkspace.valueStorage, valueStorageBytes, deviceId) &&
+                cudaMemcpy(exportWorkspace.valueStorage->host, pagedDevPtr<void>(mCache->value.get()),
                            valueStorageBytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
-                valueStorageHost = reinterpret_cast<const int8_t*>(exportValueStorageMapped->host);
+                valueStorageHost = reinterpret_cast<const int8_t*>(exportWorkspace.valueStorage->host);
                 valueStorageReady = true;
             }
         }
-        std::shared_ptr<SharedPagedCache::MappedBuffer> exportValueDataMapped;
-        if (keyReady && valueStorageReady) {
-            exportValueDataMapped = makeMappedPagedBuffer(valueBytes, deviceId);
-        }
-        if (keyReady && valueStorageReady && exportValueDataMapped != nullptr) {
+        const bool valueDataReady = valueStorageReady &&
+            ensureMappedHostWorkspace(&exportWorkspace.scratch, valueBytes, deviceId);
+        if (valueDataReady) {
             std::vector<int> physicalSlots(kvLen);
             for (int l = 0; l < kvLen; ++l) {
                 physicalSlots[l] = mMeta ? mMeta->physicalSlot(l) : l;
             }
-            auto* valueData = reinterpret_cast<int8_t*>(exportValueDataMapped->host);
+            auto* valueData = reinterpret_cast<int8_t*>(exportWorkspace.scratch->host);
             ::memset(valueData, 0, valueBytes);
             for (int l = 0; l < kvLen; ++l) {
                 int slot = physicalSlots[l];
@@ -2640,17 +2795,22 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     }
                 }
             }
-            if (!writeBinaryFile(basePath + ".k", exportKeyMapped->host, keyBytes)) {
-                MNN_PRINT("CUDAPagedAttention: failed to export key cache: %s\n", (basePath + ".k").c_str());
-            }
             if (!writeBinaryFile(basePath + ".v", valueData, valueBytes)) {
                 MNN_PRINT("CUDAPagedAttention: failed to export value cache: %s\n", (basePath + ".v").c_str());
+                MNNRemoveFile((basePath + ".k").c_str());
+                return FILE_CREATE_FAILED;
             }
             if (!writeShapeFile(basePath + ".json", mBatch, mKvNumHead, mHeadDim, kvLen, mPrecision, mMeta)) {
                 MNN_PRINT("CUDAPagedAttention: failed to export shape metadata: %s\n", (basePath + ".json").c_str());
+                MNNRemoveFile((basePath + ".k").c_str());
+                MNNRemoveFile((basePath + ".v").c_str());
+                return FILE_CREATE_FAILED;
             }
         } else {
-            MNN_PRINT("CUDAPagedAttention: failed to stage mapped paged KV for export\n");
+            MNN_PRINT("CUDAPagedAttention: failed to stage mapped value for export, key=%zu valueStorage=%zu value=%zu maxSlots=%d kvLen=%d zeroCopy=%d\n",
+                      keyBytes, valueStorageBytes, valueBytes, mCache->maxSlots, kvLen,
+                      mCache->zeroCopyKV ? 1 : 0);
+            return OUT_OF_MEMORY;
         }
         if (mLayerIndex < 0) {
             mMeta->layer_index = (mMeta->layer_index + 1) % std::max(1, mMeta->layer_nums);
@@ -2667,13 +2827,14 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     bool useMask = mask != nullptr && mask->elementSize() > 1 && mask->getType().code == halide_type_float;
     int maskElements = useMask ? static_cast<int>(mask->elementSize()) : 0;
     const uint64_t attentionStartUs = profile ? nowUs() : 0;
-    const bool benchForceV2Kernel = envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
     const bool queryRowsAreFull = sparseQuery && mQuerySeqLen > attnLen;
     const bool fullCausalMask = mMeta != nullptr && mMeta->full_causal_attention_mask;
     const bool repairDecodeCausal = picDecodeRecompute && sparseQuery && fullCausalMask;
     const bool ordinaryDecodeCausal = decodeStep && !sparseQuery && !picDecodeRecompute && fullCausalMask &&
         attnLen == 1 && mQuerySeqLen == 1 && mNewKvSeqLen == 1;
-    if (benchForceV2Kernel || picDecodeRecompute || ordinaryDecodeCausal) {
+    // Row-compressed attention is kept for decode and decode-recompute paths.
+    // Prefill keeps the fast q-split path below as the default accelerator.
+    if (picDecodeRecompute || ordinaryDecodeCausal) {
         const int v2BlockSize = 128;
         const int v2SharedBytes = (mHeadDim * 2 + v2BlockSize * 2) * static_cast<int>(sizeof(float));
         const bool skipCausalMask = fullCausalMask;
@@ -2786,6 +2947,10 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
         }
         const int maxPieceLen = UP_DIV(attnLen, qSplitNum);
         size_t prefillElements = static_cast<size_t>(mBatch) * mNumHead * maxPieceLen * kvLen;
+        // Full-causal prefill is enforced in-kernel by logical position, so the additive causal mask
+        // is redundant here and can be skipped safely.
+        const float* prefillMask = (!fullCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
+        const int prefillMaskElements = prefillMask != nullptr ? maskElements : 0;
         if (ensurePrefillTemp(prefillElements)) {
             ScopedNvtxRange prefillNvtx(nvtxLayerRangeName("prefill_attention_fast_qk_softmax_qkv", layerIndex,
                                                            mQuerySeqLen, attnLen, kvLen), nvtx);
@@ -2800,19 +2965,27 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                 if (mPrecision == 4) {
                     pagedPrefillQKKernel<float><<<qkGrid, qkBlock, 0, stream>>>(
                         pagedDevPtr<float>(query), pagedDevPtr<float>(mCache->key.get()), mPrefillQK,
-                        pagedDevPtr<int>(mCache->slotTable.get()), useMask ? pagedDevPtr<float>(mask) : nullptr,
-                        maskElements, mBatch, mQuerySeqLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                        pagedDevPtr<int>(mCache->slotTable.get()), prefillMask, prefillMaskElements,
+                        mBatch, mQuerySeqLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
                         baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
                         queryRowsAreFull ? 1 : 0);
                 } else {
                     pagedPrefillQKKernel<half><<<qkGrid, qkBlock, 0, stream>>>(
                         pagedDevPtr<half>(query), pagedDevPtr<half>(mCache->key.get()), mPrefillQK,
-                        pagedDevPtr<int>(mCache->slotTable.get()), useMask ? pagedDevPtr<float>(mask) : nullptr,
-                        maskElements, mBatch, mQuerySeqLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
+                        pagedDevPtr<int>(mCache->slotTable.get()), prefillMask, prefillMaskElements,
+                        mBatch, mQuerySeqLen, attnLen, mNumHead, mKvNumHead, mHeadDim,
                         baseLogical, qStart, qPieceLen, kvLen, mCache->maxSlots, mScale, sparseQueryDevice,
                         queryRowsAreFull ? 1 : 0);
                 }
-                checkKernelErrors;
+                if (debugSync) {
+                    err = debugCheckPagedAttentionKernel(true, "prefill_qk", layerIndex, piece, qStart, qPieceLen,
+                                                         kvLen, mNumHead, mKvNumHead, mHeadDim);
+                    if (err != NO_ERROR) {
+                        return err;
+                    }
+                } else {
+                    checkKernelErrors;
+                }
 
                 const int axis = kvLen;
                 const int outside = mBatch * mNumHead * qPieceLen;
@@ -2825,7 +2998,15 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                     SOFTMAX_AXIS_REDUCE<float><<<count, threads, 0, stream>>>(
                         mPrefillQK, mPrefillSoftmax, 1, axis, threads, calcMultiNum, outside, count);
                 }
-                checkKernelErrors;
+                if (debugSync) {
+                    err = debugCheckPagedAttentionKernel(true, "prefill_softmax", layerIndex, piece, qStart,
+                                                         qPieceLen, kvLen, mNumHead, mKvNumHead, mHeadDim);
+                    if (err != NO_ERROR) {
+                        return err;
+                    }
+                } else {
+                    checkKernelErrors;
+                }
 
                 dim3 qkvBlock(32, 8, 1);
                 dim3 qkvGrid(UP_DIV(mHeadDim, qkvBlock.x), UP_DIV(qPieceLen, qkvBlock.y), mBatch * mNumHead);
@@ -2840,14 +3021,24 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                         pagedDevPtr<int>(mCache->slotTable.get()), mBatch, attnLen, qStart, qPieceLen,
                         mNumHead, mKvNumHead, mHeadDim, kvLen, mCache->maxSlots);
                 }
-                checkKernelErrors;
+                if (debugSync) {
+                    err = debugCheckPagedAttentionKernel(true, "prefill_qkv", layerIndex, piece, qStart, qPieceLen,
+                                                         kvLen, mNumHead, mKvNumHead, mHeadDim);
+                    if (err != NO_ERROR) {
+                        return err;
+                    }
+                } else {
+                    checkKernelErrors;
+                }
             }
             if (profile) {
                 cudaDeviceSynchronize();
                 MNN_PRINT("CUDAPagedAttention profile op=prefill_attention_fast_qk_softmax_qkv layer=%d query=%d "
-                          "attn=%d kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d q_split=%d us=%llu\n",
+                          "attn=%d kv_write=%d kv_len=%d sparse=%d full_q=%d mask_elements=%d "
+                          "input_mask_elements=%d causal_mask_skipped=%d q_split=%d us=%llu\n",
                           layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
-                          queryRowsAreFull ? 1 : 0, maskElements, qSplitNum,
+                          queryRowsAreFull ? 1 : 0, prefillMaskElements, maskElements,
+                          fullCausalMask ? 1 : 0, qSplitNum,
                           static_cast<unsigned long long>(nowUs() - attentionStartUs));
             }
             return NO_ERROR;
@@ -2857,8 +3048,8 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     dim3 grid(attnLen, mNumHead, mBatch);
     int blockSize = 128;
     int sharedBytes = (kvLen + blockSize) * sizeof(float);
-    const bool genericSkipCausalMask = decodeStep && !sparseQuery && !picDecodeRecompute &&
-        mMeta != nullptr && mMeta->full_causal_attention_mask;
+    const bool genericSkipCausalMask = fullCausalMask;
+    // Generic full-causal attention also applies its own positional bound, so skip the additive mask.
     const float* genericMask = (!genericSkipCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
     const int genericMaskElements = genericMask != nullptr ? maskElements : 0;
     ScopedNvtxRange genericNvtx(nvtxLayerRangeName("prefill_attention_generic_kernel", layerIndex, mQuerySeqLen,
