@@ -18,6 +18,11 @@
 namespace MNN {
 namespace OpenCL {
 
+static bool _benchPrintExecutionClass() {
+    const char* value = ::getenv("MNN_BENCH_OPENCL_PRINT_EXECUTION_CLASS");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 ConvCommonExecution::ConvCommonExecution(const Convolution2D *conv2dParams, Backend *backend) {
     mResource.reset(new ConvResource);
     mOpenCLBackend           = (OpenCLBackend *)backend;
@@ -603,6 +608,14 @@ public:
                         // Don't support IDST-int8 because of error
                         return nullptr;
                     }
+                    if (_benchPrintExecutionClass()) {
+                        MNN_PRINT("[bench_ops/opencl/perf/WeightOnlyConv] creator selected=ConvLowMemoryExecution "
+                                  "quan_type=%d memory=%d input_count=%zu output_count=%zu\n",
+                                  conv2dParams->quanParameter()->type(),
+                                  static_cast<int>(static_cast<OpenCLBackend *>(backend)->getMemory()),
+                                  inputs.size(), outputs.size());
+                        ::fflush(stdout);
+                    }
                     OPENCL_CREATOR_CHECK(new ConvLowMemoryExecution(inputs, outputs, op, backend));
                 } else {
                     //MNN_ERROR("OpenCL Conv buf low memory init error. For Opencl Backend, only support low memory mode of int8 or int4 dequantization currently.\n");
@@ -633,7 +646,14 @@ public:
         if (ConvWinograd::valid(conv2D->common(), inputs[0], outputs[0], maxWidth, maxHeight)) {
             OPENCL_CREATOR_CHECK(new ConvWinograd(op, backend));
         }
-        
+        if (_benchPrintExecutionClass()) {
+            MNN_PRINT("[bench_ops/opencl/perf/WeightOnlyConv] creator selected=ConvExecution generic "
+                      "quan_type=%d memory=%d input_count=%zu output_count=%zu\n",
+                      conv2D->quanParameter() ? conv2D->quanParameter()->type() : -1,
+                      static_cast<int>(static_cast<OpenCLBackend *>(backend)->getMemory()),
+                      inputs.size(), outputs.size());
+            ::fflush(stdout);
+        }
         OPENCL_CREATOR_CHECK(new ConvExecution(inputs, outputs, op, backend));
     }
 };

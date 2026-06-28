@@ -162,6 +162,23 @@ static std::unique_ptr<OpHolder> makePicSiluMulOp(const char* name) {
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
+static std::unique_ptr<OpHolder> makePicPackedSiluMulOp(const char* name) {
+    OpT op;
+    op.name = name != nullptr ? name : "bench_pic_packed_silu_mul";
+    op.type = OpType_Extra;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NCHW;
+    op.main.type = OpParameter_Extra;
+    op.main.value = new ExtraT;
+    auto* extra = op.main.AsExtra();
+    extra->type = "PicPackedSiluMul";
+    extra->engine = "MNN";
+    auto attr = std::unique_ptr<AttributeT>(new AttributeT);
+    attr->key = "name";
+    attr->s = op.name;
+    extra->attr.emplace_back(std::move(attr));
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
 static bool runWeightOnlyConvCase(const WeightOnlyConvCase& c) {
     KVMeta meta;
     meta.pic_decode_repair_sparse_active = true;
@@ -508,17 +525,21 @@ public:
         std::vector<WeightOnlyConvCase> cases;
         const int warmup = envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20);
         const int repeat = envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 100);
+        const int hidden = envInt("MNN_BENCH_WEIGHT_ONLY_HIDDEN", 2048);
+        const int inter = envInt("MNN_BENCH_WEIGHT_ONLY_INTER", 8192);
+        const int kv = envInt("MNN_BENCH_WEIGHT_ONLY_KV", hidden == 3072 ? 1024 : 512);
+        const int vocab = envInt("MNN_BENCH_WEIGHT_ONLY_VOCAB_OC", 128256);
         for (int rows = 1; rows <= 8; ++rows) {
-            cases.push_back({"hidden_to_inter", rows, 2048, 8192, 64, warmup, repeat});
-            cases.push_back({"hidden_to_gateup_concat", rows, 2048, 16384, 64, warmup, repeat});
-            cases.push_back({"inter_to_hidden", rows, 8192, 2048, 64, warmup, repeat});
-            cases.push_back({"hidden_to_hidden", rows, 2048, 2048, 64, warmup, repeat});
-            cases.push_back({"hidden_to_kv", rows, 2048, 512, 64, warmup, repeat});
-            cases.push_back({"hidden_to_qkv_concat", rows, 2048, 3072, 64, warmup, repeat});
+            cases.push_back({"hidden_to_inter", rows, hidden, inter, 64, warmup, repeat});
+            cases.push_back({"hidden_to_gateup_concat", rows, hidden, inter * 2, 64, warmup, repeat});
+            cases.push_back({"inter_to_hidden", rows, inter, hidden, 64, warmup, repeat});
+            cases.push_back({"hidden_to_hidden", rows, hidden, hidden, 64, warmup, repeat});
+            cases.push_back({"hidden_to_kv", rows, hidden, kv, 64, warmup, repeat});
+            cases.push_back({"hidden_to_qkv_concat", rows, hidden, hidden + 2 * kv, 64, warmup, repeat});
         }
         if (::getenv("MNN_BENCH_WEIGHT_ONLY_VOCAB") != nullptr) {
             for (int rows = 1; rows <= 2; ++rows) {
-                cases.push_back({"hidden_to_vocab", rows, 2048, 128256, 64, std::max(1, warmup / 2), std::max(1, repeat / 2)});
+                cases.push_back({"hidden_to_vocab", rows, hidden, vocab, 64, std::max(1, warmup / 2), std::max(1, repeat / 2)});
             }
         }
 
@@ -606,9 +627,8 @@ public:
     }
 };
 
-static bool runDecodeRepairMlpGemmFloorCase(cublasHandle_t handle, int rows, int warmup, int repeat) {
-    constexpr int hidden = 2048;
-    constexpr int inter = 8192;
+static bool runDecodeRepairMlpGemmFloorCase(cublasHandle_t handle, int rows, int hidden, int inter,
+                                            int warmup, int repeat) {
     constexpr size_t elemBytes = 2;
 
     CudaDeviceBuffer input;
@@ -701,10 +721,12 @@ public:
 #endif
         const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_MLP_WARMUP", 20));
         const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_MLP_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 2048);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
         bool ok = true;
         for (int rows = 1; rows <= 8; ++rows) {
             if (enabledRow(rows)) {
-                ok = runDecodeRepairMlpGemmFloorCase(handle, rows, warmup, repeat) && ok;
+                ok = runDecodeRepairMlpGemmFloorCase(handle, rows, hidden, inter, warmup, repeat) && ok;
             }
         }
         cublasDestroy(handle);
@@ -723,9 +745,7 @@ static ErrorCode executeChain(DirectOpBench& bench,
     return NO_ERROR;
 }
 
-static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
-    constexpr int hidden = 2048;
-    constexpr int inter = 8192;
+static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int repeat) {
     constexpr int quantBlock = 64;
 
     KVMeta meta;
@@ -739,8 +759,11 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
     auto gate = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
     auto up = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
     auto swiglu = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto packedGateUp = bench.tensor({rows, inter * 2, 1, 1}, Tensor::CAFFE, false);
+    auto packedSwiglu = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
     auto output = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
-    if (!input || !gate || !up || !swiglu || !output) {
+    auto packedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    if (!input || !gate || !up || !swiglu || !packedGateUp || !packedSwiglu || !output || !packedOutput) {
         return false;
     }
 
@@ -748,6 +771,9 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
     auto upOp = makeWeightOnlyLinearConvOp(hidden, inter, quantBlock);
     auto siluOp = makePicSiluMulOp("bench_pic_decode_mlp_silu");
     auto downOp = makeWeightOnlyLinearConvOp(inter, hidden, quantBlock);
+    auto concatOp = makeWeightOnlyLinearConvOp(hidden, inter * 2, quantBlock);
+    auto packedSiluOp = makePicPackedSiluMulOp("bench_pic_decode_mlp_packed_silu");
+    auto packedDownOp = makeWeightOnlyLinearConvOp(inter, hidden, quantBlock);
 
     std::vector<Tensor*> gateInputs = {input};
     std::vector<Tensor*> gateOutputs = {gate};
@@ -757,19 +783,31 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
     std::vector<Tensor*> siluOutputs = {swiglu};
     std::vector<Tensor*> downInputs = {swiglu};
     std::vector<Tensor*> downOutputs = {output};
+    std::vector<Tensor*> concatInputs = {input};
+    std::vector<Tensor*> concatOutputs = {packedGateUp};
+    std::vector<Tensor*> packedSiluInputs = {packedGateUp};
+    std::vector<Tensor*> packedSiluOutputs = {packedSwiglu};
+    std::vector<Tensor*> packedDownInputs = {packedSwiglu};
+    std::vector<Tensor*> packedDownOutputs = {packedOutput};
 
     auto gateExe = bench.create(gateInputs, gateOutputs, gateOp->get());
     auto upExe = bench.create(upInputs, upOutputs, upOp->get());
     auto siluExe = bench.create(siluInputs, siluOutputs, siluOp->get());
     auto downExe = bench.create(downInputs, downOutputs, downOp->get());
-    if (!gateExe || !upExe || !siluExe || !downExe) {
+    auto concatExe = bench.create(concatInputs, concatOutputs, concatOp->get());
+    auto packedSiluExe = bench.create(packedSiluInputs, packedSiluOutputs, packedSiluOp->get());
+    auto packedDownExe = bench.create(packedDownInputs, packedDownOutputs, packedDownOp->get());
+    if (!gateExe || !upExe || !siluExe || !downExe || !concatExe || !packedSiluExe || !packedDownExe) {
         MNN_ERROR("failed to create PicDecodeMlp execution rows=%d\n", rows);
         return false;
     }
     if (bench.resize(gateExe.get(), gateInputs, gateOutputs) != NO_ERROR ||
         bench.resize(upExe.get(), upInputs, upOutputs) != NO_ERROR ||
         bench.resize(siluExe.get(), siluInputs, siluOutputs) != NO_ERROR ||
-        bench.resize(downExe.get(), downInputs, downOutputs) != NO_ERROR) {
+        bench.resize(downExe.get(), downInputs, downOutputs) != NO_ERROR ||
+        bench.resize(concatExe.get(), concatInputs, concatOutputs) != NO_ERROR ||
+        bench.resize(packedSiluExe.get(), packedSiluInputs, packedSiluOutputs) != NO_ERROR ||
+        bench.resize(packedDownExe.get(), packedDownInputs, packedDownOutputs) != NO_ERROR) {
         MNN_ERROR("PicDecodeMlp onResize failed rows=%d\n", rows);
         return false;
     }
@@ -781,6 +819,11 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
         MNN_ERROR("PicDecodeMlp dependency warm execute failed rows=%d\n", rows);
         return false;
     }
+    if (bench.execute(concatExe.get(), concatInputs, concatOutputs) != NO_ERROR ||
+        bench.execute(packedSiluExe.get(), packedSiluInputs, packedSiluOutputs) != NO_ERROR) {
+        MNN_ERROR("PicDecodeMlp packed dependency warm execute failed rows=%d\n", rows);
+        return false;
+    }
 
     float gateMs = 0.0f;
     float upMs = 0.0f;
@@ -788,6 +831,11 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
     float downMs = 0.0f;
     float siluDownMs = 0.0f;
     float totalMs = 0.0f;
+    float concatMs = 0.0f;
+    float packedSiluMs = 0.0f;
+    float packedDownMs = 0.0f;
+    float packedSiluDownMs = 0.0f;
+    float packedTotalMs = 0.0f;
     CudaEventPair timer;
     if (!timer.measure([&]() { return bench.execute(gateExe.get(), gateInputs, gateOutputs); }, warmup, repeat, &gateMs)) {
         return false;
@@ -799,6 +847,15 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
         return false;
     }
     if (!timer.measure([&]() { return bench.execute(downExe.get(), downInputs, downOutputs); }, warmup, repeat, &downMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(concatExe.get(), concatInputs, concatOutputs); }, warmup, repeat, &concatMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(packedSiluExe.get(), packedSiluInputs, packedSiluOutputs); }, warmup, repeat, &packedSiluMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(packedDownExe.get(), packedDownInputs, packedDownOutputs); }, warmup, repeat, &packedDownMs)) {
         return false;
     }
     std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> siluDownChain = {
@@ -817,11 +874,32 @@ static bool runPicDecodeMlpCase(int rows, int warmup, int repeat) {
     if (!timer.measure([&]() { return executeChain(bench, chain); }, warmup, repeat, &totalMs)) {
         return false;
     }
+    std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> packedSiluDownChain = {
+        {packedSiluExe.get(), {packedSiluInputs, packedSiluOutputs}},
+        {packedDownExe.get(), {packedDownInputs, packedDownOutputs}},
+    };
+    if (!timer.measure([&]() { return executeChain(bench, packedSiluDownChain); }, warmup, repeat, &packedSiluDownMs)) {
+        return false;
+    }
+    std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> packedChain = {
+        {concatExe.get(), {concatInputs, concatOutputs}},
+        {packedSiluExe.get(), {packedSiluInputs, packedSiluOutputs}},
+        {packedDownExe.get(), {packedDownInputs, packedDownOutputs}},
+    };
+    if (!timer.measure([&]() { return executeChain(bench, packedChain); }, warmup, repeat, &packedTotalMs)) {
+        return false;
+    }
     MNN_PRINT("[bench_ops/cuda/perf/PicDecodeMlp] rows=%d hidden=%d inter=%d qblock=%d "
               "gate=%.4f ms up=%.4f ms silu=%.4f ms down=%.4f ms silu_down=%.4f ms "
               "silu_down_over_down=%.4f ms sum=%.4f ms chain=%.4f ms\n",
               rows, hidden, inter, quantBlock, gateMs, upMs, siluMs, downMs,
               siluDownMs, siluDownMs - downMs, gateMs + upMs + siluMs + downMs, totalMs);
+    MNN_PRINT("[bench_ops/cuda/perf/PicDecodeMlpPacked] rows=%d hidden=%d inter=%d qblock=%d "
+              "concat=%.4f ms packed_silu=%.4f ms down=%.4f ms packed_silu_down=%.4f ms "
+              "sum=%.4f ms chain=%.4f ms delta_vs_split_chain=%.4f ms\n",
+              rows, hidden, inter, quantBlock, concatMs, packedSiluMs, packedDownMs,
+              packedSiluDownMs, concatMs + packedSiluMs + packedDownMs,
+              packedTotalMs, packedTotalMs - totalMs);
     ::fflush(stdout);
     return true;
 }
@@ -839,10 +917,12 @@ public:
         }
         const int warmup = envInt("MNN_BENCH_MLP_WARMUP", envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20));
         const int repeat = envInt("MNN_BENCH_MLP_REPEAT", envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 2048);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
         bool ok = true;
         for (int rows = 1; rows <= 8; ++rows) {
             if (enabledRow(rows)) {
-                ok = runPicDecodeMlpCase(rows, warmup, repeat) && ok;
+                ok = runPicDecodeMlpCase(rows, hidden, inter, warmup, repeat) && ok;
             }
         }
         return ok;

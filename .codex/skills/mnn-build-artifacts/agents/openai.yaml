@@ -1,4 +1,4 @@
 interface:
   display_name: "MNN Build Artifacts"
-  short_description: "Build and verify Jetson/x64 MNN CUDA and LLM artifacts"
-  default_prompt: "Use $mnn-build-artifacts from .codex/skills to build, restart, or diagnose this MNN repo's CUDA/LLM artifacts."
+  short_description: "Build and verify per-device MNN artifacts"
+  default_prompt: "Use $mnn-build-artifacts from .codex/skills to build or diagnose this MNN repo's Jetson, OrangePi, Rhino/Adreno, OnePlus13T, or x64 artifacts."

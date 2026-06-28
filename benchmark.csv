@@ -1,476 +1,772 @@
-device,device_display,model,backend,frequency_profile,context_tokens,mode,budget,prefill_latency_s,prefill_tps
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,normal-full-recompute,full,0.41655600000000004,1229.12645598671
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,pic-full-recompute,full,0.7001837599091232,731.2366114667561
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,full-reuse,0,0.3972311057150364,1288.9222234456531
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,cacheblend,0.05,0.1327118040062487,3857.9838759172662
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,cacheblend,0.10,0.14507285598665476,3529.2611875449593
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,cacheblend,0.20,0.1810500780120492,2827.9468621158258
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,cacheblend,0.30,0.2319653518497944,2207.2261909681138
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,cacheblend,0.40,0.2714657220058143,1886.0576437309232
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,cacheblend,0.50,0.28978412691503763,1766.8324536979014
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,epic,0.05,0.11127195274457335,4601.3392177569185
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,epic,0.10,0.12012767186388373,4262.132047145186
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,epic,0.20,0.14743173588067293,3472.793675945037
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,epic,0.30,0.18033808981999755,2839.111806668503
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,epic,0.40,0.223503980319947,2290.78694378091
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,512,epic,0.50,0.2622775509953499,1952.130474213089
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,normal-full-recompute,full,1.546081,662.3197620305792
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,pic-full-recompute,full,1.6496243267320096,620.7473928494959
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,full-reuse,0,0.4205226260237396,2435.0651704105753
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,cacheblend,0.05,0.25916346814483404,3951.174165595498
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,cacheblend,0.10,0.2959675849415362,3459.8383475078035
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,cacheblend,0.20,0.4262618077918887,2402.279494155248
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,cacheblend,0.30,0.48414718406274915,2115.0592912821357
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,cacheblend,0.40,0.4512453502975404,2269.2754602896157
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,cacheblend,0.50,0.5093229957856238,2010.512010007508
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,epic,0.05,0.21063064876943827,4861.590684843291
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,epic,0.10,0.22298948699608445,4592.144740967007
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,epic,0.20,0.2976750610396266,3439.9925758768377
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,epic,0.30,0.35583953466266394,2877.701604940419
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,epic,0.40,0.38279918394982815,2675.031825914789
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1024,epic,0.50,0.43185911094769835,2371.1436763551683
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,normal-full-recompute,full,3.028995,507.09888923553854
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,pic-full-recompute,full,2.9319307571277022,523.8868606517703
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,full-reuse,0,0.45431561628356576,3380.909537217602
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,cacheblend,0.05,0.40059757605195045,3834.2718274481217
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,cacheblend,0.10,0.5096975499764085,3013.551860453507
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,cacheblend,0.20,0.6764137870632112,2270.799367749227
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,cacheblend,0.30,0.6743503720499575,2277.747686756239
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,cacheblend,0.40,0.8159729149192572,1882.4154232521205
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,cacheblend,0.50,1.0426642536185682,1473.149189366864
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,epic,0.05,0.32096715411171317,4785.536402473733
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,epic,0.10,0.3513339553028345,4371.908768897772
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,epic,0.20,0.4422169290482998,3473.408409093798
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,epic,0.30,0.47675362788140774,3221.7898515542693
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,epic,0.40,0.5721157537773252,2684.7713768739027
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,1536,epic,0.50,0.7960733822546899,1929.4703657213643
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,normal-full-recompute,full,5.030644,407.1049352727007
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,pic-full-recompute,full,4.59839435108006,445.3728505296573
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,full-reuse,0,0.4912087139673531,4169.307143309585
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,cacheblend,0.05,0.6042299619875848,3389.4380100966932
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,cacheblend,0.10,0.8007025131955743,2557.753930141305
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,cacheblend,0.20,0.6875808890908957,2978.5586430533585
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,cacheblend,0.30,0.8492556000128388,2411.5236920063157
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,cacheblend,0.40,1.1160957608371973,1834.967994559687
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,cacheblend,0.50,1.3547808891162276,1511.6835618606815
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,epic,0.05,0.44236995931714773,4629.609124365812
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,epic,0.10,0.5138855949044228,3985.322842880829
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,epic,0.20,0.6038091629743576,3391.800134187387
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,epic,0.30,0.6941143036819994,2950.5226864454125
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,epic,0.40,0.9540474535897374,2146.6437463819148
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2048,epic,0.50,1.1648462140001357,1758.1720019221023
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,normal-full-recompute,full,7.548529133776922,339.1389176130925
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,pic-full-recompute,full,8.036989714019,318.5272211478094
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,full-reuse,0,0.7767370529472828,3295.8386500119072
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,cacheblend,0.05,0.8782260501757264,2914.9670514644417
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,cacheblend,0.10,1.0771538182161748,2376.633640160603
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,cacheblend,0.20,1.2125367699190974,2111.2761802438436
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,cacheblend,0.30,1.5858162427321076,1614.3106187319217
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,cacheblend,0.40,1.8040387472137809,1419.0382573288691
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,cacheblend,0.50,2.0436846958473325,1252.6394140944515
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,epic,0.05,0.6226863358169794,4111.219168863275
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,epic,0.10,0.703672731295228,3638.054860087998
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,epic,0.20,0.7932592537254095,3227.192103940027
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,epic,0.30,1.060286046937108,2414.442788712704
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,epic,0.40,1.2813431089743972,1997.9035919965695
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,2560,epic,0.50,1.5354119767434895,1667.304957090146
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,normal-full-recompute,full,10.579523369830547,290.37224954390405
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,pic-full-recompute,full,9.214727533981204,333.37936348865094
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,full-reuse,0,0.5884491838514805,5220.50176005571
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,cacheblend,0.05,1.189121293835342,2583.4202246027403
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,cacheblend,0.10,1.4000630611553788,2194.1868800287343
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,cacheblend,0.20,1.5761026619002223,1949.111611991223
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,cacheblend,0.30,2.156097979284823,1424.796103662683
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,cacheblend,0.40,2.5730726029723883,1193.903349812693
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,cacheblend,0.50,2.89196824003011,1062.2523295650078
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,epic,0.05,0.7982465540990233,3848.435028281895
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,epic,0.10,0.8996037929318845,3414.836647128947
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,epic,0.20,1.0434557399712503,2944.0635403324736
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,epic,0.30,1.3909562351182103,2208.5525931295215
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,epic,0.40,1.690570475999266,1817.1380865883132
-jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,max,3072,epic,0.50,2.04246921883896,1504.0618344036911
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,normal-full-recompute,full,0.45383302360065103,1128.168232311214
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,pic-full-recompute,full,0.6274908589984989,815.9481411684195
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,full-reuse,0,0.3132105910044629,1634.682908895327
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,cacheblend,0.05,0.12483951399917714,4101.265565671577
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,cacheblend,0.10,0.13788198700058274,3713.3204353795404
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,cacheblend,0.20,0.1839268199983053,2783.715827875008
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,cacheblend,0.30,0.2310652640007902,2215.824183760693
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,cacheblend,0.40,0.2775663139982498,1844.6042411444364
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,cacheblend,0.50,0.3323410960001638,1540.5858804766883
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,epic,0.05,0.12245498400443466,4181.128307374227
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,epic,0.10,0.135990833005053,3764.9596571040615
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,epic,0.20,0.18572423200384947,2756.7754324561583
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,epic,0.30,0.23250877599639352,2202.067417910891
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,epic,0.40,0.2799097550014267,1829.1609736766422
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,512,epic,0.50,0.33302137199643767,1537.4388644506482
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,normal-full-recompute,full,1.6390073592708232,624.7683966810049
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,pic-full-recompute,full,1.724776846000168,593.6999921901203
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,full-reuse,0,0.3305788279976696,3097.5970427459397
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,cacheblend,0.05,0.24764961899927584,4134.8741182718895
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,cacheblend,0.10,0.3008811149993562,3403.337560757813
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,cacheblend,0.20,0.4450213059972157,2301.013426099664
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,cacheblend,0.30,0.5858060000027763,1748.0189687288062
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,cacheblend,0.40,0.7167439620025107,1428.6831201745276
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,cacheblend,0.50,0.8380638379967422,1221.863960205834
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,epic,0.05,0.24623532099940348,4158.623530709799
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,epic,0.10,0.2993682369997259,3420.5365614687357
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,epic,0.20,0.44258484199963277,2313.680684077404
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,epic,0.30,0.5805345109984046,1763.891690502469
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,epic,0.40,0.7111203649983509,1439.9812611221937
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1024,epic,0.50,0.840251002999139,1218.683460471929
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,normal-full-recompute,full,3.772549083358639,407.15176027147254
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,pic-full-recompute,full,3.33981815000152,459.9052795731711
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,full-reuse,0,0.3550835189962527,4325.742868443888
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,cacheblend,0.05,0.39738910400046734,3865.229279155559
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,cacheblend,0.10,0.5406626499971026,2840.958220450833
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,cacheblend,0.20,0.8316476230029366,1846.9360790736923
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,cacheblend,0.30,1.0917273550003301,1406.944685378462
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,cacheblend,0.40,1.378684286995849,1114.105683576725
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,cacheblend,0.50,1.7815556519999518,862.1678465534915
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,epic,0.05,0.3944657149986597,3893.874528500453
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,epic,0.10,0.5415812869978254,2836.1393513328085
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,epic,0.20,0.8272393650040613,1856.7781768853072
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,epic,0.30,1.0867144229996484,1413.4348155242042
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,epic,0.40,1.3649436800042167,1125.321156104591
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,1536,epic,0.50,1.7826083229956566,861.6587167161692
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,normal-full-recompute,full,6.4881409989613035,315.65281955615137
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,pic-full-recompute,full,5.4640623629966285,374.8127059949633
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,full-reuse,0,0.38578341199900024,5308.67822799314
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,cacheblend,0.05,0.6127675259995158,3342.2136668541707
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,cacheblend,0.10,0.8698943900017184,2354.308779938165
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,cacheblend,0.20,1.364670308001223,1500.7287752890456
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,cacheblend,0.30,1.8502232199971331,1106.8934698609896
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,cacheblend,0.40,2.3586886519988184,868.2790745885294
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,cacheblend,0.50,2.914230230002431,702.7584776643715
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,epic,0.05,0.6082732430004398,3366.907921015554
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,epic,0.10,0.8666517460005707,2363.1176068716436
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,epic,0.20,1.3494617549949908,1517.6421209562936
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,epic,0.30,1.83455637699808,1116.3461781159224
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,epic,0.40,2.3563071160024265,869.1566502903568
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2048,epic,0.50,2.910745555003814,703.5998033147616
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,normal-full-recompute,full,9.945402829283138,257.40536044074184
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,pic-full-recompute,full,8.314876528005698,307.88190195940405
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,full-reuse,0,0.42089601200132165,6082.262428259742
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,cacheblend,0.05,0.8860036490004859,2889.3786192505804
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,cacheblend,0.10,1.2868686780057033,1989.3249744545064
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,cacheblend,0.20,1.9965241429963498,1282.2284213192609
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,cacheblend,0.30,2.9002158360017347,882.6929252028499
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,cacheblend,0.40,3.585948379994079,713.8976161180065
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,cacheblend,0.50,4.345993125003588,589.0483317315156
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,epic,0.05,0.8887286810058868,2880.519167112424
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,epic,0.10,1.280299054000352,1999.5328372704523
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,epic,0.20,1.9749028160003945,1296.266317136837
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,epic,0.30,2.867025260005903,892.9115608820025
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,epic,0.40,3.6225004049993004,706.6941929025111
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,2560,epic,0.50,4.385210703003395,583.780386709053
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,normal-full-recompute,full,13.93576882724869,220.43993683314412
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,pic-full-recompute,full,11.658345396994264,263.5022291235271
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,full-reuse,0,0.44869857499725185,6846.467029717701
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,cacheblend,0.05,1.2333516090002377,2490.773902253374
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,cacheblend,0.10,1.7557366500041098,1749.6929280326915
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,cacheblend,0.20,2.848937829003262,1078.296608906618
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,cacheblend,0.30,3.993402968000737,769.2687225947474
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,cacheblend,0.40,5.012519788004283,612.8654109958348
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,cacheblend,0.50,6.142181756003993,500.1480128778532
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,epic,0.05,1.224149749003118,2509.4968997883407
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,epic,0.10,1.7447512910002843,1760.7094007299975
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,epic,0.20,2.827276110998355,1086.5581851201755
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,epic,0.30,3.9863023340003565,770.6389888689575
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,epic,0.40,5.022389467005269,611.6610470338057
-jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,max,3072,epic,0.50,6.116937541999505,502.21209206524355
-jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,512,normal-full-recompute,full,1.164370079717512,439.72273843056524
-jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1024,normal-full-recompute,full,3.7487658637138837,273.1565633137537
-jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,1536,normal-full-recompute,full,7.885569669639346,194.7861808784514
-jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2048,normal-full-recompute,full,13.093571185706013,156.41263723649055
-jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,max,2560,normal-full-recompute,full,19.56601292139491,130.83912446979468
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,normal-full-recompute,full,3.9934296639345033,128.21059667683116
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,pic-full-recompute,full,5.980009828694165,85.61858837476255
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,full-reuse,0,0.4033309821970761,1269.428887438719
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,cacheblend,0.05,0.9301126105710864,550.470979729684
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,cacheblend,0.10,1.0116244871169329,506.11665348193407
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,cacheblend,0.20,1.4065624312497675,364.008016014671
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,cacheblend,0.30,1.8537478349171579,276.1972207632441
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,cacheblend,0.40,2.3089835387654603,221.74259426455245
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,cacheblend,0.50,2.7110636751167476,188.8557634036211
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,epic,0.05,0.8702672901563346,588.3249959998203
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,epic,0.10,0.957866651006043,534.52116686832
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,epic,0.20,1.4342550178989768,356.97975158561604
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,epic,0.30,1.8649883340112865,274.5325483611853
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,epic,0.40,2.2235228517092764,230.26522961363455
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,512,epic,0.50,2.6280974852852523,194.81773521214257
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,normal-full-recompute,full,6.006731939977573,170.4753949788915
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,pic-full-recompute,full,13.901191587094218,73.66274995811693
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,full-reuse,0,0.4932283032685518,2076.1176785965076
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.05,1.6787978829815984,609.9602640559348
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.10,1.9715475807897747,519.3889358682379
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.20,2.857826031278819,358.3143231226643
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.30,3.5716491281054914,286.7022944505078
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.40,4.428747241850942,231.21662720404683
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.50,4.5370221310295165,225.69870069548008
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,epic,0.05,1.6183142862282693,632.7571898203962
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,epic,0.10,1.9589674840681255,522.7243475596092
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,epic,0.20,2.786589492112398,367.4742917456952
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,epic,0.30,3.445766632910818,297.17624815902695
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,epic,0.40,4.278179157990962,239.35416498098962
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1024,epic,0.50,4.320406292099506,237.01474601417317
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,normal-full-recompute,full,9.05530437361207,169.62433692190788
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,pic-full-recompute,full,26.865101960022002,57.17454570936391
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,full-reuse,0,0.5803796728141606,2646.543412783914
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.05,2.7273378493264318,563.1865521828711
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.10,3.3148784628137946,463.365404563335
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.20,4.563978239893913,336.54849328021845
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.30,6.027033199090511,254.85175695262222
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.40,6.131475158035755,250.51067816640463
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.50,7.682647153735161,199.93108745769032
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,epic,0.05,2.6818092218600214,572.7476762626228
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,epic,0.10,3.2170467721298337,477.4565335222332
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,epic,0.20,4.303636739961803,356.9074466107548
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,epic,0.30,5.569931495934725,275.76640774147154
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,epic,0.40,5.515371250919998,278.4943986760249
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,1536,epic,0.50,6.7538556307554245,227.4256489886203
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,normal-full-recompute,full,13.07453229554599,156.64040240259132
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,pic-full-recompute,full,44.88574573257938,45.62695721268817
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,full-reuse,0,0.7334407931193709,2792.3180974018696
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.05,4.202835537027568,487.2900645187836
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.10,5.301839442923665,386.28102982889345
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.20,7.365574773866683,278.05026259001204
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.30,8.34351104311645,245.46021326233367
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.40,10.173644164577127,201.30446542751935
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.50,12.683047941885889,161.47538110586652
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,epic,0.05,4.001794394571334,511.77042048392855
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,epic,0.10,4.810463037807494,425.73864176980237
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,epic,0.20,6.321986814029515,323.948793353247
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,epic,0.30,6.733312357217073,304.15936337853975
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,epic,0.40,8.122539370786399,252.13789758481886
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2048,epic,0.50,9.990882568061352,204.98689540671856
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,normal-full-recompute,full,16.794484999999998,152.43099148321608
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,pic-full-recompute,full,66.68656744621694,38.38854057175237
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,full-reuse,0,0.7541166180744767,3394.7004198589
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.05,6.39794984087348,400.128176004971
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.10,7.877523650880903,324.97522234842523
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.20,9.815862662158906,260.80234495018414
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.30,11.917647468857467,214.8074950773338
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.40,14.472136296797544,176.89164526224698
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.50,17.185838568024337,148.95985376955014
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,epic,0.05,5.666181659325957,451.80337552123854
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,epic,0.10,6.628030665684491,386.238406115706
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,epic,0.20,7.762072559911758,329.80882106429357
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,epic,0.30,9.363832087256014,273.392343662816
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,epic,0.40,11.408100694883615,224.4019463422274
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,2560,epic,0.50,13.512123540975153,189.45948741786356
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,normal-full-recompute,full,21.674302,141.73466808758133
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,pic-full-recompute,full,97.34971873695031,31.556331542167918
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,full-reuse,0,0.9405548498034477,3266.157205655758
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.05,8.729766565840691,351.89944391189584
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.10,10.719340038020164,286.58480737657345
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.20,13.472601178102195,228.0183284125638
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.30,16.694835225120187,184.0090038970651
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.40,19.81917000329122,155.00144554438234
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.50,23.85387877188623,128.78408703999142
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,epic,0.05,7.784666858613491,394.62189658134537
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,epic,0.10,8.933808587025851,343.862303526552
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,epic,0.20,10.1320520658046,303.1962311334657
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,epic,0.30,12.36069566803053,248.52970111911765
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,epic,0.40,14.749936858657748,208.27207800532602
-orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,max,3072,epic,0.50,17.88797528995201,171.7354787338954
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,512,normal-full-recompute,full,2.9782999411378346,171.9101534831964
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,normal-full-recompute,full,4.549767212690032,225.06645991555334
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,pic-full-recompute,full,16.065021,63.74096865481843
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,full-reuse,0,0.514472,1990.3901475687694
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.05,1.622333,631.1897742325405
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.10,2.10168,487.22926420768147
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.20,3.595033,284.83744099150135
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.30,5.143456,199.08792842788975
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.40,6.732609,152.09556948873757
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.50,7.719177,132.65662906809882
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,epic,0.05,1.532307,668.2733943002283
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,epic,0.10,1.863759,549.427259640329
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,epic,0.20,2.795513,366.3012835211283
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,epic,0.30,3.939932,259.90296279225123
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,epic,0.40,5.281591,193.8809726084432
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1024,epic,0.50,6.465034,158.39050498419653
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,normal-full-recompute,full,7.35691025107768,208.78329999676134
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,pic-full-recompute,full,33.131036,46.36136340559951
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,full-reuse,0,0.630957,2434.3972727143055
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.05,6.644793,231.158442407461
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.10,9.934727,154.60918050390313
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.20,16.872859,91.03377204776027
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.30,27.596612,55.65900625772468
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.40,40.109915,38.29477075680664
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.50,50.646872,30.327638002994536
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,epic,0.05,6.103843,251.64474250074912
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,epic,0.10,6.464,237.6237623762376
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,epic,0.20,10.047251,152.87763787328495
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,epic,0.30,14.4516,106.2858091837582
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,epic,0.40,18.918095,81.19210734484629
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,1536,epic,0.50,26.854474,57.19717317866662
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,2048,normal-full-recompute,full,11.07995779940647,184.83824912308845
-orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,max,2560,normal-full-recompute,full,14.470425663088292,176.912556658934
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,normal-full-recompute,full,15.88508387978672,64.46298979277084
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,pic-full-recompute,full,36.038463,28.414086361008238
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,full-reuse,0,1.109441,922.9873422741724
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.05,3.815022,268.4126067949281
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.10,5.443495,188.11443750752042
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.20,9.169771,111.67127292491818
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.30,12.730611,80.43604505706757
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.40,16.535884,61.92593029801129
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,cacheblend,0.50,17.435609,58.73038332070879
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.05,3.654728,280.1850096641939
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.10,4.621289,221.58319897327348
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.20,7.543236,135.75075736726254
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.30,10.677521,95.902410306662
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.40,14.277874,71.71936101971484
-orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,max,1024,epic,0.50,15.614366,65.58063260461552
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,normal-full-recompute,full,35.687320832931405,28.69366419501789
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,pic-full-recompute,full,70.80941,14.461354783213135
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,full-reuse,0,2.174056,471.0090264464208
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,cacheblend,0.05,8.247438,124.15976937322837
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,cacheblend,0.10,11.99819,85.34620638612991
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,cacheblend,0.20,20.804445,49.220250768525666
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,cacheblend,0.30,29.191376,35.0788534257515
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,cacheblend,0.40,37.938296,26.991196441716834
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,cacheblend,0.50,38.789479,26.39891090055631
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,epic,0.05,6.87402,148.96668906986014
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,epic,0.10,9.225829,110.99273572055152
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,epic,0.20,15.611741,65.59165950805871
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,epic,0.30,22.474635,45.56247520816245
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,epic,0.40,30.758785,33.29130198088124
-orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,max,1024,epic,0.50,32.05395,31.946140803239537
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,normal-full-recompute,full,1.6480269304101536,310.67453483455864
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,pic-full-recompute,full,1.8829209641553462,271.9179454405175
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,full-reuse,0,0.32176920492202044,1591.202614072659
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,cacheblend,0.05,0.4360594367608428,1174.1518628819558
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,cacheblend,0.10,0.49862386705353856,1026.8260984487235
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,cacheblend,0.20,0.6436659353785217,795.4436794902115
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,cacheblend,0.30,0.8061086968518794,635.1500759134954
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,cacheblend,0.40,0.9546165186911821,536.3410227826067
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,cacheblend,0.50,1.0903563830070198,469.5712410909083
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,epic,0.05,0.42129163490608335,1215.310149972804
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,epic,0.10,0.48520374158397317,1055.2268173541881
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,epic,0.20,0.6412144261412323,798.4848423968992
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,epic,0.30,0.7893617390654981,648.6253065750838
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,epic,0.40,0.9441392840817571,542.2928678345977
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,512,epic,0.50,1.0890178461559117,470.1484018900994
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,normal-full-recompute,full,3.0149131934427373,339.64493645360704
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,pic-full-recompute,full,3.2095063710585237,319.05217862592235
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,full-reuse,0,0.36446329904720187,2809.610741814037
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.05,0.6571181318722665,1558.319501978146
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.10,0.7697114301845431,1330.3687068210609
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.20,1.0919321030378342,937.7872462501632
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.30,1.432239918038249,714.964013433295
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.40,1.7672682348638773,579.4253412124917
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,cacheblend,0.50,2.2182880067266524,461.61724577460694
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,epic,0.05,0.6128074717707932,1670.9979025565865
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,epic,0.10,0.748230024240911,1368.5630980110177
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,epic,0.20,1.0554157178848982,970.2337975903403
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,epic,0.30,1.394183469004929,734.4800901497274
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,epic,0.40,1.6519009941257536,619.8918722377416
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1024,epic,0.50,2.0077368239872158,510.027005415188
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,normal-full-recompute,full,4.4926133147108,341.89454831789277
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,pic-full-recompute,full,6.402008825913072,239.9246926656543
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,full-reuse,0,0.39665111573413014,3872.4207220673998
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.05,0.9384582098573446,1636.7271167391546
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.10,1.179730567149818,1301.9922029408078
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.20,1.7350316583178937,885.2864399541538
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.30,2.2483429959975183,683.1697844743327
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.40,2.752925860695541,557.9518220704722
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,cacheblend,0.50,3.589501211885363,427.9146068857923
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,epic,0.05,0.9247381780296564,1661.0106909101144
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,epic,0.10,1.147884570993483,1338.1136386131636
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,epic,0.20,1.6357549498789012,939.0159571968367
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,epic,0.30,2.0561342798173428,747.0329224492338
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,epic,0.40,2.522518004756421,608.9153762644081
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,1536,epic,0.50,3.1258568270131946,491.38526970465
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,normal-full-recompute,full,6.323234265663554,323.88488453148983
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,pic-full-recompute,full,6.696720091160387,305.8213531581442
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,full-reuse,0,0.44275761488825083,4625.555679074886
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.05,1.2303092307411134,1664.622152567551
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.10,1.5822267578914762,1294.3783119489317
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.20,2.3640321511775255,866.3164750022077
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.30,3.1669371728785336,646.6816006136634
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.40,4.228441926650703,484.33915743101994
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,cacheblend,0.50,5.207544039934874,393.2755986880934
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,epic,0.05,1.058595503680408,1934.6388614723373
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,epic,0.10,1.392317920923233,1470.928420315089
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,epic,0.20,1.9598302450031042,1044.9884653131048
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,epic,0.30,2.6000589579343796,787.6744462852629
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,epic,0.40,3.27932570502162,624.5186310295146
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2048,epic,0.50,3.9020656999200583,524.8502094780099
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,normal-full-recompute,full,8.389641804265796,305.13817630430214
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,pic-full-recompute,full,8.68286877963692,294.83343178048676
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,full-reuse,0,0.4852210130002277,5275.946283057611
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.05,1.477051923982799,1733.182130183402
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.10,2.024710669182241,1264.3781844810235
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.20,3.1518812216818333,812.2133481394304
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.30,4.356927094049752,587.5700797234334
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.40,5.222574308980256,490.17971761513485
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,cacheblend,0.50,6.665021932683885,384.0947600556708
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,epic,0.05,1.294183474034071,1978.0812005119183
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,epic,0.10,1.6845147288404405,1519.7255068005325
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,epic,0.20,2.4703986449167132,1036.269998474804
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,epic,0.30,3.3566910731606185,762.6558250978801
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,epic,0.40,4.055455807596445,631.248402511194
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,2560,epic,0.50,5.051511587109417,506.77900186009214
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,normal-full-recompute,full,10.406852339451069,295.1901208739586
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,pic-full-recompute,full,21.269487435929477,144.4322534454039
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,full-reuse,0,0.5137117260001105,5980.007549991839
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.05,1.7504071579314768,1755.020245478372
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.10,2.452488166745752,1252.605432170663
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.20,3.869468729943037,793.9074364984526
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.30,5.5257031987421215,555.94734091026
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.40,7.0868893139995635,433.47650342605436
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,cacheblend,0.50,9.147212170995772,335.8400289151246
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,epic,0.05,1.5320070562884212,2005.2126962407765
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,epic,0.10,2.071925648022443,1482.6786873033218
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,epic,0.20,2.952227396890521,1040.5702498512246
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,epic,0.30,4.0148120410740376,765.1665802960435
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,epic,0.40,4.908214353956282,625.8895350655996
-rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,max,3072,epic,0.50,6.327216072008014,485.52158880597005
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,normal-full-recompute,full,1.2439033310490104,411.6075479661425
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,pic-full-recompute,full,1.760187,290.87818510192386
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,full-reuse,0,0.337038,1519.1165387879112
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,cacheblend,0.05,2.833379,180.7029698462507
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,cacheblend,0.10,3.219565,159.02769473515832
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,cacheblend,0.20,4.235745,120.87602062919275
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,cacheblend,0.30,4.920549,104.05342981037278
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,cacheblend,0.40,6.261123,81.7744676154741
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,cacheblend,0.50,6.775504,75.56633425351089
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,epic,0.05,2.817644,181.71209705697385
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,epic,0.10,3.021654,169.4436225987489
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,epic,0.20,3.590852,142.58454539479766
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,epic,0.30,4.408682,116.13448191545683
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,epic,0.40,6.127144,83.56258641872951
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,512,epic,0.50,6.789226,75.4136038482148
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,normal-full-recompute,full,2.3206329982099554,441.25891547257714
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,pic-full-recompute,full,2.574071,397.81342472682377
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,full-reuse,0,0.325004,3150.7304525482764
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.05,5.434128,188.43869706418397
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.10,6.625788,154.54765531284733
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.20,11.135314,91.95968789025618
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.30,13.765002,74.39156202084096
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.40,18.649105,54.90880125346498
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,cacheblend,0.50,24.106802,42.477637639368346
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,epic,0.05,5.224909,195.98427455865738
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,epic,0.10,5.41915,188.95952317245323
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,epic,0.20,7.793084,131.39855800348104
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,epic,0.30,10.623759,96.38772867494453
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,epic,0.40,16.475283,62.15371232166391
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1024,epic,0.50,24.459728,41.86473373702275
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,normal-full-recompute,full,3.564026094597638,430.9732755122848
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,pic-full-recompute,full,3.888332,395.0279965805389
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,full-reuse,0,0.42534,3611.2286641275214
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.05,8.111231,189.36706401284835
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.10,11.891269,129.17040225059245
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.20,19.777092,77.66561433804323
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.30,29.612314,51.870313140675194
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.40,41.581657,36.93936487427617
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,cacheblend,0.50,55.627961,27.61201331826633
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,epic,0.05,7.425148,206.86456350769035
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,epic,0.10,7.947571,193.2665968004564
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,epic,0.20,12.775277,120.2322266671791
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,epic,0.30,21.39386,71.7963004338628
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,epic,0.40,35.873889,42.81665698413685
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,1536,epic,0.50,55.716132,27.568317197611634
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,2048,normal-full-recompute,full,5.12639365812659,399.50111844286835
-rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,max,2560,normal-full-recompute,full,6.796692651062217,376.6537831602422
+device,device_display,model,backend,frequency_note,context_tokens,mode,budget,prefill_latency_s,prefill_tps
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,0.41655600000000004,1229.12645598671
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.3972311057150364,1288.9222234456531
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.1327118040062487,3857.9838759172662
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,0.14507285598665476,3529.2611875449593
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,0.1810500780120492,2827.9468621158258
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,0.2319653518497944,2207.2261909681138
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,0.2714657220058143,1886.0576437309232
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,0.28978412691503763,1766.8324536979014
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.11127195274457335,4601.3392177569185
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.12012767186388373,4262.132047145186
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.20,0.14743173588067293,3472.793675945037
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.30,0.18033808981999755,2839.111806668503
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.40,0.223503980319947,2290.78694378091
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.50,0.2622775509953499,1952.130474213089
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,1.546081,662.3197620305792
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.4205226260237396,2435.0651704105753
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,0.25916346814483404,3951.174165595498
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,0.2959675849415362,3459.8383475078035
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,0.4262618077918887,2402.279494155248
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,0.48414718406274915,2115.0592912821357
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,0.4512453502975404,2269.2754602896157
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,0.5093229957856238,2010.512010007508
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,0.21063064876943827,4861.590684843291
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,0.22298948699608445,4592.144740967007
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,0.2976750610396266,3439.9925758768377
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,0.35583953466266394,2877.701604940419
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,0.38279918394982815,2675.031825914789
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,0.43185911094769835,2371.1436763551683
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,3.028995,507.09888923553854
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.45431561628356576,3380.909537217602
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,0.40059757605195045,3834.2718274481217
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,0.5096975499764085,3013.551860453507
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,0.6764137870632112,2270.799367749227
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,0.6743503720499575,2277.747686756239
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,0.8159729149192572,1882.4154232521205
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,1.0426642536185682,1473.149189366864
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,0.32096715411171317,4785.536402473733
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,0.3513339553028345,4371.908768897772
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,0.4422169290482998,3473.408409093798
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,0.47675362788140774,3221.7898515542693
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,0.5721157537773252,2684.7713768739027
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,0.7960733822546899,1929.4703657213643
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,5.030644,407.1049352727007
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.4912087139673531,4169.307143309585
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,0.6042299619875848,3389.4380100966932
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,0.8007025131955743,2557.753930141305
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,0.6875808890908957,2978.5586430533585
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,0.8492556000128388,2411.5236920063157
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,1.1160957608371973,1834.967994559687
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,1.3547808891162276,1511.6835618606815
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,0.44236995931714773,4629.609124365812
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,0.5138855949044228,3985.322842880829
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,0.6038091629743576,3391.800134187387
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,0.6941143036819994,2950.5226864454125
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,0.9540474535897374,2146.6437463819148
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,1.1648462140001357,1758.1720019221023
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,7.548529133776922,339.1389176130925
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,0.7767370529472828,3295.8386500119072
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,0.8782260501757264,2914.9670514644417
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,1.0771538182161748,2376.633640160603
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,1.2125367699190974,2111.2761802438436
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,1.5858162427321076,1614.3106187319217
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,1.8040387472137809,1419.0382573288691
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,2.0436846958473325,1252.6394140944515
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,0.6226863358169794,4111.219168863275
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,0.703672731295228,3638.054860087998
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,0.7932592537254095,3227.192103940027
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,1.060286046937108,2414.442788712704
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,1.2813431089743972,1997.9035919965695
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,1.5354119767434895,1667.304957090146
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,10.579523369830547,290.37224954390405
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.5884491838514805,5220.50176005571
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,1.189121293835342,2583.4202246027403
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,1.4000630611553788,2194.1868800287343
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,1.5761026619002223,1949.111611991223
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,2.156097979284823,1424.796103662683
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,2.5730726029723883,1193.903349812693
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,2.89196824003011,1062.2523295650078
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,0.7982465540990233,3848.435028281895
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,0.8996037929318845,3414.836647128947
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,1.0434557399712503,2944.0635403324736
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,1.3909562351182103,2208.5525931295215
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,1.690570475999266,1817.1380865883132
+jetson,Jetson AGX Xavier,Llama3.2 1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,2.04246921883896,1504.0618344036911
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,0.45004640375114696,1137.6604628599816
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.3132105910044629,1634.682908895327
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.127653,4010.873226637839
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,0.128897,3972.163820725075
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,0.169279,3024.5925365816192
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,0.207742,2464.5955078895936
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,0.259385,1973.8998014534382
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,0.300547,1703.560508007067
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.113568,4508.312200619893
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.115133,4447.030825219529
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.20,0.146945,3484.2968457586176
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.30,0.183102,2796.255638933491
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.40,0.232526,2201.9043031746987
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,epic,0.50,0.279597,1831.2070587309593
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,1.6692124031131643,613.4629709737293
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.3305788279976696,3097.5970427459397
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,0.208365,4914.453003143522
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,0.242442,4223.690614662476
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,0.340225,3009.772944375046
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,0.451946,2265.7574134963024
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,0.53951,1898.0185724082962
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,0.67354,1520.3254446654987
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,0.201057,5093.083056048782
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,0.218097,4695.158576229843
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,0.301568,3395.585738539898
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,0.407287,2514.19760512857
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,0.50319,2035.016594129454
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,0.654636,1564.2280595628715
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,3.836718220235194,400.3421444658091
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.3550835189962527,4325.742868443888
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,0.430028,3571.8604369948002
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,0.486387,3157.979140067477
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,0.866872,1771.887891176552
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,1.23483,1243.8959208959936
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,1.605336,956.8090418454453
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,2.051844,748.5949224210028
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,0.303255,5065.0442696740365
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,0.359818,4268.824794757349
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,0.510258,3010.241877638371
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,0.666415,2304.870088458393
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,0.926037,1658.681024624286
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,1.322021,1161.85748940448
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,6.579209132943871,311.2836145829615
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.38578341199900024,5308.67822799314
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,0.555017,3689.9770637656143
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,0.912805,2243.6336347850856
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,1.60223,1278.2184829893336
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,2.284661,896.413078351668
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,2.983146,686.5235560042988
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,3.689542,555.0824465475661
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,0.435663,4700.881185687102
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,0.543082,3771.06956223922
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,0.751,2727.030625832224
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,1.076837,1901.8662991706265
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,1.57224,1302.6001119421971
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,2.152964,951.2467463459677
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,10.053044245615244,254.64923235731058
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,0.42089601200132165,6082.262428259742
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,1.167305,2193.085783064409
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,1.886318,1357.1412667429352
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,3.056614,837.5280620974712
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,4.300432,595.2890314275403
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,5.3039,482.66370029600864
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,6.223105,411.37020828027164
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,0.643327,3979.313785990639
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,0.759193,3372.0015858944957
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,1.050572,2436.767779838031
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,1.635625,1565.150936186473
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,2.324546,1101.290316474701
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,3.174938,806.3149579613838
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,14.171284891141076,216.77639138568202
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.44869857499725185,6846.467029717701
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,1.556105,1974.1598413988772
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,2.553866,1202.882218565892
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,4.429644,693.5094558388892
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,6.282745,488.95824993693043
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,7.976254,385.1432013072803
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,9.288044,330.7477871551858
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,0.782421,3926.274984950557
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,0.958321,3205.606472152859
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,1.415365,2170.4648624206475
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,2.208434,1391.0309296089447
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,3.194247,961.7290084329735
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,4.395712,698.8628918364079
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,1.164370079717512,439.72273843056524
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,3.7487658637138837,273.1565633137537
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,7.885569669639346,194.7861808784514
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,13.093571185706013,156.41263723649055
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,19.56601292139491,130.83912446979468
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,3.9934296639345033,128.21059667683116
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.4033309821970761,1269.428887438719
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.9301126105710864,550.470979729684
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,1.0116244871169329,506.11665348193407
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,1.4065624312497675,364.008016014671
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,1.8537478349171579,276.1972207632441
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,2.3089835387654603,221.74259426455245
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,2.7110636751167476,188.8557634036211
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.8702672901563346,588.3249959998203
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.957866651006043,534.52116686832
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,1.4342550178989768,356.97975158561604
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,1.8649883340112865,274.5325483611853
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,2.2235228517092764,230.26522961363455
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,2.6280974852852523,194.81773521214257
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,6.006731939977573,170.4753949788915
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.4932283032685518,2076.1176785965076
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,1.6787978829815984,609.9602640559348
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,1.9715475807897747,519.3889358682379
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,2.857826031278819,358.3143231226643
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,3.5716491281054914,286.7022944505078
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,4.428747241850942,231.21662720404683
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,4.5370221310295165,225.69870069548008
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,1.6183142862282693,632.7571898203962
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,1.9589674840681255,522.7243475596092
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,2.786589492112398,367.4742917456952
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,3.445766632910818,297.17624815902695
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,4.278179157990962,239.35416498098962
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,4.320406292099506,237.01474601417317
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,9.05530437361207,169.62433692190788
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.5803796728141606,2646.543412783914
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,2.7273378493264318,563.1865521828711
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,3.3148784628137946,463.365404563335
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,4.563978239893913,336.54849328021845
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,6.027033199090511,254.85175695262222
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,6.131475158035755,250.51067816640463
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,7.682647153735161,199.93108745769032
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,2.6818092218600214,572.7476762626228
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,3.2170467721298337,477.4565335222332
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,4.303636739961803,356.9074466107548
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,5.569931495934725,275.76640774147154
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,5.515371250919998,278.4943986760249
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,6.7538556307554245,227.4256489886203
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,13.07453229554599,156.64040240259132
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.7334407931193709,2792.3180974018696
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,4.202835537027568,487.2900645187836
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,5.301839442923665,386.28102982889345
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,7.365574773866683,278.05026259001204
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,8.34351104311645,245.46021326233367
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,10.173644164577127,201.30446542751935
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,12.683047941885889,161.47538110586652
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,4.001794394571334,511.77042048392855
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,4.810463037807494,425.73864176980237
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,6.321986814029515,323.948793353247
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,6.733312357217073,304.15936337853975
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,8.122539370786399,252.13789758481886
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,9.990882568061352,204.98689540671856
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,16.794484999999998,152.43099148321608
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,0.7541166180744767,3394.7004198589
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,6.39794984087348,400.128176004971
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,7.877523650880903,324.97522234842523
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,9.815862662158906,260.80234495018414
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,11.917647468857467,214.8074950773338
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,14.472136296797544,176.89164526224698
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,17.185838568024337,148.95985376955014
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,5.666181659325957,451.80337552123854
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,6.628030665684491,386.238406115706
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,7.762072559911758,329.80882106429357
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,9.363832087256014,273.392343662816
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,11.408100694883615,224.4019463422274
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,13.512123540975153,189.45948741786356
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,21.674302,141.73466808758133
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.9405548498034477,3266.157205655758
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,8.729766565840691,351.89944391189584
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,10.719340038020164,286.58480737657345
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,13.472601178102195,228.0183284125638
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,16.694835225120187,184.0090038970651
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,19.81917000329122,155.00144554438234
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,23.85387877188623,128.78408703999142
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,7.784666858613491,394.62189658134537
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,8.933808587025851,343.862303526552
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,10.1320520658046,303.1962311334657
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,12.36069566803053,248.52970111911765
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,14.749936858657748,208.27207800532602
+orangepi,Orange Pi 5 Plus,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,17.88797528995201,171.7354787338954
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,2.087799255171569,245.234305324975
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.429257,1192.758650412224
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.622859,822.0158976590207
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,0.788489,649.3432375087034
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,1.122164,456.2612951404608
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,1.268948,403.48383070070645
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,1.494961,342.48385074928376
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,1.712549,298.9695477326488
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.617986,828.4977329583518
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.731855,699.5921323212931
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,1.060809,482.65050541614943
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,1.218384,420.22876203233136
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,1.440272,355.4884077452037
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,1.655416,309.2878164763419
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,4.5503844396762965,225.03593126580859
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.533418,1919.69524837932
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,1.317182,777.41724378256
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,1.656581,618.1406161244153
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,2.1274,481.3387233242455
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,2.58669,395.87271764301096
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,3.221288,317.8852682529473
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,3.98559,256.9255743817101
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,1.290408,793.5474671576742
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,1.583476,646.6785729622678
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,1.946304,526.1254151458354
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,2.290734,447.0182919535834
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,2.889557,354.3795813683551
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,3.582154,285.8615235414223
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,7.367356320941146,208.48726912176593
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.627512,2447.761955149862
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,2.405929,638.4228296013723
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,2.746062,559.3464386455951
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,3.664046,419.20871080767
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,4.787379,320.8436181885746
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,6.027979,254.8117702467112
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,7.185928,213.75109797927283
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,2.279019,673.9741967925673
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,2.492294,616.299682140229
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,3.071995,500.00081380340794
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,3.856194,398.32020899363465
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,4.745882,323.64900770815626
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,5.804678,264.6141611989502
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,11.102710484015056,184.45946176373545
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.739107,2770.911383602104
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,3.689036,555.1585834348051
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,4.473335,457.8239724947942
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,6.276987,326.2711871157292
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,8.029129,255.0712536814392
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,9.620878,212.87038459483637
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,11.892315,172.21205459155766
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,3.475747,589.2258556218275
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,3.884049,527.2847999600417
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,4.791291,427.4422071212122
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,5.948013,344.3166650779008
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,7.119305,287.66852944212957
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,8.922163,229.5407514971426
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,14.56778845211577,175.730174035318
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,0.834758,3066.7570721095217
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,6.842663,374.1233493451307
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,9.528431,268.66962672028586
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,10.873187,235.44154993379587
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,12.773148,200.4204445137565
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,15.857593,161.43685867079574
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,18.648733,137.27474139932187
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,5.040579,507.87816240951685
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,5.382201,475.64184243583617
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,6.781841,377.4786226925698
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,8.250531,310.28305935702804
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,10.252805,249.68776837167974
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,12.378715,206.80660310864255
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,18.819421568768487,163.23562277270494
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.946019,3247.2920734150157
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,7.80878,393.4033229262446
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,9.639148,318.70036646392396
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,13.844792,221.8884906324342
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,18.042043,170.26896565982022
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,22.162702,138.6112577789477
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,26.243375,117.05811466703501
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,6.51177,471.7611340695387
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,7.032496,436.82925663946344
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,8.784652,349.70081911042126
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,10.856033,282.9762953005025
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,13.352672,230.06631182133432
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,16.551713,185.6001248934174
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,7.656915970530308,66.86765297811405
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,1.144835,447.2260194700546
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,1.634906,313.1678518520331
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,2.287552,223.8200486808606
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,3.319912,154.22095525423566
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,4.366593,117.2538864968638
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,4.769152,107.35661182533079
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,5.92669,86.38886123620436
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,1.621399,315.7766842091305
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,2.26226,226.32235021615554
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,3.240575,157.99665182876495
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,4.274442,119.78171653750361
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,4.673004,109.56549577102867
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,5.782993,88.53546943598236
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,15.890526332100896,64.44091143358726
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,1.109441,922.9873422741724
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,3.38034,302.9281078234734
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,4.372394,234.19664376083216
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,5.854538,174.9070550058775
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,7.268154,140.888594270292
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,9.322362,109.84340663878962
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,11.11822,92.1010737330256
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,3.312802,309.1038945279555
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,4.199468,243.84041026149023
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,5.558722,184.21500481585514
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,6.84197,149.66449721352183
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,8.852828,115.66925280825517
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,10.627023,96.35812400142542
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,24.133070046493298,63.64710320903376
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,1.485792,1033.792078568198
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,5.368141,286.13257364141515
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,6.981383,220.0137136151963
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,9.118096,168.4562215620454
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,12.182711,126.08031168103717
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,15.014416,102.30168126419302
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,18.438851,83.30237063036087
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,5.142042,298.71401283770143
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,6.514995,235.76380334904326
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,8.252879,186.1168690344303
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,10.86486,141.37319762978998
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,13.502201,113.75923080985093
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,16.649957,92.25249050192743
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,33.53586711481794,61.06894427355015
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,1.641725,1247.4683640682817
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,7.896584,259.3526517288995
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,9.796949,209.0446729895195
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,13.87704,147.58190507485747
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,17.808895,114.99871272192912
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,21.715644,94.3098901418719
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,28.110441,72.85549166589026
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,7.344334,278.8544202918876
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,8.776739,233.34407004697306
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,12.076437,169.58644341870038
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,15.332369,133.57361801036748
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,18.762844,109.15189616243677
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,24.406214,83.9130559127278
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,43.3787657674617,59.015049292164264
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,1.718726,1489.475343946621
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,13.190611,194.07743886920778
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,15.720495,162.844745028703
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,21.863034,117.09262310070963
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,27.095806,94.47956632107567
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,33.443118,76.54788647398249
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,40.653321,62.97148515861718
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,11.318988,226.16862920960781
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,12.074512,212.01685003915685
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,16.017443,159.8257599543198
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,20.666827,123.87000675043149
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,26.631143,96.12805578791718
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,32.196172,79.51255820101844
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,53.49077333281615,57.43046526708847
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,1.902864,1614.4085967257774
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,15.757516,194.9545854816203
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,19.975138,153.7911778131395
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,29.355134,104.64949674561186
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,37.214031,82.54950935038454
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,43.780184,70.16873204553
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,52.411456,58.61313984484613
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,13.014173,236.0503429607091
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,14.793188,207.66314874116384
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,20.108723,152.76952196317984
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,26.027446,118.02925265890475
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,32.011209,95.96638477478311
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,40.962314,74.9957631788087
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,18.236918982758965,28.07491772508507
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,1.994174,256.7479066520775
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,3.722191,137.55339261203952
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,4.553864,112.43199182057259
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,7.491922,68.34027369745708
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,10.171252,50.337952495916916
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,12.436148,41.17030450264825
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,13.349783,38.3526833357516
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,3.71119,137.96113914943723
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,4.434473,115.45904101795186
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,7.236022,70.75710936202239
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,9.777682,52.36414929428059
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,12.071292,42.414681046569
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,12.935742,39.58025755306499
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,35.656490592688314,28.71847405560379
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,2.174056,471.0090264464208
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,6.841075,149.6840774293514
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,9.504851,107.73446106624922
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,14.885654,68.79106554539021
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,16.50506,62.04157997608006
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,21.05446,48.63577598285589
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,25.929444,39.49178393489656
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,6.415004,159.6257773182994
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,8.565839,119.54462370819716
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,13.516216,75.76084904236511
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,14.811527,69.13534303384114
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,19.011024,53.863484681309124
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,23.49162,43.59001209793109
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,53.60307833001617,28.655070713352757
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,4.300412,357.17507996908205
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,12.608554,121.82205826298559
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,16.112973,95.32691453029804
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,21.922581,70.06474283297209
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,29.512965,52.044923307434544
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,37.012949,41.498989988611825
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,44.31004,34.66482991213729
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,11.350157,135.32852453054176
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,15.285194,100.48940170468232
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,19.090253,80.45990799598098
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,26.438508,58.09707567461825
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,33.559339,45.76967383058409
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,39.617994,38.770261815880936
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,88.62909565123775,23.107535792298233
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,4.036305,507.394758324755
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,15.063533,135.95748089110305
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,21.952568,93.29204674368849
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,32.840393,62.36222568956468
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,48.44424,42.2754077677759
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,54.620986,37.49474606701534
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,14.072689,145.53011155153075
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,19.454334,105.27217225734893
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,26.736158,76.60038514135053
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,39.308398,52.10082588458579
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,43.778806,46.78062713724992
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,107.77953404796149,23.75219027075038
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,4.749035,539.0568820823598
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,23.292122,109.90840594085846
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,26.560423,96.38400713723573
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,47.648407,53.72687485648786
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,46.149394,55.472017682399034
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,19.888857,128.71529017479486
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,26.61636,96.18144629844201
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,38.113784,67.16730094288197
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,46.296738,55.29547243695658
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,59.738034,42.85377051410831
+orangepi,Orange Pi 5 Plus,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,72.143115,35.48502168224924
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,1.6866901252252064,303.55309036485755
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.328252,1559.7772443122967
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.43183,1185.651761109696
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,0.475708,1076.2904975320994
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,0.622912,821.9459570533237
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,0.764165,670.0123664391853
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,0.9145,559.8687807545107
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,1.070775,478.15834325605283
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.385755,1327.2673069694495
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.457117,1120.063353583437
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,0.584821,875.4815576048055
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,0.72382,707.3581829736675
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,0.86477,592.0649421233392
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,1.009112,507.37678275553156
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,3.4508173968422318,296.7412882921711
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.373276,2743.2784320449214
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,0.627364,1632.2262673663136
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,0.775098,1321.1232644130162
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,1.07431,953.1699416369576
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,1.457897,702.3815811405058
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,1.800309,568.7912463915917
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,2.173855,471.05257710380863
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,0.594816,1721.5407789972026
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,0.726575,1409.3520971682208
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,1.01443,1009.4338692664846
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,1.339642,764.3833203199064
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,1.652554,619.6469222790904
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,2.009579,509.55946494265714
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,4.520957184245727,339.75106098162814
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.418881,3666.9125598917117
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,0.954552,1609.1318230960703
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,1.176923,1305.0981245162172
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,1.762767,871.3573603317966
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,2.271751,676.1304385912013
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,2.645112,580.6937475615399
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,3.437812,446.7958108238612
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,0.792847,1937.3220810572532
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,1.019729,1506.2825515406544
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,1.489951,1030.9063855120069
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,1.924024,798.3268399978379
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,2.333384,658.2714203920143
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,3.168442,484.78084812661865
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,6.374329348561624,321.2887016046847
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.452403,4526.937266110083
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,1.296561,1579.5631674869135
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,1.711603,1196.539150725957
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,2.526406,810.6377201447431
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,3.114373,657.5962481051563
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,3.91748,522.7850556990719
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,4.735463,432.4814701329099
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,1.059907,1932.2449988536732
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,1.365676,1499.6236296163952
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,2.000899,1023.5399188064965
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,2.536107,807.5369059743931
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,3.474634,589.4145973360072
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,4.228273,484.35850759872886
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,8.296967398517298,308.5464696965644
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,0.47226,5420.742811163342
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,1.516731,1687.8404937988344
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,2.053716,1246.5209405779572
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,3.00368,852.2878602247908
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,3.951155,647.91181312806
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,4.500211,568.8622155716698
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,5.550915,461.18522802096595
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,1.291204,1982.645654753238
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,1.673107,1530.0874361293093
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,2.501855,1023.2407553595233
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,3.512661,728.7922176378535
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,4.379194,584.5824596946379
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,5.553464,460.97354732109545
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,1.1390839904817882,449.4839750872488
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.289987,1765.596388803636
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.378844,1351.4797647580533
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,0.427261,1198.3307626954017
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,0.531958,962.4820004586827
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,0.656011,780.4747176495516
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,0.782775,654.0832295359459
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,0.8952,571.9392314566577
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.333902,1533.3840468161318
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.389586,1314.2156032300957
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,0.490962,1042.850566846314
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,0.609684,839.7792955039004
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,0.7128,718.294051627385
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,0.856555,597.7432856033763
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,2.253296175649013,454.44536367042787
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.328981,3112.641763506099
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,0.586074,1747.2196343806413
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,0.6329,1617.9491230842154
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,0.911618,1123.2775131688932
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,1.230344,832.2875553503735
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,1.520313,673.5455133252166
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,1.809501,565.9018701841005
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,0.525158,1949.8893666287097
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,0.563803,1816.2372317990503
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,0.804555,1272.7532611195008
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,1.096019,934.2903727033929
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,1.366975,749.0992885751385
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,1.696423,603.6230350567046
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,3.5663442765379303,430.69313585481706
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.438112,3505.952815718355
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,0.759404,2022.6388062217213
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,0.962889,1595.199446665192
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,1.424133,1078.5509499463883
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,1.896506,809.9104352952219
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,2.288092,671.3016784290143
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,2.924766,525.1702187457048
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,0.583319,2633.207558814302
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,0.781613,1965.1669048493309
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,1.159618,1324.5741269969938
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,1.54762,992.4916969281865
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,1.973799,778.1947401939103
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,2.699317,569.0328331203782
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,5.079265620383708,403.2078952085372
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.470757,4350.439823518291
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,1.029548,1989.22245490254
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,1.384928,1478.7772360729223
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,2.076133,986.4493267049847
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,2.780259,736.6220197470811
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,3.693698,554.4578901686061
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,4.25923,480.83808575728483
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,0.788554,2597.1588502499512
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,1.069491,1914.9296254012422
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,1.614445,1268.5473955445989
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,2.135657,958.9554877023791
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,3.05614,670.1263685564143
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,3.764695,544.0015725045455
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,6.68789843073131,382.7809328318505
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,0.522292,4901.472739387163
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,1.23441,2073.865247365138
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,1.707102,1499.6174803848862
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,2.501852,1023.2419823394829
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,3.544536,722.2383973529963
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,4.268309,599.7691357397039
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,5.049362,506.9947450786851
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,1.002107,2554.617421093755
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,1.340911,1909.1498242612672
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,1.979228,1293.433601383974
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,2.963322,863.8953174849038
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,3.895751,657.1261869662615
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,5.038198,508.1181803494027
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,4.38106414234266,116.86658386293823
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.633926,807.6652479942454
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.862891,593.3542011679343
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,1.038672,492.93713511098787
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,1.475199,347.07181878512665
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,1.895696,270.08549894075844
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,2.297266,222.87362456067342
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,2.670118,191.7518252002346
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,0.819005,625.1488086153321
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,0.996402,513.8488280834442
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,1.431898,357.56736862541885
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,1.797849,284.78476223531567
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,2.223314,230.28686006564976
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,2.60708,196.38829648495636
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,8.990343619472043,113.89998462151486
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.725143,1412.1352615966782
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,1.337981,765.3322431334974
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,1.728641,592.3728524314765
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,2.588465,395.60125402506895
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,3.45015,296.79868991203284
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,4.326246,236.69481578255142
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,5.148297,198.90072387043713
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,1.272774,804.5418903905957
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,1.614214,634.3644646868382
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,2.44973,418.00524955811454
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,3.288136,311.4226418858587
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,4.214077,242.99508528202026
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,5.152873,198.72409042489502
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,13.181994019324238,116.52258359003122
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.818976,1875.5128355409681
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,1.864501,823.8129129456086
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,2.447043,627.6963665942936
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,3.845744,399.40256033682954
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,5.506691,278.9333921224198
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,6.973104,220.27493064781478
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,8.752182,175.4990926834017
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,1.653296,929.0532366859896
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,2.254753,681.2276111840188
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,3.509345,437.6885145233654
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,4.937315,311.10026400989204
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,6.244325,245.98335288441905
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,7.98621,192.33153147738415
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,18.396979152999723,111.32262438130027
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.928166,2206.501854194185
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,2.56137,799.5721039912235
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,3.321762,616.5402578511043
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,5.196802,394.08851828489907
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,6.636043,308.61765060895476
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,8.839539,231.68629042758903
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,10.404869,196.83092598282593
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,2.131694,960.7382673122878
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,2.984456,686.2222126913581
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,4.701521,435.60371207530505
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,6.050912,338.46137573972317
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,8.479865,241.5132788080942
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,10.405713,196.81496116604407
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,23.182423179521578,110.42849059288164
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,1.013803,2525.1454177981323
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,2.89088,885.5435023245517
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,4.128724,620.0462903308625
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,6.637145,385.7080115019334
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,9.494935,269.6174328734215
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,11.180048,228.97933890802616
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,13.3593,191.62680679376913
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,2.592407,987.4992622686175
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,3.645915,702.1557002837422
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,5.825093,439.4779619827529
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,8.544156,299.6199975749507
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,10.609695,241.28874581220288
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,13.36293,191.57475194437149
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,9.517835301771717,53.79374445623079
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,1.555088,329.2418178263867
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,1.920544,266.5911325124548
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,2.345901,218.25302943304087
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,3.337743,153.39707101475457
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.30,4.346478,117.79652399022841
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.40,5.253379,97.46108171521605
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.50,6.165843,83.03811822649394
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.05,1.769913,289.27975555860655
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.10,2.255313,227.019486873884
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.20,3.179114,161.0511607951146
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.30,4.079109,125.51760690876365
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.40,5.049472,101.39674009480596
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",512,epic,0.50,5.970558,85.75412884356874
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,18.702300225455524,54.75262334877093
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,1.776014,576.5720315267785
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,3.083677,332.0710956432856
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,3.835636,266.97006702408675
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,5.98509,171.09182986387842
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.30,8.209025,124.74075788537615
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.40,10.355204,98.88747725298313
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.50,12.74897,80.32021410357072
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.05,2.827461,362.16237819018545
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.10,3.573357,286.56526621885246
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.20,5.415995,189.06959847636492
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.30,7.494949,136.62534594965223
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.40,9.598789,106.68012391979863
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1024,epic,0.50,11.746974,87.17138558406616
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,27.310161805831672,56.24280115660137
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,1.875939,818.7899499930435
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,3.849776,398.9842525902806
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,5.158151,297.78112350724126
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,8.258991,185.97913473934042
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.30,11.634664,132.0192830665329
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.40,14.294554,107.45350991713347
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.50,17.850991,86.04564306821958
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.05,3.466,443.1621465666474
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.10,4.856421,316.28229924876774
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.20,7.71214,199.16650890673665
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.30,11.049244,139.01403571140253
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.40,14.016968,109.58147296904723
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",1536,epic,0.50,17.891587,85.85040555653335
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,36.955336665105634,55.418247669051404
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,2.055178,996.50735848671
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,4.753203,430.86735407681937
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,6.937047,295.2264846987486
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,11.423563,179.27856659082636
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.30,15.582571,131.42888936620278
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.40,19.299432,106.11711266942986
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.50,24.715176,82.86406700077717
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.05,4.36369,469.32756451535283
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.10,6.412681,319.3672038262936
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.20,10.526677,194.5533239026903
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.30,14.593874,140.33285473069043
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.40,18.635158,109.8997926392682
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2048,epic,0.50,24.619595,83.1857713337689
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,normal-full-recompute,full,46.068623335267006,55.56927502194836
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,full-reuse,0,2.192907,1167.4001679049773
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.05,5.912034,433.0151010633565
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.10,8.775972,291.7055797352134
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.20,14.238515,179.7940304870276
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.30,20.141727,127.09932966522682
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.40,26.092219,98.11354105221943
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,cacheblend,0.50,31.599367,81.01428107721271
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.05,5.357163,477.8648698947559
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.10,7.893249,324.3277894818724
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,14.666031,174.55301983201863
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,18.635991,137.36860036045306
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,25.185876,101.64427078097263
+rhino,Rhino Pi X1,Qwen3-8B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,31.60355,81.00355814457554

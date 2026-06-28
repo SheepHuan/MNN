@@ -5,6 +5,7 @@
 #include "core/Execution.hpp"
 #include "core/PagedKVMeta.hpp"
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace MNN {
@@ -43,7 +44,9 @@ private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
     ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int attnLen, const int** devicePtr);
+    ErrorCode syncDecodeAttentionHeadIds(const int** devicePtr, int* count);
     bool ensurePrefillTemp(size_t elements);
+    bool ensureQTileTuneOutput(size_t bytes);
 
     CUDABackend* mCudaBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -63,6 +66,9 @@ private:
     float* mPrefillQK = nullptr;
     float* mPrefillSoftmax = nullptr;
     size_t mPrefillElements = 0;
+    void* mQTileTuneOutput = nullptr;
+    size_t mQTileTuneOutputBytes = 0;
+    std::string mQTileTuneShapeKey;
     void* mExternalKey = nullptr;
     size_t mExternalKeyBytes = 0;
     void* mExternalValue = nullptr;
@@ -74,6 +80,9 @@ private:
     size_t mCacheBlendIndexCount = 0;
     unsigned char* mCacheBlendUsed = nullptr;
     size_t mCacheBlendUsedCount = 0;
+    int* mDecodeAttentionHeadIds = nullptr;
+    size_t mDecodeAttentionHeadIdCount = 0;
+    std::vector<int> mDecodeAttentionHeadIdsHost;
 };
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

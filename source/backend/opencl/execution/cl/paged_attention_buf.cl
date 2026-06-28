@@ -325,6 +325,76 @@ __kernel void pack_paged_k_prefill(GLOBAL_SIZE_3_DIMS
     vstore4((FLOAT4)(k0.s3, k1.s3, k2.s3, k3.s3), 0, packed_key + key_offset + kv_len_pack * 3);
 }
 
+__kernel void pack_paged_k_prefill_to_image(GLOBAL_SIZE_3_DIMS
+    __global const FLOAT* key_cache,      // [max_slots, batch, kv_heads, head_dim]
+    __write_only image2d_t packed_key,    // linearized [batch * kv_heads, head_dim_pack, kv_len_pack]
+    __global const int* slot_table,
+    const int batch,
+    const int kv_len,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots,
+    const int image_width) {
+    const int x = get_global_id(0); // kv token / 4
+    const int y = get_global_id(1); // head dim / 4
+    int z = get_global_id(2);       // batch * kv_heads
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+
+    const int logical4 = x << 2;
+    const int dim4 = y << 2;
+    const int head_dim_pack = ((head_dim + 3) / 4) * 4;
+    const int kv_len_pack = ((kv_len + 3) / 4) * 4;
+    const int b = z / kv_heads;
+    const int h = z - b * kv_heads;
+
+    FLOAT4 k0 = (FLOAT4)0;
+    FLOAT4 k1 = (FLOAT4)0;
+    FLOAT4 k2 = (FLOAT4)0;
+    FLOAT4 k3 = (FLOAT4)0;
+
+    if (dim4 < head_dim) {
+        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
+        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
+        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
+        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        if (slot0 >= 0 && slot0 < max_slots) {
+            k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (slot1 >= 0 && slot1 < max_slots) {
+            k1 = vload4(0, key_cache + ((slot1 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (slot2 >= 0 && slot2 < max_slots) {
+            k2 = vload4(0, key_cache + ((slot2 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (slot3 >= 0 && slot3 < max_slots) {
+            k3 = vload4(0, key_cache + ((slot3 * batch + b) * kv_heads + h) * head_dim + dim4);
+        }
+        if (dim4 + 3 >= head_dim) {
+            if (dim4 + 1 >= head_dim) {
+                k0.yzw = (FLOAT3)0; k1.yzw = (FLOAT3)0; k2.yzw = (FLOAT3)0; k3.yzw = (FLOAT3)0;
+            } else if (dim4 + 2 >= head_dim) {
+                k0.zw = (FLOAT2)0; k1.zw = (FLOAT2)0; k2.zw = (FLOAT2)0; k3.zw = (FLOAT2)0;
+            } else {
+                k0.w = (FLOAT)0; k1.w = (FLOAT)0; k2.w = (FLOAT)0; k3.w = (FLOAT)0;
+            }
+        }
+    }
+
+    const int key_offset = (z * head_dim_pack + dim4) * kv_len_pack + logical4;
+    const int pixel0 = key_offset >> 2;
+    const int pixel1 = (key_offset + kv_len_pack) >> 2;
+    const int pixel2 = (key_offset + kv_len_pack * 2) >> 2;
+    const int pixel3 = (key_offset + kv_len_pack * 3) >> 2;
+    WI_F(packed_key, (int2)(pixel0 - (pixel0 / image_width) * image_width, pixel0 / image_width),
+         (FLOAT4)(k0.s0, k1.s0, k2.s0, k3.s0));
+    WI_F(packed_key, (int2)(pixel1 - (pixel1 / image_width) * image_width, pixel1 / image_width),
+         (FLOAT4)(k0.s1, k1.s1, k2.s1, k3.s1));
+    WI_F(packed_key, (int2)(pixel2 - (pixel2 / image_width) * image_width, pixel2 / image_width),
+         (FLOAT4)(k0.s2, k1.s2, k2.s2, k3.s2));
+    WI_F(packed_key, (int2)(pixel3 - (pixel3 / image_width) * image_width, pixel3 / image_width),
+         (FLOAT4)(k0.s3, k1.s3, k2.s3, k3.s3));
+}
+
 static inline float paged_rope_inv_freq(
     const float theta,
     const int rope_type_llama3,
@@ -506,6 +576,31 @@ __kernel void export_canonical_paged_key(
     key_out[dst] = (FLOAT)out;
 }
 
+__constant sampler_t PAGED_ATTENTION_IMAGE_SAMPLER =
+    CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
+
+inline FLOAT4 paged_attention_read_linear4_image(__read_only image2d_t image,
+                                                 const int linear_index,
+                                                 const int image_width) {
+    const int pixel0 = linear_index >> 2;
+    const int2 coord0 = (int2)(pixel0 - (pixel0 / image_width) * image_width, pixel0 / image_width);
+    const FLOAT4 p0 = RI_F(image, PAGED_ATTENTION_IMAGE_SAMPLER, coord0);
+    const int lane = linear_index & 3;
+    if (lane == 0) {
+        return p0;
+    }
+    const int pixel1 = (linear_index + 3) >> 2;
+    const int2 coord1 = (int2)(pixel1 - (pixel1 / image_width) * image_width, pixel1 / image_width);
+    const FLOAT4 p1 = RI_F(image, PAGED_ATTENTION_IMAGE_SAMPLER, coord1);
+    if (lane == 1) {
+        return (FLOAT4)(p0.y, p0.z, p0.w, p1.x);
+    }
+    if (lane == 2) {
+        return (FLOAT4)(p0.z, p0.w, p1.x, p1.y);
+    }
+    return (FLOAT4)(p0.w, p1.x, p1.y, p1.z);
+}
+
 __kernel void pic_cacheblend_value_score(
     __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
     __global const FLOAT* cached_value_cache,    // [batch, kv_heads, cached_max_slots, head_dim]
@@ -550,6 +645,63 @@ __kernel void pic_cacheblend_value_score(
     scores[score_offset + token_local] = acc / denom;
 }
 
+__kernel void pic_cacheblend_value_score_cached_image(
+    __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
+    __read_only image2d_t cached_value_image,    // linearized [batch * kv_heads, cached_token_stride, head_dim]
+    __global const int* slot_table,
+    __global float* scores,
+    const int batch,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots,
+    const int cached_token_stride,
+    const int cached_image_width,
+    const int logical_start,
+    const int token_count,
+    const int score_offset) {
+    int token_local = get_global_id(0);
+    if (token_local >= token_count) {
+        return;
+    }
+    int logical = logical_start + token_local;
+    if (logical < 0 || logical >= max_slots) {
+        scores[score_offset + token_local] = -3.4028234663852886e+38f;
+        return;
+    }
+    int slot = slot_table[logical];
+    if (slot < 0 || slot >= max_slots || cached_token_stride <= 0 || cached_image_width <= 0) {
+        scores[score_offset + token_local] = -3.4028234663852886e+38f;
+        return;
+    }
+    float acc = 0.0f;
+    for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < kv_heads; ++h) {
+            int ref_base = ((b * kv_heads + h) * max_slots + slot) * head_dim;
+            int cached_base = ((b * kv_heads + h) * cached_token_stride + token_local) * head_dim;
+            int d = 0;
+            for (; d + 3 < head_dim; d += 4) {
+                float4 ref4 = convert_float4(vload4(0, reference_value_cache + ref_base + d));
+                float4 cached4 = convert_float4(
+                    paged_attention_read_linear4_image(cached_value_image, cached_base + d, cached_image_width));
+                float4 diff4 = fabs(ref4 - cached4);
+                acc += diff4.x + diff4.y + diff4.z + diff4.w;
+            }
+            if (d < head_dim) {
+                float4 cached4 = convert_float4(
+                    paged_attention_read_linear4_image(cached_value_image, cached_base + d, cached_image_width));
+                for (int tail = d; tail < head_dim; ++tail) {
+                    int lane = tail - d;
+                    float cached = lane == 0 ? cached4.x : (lane == 1 ? cached4.y : (lane == 2 ? cached4.z : cached4.w));
+                    acc += fabs((float)reference_value_cache[ref_base + tail] - cached);
+                }
+            }
+        }
+    }
+    int denom_int = batch * kv_heads * head_dim;
+    float denom = (float)(denom_int > 0 ? denom_int : 1);
+    scores[score_offset + token_local] = acc / denom;
+}
+
 __kernel void pic_cacheblend_topk(
     __global const float* scores,
     __global int* selected,
@@ -565,9 +717,10 @@ __kernel void pic_cacheblend_topk(
     if (token_count <= 1024) {
         for (int i = lid; i < 1024; i += local_size) {
             float value = -3.4028234663852886e+38f;
-            int index = i;
+            int index = -1;
             if (i < token_count) {
                 value = scores[i];
+                index = i;
                 if (isnan(value)) {
                     value = -3.4028234663852886e+38f;
                 }
@@ -651,6 +804,137 @@ __kernel void pic_cacheblend_topk(
             selected[k] = best_indices[0];
         }
         barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+    }
+}
+
+__kernel void pic_cacheblend_topk_stage1(
+    __global const float* scores,
+    __global float* stage_values,
+    __global int* stage_indices,
+    const int token_count,
+    const int top_k,
+    const int block_size,
+    __local float* best_values,
+    __local int* best_indices) {
+    const int lid = get_local_id(0);
+    const int local_size = get_local_size(0);
+    const int group = get_group_id(0);
+    if (block_size <= 0) {
+        return;
+    }
+    const int block_start = group * block_size;
+
+    for (int i = lid; i < block_size; i += local_size) {
+        const int index = block_start + i;
+        float value = -3.4028234663852886e+38f;
+        int out_index = -1;
+        if (index < token_count) {
+            value = scores[index];
+            out_index = index;
+            if (isnan(value)) {
+                value = -3.4028234663852886e+38f;
+            }
+        }
+        best_values[i] = value;
+        best_indices[i] = out_index;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int k = 2; k <= block_size; k <<= 1) {
+        for (int stride = k >> 1; stride > 0; stride >>= 1) {
+            for (int i = lid; i < block_size; i += local_size) {
+                const int other = i ^ stride;
+                if (other > i) {
+                    const float value_i = best_values[i];
+                    const float value_o = best_values[other];
+                    const int index_i = best_indices[i];
+                    const int index_o = best_indices[other];
+                    const int other_better = (value_o > value_i) ||
+                        (value_o == value_i && index_o >= 0 &&
+                         (index_i < 0 || index_o < index_i));
+                    const int self_better = (value_i > value_o) ||
+                        (value_i == value_o && index_i >= 0 &&
+                         (index_o < 0 || index_i < index_o));
+                    const int descending = ((i & k) == 0);
+                    if ((descending && other_better) || (!descending && self_better)) {
+                        best_values[i] = value_o;
+                        best_indices[i] = index_o;
+                        best_values[other] = value_i;
+                        best_indices[other] = index_i;
+                    }
+                }
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+    }
+
+    const int candidate_offset = group * top_k;
+    for (int i = lid; i < top_k; i += local_size) {
+        stage_values[candidate_offset + i] = best_values[i];
+        stage_indices[candidate_offset + i] = best_indices[i];
+    }
+}
+
+__kernel void pic_cacheblend_topk_stage2(
+    __global const float* stage_values,
+    __global const int* stage_indices,
+    __global int* selected,
+    const int candidate_count,
+    const int top_k,
+    const int sort_size,
+    __local float* best_values,
+    __local int* best_indices) {
+    const int lid = get_local_id(0);
+    const int local_size = get_local_size(0);
+    if (get_group_id(0) != 0 || sort_size <= 0) {
+        return;
+    }
+
+    for (int i = lid; i < sort_size; i += local_size) {
+        float value = -3.4028234663852886e+38f;
+        int index = -1;
+        if (i < candidate_count) {
+            value = stage_values[i];
+            index = stage_indices[i];
+            if (isnan(value)) {
+                value = -3.4028234663852886e+38f;
+            }
+        }
+        best_values[i] = value;
+        best_indices[i] = index;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int k = 2; k <= sort_size; k <<= 1) {
+        for (int stride = k >> 1; stride > 0; stride >>= 1) {
+            for (int i = lid; i < sort_size; i += local_size) {
+                const int other = i ^ stride;
+                if (other > i) {
+                    const float value_i = best_values[i];
+                    const float value_o = best_values[other];
+                    const int index_i = best_indices[i];
+                    const int index_o = best_indices[other];
+                    const int other_better = (value_o > value_i) ||
+                        (value_o == value_i && index_o >= 0 &&
+                         (index_i < 0 || index_o < index_i));
+                    const int self_better = (value_i > value_o) ||
+                        (value_i == value_o && index_i >= 0 &&
+                         (index_o < 0 || index_i < index_o));
+                    const int descending = ((i & k) == 0);
+                    if ((descending && other_better) || (!descending && self_better)) {
+                        best_values[i] = value_o;
+                        best_indices[i] = index_o;
+                        best_values[other] = value_i;
+                        best_indices[other] = index_i;
+                    }
+                }
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+    }
+
+    for (int i = lid; i < top_k; i += local_size) {
+        selected[i] = best_indices[i];
     }
 }
 

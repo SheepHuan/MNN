@@ -8,6 +8,7 @@
 
 #include "core/KVMeta.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,6 +79,15 @@ struct PagedKVMeta : public KVMeta {
     std::vector<int> sparse_query_logical_indices;
     bool pic_decode_recompute_active = false;
     int pic_decode_recompute_append_count = 0;
+    bool pic_decode_attention_rank_active = false;
+    int pic_decode_attention_layer_idx = -1;
+    int pic_decode_attention_pic_start = 0;
+    int pic_decode_attention_pic_token_count = 0;
+    int pic_decode_attention_top_m = 0;
+    int pic_decode_attention_step_idx = -1;
+    std::vector<int> pic_decode_attention_head_ids;
+    std::vector<int> pic_decode_attention_ranked_local_indices;
+    int pic_decode_attention_rank_source_step_idx = -2;
     bool cacheblend_score_active = false;
     bool cacheblend_score_ready = false;
     int cacheblend_score_layer_idx = -1;
@@ -117,6 +127,8 @@ struct PagedKVMeta : public KVMeta {
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;
+        finishPicDecodeAttentionRankCapture();
+        clearPicDecodeAttentionRankResult();
         finishCacheBlendScoring();
         finishPicGraphActivePlan();
         slot_table_host.resize(request_capacity);
@@ -141,6 +153,8 @@ struct PagedKVMeta : public KVMeta {
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;
+        finishPicDecodeAttentionRankCapture();
+        clearPicDecodeAttentionRankResult();
         finishCacheBlendScoring();
         finishPicGraphActivePlan();
     }
@@ -275,6 +289,76 @@ struct PagedKVMeta : public KVMeta {
         return true;
     }
 
+    bool beginPicDecodeAttentionRankCapture(int layerIdx, int picStart, int picTokenCount, int topM,
+                                            int sourceStepIdx, const std::vector<int>& headIds) {
+        if (!request_active || layerIdx < 0 || picStart < 0 || picTokenCount <= 0 || topM <= 0) {
+            finishPicDecodeAttentionRankCapture();
+            clearPicDecodeAttentionRankResult();
+            return false;
+        }
+        pic_decode_attention_rank_active = true;
+        pic_decode_attention_layer_idx = layerIdx;
+        pic_decode_attention_pic_start = picStart;
+        pic_decode_attention_pic_token_count = picTokenCount;
+        pic_decode_attention_top_m = std::min(topM, picTokenCount);
+        pic_decode_attention_step_idx = sourceStepIdx;
+        pic_decode_attention_head_ids.clear();
+        pic_decode_attention_head_ids.reserve(headIds.size());
+        for (int head : headIds) {
+            if (head >= 0) {
+                pic_decode_attention_head_ids.emplace_back(head);
+            }
+        }
+        std::sort(pic_decode_attention_head_ids.begin(), pic_decode_attention_head_ids.end());
+        pic_decode_attention_head_ids.erase(
+            std::unique(pic_decode_attention_head_ids.begin(), pic_decode_attention_head_ids.end()),
+            pic_decode_attention_head_ids.end());
+        clearPicDecodeAttentionRankResult();
+        return true;
+    }
+
+    bool needsPicDecodeAttentionRankCapture(int layerIdx) const {
+        return pic_decode_attention_rank_active && layerIdx == pic_decode_attention_layer_idx &&
+            pic_decode_attention_top_m > 0 && pic_decode_attention_pic_token_count > 0;
+    }
+
+    void setPicDecodeAttentionRankResult(const std::vector<int>& rankedLocalIndices, int sourceStepIdx) {
+        pic_decode_attention_ranked_local_indices.clear();
+        pic_decode_attention_ranked_local_indices.reserve(rankedLocalIndices.size());
+        std::vector<uint8_t> seen(static_cast<size_t>(std::max(0, pic_decode_attention_pic_token_count)), 0);
+        for (int local : rankedLocalIndices) {
+            if (local < 0 || local >= pic_decode_attention_pic_token_count) {
+                continue;
+            }
+            if (!seen.empty() && seen[static_cast<size_t>(local)] != 0) {
+                continue;
+            }
+            if (!seen.empty()) {
+                seen[static_cast<size_t>(local)] = 1;
+            }
+            pic_decode_attention_ranked_local_indices.emplace_back(local);
+            if (static_cast<int>(pic_decode_attention_ranked_local_indices.size()) >= pic_decode_attention_top_m) {
+                break;
+            }
+        }
+        pic_decode_attention_rank_source_step_idx = sourceStepIdx;
+    }
+
+    void finishPicDecodeAttentionRankCapture() {
+        pic_decode_attention_rank_active = false;
+        pic_decode_attention_layer_idx = -1;
+        pic_decode_attention_pic_start = 0;
+        pic_decode_attention_pic_token_count = 0;
+        pic_decode_attention_top_m = 0;
+        pic_decode_attention_step_idx = -1;
+        pic_decode_attention_head_ids.clear();
+    }
+
+    void clearPicDecodeAttentionRankResult() {
+        pic_decode_attention_ranked_local_indices.clear();
+        pic_decode_attention_rank_source_step_idx = -2;
+    }
+
     void finishSparseQuery() {
         sparse_query_active = false;
         sparse_query_start_layer_idx = 0;
@@ -285,6 +369,7 @@ struct PagedKVMeta : public KVMeta {
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;
+        finishPicDecodeAttentionRankCapture();
         add = 0;
         remove = 0;
         n_reserve = 0;

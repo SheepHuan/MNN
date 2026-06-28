@@ -277,6 +277,7 @@ bool OpenCLSymbols::LoadLibraryFromPath(const std::string &library_path) {
     MNN_LOAD_FUNCTION_PTR(clGetDeviceInfo);
     MNN_LOAD_FUNCTION_PTR(clGetDeviceIDs);
     MNN_LOAD_FUNCTION_PTR(clRetainEvent);
+    MNN_LOAD_FUNCTION_PTR(clGetKernelInfo);
     MNN_LOAD_FUNCTION_PTR(clGetKernelWorkGroupInfo);
     MNN_LOAD_FUNCTION_PTR(clGetEventInfo);
     MNN_LOAD_FUNCTION_PTR(clGetEventProfilingInfo);
@@ -485,6 +486,13 @@ cl_int CL_API_CALL clSetKernelArg(cl_kernel kernel, cl_uint arg_index, size_t ar
     auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clSetKernelArg;
     MNN_CHECK_NOTNULL(func);
     return func(kernel, arg_index, arg_size, arg_value);
+}
+
+cl_int CL_API_CALL clGetKernelInfo(cl_kernel kernel, cl_kernel_info param_name, size_t param_value_size,
+                                   void *param_value, size_t *param_value_size_ret) {
+    auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clGetKernelInfo;
+    MNN_CHECK_NOTNULL(func);
+    return func(kernel, param_name, param_value_size, param_value, param_value_size_ret);
 }
 
 cl_mem CL_API_CALL clCreateBuffer(cl_context context, cl_mem_flags flags, size_t size, void *host_ptr, cl_int *errcode_ret) {

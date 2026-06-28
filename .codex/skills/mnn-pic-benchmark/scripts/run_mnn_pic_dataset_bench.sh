@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MNN_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 KVSHARE_ROOT_DEFAULT="$(cd "${MNN_ROOT}/../.." && pwd)"
+TOTAL_CPUS="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 1)"
+DEFAULT_JOBS="$(( TOTAL_CPUS > 1 ? TOTAL_CPUS / 2 : 1 ))"
 
 timestamp() {
   date +%Y%m%d_%H%M%S
@@ -76,19 +78,22 @@ usage() {
 Usage:
   bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh [options] -- [pic_bench args]
 
-Build local MNN Jetson-cross pic_server artifacts, rsync them to Jetson, start
-remote MNN pic_server, open an SSH tunnel, and run local impl/pic_bench/cli.py.
+Single-device helper for MNN PIC dataset bench. Formal regression still requires
+running it once for Jetson and once for OrangePi. Rhino is extra-profile only.
 
 Common:
+  --device-key jetson|orangepi|rhino
+                                Built-in device preset. Default: jetson
+  --allow-extra-device          Allow extra-profile preset rhino.
   --skip-build                  Do not build locally.
   --skip-rsync                  Do not rsync artifact root.
-  --remote USER@HOST            Default: jetson@192.168.101.192
-  --remote-repo PATH            Default: /home/jetson/code/kvshare-edge/impl/MNN
-  --port PORT                   Remote pic_server port. Default: 18096
+  --remote USER@HOST            Override preset remote host.
+  --remote-repo PATH            Override preset remote work/repo path.
+  --port PORT                   Remote pic_server port. Default: fixed per device preset
   --local-port PORT             Local SSH tunnel port. Default: same as --port
   --run-id ID                   Run id for logs/output.
-  --remote-config PATH          Remote model config path.
-  --remote-log-dir PATH         Remote log/PID directory. Default: <remote-repo>/.cache/logs
+  --remote-config PATH          Override preset remote model config path.
+  --remote-log-dir PATH         Override preset remote log/PID directory.
   --remote-ld-library-path PATH Exact remote LD_LIBRARY_PATH for pic_server.
   --remote-server-env ENV       Extra env assignments before pic_server, e.g. LD_PRELOAD=/usr/lib/libOpenCL_adreno.so.
   --line-buffer                 Start remote server through stdbuf when available.
@@ -98,18 +103,157 @@ Everything after -- is forwarded to impl/pic_bench/cli.py.
 EOF
 }
 
-REMOTE="jetson@192.168.101.192"
-REMOTE_REPO="/home/jetson/code/kvshare-edge/impl/MNN"
-REMOTE_CUDA_LIB="/usr/local/cuda-12.2/targets/aarch64-linux/lib"
+FORMAL_REQUIRED_DEVICES=(jetson orangepi)
+EXTRA_PROFILE_DEVICES=(rhino)
+FORMAL_REQUIRED_DEVICES_CSV="jetson,orangepi"
+EXTRA_PROFILE_DEVICES_CSV="rhino"
+
+default_remote_for_device() {
+  case "$1" in
+    jetson) printf '%s' 'jetson@192.168.101.192' ;;
+    orangepi) printf '%s' 'orangepi@192.168.101.113' ;;
+    rhino) printf '%s' 'aidlux@192.168.101.227' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_repo_for_device() {
+  case "$1" in
+    jetson) printf '%s' '/home/jetson/code/kvshare-edge/impl/MNN' ;;
+    orangepi) printf '%s' '/mnt/ssd/code/.cache/mnn_opencl_pic' ;;
+    rhino) printf '%s' '/mnt/nvme/mnn_pic_opencl' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_cuda_lib_for_device() {
+  case "$1" in
+    jetson) printf '%s' '/usr/local/cuda-12.2/targets/aarch64-linux/lib' ;;
+    orangepi|rhino) printf '%s' '' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_port_for_device() {
+  case "$1" in
+    jetson) printf '%s' '18096' ;;
+    orangepi) printf '%s' '18097' ;;
+    rhino) printf '%s' '18098' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_build_dir_for_device() {
+  case "$1" in
+    jetson) printf '%s' "${MNN_ROOT}/.cache/build/mnn/jetson_cross_cuda" ;;
+    orangepi) printf '%s' "${MNN_ROOT}/.cache/build/mnn/orangepi5plus" ;;
+    rhino) printf '%s' "${MNN_ROOT}/.cache/build/mnn/aidlux_adreno_opencl" ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_install_prefix_for_device() {
+  case "$1" in
+    jetson) printf '%s' "${MNN_ROOT}/.cache/output/mnn/artifacts/jetson_cross_cuda" ;;
+    orangepi) printf '%s' "${MNN_ROOT}/.cache/output/mnn/artifacts/orangepi5plus" ;;
+    rhino) printf '%s' "${MNN_ROOT}/.cache/output/mnn/artifacts/aidlux_adreno_opencl" ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_art_rel_for_device() {
+  case "$1" in
+    jetson) printf '%s' '.cache/output/mnn/artifacts/jetson_cross_cuda' ;;
+    orangepi) printf '%s' 'artifacts/orangepi5plus' ;;
+    rhino) printf '%s' 'artifacts/aidlux_adreno_opencl' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_config_for_device() {
+  case "$1" in
+    jetson) printf '%s' '/home/jetson/code/kvshare-edge/impl/MNN/.cache/weight/AI-ModelScope__Llama-3___2-3B-Instruct-pic-boundary/config_cuda_greedy.json' ;;
+    orangepi) printf '%s' '/mnt/ssd/code/.cache/mnn_opencl_pic/models/pic/AI-ModelScope__Llama-3___2-3B-Instruct-pic-boundary/config_opencl_greedy.json' ;;
+    rhino) printf '%s' '/mnt/nvme/mnn_pic_opencl/models/pic/AI-ModelScope__Llama-3___2-3B-Instruct-pic-boundary/config_opencl_greedy.json' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_kv_dir_for_device() {
+  local device="$1"
+  local run_id="$2"
+  case "${device}" in
+    jetson) printf '%s' "/home/jetson/code/kvshare-edge/impl/MNN/.cache/kvshare/mnn_pic_dataset_bench_${run_id}" ;;
+    orangepi) printf '%s' "/mnt/ssd/code/.cache/mnn_opencl_pic/mnn_pic_dataset_bench_${run_id}" ;;
+    rhino) printf '%s' "/mnt/nvme/mnn_pic_opencl/cache/mnn_pic_dataset_bench_${run_id}" ;;
+    *) die "unsupported device preset: ${device}" ;;
+  esac
+}
+
+default_remote_log_dir_for_device() {
+  case "$1" in
+    jetson) printf '%s' '/home/jetson/code/kvshare-edge/impl/MNN/.cache/logs' ;;
+    orangepi) printf '%s' '/mnt/ssd/code/.cache/mnn_opencl_pic/logs' ;;
+    rhino) printf '%s' '/mnt/nvme/mnn_pic_opencl/logs' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_server_env_for_device() {
+  case "$1" in
+    rhino) printf '%s' 'LD_PRELOAD=/usr/lib/libOpenCL_adreno.so' ;;
+    jetson|orangepi) printf '%s' '' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+default_remote_ld_library_path_for_device() {
+  local device="$1"
+  local remote_art="$2"
+  local remote_cuda_lib="$3"
+  case "${device}" in
+    jetson) printf '%s' "${remote_art}/lib${remote_cuda_lib:+:${remote_cuda_lib}}" ;;
+    orangepi) printf '%s' "${remote_art}/lib" ;;
+    rhino) printf '%s' "${remote_art}/lib:/usr/lib:/usr/lib/aarch64-linux-gnu" ;;
+    *) die "unsupported device preset: ${device}" ;;
+  esac
+}
+
+device_role_for_key() {
+  case "$1" in
+    jetson|orangepi) printf '%s' 'formal' ;;
+    rhino) printf '%s' 'extra-profile' ;;
+    *) die "unsupported device preset: $1" ;;
+  esac
+}
+
+validate_device_key() {
+  case "$1" in
+    jetson|orangepi) return 0 ;;
+    rhino)
+      [[ "${ALLOW_EXTRA_DEVICE}" == "1" ]] || die "rhino is extra-profile only; use --allow-extra-device for targeted debug/profile runs"
+      return 0
+      ;;
+    *)
+      die "unknown --device-key: $1 (expected one of: ${FORMAL_REQUIRED_DEVICES_CSV},${EXTRA_PROFILE_DEVICES_CSV})"
+      ;;
+  esac
+}
+
+DEVICE_KEY="jetson"
+ALLOW_EXTRA_DEVICE="0"
+REMOTE=""
+REMOTE_REPO=""
+REMOTE_CUDA_LIB=""
 REMOTE_HOST="127.0.0.1"
-REMOTE_PORT="18096"
+REMOTE_PORT=""
 LOCAL_HOST="127.0.0.1"
 LOCAL_PORT=""
 SERVED_MODEL="llama-pic"
 RUN_ID="mnn_pic_dataset_$(timestamp)"
-BUILD_DIR="${MNN_ROOT}/.cache/build/mnn/jetson_cross_cuda"
-INSTALL_PREFIX="${MNN_ROOT}/.cache/output/mnn/artifacts/jetson_cross_cuda"
-REMOTE_ART_REL=".cache/output/mnn/artifacts/jetson_cross_cuda"
+BUILD_DIR=""
+INSTALL_PREFIX=""
+REMOTE_ART_REL=""
 REMOTE_CONFIG=""
 REMOTE_KV_DIR=""
 REMOTE_LOG_DIR=""
@@ -127,6 +271,10 @@ BENCH_ARGS=()
 
 while (($#)); do
   case "$1" in
+    --device-key)
+      DEVICE_KEY="$2"; shift 2 ;;
+    --allow-extra-device)
+      ALLOW_EXTRA_DEVICE="1"; shift ;;
     --remote)
       REMOTE="$2"; shift 2 ;;
     --remote-repo)
@@ -188,12 +336,22 @@ while (($#)); do
   esac
 done
 
+validate_device_key "${DEVICE_KEY}"
+DEVICE_ROLE="$(device_role_for_key "${DEVICE_KEY}")"
+REMOTE="${REMOTE:-$(default_remote_for_device "${DEVICE_KEY}")}"
+REMOTE_REPO="${REMOTE_REPO:-$(default_remote_repo_for_device "${DEVICE_KEY}")}"
+REMOTE_CUDA_LIB="${REMOTE_CUDA_LIB:-$(default_remote_cuda_lib_for_device "${DEVICE_KEY}")}"
+REMOTE_PORT="${REMOTE_PORT:-$(default_port_for_device "${DEVICE_KEY}")}"
 LOCAL_PORT="${LOCAL_PORT:-${REMOTE_PORT}}"
-REMOTE_CONFIG="${REMOTE_CONFIG:-${REMOTE_REPO}/.cache/weight/AI-ModelScope__Llama-3___2-3B-Instruct/config_cuda_greedy.json}"
-REMOTE_KV_DIR="${REMOTE_KV_DIR:-${REMOTE_REPO}/.cache/kvshare/mnn_pic_dataset_bench_${RUN_ID}}"
+BUILD_DIR="${BUILD_DIR:-$(default_build_dir_for_device "${DEVICE_KEY}")}"
+INSTALL_PREFIX="${INSTALL_PREFIX:-$(default_install_prefix_for_device "${DEVICE_KEY}")}"
+REMOTE_ART_REL="${REMOTE_ART_REL:-$(default_remote_art_rel_for_device "${DEVICE_KEY}")}"
 REMOTE_ART="${REMOTE_REPO}/${REMOTE_ART_REL}"
-REMOTE_LD_LIBRARY_PATH="${REMOTE_LD_LIBRARY_PATH:-${REMOTE_ART}/lib${REMOTE_CUDA_LIB:+:${REMOTE_CUDA_LIB}}}"
-REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-${REMOTE_REPO}/.cache/logs}"
+REMOTE_CONFIG="${REMOTE_CONFIG:-$(default_remote_config_for_device "${DEVICE_KEY}")}"
+REMOTE_KV_DIR="${REMOTE_KV_DIR:-$(default_remote_kv_dir_for_device "${DEVICE_KEY}" "${RUN_ID}")}"
+REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-$(default_remote_log_dir_for_device "${DEVICE_KEY}")}"
+REMOTE_SERVER_ENV="${REMOTE_SERVER_ENV:-$(default_remote_server_env_for_device "${DEVICE_KEY}")}"
+REMOTE_LD_LIBRARY_PATH="${REMOTE_LD_LIBRARY_PATH:-$(default_remote_ld_library_path_for_device "${DEVICE_KEY}" "${REMOTE_ART}" "${REMOTE_CUDA_LIB}")}"
 REMOTE_LOG="${REMOTE_LOG_DIR}/mnn_pic_dataset_bench_${RUN_ID}.log"
 REMOTE_PID_FILE="${REMOTE_LOG_DIR}/mnn_pic_dataset_bench_${RUN_ID}.pid"
 LOG_DIR="${KVSHARE_ROOT}/.cache/mnn-pic-benchmark/logs/${RUN_ID}"
@@ -208,6 +366,8 @@ mkdir -p "${LOG_DIR}" "${RUN_OUTPUT_DIR}"
 REMOTE_SERVER_STARTED="0"
 TUNNEL_PID=""
 
+log "dataset bench preset: ${DEVICE_KEY} (${DEVICE_ROLE}); formal required devices: ${FORMAL_REQUIRED_DEVICES_CSV}"
+
 cleanup() {
   local exit_code=$?
   if [[ -n "${TUNNEL_PID}" ]]; then
@@ -221,6 +381,12 @@ cleanup() {
   fi
   {
     printf 'run_id=%s\n' "${RUN_ID}"
+    printf 'device_key=%s\n' "${DEVICE_KEY}"
+    printf 'device_role=%s\n' "${DEVICE_ROLE}"
+    printf 'formal_required_devices=%s\n' "${FORMAL_REQUIRED_DEVICES_CSV}"
+    printf 'extra_profile_devices=%s\n' "${EXTRA_PROFILE_DEVICES_CSV}"
+    printf 'formal_matrix_device_covered=%s\n' "$([[ "${DEVICE_ROLE}" == "formal" ]] && printf '1' || printf '0')"
+    printf 'formal_matrix_complete=0\n'
     printf 'mnn_root=%s\n' "${MNN_ROOT}"
     printf 'kvshare_root=%s\n' "${KVSHARE_ROOT}"
     printf 'remote=%s\n' "${REMOTE}"
@@ -241,32 +407,41 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
-  log "building local Jetson-cross pic_server artifacts"
+  log "building local ${DEVICE_KEY} pic_server artifacts"
   (
     cd "${MNN_ROOT}"
+    case "${DEVICE_KEY}" in
+      jetson)
+        export MNN_TARGET_DEVICE="${MNN_TARGET_DEVICE:-jetson}"
+        export CUDA_ARCHS="${CUDA_ARCHS:-72}"
+        export ENABLE_CROSS_CUDA="${ENABLE_CROSS_CUDA:-ON}"
+        if [[ -z "${CUDA_TOOLKIT_ROOT:-}" && -d "${MNN_ROOT}/.cache/sysroots/jetson_cuda" ]]; then
+          export CUDA_TOOLKIT_ROOT="${MNN_ROOT}/.cache/sysroots/jetson_cuda"
+        fi
+        if [[ -z "${CUDA_NVCC_EXECUTABLE:-}" && -x /usr/local/cuda/bin/nvcc ]]; then
+          export CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc
+        fi
+        if [[ -z "${CMAKE_ARGS:-}" && -x "${MNN_ROOT}/.cache/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]]; then
+          export CMAKE_ARGS="-DCUDA_HOST_COMPILER=${MNN_ROOT}/.cache/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
+        fi
+        ;;
+      orangepi)
+        export MNN_TARGET_DEVICE="${MNN_TARGET_DEVICE:-orangepi5plus}"
+        ;;
+      rhino)
+        export MNN_TARGET_DEVICE="${MNN_TARGET_DEVICE:-aidlux_adreno_opencl}"
+        ;;
+      *)
+        die "unsupported device preset: ${DEVICE_KEY}"
+        ;;
+    esac
     export BUILD_DIR
     export INSTALL_PREFIX
-    export JOBS="${JOBS:-8}"
-    export CUDA_ARCHS="${CUDA_ARCHS:-72}"
-    export ENABLE_CROSS_CUDA="${ENABLE_CROSS_CUDA:-ON}"
+    export JOBS="${JOBS:-${DEFAULT_JOBS}}"
     export BUILD_TARGET="${BUILD_TARGET:-pic_server}"
     export BUILD_MNNCONVERT="${BUILD_MNNCONVERT:-0}"
     export INSTALL_AFTER_BUILD="${INSTALL_AFTER_BUILD:-1}"
-    if [[ -z "${CUDA_TOOLKIT_ROOT:-}" && -d "${MNN_ROOT}/.cache/sysroots/jetson_cuda" ]]; then
-      export CUDA_TOOLKIT_ROOT="${MNN_ROOT}/.cache/sysroots/jetson_cuda"
-    fi
-    if [[ -z "${CUDA_NVCC_EXECUTABLE:-}" && -x /usr/local/cuda/bin/nvcc ]]; then
-      export CUDA_NVCC_EXECUTABLE=/usr/local/cuda/bin/nvcc
-    fi
-    if [[ -z "${CMAKE_ARGS:-}" && -x "${MNN_ROOT}/.cache/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++" ]]; then
-      export CMAKE_ARGS="-DCUDA_HOST_COMPILER=${MNN_ROOT}/.cache/toolchains/gcc-arm-9.2-2019.12-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++"
-    fi
     bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
-    cmake --install "${BUILD_DIR}" --prefix "${INSTALL_PREFIX}"
-    mkdir -p "${INSTALL_PREFIX}/bin" "${INSTALL_PREFIX}/lib"
-    install -m 755 "${BUILD_DIR}/pic_server" "${INSTALL_PREFIX}/bin/pic_server"
-    install -m 755 "${BUILD_DIR}/libpic_llm.so" "${INSTALL_PREFIX}/lib/libpic_llm.so"
-    install -m 755 "${BUILD_DIR}/source/backend/cuda/libMNN_Cuda_Main.so" "${INSTALL_PREFIX}/lib/libMNN_Cuda_Main.so"
   )
 fi
 

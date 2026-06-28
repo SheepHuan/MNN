@@ -19,6 +19,11 @@
 namespace MNN {
 namespace OpenCL {
 
+static bool _benchPrintExecutionClass() {
+    const char* value = ::getenv("MNN_BENCH_OPENCL_PRINT_EXECUTION_CLASS");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 ConvBufCommonExecution::ConvBufCommonExecution(Backend *backend) {
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
 }
@@ -921,6 +926,10 @@ public:
             for (int i = 0; i < outputs.size(); ++i) {
                 TensorUtils::setTensorSupportPack(outputs[i], false);
             }
+            if (_benchPrintExecutionClass()) {
+                MNN_PRINT("[bench_ops/opencl/perf/WeightOnlyConv] creator selected=ConvBufExecution multi_input=1\n");
+                ::fflush(stdout);
+            }
             OPENCL_CREATOR_CHECK(new ConvBufExecution(inputs, outputs, op, backend));
         }
 
@@ -940,6 +949,14 @@ public:
                     }
                     for (int i = 0; i < outputs.size(); ++i) {
                         TensorUtils::setTensorSupportPack(outputs[i], false);
+                    }
+                    if (_benchPrintExecutionClass()) {
+                        MNN_PRINT("[bench_ops/opencl/perf/WeightOnlyConv] creator selected=ConvBufLowMemoryExecution "
+                                  "quan_type=%d memory=%d input_count=%zu output_count=%zu\n",
+                                  conv2dParams->quanParameter()->type(),
+                                  static_cast<int>(static_cast<OpenCLBackend *>(backend)->getMemory()),
+                                  inputs.size(), outputs.size());
+                        ::fflush(stdout);
                     }
                     OPENCL_CREATOR_CHECK(new ConvBufLowMemoryExecution(inputs, outputs, op, backend));
                 }
@@ -977,6 +994,14 @@ public:
         }
         for (int i = 0; i < outputs.size(); ++i) {
             TensorUtils::setTensorSupportPack(outputs[i], false);
+        }
+        if (_benchPrintExecutionClass()) {
+            MNN_PRINT("[bench_ops/opencl/perf/WeightOnlyConv] creator selected=ConvBufExecution generic "
+                      "quan_type=%d memory=%d input_count=%zu output_count=%zu\n",
+                      conv2D->quanParameter() ? conv2D->quanParameter()->type() : -1,
+                      static_cast<int>(static_cast<OpenCLBackend *>(backend)->getMemory()),
+                      inputs.size(), outputs.size());
+            ::fflush(stdout);
         }
         OPENCL_CREATOR_CHECK(new ConvBufExecution(inputs, outputs, op, backend));
     }

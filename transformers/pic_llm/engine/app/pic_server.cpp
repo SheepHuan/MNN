@@ -217,6 +217,38 @@ bool picGraphProfileEnabled() {
     return envInt("MNN_PIC_GRAPH_PROFILE", 0) > 0;
 }
 
+bool picGraphProfileProgressEnabled() {
+    return envInt("MNN_PIC_GRAPH_PROFILE_PROGRESS", 0) > 0;
+}
+
+bool picRequestProfileEnabled() {
+    return envInt("MNN_PIC_REQUEST_PROFILE", 0) > 0;
+}
+
+void picRequestProfileLog(const char* stage, int64_t elapsedUs, const std::string& detail = "") {
+    if (!picRequestProfileEnabled()) {
+        return;
+    }
+    std::fprintf(stderr, "MNN_PIC_REQUEST_PROFILE phase=end stage=%s cost_ms=%.3f", stage, elapsedUs / 1000.0);
+    if (!detail.empty()) {
+        std::fprintf(stderr, " %s", detail.c_str());
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
+void picRequestProfileBegin(const char* stage, const std::string& detail = "") {
+    if (!picRequestProfileEnabled()) {
+        return;
+    }
+    std::fprintf(stderr, "MNN_PIC_REQUEST_PROFILE phase=begin stage=%s", stage);
+    if (!detail.empty()) {
+        std::fprintf(stderr, " %s", detail.c_str());
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
 int64_t monotonicUs() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -374,6 +406,12 @@ public:
         pending.type = info->type();
         pending.inputShapes = tensorShapes(inputs);
         pending.flops = info->flops();
+        if (picGraphProfileProgressEnabled()) {
+            std::fprintf(stderr,
+                         "MNN_PIC_GRAPH_PROFILE_PROGRESS phase=begin type=%s name=%s inputs=%s\n",
+                         pending.type.c_str(), pending.name.c_str(), pending.inputShapes.c_str());
+            std::fflush(stderr);
+        }
         return true;
     }
 
@@ -392,6 +430,13 @@ public:
         }
         const int64_t costUs = std::max<int64_t>(0, monotonicUs() - pending.startUs);
         const std::string outputShapes = tensorShapes(outputs);
+        if (picGraphProfileProgressEnabled()) {
+            std::fprintf(stderr,
+                         "MNN_PIC_GRAPH_PROFILE_PROGRESS phase=end type=%s name=%s cost_ms=%.3f inputs=%s outputs=%s\n",
+                         pending.type.c_str(), pending.name.c_str(), costUs / 1000.0, pending.inputShapes.c_str(),
+                         outputShapes.c_str());
+            std::fflush(stderr);
+        }
         const std::string key = pending.name + "\n" + pending.type + "\n" + pending.inputShapes + "\n" + outputShapes;
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -2013,8 +2058,14 @@ bool PicServer::loadLlmInstance(std::string* error) {
     std::error_code ec;
     mConfig.kvCacheDir = absoluteString(mConfig.kvCacheDir);
     fs::create_directories(mConfig.kvCacheDir, ec);
+    const std::string runtimeCacheDir = absoluteString(
+        mConfig.runtimeCacheDir.empty()
+            ? (fs::path(mConfig.kvCacheDir) / "runtime_cache").string()
+            : mConfig.runtimeCacheDir);
+    mConfig.runtimeCacheDir = runtimeCacheDir;
+    fs::create_directories(runtimeCacheDir, ec);
     json runtimeConfig = {
-        {"tmp_path", "tmp"},
+        {"tmp_path", runtimeCacheDir},
         {"prefix_cache_path", mConfig.kvCacheDir},
     };
     const int pagedKvLimit = envInt("MNN_PIC_SERVER_PAGED_KV_MAX_TOKENS", 0);
@@ -2202,6 +2253,7 @@ json PicServer::runtimeInfo() const {
         {"paged_attention", jsonBool(cfg, "paged_attention", false)},
         {"request_scoped_kv", true},
         {"kv_cache_dir", absoluteString(mConfig.kvCacheDir)},
+        {"runtime_cache_dir", absoluteString(mConfig.runtimeCacheDir)},
         {"status", mLlm ? "ok" : "not_loaded"},
     };
 }
@@ -2627,8 +2679,18 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         }
     } else {
         PreparedPicCache pic;
+        int64_t stageUs = monotonicUs();
+        picRequestProfileBegin("prepare_pic_cache");
         if (!preparePicCacheFromRequest(mConfig.kvCacheDir, runtimeBackend(), request["pic_cache"], pic, error)) {
             return false;
+        }
+        {
+            std::ostringstream os;
+            os << "selection_algorithm=" << pic.selectionAlgorithm
+               << " score_layer=" << pic.scoreLayerIdx
+               << " pic_tokens=" << pic.tokenIds.size()
+               << " segments=" << pic.segments.size();
+            picRequestProfileLog("prepare_pic_cache", monotonicUs() - stageUs, os.str());
         }
         std::vector<int> preludeTokenIds;
         std::vector<int> suffixTokenIds;
@@ -2643,9 +2705,19 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         }
         std::vector<int> fullPromptTokenIds;
         json explicitTokenMapping = json::array();
+        stageUs = monotonicUs();
+        picRequestProfileBegin("apply_explicit_pic_prompt_mapping");
         if (!applyExplicitPicPromptMapping(pic, preludeTokenIds, suffixTokenIds,
                                            fullPromptTokenIds, explicitTokenMapping, error)) {
             return false;
+        }
+        {
+            std::ostringstream os;
+            os << "prelude_tokens=" << preludeTokenIds.size()
+               << " pic_tokens=" << pic.tokenIds.size()
+               << " suffix_tokens=" << suffixTokenIds.size()
+               << " full_prompt_tokens=" << fullPromptTokenIds.size();
+            picRequestProfileLog("apply_explicit_pic_prompt_mapping", monotonicUs() - stageUs, os.str());
         }
         if (suffixTokenIds.empty()) {
             error = "PIC prompt suffix tokenization produced no tokens";
@@ -2699,6 +2771,14 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 }
                 mLlm->reset();
                 mLlm->generate_init(&sink, "");
+                stageUs = monotonicUs();
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " effective_score_layer=" << effectiveScoreLayer
+                       << " selected_count=" << nativeSelectedLocalIndices.size();
+                    picRequestProfileBegin("prefill_fixed_graph_external_pagedkv", os.str());
+                }
                 if (!mLlm->prefillFixedGraphExternalPagedKV(
                         fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, nativeSelectedLocalIndices)) {
@@ -2706,6 +2786,13 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     error = "Native graph-level epic prefill failed on backend " + runtimeBackend() +
                             llmContextSuffix(mLlm.get());
                     return false;
+                }
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " effective_score_layer=" << effectiveScoreLayer
+                       << " selected_count=" << nativeSelectedLocalIndices.size();
+                    picRequestProfileLog("prefill_fixed_graph_external_pagedkv", monotonicUs() - stageUs, os.str());
                 }
                 graphBoundaryPrefillDone = true;
                 scoreMetadata = {
@@ -2721,6 +2808,16 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
                 mLlm->reset();
                 mLlm->generate_init(&sink, "");
+                stageUs = monotonicUs();
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " effective_score_layer=" << effectiveScoreLayer
+                       << " recompute_ratio=" << pic.recomputeRatio
+                       << " prompt_tokens=" << fullPromptTokenIds.size()
+                       << " pic_tokens=" << pic.tokenIds.size();
+                    picRequestProfileBegin("prefill_cacheblend_graph_external_pagedkv", os.str());
+                }
                 if (!mLlm->prefillCacheBlendGraphExternalPagedKV(
                         fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
@@ -2729,6 +2826,14 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     error = "Native graph-level cacheblend score/top-k failed on backend " + runtimeBackend() +
                             llmContextSuffix(mLlm.get());
                     return false;
+                }
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " effective_score_layer=" << effectiveScoreLayer
+                       << " selected_count=" << nativeSelectedLocalIndices.size()
+                       << " recompute_ratio=" << pic.recomputeRatio;
+                    picRequestProfileLog("prefill_cacheblend_graph_external_pagedkv", monotonicUs() - stageUs, os.str());
                 }
                 graphBoundaryPrefillDone = true;
                 hasNativeSelectedLocalIndices = true;
@@ -2748,6 +2853,16 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 mLlm->reset();
                 std::ostringstream scoreSink;
                 mLlm->generate_init(&scoreSink, "");
+                stageUs = monotonicUs();
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " effective_score_layer=" << effectiveScoreLayer
+                       << " recompute_ratio=" << pic.recomputeRatio
+                       << " prompt_tokens=" << fullPromptTokenIds.size()
+                       << " pic_tokens=" << pic.tokenIds.size();
+                    picRequestProfileBegin("select_cacheblend_external_pagedkv", os.str());
+                }
                 if (!mLlm->selectCacheBlendExternalPagedKV(
                         fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
                         static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
@@ -2755,6 +2870,14 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     error = "Native cacheblend score/top-k failed on backend " + runtimeBackend() +
                             llmContextSuffix(mLlm.get());
                     return false;
+                }
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " effective_score_layer=" << effectiveScoreLayer
+                       << " selected_count=" << nativeSelectedLocalIndices.size()
+                       << " recompute_ratio=" << pic.recomputeRatio;
+                    picRequestProfileLog("select_cacheblend_external_pagedkv", monotonicUs() - stageUs, os.str());
                 }
                 hasNativeSelectedLocalIndices = true;
                 scoreMetadata = {
@@ -2767,10 +2890,26 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     {"selected_count", nativeSelectedLocalIndices.size()},
                 };
             }
+            stageUs = monotonicUs();
+            picRequestProfileBegin("build_execution_plan");
             plan = buildExecutionPlan(
                 pic, static_cast<int>(preludeTokenIds.size()), layerCount,
                 hasNativeSelectedLocalIndices ? &nativeSelectedLocalIndices : nullptr,
                 hasNativeSelectedLocalIndices ? &scoreMetadata : nullptr);
+            {
+                std::ostringstream os;
+                const int reuseTokenCount = plan.metadata.contains("reuse_token_count") &&
+                        plan.metadata["reuse_token_count"].is_number_integer()
+                    ? plan.metadata["reuse_token_count"].get<int>()
+                    : -1;
+                os << "full_compute=" << (plan.fullCompute ? 1 : 0)
+                   << " sparse_recompute=" << (plan.sparseRecompute ? 1 : 0)
+                   << " recompute_tokens=" << plan.recomputeTokenCount
+                   << " reuse_tokens=" << reuseTokenCount
+                   << " score_layer=" << plan.scoreLayerIdx
+                   << " execution_mode=" << plan.executionMode;
+                picRequestProfileLog("build_execution_plan", monotonicUs() - stageUs, os.str());
+            }
             if (graphBoundaryPrefillDone) {
                 plan.executionMode = pic.selectionAlgorithm == "epic" ? "native-epic-graph-boundary"
                                                                       : "native-cacheblend-graph-boundary";
@@ -2792,6 +2931,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 mLlm->generate_init(&sink, "");
             }
             if (!graphBoundaryPrefillDone && plan.fullCompute) {
+                picRequestProfileBegin("prefill_full_compute_pic_chat");
                 if (!mLlm->prefill(fullPromptTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
                     error = "Failed to prefill full-compute PIC chat request" + llmContextSuffix(mLlm.get());
@@ -2811,6 +2951,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 firstPrefill.insert(firstPrefill.end(), plan.prefillPicTokenIds.begin(),
                                     plan.prefillPicTokenIds.end());
                 if (!firstPrefill.empty()) {
+                    picRequestProfileBegin("prefill_pic_prefix");
                     if (!mLlm->prefill(firstPrefill)) {
                         mLlm->finishExternalPagedKVRequest();
                         error = "Failed to prefill prelude/PIC prefix tokens" + llmContextSuffix(mLlm.get());
@@ -2828,12 +2969,14 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 } else {
                     mLlm->beginExternalPagedKVRequest();
                 }
-                if (!plan.externalTokenIds.empty() &&
-                    !mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to bind persistent PIC cache source into current request PagedCache" +
-                            llmContextSuffix(mLlm.get());
-                    return false;
+                if (!plan.externalTokenIds.empty()) {
+                    picRequestProfileBegin("append_external_paged_kv");
+                    if (!mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
+                        mLlm->finishExternalPagedKVRequest();
+                        error = "Failed to bind persistent PIC cache source into current request PagedCache" +
+                                llmContextSuffix(mLlm.get());
+                        return false;
+                    }
                 }
                 if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
                     auto context = mLlm->getContext();
@@ -2844,12 +2987,14 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                                  static_cast<int>(plan.externalTokenIds.size()));
                     std::fflush(stderr);
                 }
-                if (plan.sparseRecompute &&
-                    !mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds,
-                                                    plan.scoreLayerIdx)) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to sparse-recompute selected PIC KV tokens" + llmContextSuffix(mLlm.get());
-                    return false;
+                if (plan.sparseRecompute) {
+                    picRequestProfileBegin("recompute_external_paged_kv");
+                    if (!mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds,
+                                                        plan.scoreLayerIdx)) {
+                        mLlm->finishExternalPagedKVRequest();
+                        error = "Failed to sparse-recompute selected PIC KV tokens" + llmContextSuffix(mLlm.get());
+                        return false;
+                    }
                 }
                 if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr && plan.sparseRecompute) {
                     auto context = mLlm->getContext();
@@ -2858,6 +3003,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                                  context != nullptr ? context->all_seq_len : -1);
                     std::fflush(stderr);
                 }
+                picRequestProfileBegin("prefill_pic_suffix");
                 if (!mLlm->prefill(suffixTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
                     error = "Failed to prefill PIC prompt suffix tokens" + llmContextSuffix(mLlm.get());
@@ -2874,11 +3020,6 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             }
         }
         if (pic.decodeRefine.enabled && maxTokens != 0) {
-            if (pic.decodeRefine.selector != "top_hkvd") {
-                error = "pic decode_refine selector " + pic.decodeRefine.selector +
-                        " is parsed but not implemented in MNN runtime yet";
-                return false;
-            }
             std::vector<int> seedSelectedPicLocalIndices;
             seedSelectedPicLocalIndices.reserve(plan.recomputeLogicalIndices.size());
             for (int logical : plan.recomputeLogicalIndices) {
@@ -2893,7 +3034,9 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             }
             if (!mLlm->preparePicDecodeRepair(
                     static_cast<int>(preludeTokenIds.size()), pic.tokenIds, rankedPicLocalIndices,
-                    seedSelectedPicLocalIndices, pic.decodeRefine.tokensPerDecodeStep)) {
+                    seedSelectedPicLocalIndices, pic.decodeRefine.tokensPerDecodeStep,
+                    pic.decodeRefine.selector, pic.decodeRefine.attentionLayerIdx,
+                    pic.decodeRefine.attentionHeadIds, pic.decodeRefine.topM)) {
                 error = "Failed to prepare PIC decode_refine runtime state";
                 return false;
             }
@@ -2902,6 +3045,13 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             plan.metadata["decode_refine_ranking_source"] =
                 hasNativeSelectedLocalIndices ? "native_selected_indices_then_pic_order"
                                               : "seed_selected_indices_then_pic_order";
+            plan.metadata["decode_refine_selection_source"] =
+                pic.decodeRefine.selector == "lagged_attention_hkvd"
+                    ? "lagged_attention_compact_rank_filtered_hkvd_then_top_hkvd_fill"
+                    : "top_hkvd";
+            plan.metadata["decode_refine_attention_layer_idx"] = pic.decodeRefine.attentionLayerIdx;
+            plan.metadata["decode_refine_attention_head_ids"] = pic.decodeRefine.attentionHeadIds;
+            plan.metadata["decode_refine_attention_top_m"] = pic.decodeRefine.topM;
         }
         if (maxTokens != 0) {
             if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {

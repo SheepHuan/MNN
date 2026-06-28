@@ -76,6 +76,19 @@ struct PagedAttentionPendingWriteCase {
     int layers;
 };
 
+struct PagedAttentionSparseQTileCase {
+    const char* name;
+    int batch;
+    int qHeads;
+    int kvHeads;
+    int headDim;
+    int contextLen;
+    int activeLen;
+    int requestCapacity;
+    int warmup;
+    int repeat;
+};
+
 static bool printPagedAttentionSpecialTimedResult(const char* impl, const PagedAttentionSpecialShapeCase& c,
                                                   float avgMs) {
     const int kvLen = c.bench.pastLen + c.bench.seqLen;
@@ -95,6 +108,71 @@ static bool printPagedAttentionPendingWriteTimedResult(const char* impl, const P
               c.name, impl, c.batch, c.qHeads, c.kvHeads, c.headDim, c.seqLen, c.requestCapacity, c.layers, avgMs);
     ::fflush(stdout);
     return true;
+}
+
+static bool printPagedAttentionSparseQTileTimedResult(const char* impl, const char* qtileVariant,
+                                                      const PagedAttentionSparseQTileCase& c, float avgMs) {
+    const float ratio = c.contextLen > 0 ? static_cast<float>(c.activeLen) / static_cast<float>(c.contextLen) : 0.0f;
+    MNN_PRINT("[bench_ops/cuda/perf/PagedAttention/SparseQTileAB] %-28s impl=%-14s qtile=%-12s "
+              "B=%d qH=%d kvH=%d D=%d ctx=%d active=%d cap=%d active_over_ctx=%.4f avg=%.4f ms\n",
+              c.name, impl, qtileVariant != nullptr ? qtileVariant : "none", c.batch, c.qHeads, c.kvHeads,
+              c.headDim, c.contextLen, c.activeLen, c.requestCapacity, ratio, avgMs);
+    ::fflush(stdout);
+    return true;
+}
+
+static bool sparseQTileCaseEnabled(const char* name) {
+    const char* filter = ::getenv("MNN_BENCH_PAGED_SPARSE_CASE");
+    if (filter == nullptr || filter[0] == '\0') {
+        return true;
+    }
+    return std::string(name).find(filter) != std::string::npos;
+}
+
+static std::vector<int> buildLaterScatterLogicalIndices(int contextLen, int activeLen) {
+    activeLen = std::max(0, std::min(activeLen, contextLen));
+    std::vector<int> logical;
+    logical.reserve(activeLen);
+    if (activeLen <= 0 || contextLen <= 0) {
+        return logical;
+    }
+    const int anchor = std::min(activeLen, std::max(16, activeLen / 16));
+    for (int i = 0; i < anchor; ++i) {
+        logical.emplace_back(i);
+    }
+    int prev = logical.empty() ? -1 : logical.back();
+    const int windowStart = std::min(contextLen - 1, std::max(anchor, contextLen / 4));
+    const int remaining = activeLen - anchor;
+    for (int i = 0; i < remaining; ++i) {
+        const int numerator = i * std::max(1, contextLen - windowStart);
+        int logicalIndex = windowStart + numerator / std::max(1, remaining);
+        logicalIndex += (i % 3 == 1) ? 1 : ((i % 3 == 2) ? 2 : 0);
+        logicalIndex = std::max(logicalIndex, prev + 1);
+        const int remainingSlots = remaining - i - 1;
+        logicalIndex = std::min(logicalIndex, contextLen - 1 - remainingSlots);
+        logical.emplace_back(logicalIndex);
+        prev = logicalIndex;
+    }
+    return logical;
+}
+
+static std::vector<float> gatherAttentionRows(const std::vector<float>& full, int batch, int seqLen, int heads,
+                                              int headDim, const std::vector<int>& logicalIndices) {
+    const int activeLen = static_cast<int>(logicalIndices.size());
+    std::vector<float> compact(static_cast<size_t>(batch) * activeLen * heads * headDim, 0.0f);
+    for (int b = 0; b < batch; ++b) {
+        for (int q = 0; q < activeLen; ++q) {
+            const int logical = logicalIndices[static_cast<size_t>(q)];
+            for (int h = 0; h < heads; ++h) {
+                const size_t srcBase =
+                    ((static_cast<size_t>(b) * seqLen + logical) * heads + h) * headDim;
+                const size_t dstBase =
+                    ((static_cast<size_t>(b) * activeLen + q) * heads + h) * headDim;
+                ::memcpy(compact.data() + dstBase, full.data() + srcBase, static_cast<size_t>(headDim) * sizeof(float));
+            }
+        }
+    }
+    return compact;
 }
 
 static std::string sanitizePrefixCacheName(const char* name) {
@@ -430,6 +508,15 @@ static std::vector<PagedAttentionPendingWriteCase> pagedAttentionPendingWriteCas
     };
 }
 
+static std::vector<PagedAttentionSparseQTileCase> pagedAttentionSparseQTileCases() {
+    return {
+        {"llama3.2-1B_later_scatter_ctx1024_q519", 1, 32, 8, 64, 1024, 519, 2048, 2, 10},
+        {"llama3.2-3B_later_scatter_ctx1024_q519", 1, 24, 8, 128, 1024, 519, 2048, 2, 10},
+        {"qwen3-8B_later_scatter_ctx1024_q519", 1, 32, 8, 128, 1024, 519, 2048, 2, 10},
+        {"minicpm5-1B_later_scatter_ctx1522_q761", 1, 16, 2, 128, 1522, 761, 2048, 2, 10},
+    };
+}
+
 static bool runPagedAttentionV1V2Case(const BenchCase& c) {
     struct ImplCase {
         const char* label;
@@ -559,6 +646,125 @@ static bool runPagedAttentionPendingWriteCase(const PagedAttentionPendingWriteCa
             return false;
         }
         if (!printPagedAttentionPendingWriteTimedResult(impl.label, c, avgMs)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool measurePagedAttentionSparseQTileCase(const PagedAttentionSparseQTileCase& c, const char* qtileVariant,
+                                                 float* avgMs) {
+    if (avgMs == nullptr) {
+        return false;
+    }
+    PagedKVMeta meta;
+    meta.beginRequest(c.requestCapacity);
+    meta.full_causal_attention_mask = true;
+
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    auto op = makeAttentionOp(OpType_PagedAttention, true);
+    auto fullQ = bench.tensor({c.batch, c.contextLen, c.qHeads, c.headDim});
+    auto fullK = bench.tensor({c.batch, c.contextLen, c.kvHeads, c.headDim});
+    auto fullV = bench.tensor({c.batch, c.contextLen, c.kvHeads, c.headDim});
+    auto fullO = bench.tensor({c.batch, c.contextLen, c.qHeads, c.headDim});
+    auto sparseQ = bench.tensor({c.batch, c.activeLen, c.qHeads, c.headDim});
+    auto sparseK = bench.tensor({c.batch, c.activeLen, c.kvHeads, c.headDim});
+    auto sparseV = bench.tensor({c.batch, c.activeLen, c.kvHeads, c.headDim});
+    auto sparseO = bench.tensor({c.batch, c.activeLen, c.qHeads, c.headDim});
+    if (!fullQ || !fullK || !fullV || !fullO || !sparseQ || !sparseK || !sparseV || !sparseO) {
+        return false;
+    }
+
+    const auto fullQData = makePattern(c.batch * c.contextLen * c.qHeads * c.headDim, 0.0100f);
+    const auto fullKData = makePattern(c.batch * c.contextLen * c.kvHeads * c.headDim, 0.0110f, 0.0007f);
+    const auto fullVData = makePattern(c.batch * c.contextLen * c.kvHeads * c.headDim, 0.0090f, -0.0005f);
+    if (!bench.writeTensor(fullQ, fullQData) || !bench.writeTensor(fullK, fullKData) ||
+        !bench.writeTensor(fullV, fullVData)) {
+        return false;
+    }
+
+    const auto sparseLogical = buildLaterScatterLogicalIndices(c.contextLen, c.activeLen);
+    if (static_cast<int>(sparseLogical.size()) != c.activeLen) {
+        MNN_ERROR("failed to build sparse logical indices for %s ctx=%d active=%d\n",
+                  c.name, c.contextLen, c.activeLen);
+        return false;
+    }
+    const auto sparseQData = gatherAttentionRows(fullQData, c.batch, c.contextLen, c.qHeads, c.headDim, sparseLogical);
+    const auto sparseKData = gatherAttentionRows(fullKData, c.batch, c.contextLen, c.kvHeads, c.headDim, sparseLogical);
+    const auto sparseVData = gatherAttentionRows(fullVData, c.batch, c.contextLen, c.kvHeads, c.headDim, sparseLogical);
+    if (!bench.writeTensor(sparseQ, sparseQData) || !bench.writeTensor(sparseK, sparseKData) ||
+        !bench.writeTensor(sparseV, sparseVData)) {
+        return false;
+    }
+
+    std::vector<Tensor*> fullInputs = {fullQ, fullK, fullV};
+    std::vector<Tensor*> fullOutputs = {fullO};
+    auto exe = bench.create(fullInputs, fullOutputs, op->get());
+    if (!exe) {
+        MNN_ERROR("failed to create sparse-qtile PagedAttention execution for %s\n", c.name);
+        return false;
+    }
+    auto code = bench.resize(exe.get(), fullInputs, fullOutputs);
+    if (code != NO_ERROR) {
+        MNN_ERROR("sparse-qtile full prefill onResize failed for %s: %d\n", c.name, code);
+        return false;
+    }
+    setPagedMeta(meta, 0, c.contextLen);
+    code = bench.execute(exe.get(), fullInputs, fullOutputs);
+    if (code != NO_ERROR) {
+        MNN_ERROR("sparse-qtile full prefill onExecute failed for %s: %d\n", c.name, code);
+        return false;
+    }
+    if (!checkCuda(cudaDeviceSynchronize(), "PagedAttention sparse-qtile full prefill sync")) {
+        return false;
+    }
+    meta.syncPaged();
+    meta.full_causal_attention_mask = true;
+    if (!meta.activatePicRows(sparseLogical, 0, c.contextLen)) {
+        MNN_ERROR("failed to activate sparse rows for %s ctx=%d active=%d\n",
+                  c.name, c.contextLen, c.activeLen);
+        return false;
+    }
+
+    std::vector<Tensor*> sparseInputs = {sparseQ, sparseK, sparseV};
+    std::vector<Tensor*> sparseOutputs = {sparseO};
+    code = bench.resize(exe.get(), sparseInputs, sparseOutputs);
+    if (code != NO_ERROR) {
+        MNN_ERROR("sparse-qtile compact onResize failed for %s: %d\n", c.name, code);
+        return false;
+    }
+
+    ScopedEnvVar qtileEnv("MNN_CUDA_PAGED_ATTENTION_QTILE_VARIANT", qtileVariant);
+    CudaEventPair timer;
+    auto run = [&]() {
+        meta.full_causal_attention_mask = true;
+        return bench.execute(exe.get(), sparseInputs, sparseOutputs);
+    };
+    if (!timer.measure(run, c.warmup, c.repeat, avgMs)) {
+        return false;
+    }
+    return true;
+}
+
+static bool runPagedAttentionSparseQTileCase(const PagedAttentionSparseQTileCase& c) {
+    struct ImplCase {
+        const char* label;
+        const char* qtileVariant;
+    };
+    const ImplCase impls[] = {
+        {"default_sparse", nullptr},
+        {"qtile_auto", "auto"},
+    };
+    for (const auto& impl : impls) {
+        float avgMs = 0.0f;
+        if (!measurePagedAttentionSparseQTileCase(c, impl.qtileVariant, &avgMs)) {
+            return false;
+        }
+        if (!printPagedAttentionSparseQTileTimedResult(impl.label, impl.qtileVariant, c, avgMs)) {
             return false;
         }
     }
@@ -709,6 +915,25 @@ public:
     }
 };
 
+class CudaPagedAttentionSparseQTilePerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        if (!supportPerfPrecision()) {
+            return true;
+        }
+        auto cases = pagedAttentionSparseQTileCases();
+        for (const auto& c : cases) {
+            if (!sparseQTileCaseEnabled(c.name)) {
+                continue;
+            }
+            if (!runPagedAttentionSparseQTileCase(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
 MNNTestSuiteRegister(CudaLinearAttentionPrefillPerf, "bench_ops/cuda/perf/LinearAttention/Prefill");
 MNNTestSuiteRegister(CudaLinearAttentionDecodePerf, "bench_ops/cuda/perf/LinearAttention/Decode");
 MNNTestSuiteRegister(CudaAttentionPrefillPerf, "bench_ops/cuda/perf/Attention/Prefill");
@@ -718,6 +943,7 @@ MNNTestSuiteRegister(CudaPagedAttentionDecodePerf, "bench_ops/cuda/perf/PagedAtt
 MNNTestSuiteRegister(CudaPagedAttentionV1V2Perf, "bench_ops/cuda/perf/PagedAttention/V1V2");
 MNNTestSuiteRegister(CudaPagedAttentionSpecialShapePerf, "bench_ops/cuda/perf/PagedAttention/SpecialShapes");
 MNNTestSuiteRegister(CudaPagedAttentionPendingWritePerf, "bench_ops/cuda/perf/PagedAttention/PendingWriteSubgraph");
+MNNTestSuiteRegister(CudaPagedAttentionSparseQTilePerf, "bench_ops/cuda/perf/PagedAttention/SparseQTileAB");
 
 } // namespace
 

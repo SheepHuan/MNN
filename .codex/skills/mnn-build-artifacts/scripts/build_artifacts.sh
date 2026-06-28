@@ -96,6 +96,7 @@ TOOLCHAIN_ROOT="${TOOLCHAIN_ROOT:-}"
 CROSS_TRIPLE="${CROSS_TRIPLE:-}"
 SYSROOT="${SYSROOT:-}"
 ENABLE_CROSS_CUDA="${ENABLE_CROSS_CUDA:-${MNN_CROSS_CUDA:-OFF}}"
+CROSS_CUDA_SYSROOT="${CROSS_CUDA_SYSROOT:-${MNN_JETSON_CUDA_SYSROOT:-${ROOT_DIR}/.cache/sysroots/jetson_cuda/targets/aarch64-linux}}"
 CROSS_COMPILE="${CROSS_COMPILE:-auto}"
 ENABLE_OPENCL="${ENABLE_OPENCL:-${MNN_ENABLE_OPENCL:-auto}}"
 ENABLE_VULKAN="${ENABLE_VULKAN:-${MNN_ENABLE_VULKAN:-auto}}"
@@ -111,6 +112,10 @@ IS_NATIVE_JETSON=0
 IS_ANDROID_TARGET=0
 REQUESTED_BUILD_DIR="${BUILD_DIR:-}"
 REQUESTED_INSTALL_PREFIX="${INSTALL_PREFIX:-}"
+EXPECTED_CROSS_C_COMPILER=""
+EXPECTED_CROSS_CXX_COMPILER=""
+EXPECTED_CROSS_SYSROOT=""
+EXPECTED_CROSS_TOOLCHAIN_FILE=""
 
 log() {
     printf '[build_artifacts] %s\n' "$*"
@@ -123,6 +128,58 @@ die() {
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+cache_value() {
+    local cache_path="$1"
+    local key="$2"
+    awk -F= -v key="${key}" '$1 ~ ("^" key ":") {print substr($0, index($0, "=") + 1); exit}' "${cache_path}" 2>/dev/null || true
+}
+
+sanitize_path_tag() {
+    printf '%s' "$1" | tr '/ :' '___' | tr -c 'A-Za-z0-9._-' '_'
+}
+
+reset_cross_build_dir_if_mismatched() {
+    local cache_path="$1"
+    [[ -f "${cache_path}" ]] || return 0
+
+    local cached_toolchain cached_cc cached_cxx cached_sysroot
+    cached_toolchain="$(cache_value "${cache_path}" CMAKE_TOOLCHAIN_FILE)"
+    cached_cc="$(cache_value "${cache_path}" CMAKE_C_COMPILER)"
+    cached_cxx="$(cache_value "${cache_path}" CMAKE_CXX_COMPILER)"
+    cached_sysroot="$(cache_value "${cache_path}" CMAKE_SYSROOT)"
+
+    local mismatch=0
+    if [[ -n "${EXPECTED_CROSS_TOOLCHAIN_FILE}" && "${cached_toolchain}" != "${EXPECTED_CROSS_TOOLCHAIN_FILE}" ]]; then
+        mismatch=1
+        log "Cross build cache mismatch: toolchain file"
+        log "  cached:   ${cached_toolchain:-<empty>}"
+        log "  expected: ${EXPECTED_CROSS_TOOLCHAIN_FILE}"
+    fi
+    if [[ -n "${EXPECTED_CROSS_C_COMPILER}" && "${cached_cc}" != "${EXPECTED_CROSS_C_COMPILER}" ]]; then
+        mismatch=1
+        log "Cross build cache mismatch: C compiler"
+        log "  cached:   ${cached_cc:-<empty>}"
+        log "  expected: ${EXPECTED_CROSS_C_COMPILER}"
+    fi
+    if [[ -n "${EXPECTED_CROSS_CXX_COMPILER}" && "${cached_cxx}" != "${EXPECTED_CROSS_CXX_COMPILER}" ]]; then
+        mismatch=1
+        log "Cross build cache mismatch: CXX compiler"
+        log "  cached:   ${cached_cxx:-<empty>}"
+        log "  expected: ${EXPECTED_CROSS_CXX_COMPILER}"
+    fi
+    if [[ "${cached_sysroot}" != "${EXPECTED_CROSS_SYSROOT}" ]]; then
+        mismatch=1
+        log "Cross build cache mismatch: sysroot"
+        log "  cached:   ${cached_sysroot:-<empty>}"
+        log "  expected: ${EXPECTED_CROSS_SYSROOT:-<empty>}"
+    fi
+
+    if [[ "${mismatch}" == "1" ]]; then
+        log "Removing stale cross build directory: ${BUILD_DIR}"
+        rm -rf "${BUILD_DIR}"
+    fi
 }
 
 detect_is_native_jetson() {
@@ -314,6 +371,7 @@ find_toolchain_root() {
 
 prepare_cross_toolchain() {
     local archive_url archive_name archive_path sig_url sig_path extract_dir found_root triple_prefix libc_dir toolchain_file
+    local toolchain_tag root_tag
 
     require_cmd tar
 
@@ -355,8 +413,16 @@ prepare_cross_toolchain() {
             SYSROOT="${libc_dir}"
         fi
     fi
+    local cross_cuda_root=""
+    if [[ "${ENABLE_CROSS_CUDA}" == "ON" || "${ENABLE_CROSS_CUDA}" == "1" ]]; then
+        if [[ -d "${CROSS_CUDA_SYSROOT}" ]]; then
+            cross_cuda_root="${CROSS_CUDA_SYSROOT}"
+        fi
+    fi
 
-    toolchain_file="${TOOLCHAIN_CACHE_DIR}/jetson-aarch64.toolchain.cmake"
+    toolchain_tag="$(sanitize_path_tag "${TARGET_DEVICE:-jetson_cross}")"
+    root_tag="$(sanitize_path_tag "$(basename "${found_root}")")"
+    toolchain_file="${TOOLCHAIN_CACHE_DIR}/${toolchain_tag}-${root_tag}-aarch64-linux.toolchain.cmake"
     mkdir -p "${TOOLCHAIN_CACHE_DIR}"
     {
         printf 'set(CMAKE_SYSTEM_NAME Linux)\n'
@@ -365,9 +431,17 @@ prepare_cross_toolchain() {
         printf 'set(CMAKE_CXX_COMPILER "%s")\n' "${found_root}/bin/${CROSS_TRIPLE}g++"
         if [[ -n "${SYSROOT}" ]]; then
             printf 'set(CMAKE_SYSROOT "%s")\n' "${SYSROOT}"
-            printf 'set(CMAKE_FIND_ROOT_PATH "%s" "%s")\n' "${SYSROOT}" "${found_root}"
+            if [[ -n "${cross_cuda_root}" ]]; then
+                printf 'set(CMAKE_FIND_ROOT_PATH "%s" "%s" "%s")\n' "${SYSROOT}" "${found_root}" "${cross_cuda_root}"
+            else
+                printf 'set(CMAKE_FIND_ROOT_PATH "%s" "%s")\n' "${SYSROOT}" "${found_root}"
+            fi
         else
-            printf 'set(CMAKE_FIND_ROOT_PATH "%s")\n' "${found_root}"
+            if [[ -n "${cross_cuda_root}" ]]; then
+                printf 'set(CMAKE_FIND_ROOT_PATH "%s" "%s")\n' "${found_root}" "${cross_cuda_root}"
+            else
+                printf 'set(CMAKE_FIND_ROOT_PATH "%s")\n' "${found_root}"
+            fi
         fi
         printf 'set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n'
         printf 'set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n'
@@ -377,6 +451,10 @@ prepare_cross_toolchain() {
 
     export PATH="${found_root}/bin:${PATH}"
     CMAKE_TOOLCHAIN_FILE="${CMAKE_TOOLCHAIN_FILE:-${toolchain_file}}"
+    EXPECTED_CROSS_C_COMPILER="${found_root}/bin/${CROSS_TRIPLE}gcc"
+    EXPECTED_CROSS_CXX_COMPILER="${found_root}/bin/${CROSS_TRIPLE}g++"
+    EXPECTED_CROSS_SYSROOT="${SYSROOT:-}"
+    EXPECTED_CROSS_TOOLCHAIN_FILE="${CMAKE_TOOLCHAIN_FILE}"
     log "Cross toolchain root: ${found_root}"
     log "Cross triple: ${CROSS_TRIPLE}"
     log "Cross sysroot: ${SYSROOT:-<toolchain default>}"
@@ -639,9 +717,19 @@ else
             CUDA_ARCHS="7.2"
         fi
         CUDA_ARCHS="$(normalize_cuda_archs "${CUDA_ARCHS}")"
+        if [[ -d "${CROSS_CUDA_SYSROOT}" ]]; then
+            CROSS_CUDA_TOOLKIT_ROOT="$(dirname "$(dirname "${CROSS_CUDA_SYSROOT}")")"
+            export CUDA_TOOLKIT_ROOT="${CUDA_TOOLKIT_ROOT:-${CROSS_CUDA_TOOLKIT_ROOT}}"
+            log "Cross CUDA toolkit root: ${CUDA_TOOLKIT_ROOT}"
+            log "Cross CUDA target sysroot: ${CROSS_CUDA_SYSROOT}"
+        fi
     else
         CUDA_ARCHS=""
     fi
+fi
+
+if [[ "${IS_ANDROID_TARGET}" != "1" && "${IS_NATIVE_JETSON}" != "1" && "${CLEAN}" != "1" ]]; then
+    reset_cross_build_dir_if_mismatched "${BUILD_DIR}/CMakeCache.txt"
 fi
 
 GENERATOR_ARGS=()
@@ -700,6 +788,24 @@ if [[ "${IS_NATIVE_JETSON}" == "1" || "${ENABLE_CROSS_CUDA}" == "ON" || "${ENABL
         -DCUDA_ARCHS="${CUDA_ARCHS}"
         -DMNN_CUDA=ON
     )
+    if [[ "${IS_NATIVE_JETSON}" != "1" && -d "${CROSS_CUDA_SYSROOT}" ]]; then
+        cross_cuda_toolkit_root="$(dirname "$(dirname "${CROSS_CUDA_SYSROOT}")")"
+        cross_cuda_include="${CROSS_CUDA_SYSROOT}/include"
+        cross_cuda_lib="${CROSS_CUDA_SYSROOT}/lib"
+        if [[ -d "${cross_cuda_toolkit_root}" && -d "${cross_cuda_include}" && -f "${cross_cuda_lib}/libcudart.so" ]]; then
+            CMAKE_CONFIGURE_ARGS+=(
+                -DCUDA_TOOLKIT_ROOT_DIR="${cross_cuda_toolkit_root}"
+                -DCUDA_TOOLKIT_TARGET_DIR="${CROSS_CUDA_SYSROOT}"
+                -DCUDA_TOOLKIT_INCLUDE="${cross_cuda_include}"
+                -DCUDA_CUDART_LIBRARY="${cross_cuda_lib}/libcudart.so"
+            )
+            if [[ -f "${cross_cuda_lib}/libcublas.so" ]]; then
+                CMAKE_CONFIGURE_ARGS+=(
+                    -DCUDA_CUBLAS_LIBRARY="${cross_cuda_lib}/libcublas.so"
+                )
+            fi
+        fi
+    fi
 else
     CMAKE_CONFIGURE_ARGS+=(
         -DMNN_CUDA=OFF

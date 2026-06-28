@@ -465,6 +465,15 @@ void Llm::tuning(TuneType type, std::vector<int> candidates) {
     reset();
 }
 
+void Llm::updateRuntimeCache() {
+    if (mRuntimeManager != nullptr) {
+        mRuntimeManager->updateCache();
+    }
+    if (mProcessorRuntimeManager != nullptr) {
+        mProcessorRuntimeManager->updateCache();
+    }
+}
+
 void Llm::switchMode(Llm::Stage stage) {
     // do nothing, only reserve api
     return;

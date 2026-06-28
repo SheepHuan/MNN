@@ -117,6 +117,69 @@ private:
     std::shared_ptr<Execution> mFallbackMul;
 };
 
+class FuseBufExecution : public CommonExecution {
+public:
+    FuseBufExecution(const std::vector<Tensor*>& inputs, Backend* backend, const Op* op)
+        : CommonExecution(backend, op) {
+        mUnits.resize(1);
+        mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
+        auto runtime = mOpenCLBackend->getOpenCLRuntime();
+        std::set<std::string> buildOptions;
+        auto extra = op->main_as_Extra();
+        auto source = reinterpret_cast<const char*>(extra->info()->data());
+        mKernelName = extra->type()->str();
+        mUnits[0].kernel = runtime->buildKernelFromSource(source, extra->type()->c_str(), buildOptions,
+                                                          mOpenCLBackend->getPrecision());
+        OPENCL_CHECK_KERNEL_CTOR(mUnits[0].kernel);
+        mMaxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mUnits[0].kernel));
+    }
+    virtual ~FuseBufExecution() = default;
+
+    virtual ErrorCode onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        auto output = outputs[0];
+        auto outputShape = tensorShapeFormat(output);
+        auto& unit = mUnits[0];
+        const int outputBatch = outputShape.at(0);
+        const int outputHeight = outputShape.at(1);
+        const int outputWidth = outputShape.at(2);
+        const int outputChannels = outputShape.at(3);
+        const int channelBlocks = UP_DIV(outputChannels, 4);
+        mGlobalWorkSize = {
+            static_cast<uint32_t>(channelBlocks),
+            static_cast<uint32_t>(outputWidth),
+            static_cast<uint32_t>(outputHeight * outputBatch),
+        };
+
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        for (auto input : inputs) {
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(input));
+        }
+        for (auto out : outputs) {
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(out));
+        }
+        ret |= unit.kernel->get().setArg(idx++, mGlobalWorkSize[0]);
+        ret |= unit.kernel->get().setArg(idx++, mGlobalWorkSize[1]);
+        ret |= unit.kernel->get().setArg(idx++, mGlobalWorkSize[2]);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg FuseBufExecution");
+
+        mLocalWorkSize = localWS3DDefault(mGlobalWorkSize, mMaxWorkGroupSize, mOpenCLBackend->getOpenCLRuntime(),
+                                          mKernelName, unit.kernel, mOpenCLBackend->getCLTuneLevel(), "FuseBuf")
+                             .first;
+        mOpenCLBackend->recordKernel3d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
+        unit.globalWorkSize = cl::NDRange(mGlobalWorkSize[0], mGlobalWorkSize[1], mGlobalWorkSize[2]);
+        unit.localWorkSize = cl::NDRange(mLocalWorkSize[0], mLocalWorkSize[1], mLocalWorkSize[2]);
+        return NO_ERROR;
+    }
+
+private:
+    std::string mKernelName;
+    uint32_t mMaxWorkGroupSize = 1;
+    OpenCLBackend* mOpenCLBackend = nullptr;
+    std::vector<uint32_t> mGlobalWorkSize{1, 1, 1};
+    std::vector<uint32_t> mLocalWorkSize{1, 1, 1, 1};
+};
+
 class FuseBufCreator : public OpenCLBackend::Creator {
 public:
     virtual Execution *onCreate(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs,
@@ -128,6 +191,9 @@ public:
         if(param->type()->str() == "ExtraConvolution2DPrelu")OPENCL_CREATOR_CHECK(new ConvBufExecution(inputs, outputs, op, backend, true));
         if(param->type()->str() == "PicSiluMul") {
             OPENCL_CREATOR_CHECK(new PicSiluMulBufExecution(op, backend));
+        }
+        if (param->info() != nullptr && param->info()->size() > 0) {
+            OPENCL_CREATOR_CHECK(new FuseBufExecution(inputs, backend, op));
         }
         return nullptr;
     }

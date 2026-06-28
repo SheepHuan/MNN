@@ -75,7 +75,9 @@ const char* gemm_buf =
 " #ifdef PRELU\n"
 " res=select(res*slope_in,res,res >= 0);\n"
 " #endif\n"
+" if (idx_m+i<M) {\n"
 " vstore4(res,0,output+((idx_n4*M+idx_m+i) << 2));\n"
+" }\n"
 " }\n"
 "}\n"
 ;

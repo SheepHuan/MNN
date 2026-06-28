@@ -7,12 +7,14 @@
 #ifndef MNN_OPENCL_BUFFER_CLOSED
 
 #include "backend/opencl/execution/buffer/PagedAttentionBufExecution.hpp"
+#include "backend/opencl/execution/buffer/PagedAttentionAdrenoUtils.hpp"
 #include "backend/opencl/core/OpenCLRunningUtils.hpp"
 #include "core/MNNFileUtils.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
@@ -32,6 +34,8 @@ namespace MNN {
 namespace OpenCL {
 namespace {
 
+static thread_local int gSteadyStateTuneMeasureDepth = 0;
+
 static int _reverseCount(const PagedKVMeta* meta) {
     if (meta == nullptr || meta->n_reserve <= 0 || meta->reserve == nullptr) {
         return 0;
@@ -44,9 +48,81 @@ static bool _profilePagedAttention() {
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+static bool _profilePagedAttentionTune() {
+    const char* value = ::getenv("MNN_PAGED_ATTENTION_PROFILE_TUNE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static bool _tracePagedAttentionProgress() {
+    const char* value = ::getenv("MNN_PAGED_ATTENTION_TRACE_PROGRESS");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static int _pagedAttentionProfileLayerIndex(int layerIndex, const PagedKVMeta* meta) {
+    return layerIndex >= 0 ? layerIndex : (meta != nullptr ? meta->layer_index : -1);
+}
+
 static uint64_t _nowUs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static void _profileTuneCandidateStart(const char* op, int layerIndex, int queryLen, int kvLen,
+                                       const char* candidate) {
+    if (!_profilePagedAttention() && !_tracePagedAttentionProgress()) {
+        return;
+    }
+    MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d query=%d kv_len=%d candidate=%s phase=begin\n",
+              op, layerIndex, queryLen, kvLen, candidate != nullptr ? candidate : "unknown");
+    std::fflush(stdout);
+}
+
+static void _profileTuneCandidateEnd(const char* op, int layerIndex, int queryLen, int kvLen,
+                                     const char* candidate, bool ok, uint64_t elapsedUs) {
+    if (!_profilePagedAttention() && !_tracePagedAttentionProgress()) {
+        return;
+    }
+    MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d query=%d kv_len=%d candidate=%s phase=end ok=%d us=%llu\n",
+              op, layerIndex, queryLen, kvLen, candidate != nullptr ? candidate : "unknown", ok ? 1 : 0,
+              static_cast<unsigned long long>(elapsedUs));
+    std::fflush(stdout);
+}
+
+template <typename Runner>
+static bool _measureSteadyStateCandidate(OpenCLRuntime* runtime, Runner&& runner, uint64_t* elapsedUs) {
+    if (runtime == nullptr || elapsedUs == nullptr) {
+        return false;
+    }
+    if (gSteadyStateTuneMeasureDepth > 0) {
+        const uint64_t t0 = _nowUs();
+        auto timedErr = runner();
+        if (timedErr != NO_ERROR) {
+            return false;
+        }
+        runtime->commandQueue().finish();
+        *elapsedUs = _nowUs() - t0;
+        return true;
+    }
+    // Tune candidates can trigger deeper first-use work, such as nested family/variant tuning,
+    // kernel build, or image mirror setup. Warm once, then measure the second run so the cache
+    // records the steady-state path instead of a cold-start artifact.
+    ++gSteadyStateTuneMeasureDepth;
+    auto warmErr = runner();
+    if (warmErr != NO_ERROR) {
+        --gSteadyStateTuneMeasureDepth;
+        return false;
+    }
+    runtime->commandQueue().finish();
+    const uint64_t t0 = _nowUs();
+    auto timedErr = runner();
+    if (timedErr != NO_ERROR) {
+        --gSteadyStateTuneMeasureDepth;
+        return false;
+    }
+    runtime->commandQueue().finish();
+    *elapsedUs = _nowUs() - t0;
+    --gSteadyStateTuneMeasureDepth;
+    return true;
 }
 
 static bool _writeBinaryFile(const std::string& path, const int8_t* data, size_t bytes) {
@@ -118,6 +194,70 @@ struct ExternalLayerReadTask {
 
 static std::mutex gExternalLayerReadMutex;
 static std::unordered_map<std::string, ExternalLayerReadTask> gExternalLayerReadTasks;
+static thread_local int gSparseQSplitChunkOverride = 0;
+static thread_local bool gSparseQSplitTuneInProgress = false;
+enum SparseFlashKernelVariant : uint32_t {
+    kSparseFlashVariantRow32 = 0,
+    kSparseFlashVariantRow64 = 1,
+    kSparseFlashVariantMQTileHD64Q4K16 = 2,
+    kSparseFlashVariantMQTileHD128Q4K16 = 3,
+    kSparseFlashVariantMQTileHD128Q4K8 = 4,
+    kSparseFlashVariantMQTileHD128Q8K16 = 5,
+    kSparseFlashVariantMQTileHD128Q4K8KVImage = 6,
+    kSparseFlashVariantMQTileHD128Q8K16KVImage = 7,
+    kSparseFlashVariantMQTileHD128Q8K16KImage = 8,
+    kSparseFlashVariantMQTileHD128Q4K8KImage = 9,
+};
+enum ScoreSparsePrefillFamily : uint32_t {
+    kScoreSparseFamilyQSplit = 0,
+    kScoreSparseFamilyFlash = 1,
+};
+enum CacheBlendTopKFamily : uint32_t {
+    kCacheBlendTopKFamilyLegacy = 0,
+    kCacheBlendTopKFamilyStage1024 = 1,
+    kCacheBlendTopKFamilyStage2048 = 2,
+};
+enum SparseFlashScheduleVariant : uint32_t {
+    kSparseFlashScheduleSinglePiece = 0,
+    kSparseFlashScheduleRangeQ64 = 1,
+    kSparseFlashScheduleRangeQ128 = 2,
+};
+enum TuneSelectionSource : uint32_t {
+    kTuneSelectionSourceDefault = 0,
+    kTuneSelectionSourceCache = 1,
+    kTuneSelectionSourceOnlineTuned = 2,
+};
+static thread_local int gSparseFlashVariantOverride = -1;
+static thread_local bool gSparseFlashVariantTuneInProgress = false;
+static thread_local int gSparseFlashScheduleOverride = -1;
+static thread_local bool gSparseFlashScheduleTuneInProgress = false;
+static bool _supportsAdrenoSparseFlashKVImage(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                              int kvLen);
+static bool _supportsAdrenoSparseFlashKImage(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                             int kvLen);
+static bool _preferAdrenoSparseFlashKImage(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                           int kvLen);
+static bool _allowAdrenoSparseFlashKVImageFallback(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                                   int kvLen);
+static bool _preferAdrenoScoreSparseFlash(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                          int activeLen, int kvLen);
+static bool _preferAdrenoLaterSparseQ4K8(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                         int activeLen, int kvLen);
+static bool _useAdrenoGemmTransNullLws(OpenCLRuntime* runtime, int seqLen, int kvLen, int batchHeads,
+                                       std::vector<uint32_t>* lws);
+static bool _useAdrenoGemmClipNullLws(OpenCLRuntime* runtime, int seqLen, int numHeads, int headDim,
+                                      std::vector<uint32_t>* lws);
+
+struct CacheBlendTopKDispatch {
+    uint32_t family = kCacheBlendTopKFamilyLegacy;
+    bool useStage = false;
+    int stage1LocalSize = 256;
+    int stage2LocalSize = 256;
+    int blockSize = 0;
+    int blockCount = 0;
+    int stageCandidateCount = 0;
+    int stageSortSize = 0;
+};
 
 static bool _envFlagEnabled(const char* name, bool defaultValue) {
     const char* value = ::getenv(name);
@@ -127,12 +267,43 @@ static bool _envFlagEnabled(const char* name, bool defaultValue) {
     return value[0] != '0';
 }
 
+static const char* _tuneSelectionSourceName(uint32_t source) {
+    switch (source) {
+        case kTuneSelectionSourceCache:
+            return "cache";
+        case kTuneSelectionSourceOnlineTuned:
+            return "online_tuned";
+        case kTuneSelectionSourceDefault:
+        default:
+            return "default";
+    }
+}
+
 static bool _picOpenCLDebug() {
     return _envFlagEnabled("MNN_PIC_DECODE_DEBUG", false);
 }
 
 static bool _legacyB863976OpenCL() {
     return _envFlagEnabled("MNN_PAGED_ATTENTION_OPENCL_LEGACY_B863976", false);
+}
+
+static std::string _openCLTuneDeviceKey(OpenCLRuntime* runtime) {
+    if (runtime == nullptr) {
+        return "unknown";
+    }
+    switch (runtime->getGpuType()) {
+        case GpuType::MALI:
+            return "mali";
+        case GpuType::ADRENO:
+            return _legacyB863976OpenCL() ? "adreno_legacy" : "adreno";
+        case GpuType::RADEON:
+            return "radeon";
+        case GpuType::INTEL:
+            return "intel";
+        case GpuType::OTHER:
+        default:
+            return "other";
+    }
 }
 
 static int _envIntValue(const char* name, int defaultValue) {
@@ -333,8 +504,13 @@ static size_t _fastPrefillScratchBytes(int seqLen, int kvLen, int batch, int num
     return bytes;
 }
 
-static bool _useDirectValuePrefillForSparse(const PagedKVMeta* meta, int activeLen) {
+static bool _useDirectValuePrefillForSparse(const PagedKVMeta* meta, int activeLen, int headDim,
+                                            OpenCLRuntime* runtime = nullptr) {
     if (meta == nullptr) {
+        return false;
+    }
+    const bool adreno = runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO && !_legacyB863976OpenCL();
+    if (headDim >= 128 && !adreno) {
         return false;
     }
     if (!meta->cacheblend_score_ready || meta->cacheblend_score_pic_token_count <= 0) {
@@ -352,7 +528,127 @@ static bool _useDirectValuePrefillForSparse(const PagedKVMeta* meta, int activeL
         selected * 100 >= meta->cacheblend_score_pic_token_count * minRatioPercent;
 }
 
-static uint32_t _sparseFlashLaneWidth(const PagedKVMeta* meta, int activeLen) {
+static bool _highBudgetSparsePlan(const PagedKVMeta* meta, int activeLen) {
+    if (meta == nullptr) {
+        return false;
+    }
+    constexpr int minActive = 384;
+    if (activeLen < minActive) {
+        return false;
+    }
+    int selected = 0;
+    int picTokenCount = 0;
+    if (meta->cacheblend_score_ready && meta->cacheblend_score_pic_token_count > 0) {
+        selected = meta->cacheblend_score_selected_local_indices.empty()
+            ? meta->cacheblend_score_top_k
+            : static_cast<int>(meta->cacheblend_score_selected_local_indices.size());
+        picTokenCount = meta->cacheblend_score_pic_token_count;
+    } else if (meta->pic_graph_active_plan_ready && meta->pic_graph_pic_token_count > 0) {
+        selected = static_cast<int>(meta->pic_graph_selected_local_indices.size());
+        picTokenCount = meta->pic_graph_pic_token_count;
+    } else {
+        return false;
+    }
+    constexpr int minRatioPercent = 50;
+    return selected > 0 && picTokenCount > 0 &&
+           selected * 100 >= picTokenCount * minRatioPercent;
+}
+
+static int _sparseSelectedRatioPercent(const PagedKVMeta* meta) {
+    if (meta == nullptr) {
+        return 0;
+    }
+    int selected = 0;
+    int picTokenCount = 0;
+    if (meta->cacheblend_score_ready && meta->cacheblend_score_pic_token_count > 0) {
+        selected = meta->cacheblend_score_selected_local_indices.empty()
+            ? meta->cacheblend_score_top_k
+            : static_cast<int>(meta->cacheblend_score_selected_local_indices.size());
+        picTokenCount = meta->cacheblend_score_pic_token_count;
+    } else if (meta->pic_graph_active_plan_ready && meta->pic_graph_pic_token_count > 0) {
+        selected = static_cast<int>(meta->pic_graph_selected_local_indices.size());
+        picTokenCount = meta->pic_graph_pic_token_count;
+    }
+    if (selected <= 0 || picTokenCount <= 0) {
+        return 0;
+    }
+    return std::max(0, std::min(100, (selected * 100) / picTokenCount));
+}
+
+static bool _useFinerSparseQSplitPieces(const PagedKVMeta* meta, int activeLen) {
+    return _highBudgetSparsePlan(meta, activeLen);
+}
+
+static int _sparseQSplitChunkLen(const PagedKVMeta* meta, int activeLen, int kvLen, int batch, int numHeads,
+                                 int layerCount, bool staticWorkspace) {
+    if (activeLen <= 0) {
+        return 0;
+    }
+    if (gSparseQSplitChunkOverride > 0) {
+        int overrideChunk = std::max(1, std::min(gSparseQSplitChunkOverride, activeLen));
+        if (overrideChunk < activeLen) {
+            overrideChunk = ((overrideChunk + 3) / 4) * 4;
+        }
+        return std::max(1, std::min(overrideChunk, activeLen));
+    }
+    int qChunkLen = staticWorkspace ? activeLen
+                                    : _prefillQChunkLen(activeLen, kvLen, batch, numHeads, layerCount);
+    constexpr int sparseQChunkLimit = 64;
+    if (!staticWorkspace && sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
+        qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
+    }
+    // HeadDim=128 q-split can become too coarse when static workspace keeps a whole 50% cacheblend budget
+    // in one or two huge pieces. Keep the default path range-aware by capping the piece span modestly.
+    if (staticWorkspace && _useFinerSparseQSplitPieces(meta, activeLen)) {
+        constexpr int cacheblendStaticChunkCap = 192;
+        qChunkLen = std::min(qChunkLen,
+                             std::max(4, std::min(activeLen, ((cacheblendStaticChunkCap + 3) / 4) * 4)));
+    }
+    qChunkLen = std::max(1, std::min(qChunkLen, activeLen));
+    if (qChunkLen < activeLen) {
+        qChunkLen = ((qChunkLen + 3) / 4) * 4;
+    }
+    return std::max(1, std::min(qChunkLen, activeLen));
+}
+
+static bool _shouldTuneSparseQSplitChunk(const PagedKVMeta* meta, int activeLen, int headDim, bool staticWorkspace,
+                                         bool profile, int tuneLevel) {
+    if ((profile && !_profilePagedAttentionTune()) || meta == nullptr || !staticWorkspace) {
+        return false;
+    }
+    if (headDim != 128 || activeLen < 384) {
+        return false;
+    }
+    return tuneLevel == Heavy || tuneLevel == Wide;
+}
+
+static std::vector<int> _sparseQSplitChunkCandidates(int baseChunkLen, int activeLen) {
+    std::vector<int> candidates;
+    if (baseChunkLen <= 0 || activeLen <= 0) {
+        return candidates;
+    }
+    auto append = [&](int candidate) {
+        candidate = std::max(4, std::min(candidate, std::min(baseChunkLen, activeLen)));
+        candidate = ((candidate + 3) / 4) * 4;
+        candidate = std::max(4, std::min(candidate, std::min(baseChunkLen, activeLen)));
+        if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end()) {
+            candidates.emplace_back(candidate);
+        }
+    };
+    append(baseChunkLen);
+    append(64);
+    append(96);
+    append(128);
+    append(160);
+    append(192);
+    std::sort(candidates.begin(), candidates.end());
+    return candidates;
+}
+
+static uint32_t _sparseFlashLaneWidth(const PagedKVMeta* meta, int activeLen, int headDim) {
+    if (headDim >= 128) {
+        return 32u;
+    }
     if (activeLen < 384) {
         return 64u;
     }
@@ -365,6 +661,501 @@ static uint32_t _sparseFlashLaneWidth(const PagedKVMeta* meta, int activeLen) {
         }
     }
     return 32u;
+}
+
+static const char* _sparseFlashVariantName(uint32_t variant) {
+    switch (variant) {
+        case kSparseFlashVariantRow32:
+            return "row32";
+        case kSparseFlashVariantRow64:
+            return "row64";
+        case kSparseFlashVariantMQTileHD64Q4K16:
+            return "mqtile_hd64_q4k16";
+        case kSparseFlashVariantMQTileHD128Q4K16:
+            return "mqtile_hd128_q4k16";
+        case kSparseFlashVariantMQTileHD128Q4K8:
+            return "mqtile_hd128_q4k8";
+        case kSparseFlashVariantMQTileHD128Q8K16:
+            return "mqtile_hd128_q8k16";
+        case kSparseFlashVariantMQTileHD128Q4K8KImage:
+            return "mqtile_hd128_q4k8_kimg";
+        case kSparseFlashVariantMQTileHD128Q4K8KVImage:
+            return "mqtile_hd128_q4k8_kvimg";
+        case kSparseFlashVariantMQTileHD128Q8K16KVImage:
+            return "mqtile_hd128_q8k16_kvimg";
+        case kSparseFlashVariantMQTileHD128Q8K16KImage:
+            return "mqtile_hd128_q8k16_kimg";
+        default:
+            return "unknown";
+    }
+}
+
+static bool _parseSparseFlashVariantName(const char* name, uint32_t* variant) {
+    if (name == nullptr || name[0] == '\0' || variant == nullptr) {
+        return false;
+    }
+    const std::pair<const char*, uint32_t> variants[] = {
+        {"row32", kSparseFlashVariantRow32},
+        {"row64", kSparseFlashVariantRow64},
+        {"mqtile_hd64_q4k16", kSparseFlashVariantMQTileHD64Q4K16},
+        {"mqtile_hd128_q4k16", kSparseFlashVariantMQTileHD128Q4K16},
+        {"mqtile_hd128_q4k8", kSparseFlashVariantMQTileHD128Q4K8},
+        {"mqtile_hd128_q8k16", kSparseFlashVariantMQTileHD128Q8K16},
+        {"mqtile_hd128_q4k8_kimg", kSparseFlashVariantMQTileHD128Q4K8KImage},
+        {"mqtile_hd128_q4k8_kvimg", kSparseFlashVariantMQTileHD128Q4K8KVImage},
+        {"mqtile_hd128_q8k16_kvimg", kSparseFlashVariantMQTileHD128Q8K16KVImage},
+        {"mqtile_hd128_q8k16_kimg", kSparseFlashVariantMQTileHD128Q8K16KImage},
+    };
+    for (const auto& item : variants) {
+        if (::strcmp(name, item.first) == 0) {
+            *variant = item.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool _isSparseFlashKVImageVariant(uint32_t variant) {
+    return variant == kSparseFlashVariantMQTileHD128Q4K8KVImage ||
+           variant == kSparseFlashVariantMQTileHD128Q8K16KVImage;
+}
+
+static const char* _scoreSparseFamilyName(uint32_t family) {
+    switch (family) {
+        case kScoreSparseFamilyQSplit:
+            return "qsplit";
+        case kScoreSparseFamilyFlash:
+            return "flash";
+        default:
+            return "unknown";
+    }
+}
+
+static bool _parseScoreSparseFamilyName(const char* name, uint32_t* family) {
+    if (name == nullptr || name[0] == '\0' || family == nullptr) {
+        return false;
+    }
+    const std::pair<const char*, uint32_t> families[] = {
+        {"qsplit", kScoreSparseFamilyQSplit},
+        {"flash", kScoreSparseFamilyFlash},
+    };
+    for (const auto& item : families) {
+        if (::strcmp(name, item.first) == 0) {
+            *family = item.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool _scoreSparseFamilySupported(uint32_t family) {
+    return family == kScoreSparseFamilyQSplit || family == kScoreSparseFamilyFlash;
+}
+
+static const char* _cacheBlendTopKFamilyName(uint32_t family) {
+    switch (family) {
+        case kCacheBlendTopKFamilyLegacy:
+            return "legacy";
+        case kCacheBlendTopKFamilyStage1024:
+            return "stage1024";
+        case kCacheBlendTopKFamilyStage2048:
+            return "stage2048";
+        default:
+            return "unknown";
+    }
+}
+
+static int _cacheBlendTopKNextPow2(int value) {
+    if (value <= 1) {
+        return 1;
+    }
+    int rounded = 1;
+    while (rounded < value && rounded < (1 << 30)) {
+        rounded <<= 1;
+    }
+    return rounded;
+}
+
+static bool _cacheBlendTopKDispatchForFamily(OpenCLRuntime* runtime,
+                                             const std::shared_ptr<KernelWrap>& stage1Kernel,
+                                             const std::shared_ptr<KernelWrap>& stage2Kernel,
+                                             int picTokenCount,
+                                             int topK,
+                                             uint32_t family,
+                                             CacheBlendTopKDispatch* dispatch) {
+    if (dispatch == nullptr || runtime == nullptr) {
+        return false;
+    }
+    dispatch->family = family;
+    dispatch->useStage = false;
+    dispatch->stage1LocalSize = 256;
+    dispatch->stage2LocalSize = 256;
+    dispatch->blockSize = 0;
+    dispatch->blockCount = 0;
+    dispatch->stageCandidateCount = 0;
+    dispatch->stageSortSize = 0;
+    if (family == kCacheBlendTopKFamilyLegacy) {
+        return true;
+    }
+    if (picTokenCount <= 1024 || topK <= 0) {
+        return false;
+    }
+    int blockSize = 0;
+    switch (family) {
+        case kCacheBlendTopKFamilyStage1024:
+            blockSize = 1024;
+            break;
+        case kCacheBlendTopKFamilyStage2048:
+            blockSize = 2048;
+            break;
+        default:
+            return false;
+    }
+    if (topK > blockSize) {
+        return false;
+    }
+    const int blockCount = UP_DIV(picTokenCount, blockSize);
+    const int candidateCount = blockCount * topK;
+    const int sortSize = _cacheBlendTopKNextPow2(candidateCount);
+    constexpr int kTopKMaxSortSize = 4096;
+    if (blockCount <= 0 || candidateCount <= 0 || sortSize > kTopKMaxSortSize) {
+        return false;
+    }
+    const size_t stage1Bytes = static_cast<size_t>(blockSize) * (sizeof(float) + sizeof(int));
+    const size_t stage2Bytes = static_cast<size_t>(sortSize) * (sizeof(float) + sizeof(int));
+    size_t localMem = runtime->getMaxLocalMem();
+    if (runtime->getGpuType() == GpuType::MALI) {
+        // Mali-G610 reports 32KiB local memory, but cacheblend staged top-k
+        // becomes unstable once the dynamic local allocation crosses 8KiB.
+        // Keep the small staged path for low ratios and let high ratios use
+        // the legacy top-k path rather than returning invalid selected rows.
+        localMem = std::min<size_t>(localMem, 8 * 1024);
+    }
+    if (std::max(stage1Bytes, stage2Bytes) > localMem) {
+        return false;
+    }
+    constexpr int kMaxPreferredLocalSize = 256;
+    const int stage2LocalSize = std::max(1, std::min(kMaxPreferredLocalSize, sortSize));
+    if (runtime->getMaxWorkGroupSize(stage1Kernel) < kMaxPreferredLocalSize ||
+        runtime->getMaxWorkGroupSize(stage2Kernel) < stage2LocalSize) {
+        return false;
+    }
+    dispatch->useStage = true;
+    dispatch->stage1LocalSize = kMaxPreferredLocalSize;
+    dispatch->stage2LocalSize = stage2LocalSize;
+    dispatch->blockSize = blockSize;
+    dispatch->blockCount = blockCount;
+    dispatch->stageCandidateCount = candidateCount;
+    dispatch->stageSortSize = sortSize;
+    return true;
+}
+
+static std::vector<uint32_t> _cacheBlendTopKFamilyCandidates(OpenCLRuntime* runtime,
+                                                             const std::shared_ptr<KernelWrap>& stage1Kernel,
+                                                             const std::shared_ptr<KernelWrap>& stage2Kernel,
+                                                             int picTokenCount,
+                                                             int topK) {
+    std::vector<uint32_t> candidates;
+    if (picTokenCount <= 1024 || topK <= 0 || runtime == nullptr) {
+        return candidates;
+    }
+    CacheBlendTopKDispatch dispatch;
+    for (uint32_t family : {kCacheBlendTopKFamilyStage1024, kCacheBlendTopKFamilyStage2048}) {
+        if (_cacheBlendTopKDispatchForFamily(runtime, stage1Kernel, stage2Kernel, picTokenCount, topK, family,
+                                             &dispatch)) {
+            candidates.emplace_back(family);
+        }
+    }
+    return candidates;
+}
+
+static bool _shouldTuneCacheBlendTopKFamily(int picTokenCount, int topK, bool profile, int tuneLevel) {
+    if ((profile && !_profilePagedAttentionTune()) || picTokenCount <= 1024 || topK <= 0) {
+        return false;
+    }
+    return tuneLevel == Heavy || tuneLevel == Wide;
+}
+
+static bool _shouldTuneScoreSparseFamily(int activeLen, bool profile, int tuneLevel) {
+    if ((profile && !_profilePagedAttentionTune()) || activeLen < 64) {
+        return false;
+    }
+    return tuneLevel == Heavy || tuneLevel == Wide;
+}
+
+static const char* _sparseFlashScheduleName(uint32_t schedule) {
+    switch (schedule) {
+        case kSparseFlashScheduleSinglePiece:
+            return "single_piece";
+        case kSparseFlashScheduleRangeQ64:
+            return "range_q64";
+        case kSparseFlashScheduleRangeQ128:
+            return "range_q128";
+        default:
+            return "unknown";
+    }
+}
+
+static bool _parseSparseFlashScheduleName(const char* name, uint32_t* schedule) {
+    if (name == nullptr || name[0] == '\0' || schedule == nullptr) {
+        return false;
+    }
+    const std::pair<const char*, uint32_t> schedules[] = {
+        {"single_piece", kSparseFlashScheduleSinglePiece},
+        {"range_q64", kSparseFlashScheduleRangeQ64},
+        {"range_q128", kSparseFlashScheduleRangeQ128},
+    };
+    for (const auto& item : schedules) {
+        if (::strcmp(name, item.first) == 0) {
+            *schedule = item.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool _benchSparseFlashVariantOverride(uint32_t* variant) {
+    return _parseSparseFlashVariantName(::getenv("MNN_BENCH_OPENCL_PAGED_SPARSE_FORCE_VARIANT"), variant) ||
+           _parseSparseFlashVariantName(::getenv("MNN_PAGED_ATTENTION_BENCH_FORCE_SPARSE_FLASH_VARIANT"), variant);
+}
+
+static bool _benchSparseFlashScheduleOverride(uint32_t* schedule) {
+    return _parseSparseFlashScheduleName(::getenv("MNN_BENCH_OPENCL_PAGED_SPARSE_FORCE_SCHEDULE"), schedule) ||
+           _parseSparseFlashScheduleName(::getenv("MNN_PAGED_ATTENTION_BENCH_FORCE_SPARSE_FLASH_SCHEDULE"),
+                                         schedule);
+}
+
+static bool _benchScoreSparseFamilyOverride(uint32_t* family) {
+    return _parseScoreSparseFamilyName(::getenv("MNN_BENCH_OPENCL_PAGED_SCORE_FORCE_FAMILY"), family) ||
+           _parseScoreSparseFamilyName(::getenv("MNN_PAGED_ATTENTION_BENCH_FORCE_SCORE_SPARSE_FAMILY"), family);
+}
+
+static bool _sparseFlashVariantSupported(uint32_t variant, int headDim, OpenCLRuntime* runtime = nullptr,
+                                         int batch = 0, int kvHeads = 0, int kvLen = 0) {
+    if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI && headDim == 128) {
+        // Mali G610 can hard-hang on the larger headDim=128 sparse-flash variants
+        // at Qwen3-8B 2K+ high-budget shapes. Keep the production path on the
+        // smaller row32 kernel; Adreno keeps its image/mqtile variants below.
+        return variant == kSparseFlashVariantRow32;
+    }
+    switch (variant) {
+        case kSparseFlashVariantRow32:
+        case kSparseFlashVariantRow64:
+            return headDim == 64 || headDim == 128;
+        case kSparseFlashVariantMQTileHD64Q4K16:
+            return headDim == 64;
+        case kSparseFlashVariantMQTileHD128Q4K16:
+        case kSparseFlashVariantMQTileHD128Q4K8:
+        case kSparseFlashVariantMQTileHD128Q8K16:
+            return headDim == 128;
+        case kSparseFlashVariantMQTileHD128Q4K8KImage:
+            return headDim == 128 &&
+                _supportsAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen);
+        case kSparseFlashVariantMQTileHD128Q8K16KImage:
+            return headDim == 128 &&
+                _supportsAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen);
+        case kSparseFlashVariantMQTileHD128Q4K8KVImage:
+        case kSparseFlashVariantMQTileHD128Q8K16KVImage:
+            return headDim == 128 &&
+                _supportsAdrenoSparseFlashKVImage(runtime, batch, kvHeads, headDim, kvLen);
+        default:
+            return false;
+    }
+}
+
+static std::vector<uint32_t> _sparseFlashVariantCandidates(int headDim, OpenCLRuntime* runtime = nullptr,
+                                                           int batch = 0, int kvHeads = 0, int kvLen = 0,
+                                                           bool queryRowsAreFull = false) {
+    if (headDim == 64) {
+        return {kSparseFlashVariantRow32, kSparseFlashVariantRow64, kSparseFlashVariantMQTileHD64Q4K16};
+    }
+    if (headDim == 128) {
+        if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI) {
+            return {kSparseFlashVariantRow32};
+        }
+        const bool adrenoScoreFlash = queryRowsAreFull && runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO;
+        if (adrenoScoreFlash) {
+            std::vector<uint32_t> candidates = {
+                kSparseFlashVariantRow64,
+                kSparseFlashVariantMQTileHD128Q8K16,
+            };
+            if (_preferAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen)) {
+                candidates.emplace_back(kSparseFlashVariantMQTileHD128Q4K8KImage);
+                candidates.emplace_back(kSparseFlashVariantMQTileHD128Q8K16KImage);
+            } else if (_allowAdrenoSparseFlashKVImageFallback(runtime, batch, kvHeads, headDim, kvLen)) {
+                candidates.emplace_back(kSparseFlashVariantMQTileHD128Q8K16KVImage);
+            }
+            return candidates;
+        }
+        std::vector<uint32_t> candidates = {
+            kSparseFlashVariantRow32,
+            kSparseFlashVariantRow64,
+            kSparseFlashVariantMQTileHD128Q4K16,
+            kSparseFlashVariantMQTileHD128Q4K8,
+            kSparseFlashVariantMQTileHD128Q8K16,
+        };
+        if (_preferAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen)) {
+            candidates.emplace_back(kSparseFlashVariantMQTileHD128Q4K8KImage);
+            candidates.emplace_back(kSparseFlashVariantMQTileHD128Q8K16KImage);
+        } else if (_allowAdrenoSparseFlashKVImageFallback(runtime, batch, kvHeads, headDim, kvLen)) {
+            candidates.emplace_back(kSparseFlashVariantMQTileHD128Q4K8KVImage);
+            candidates.emplace_back(kSparseFlashVariantMQTileHD128Q8K16KVImage);
+        }
+        return candidates;
+    }
+    return {};
+}
+
+static bool _sparseFlashScheduleSupported(const PagedKVMeta* meta, uint32_t schedule, bool queryRowsAreFull) {
+    switch (schedule) {
+        case kSparseFlashScheduleSinglePiece:
+            return meta != nullptr && meta->cacheblend_score_ready && queryRowsAreFull;
+        case kSparseFlashScheduleRangeQ64:
+        case kSparseFlashScheduleRangeQ128:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static uint32_t _defaultSparseFlashSchedule(const PagedKVMeta* meta, bool queryRowsAreFull) {
+    uint32_t forcedSchedule = 0;
+    if (_benchSparseFlashScheduleOverride(&forcedSchedule) &&
+        _sparseFlashScheduleSupported(meta, forcedSchedule, queryRowsAreFull)) {
+        return forcedSchedule;
+    }
+    if (gSparseFlashScheduleOverride >= 0 &&
+        _sparseFlashScheduleSupported(meta, static_cast<uint32_t>(gSparseFlashScheduleOverride), queryRowsAreFull)) {
+        return static_cast<uint32_t>(gSparseFlashScheduleOverride);
+    }
+    if (meta != nullptr && meta->cacheblend_score_ready && queryRowsAreFull) {
+        return kSparseFlashScheduleSinglePiece;
+    }
+    return kSparseFlashScheduleRangeQ64;
+}
+
+static std::vector<uint32_t> _sparseFlashScheduleCandidates(const PagedKVMeta* meta, int activeLen,
+                                                            bool queryRowsAreFull) {
+    std::vector<uint32_t> candidates;
+    if (activeLen <= 0) {
+        return candidates;
+    }
+    if (meta != nullptr && meta->cacheblend_score_ready && queryRowsAreFull) {
+        candidates.emplace_back(kSparseFlashScheduleSinglePiece);
+    }
+    candidates.emplace_back(kSparseFlashScheduleRangeQ64);
+    if (activeLen > 64) {
+        candidates.emplace_back(kSparseFlashScheduleRangeQ128);
+    }
+    return candidates;
+}
+
+static bool _shouldTuneSparseFlashSchedule(const PagedKVMeta* meta, int activeLen, bool profile, int tuneLevel) {
+    if ((profile && !_profilePagedAttentionTune()) || meta == nullptr || activeLen < 128) {
+        return false;
+    }
+    return tuneLevel == Heavy || tuneLevel == Wide;
+}
+
+static int _sparseFlashScheduleQChunkLen(uint32_t schedule, int activeLen) {
+    if (activeLen <= 0) {
+        return 0;
+    }
+    int qChunkLen = activeLen;
+    switch (schedule) {
+        case kSparseFlashScheduleSinglePiece:
+            return activeLen;
+        case kSparseFlashScheduleRangeQ128:
+            qChunkLen = 128;
+            break;
+        case kSparseFlashScheduleRangeQ64:
+        default:
+            qChunkLen = 64;
+            break;
+    }
+    qChunkLen = std::max(1, std::min(qChunkLen, activeLen));
+    if (qChunkLen < activeLen) {
+        qChunkLen = std::max(4, ((qChunkLen + 3) / 4) * 4);
+    }
+    return std::max(1, std::min(qChunkLen, activeLen));
+}
+
+static uint32_t _defaultSparseFlashVariant(const PagedKVMeta* meta, int activeLen, int headDim,
+                                           OpenCLRuntime* runtime = nullptr, bool queryRowsAreFull = false,
+                                           int batch = 0, int kvHeads = 0, int kvLen = 0) {
+    uint32_t forcedVariant = 0;
+    if (_benchSparseFlashVariantOverride(&forcedVariant) &&
+        _sparseFlashVariantSupported(forcedVariant, headDim, runtime, batch, kvHeads, kvLen)) {
+        return forcedVariant;
+    }
+    if (gSparseFlashVariantOverride >= 0 &&
+        _sparseFlashVariantSupported(static_cast<uint32_t>(gSparseFlashVariantOverride), headDim, runtime, batch,
+                                     kvHeads, kvLen)) {
+        return static_cast<uint32_t>(gSparseFlashVariantOverride);
+    }
+    if (headDim == 128) {
+        if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI) {
+            return kSparseFlashVariantRow32;
+        }
+        if (queryRowsAreFull && runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO) {
+            // Adreno score-layer sparse attention is QK-dominant. Prefer the mixed path that keeps
+            // V in buffer while serving K through the texture cache when the packed key image fits.
+            if (_preferAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen)) {
+                return kSparseFlashVariantMQTileHD128Q8K16KImage;
+            }
+            if (_allowAdrenoSparseFlashKVImageFallback(runtime, batch, kvHeads, headDim, kvLen)) {
+                return kSparseFlashVariantMQTileHD128Q8K16KVImage;
+            }
+            return kSparseFlashVariantMQTileHD128Q8K16;
+        }
+        if (_preferAdrenoLaterSparseQ4K8(runtime, batch, kvHeads, headDim, activeLen, kvLen)) {
+            return kSparseFlashVariantMQTileHD128Q4K8;
+        }
+        if (runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO &&
+            _useDirectValuePrefillForSparse(meta, activeLen, headDim, runtime)) {
+            // High-budget Adreno sparse layers can keep V on the identity-mapped paged buffer while
+            // mirroring only K into an image. That avoids tempV pack/copy and still gives the QK loop
+            // texture-cache-friendly K reads.
+            if (_preferAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen)) {
+                return kSparseFlashVariantMQTileHD128Q8K16KImage;
+            }
+            if (_allowAdrenoSparseFlashKVImageFallback(runtime, batch, kvHeads, headDim, kvLen)) {
+                return kSparseFlashVariantMQTileHD128Q8K16KVImage;
+            }
+            return kSparseFlashVariantMQTileHD128Q8K16;
+        }
+        return kSparseFlashVariantMQTileHD128Q4K16;
+    }
+    return _sparseFlashLaneWidth(meta, activeLen, headDim) == 32u ? kSparseFlashVariantRow32
+                                                                   : kSparseFlashVariantRow64;
+}
+
+static bool _shouldTuneSparseFlashVariant(const PagedKVMeta* meta, int activeLen, int headDim, bool profile,
+                                          int tuneLevel) {
+    if ((profile && !_profilePagedAttentionTune()) || meta == nullptr || activeLen < 128) {
+        return false;
+    }
+    if (headDim != 64 && headDim != 128) {
+        return false;
+    }
+    return tuneLevel == Heavy || tuneLevel == Wide;
+}
+
+static uint64_t _sparseLogicalWork(const PagedKVMeta* meta, int activeLen, int kvLen);
+
+static uint32_t _sparseLogicalWorkPermille(const PagedKVMeta* meta, int activeLen, int kvLen) {
+    if (activeLen <= 0 || kvLen <= 0) {
+        return 0;
+    }
+    const uint64_t work = _sparseLogicalWork(meta, activeLen, kvLen);
+    if (work == 0) {
+        return 0;
+    }
+    const uint64_t full = static_cast<uint64_t>(activeLen) * static_cast<uint64_t>(kvLen);
+    if (full == 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(1000, (work * 1000u) / full));
 }
 
 static uint64_t _sparseLogicalWork(const PagedKVMeta* meta, int activeLen, int kvLen) {
@@ -424,21 +1215,125 @@ static int _adrenoGemmPrefillQSplitNum(int seqLen, int kvLen, int batch, int num
 
 static bool _useAdrenoGemmFullPrefill(OpenCLRuntime* runtime, int seqLen, int kvLen, int batch, int numHeads,
                                       int kvHeads, int headDim, int maskKeyLen) {
-    if (runtime == nullptr || runtime->getGpuType() != GpuType::ADRENO || _legacyB863976OpenCL()) {
-        return false;
-    }
-    if (seqLen <= 1 || kvLen < seqLen || batch <= 0 || numHeads <= 0 || kvHeads <= 0 ||
-        numHeads % kvHeads != 0 || headDim <= 0) {
-        return false;
-    }
-    if (maskKeyLen != kvLen) {
-        return false;
-    }
-    return (headDim % 32) == 0;
+    return PagedAttentionAdreno::useAdrenoGemmFullPrefill(runtime, _legacyB863976OpenCL(), seqLen, kvLen, batch,
+                                                          numHeads, kvHeads, headDim, maskKeyLen);
 }
 
 static bool _useAdrenoSourceSlotValueHydrate(OpenCLRuntime* runtime) {
-    return runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO && !_legacyB863976OpenCL();
+    return PagedAttentionAdreno::useAdrenoSourceSlotValueHydrate(runtime, _legacyB863976OpenCL());
+}
+
+static bool _useAdrenoCacheBlendValueImage(OpenCLRuntime* runtime, int batch, int kvHeads, int tokenCount,
+                                           int headDim) {
+    return PagedAttentionAdreno::useAdrenoCacheBlendValueImage(runtime, _legacyB863976OpenCL(), batch, kvHeads,
+                                                               tokenCount, headDim);
+}
+
+static bool _computeAdrenoCacheBlendValueImageShape(OpenCLRuntime* runtime, int batch, int kvHeads,
+                                                    int tokenCount, int headDim,
+                                                    int* imageWidth, int* imageHeight) {
+    return PagedAttentionAdreno::computeAdrenoCacheBlendValueImageShape(runtime, _legacyB863976OpenCL(), batch,
+                                                                        kvHeads, tokenCount, headDim,
+                                                                        imageWidth, imageHeight);
+}
+
+static bool _supportsAdrenoSparseFlashKVImage(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                              int kvLen) {
+    return PagedAttentionAdreno::supportsAdrenoSparseFlashKVImage(runtime, _legacyB863976OpenCL(), batch, kvHeads,
+                                                                  headDim, kvLen);
+}
+
+static bool _supportsAdrenoSparseFlashKImage(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                             int kvLen) {
+    return PagedAttentionAdreno::supportsAdrenoSparseFlashKImage(runtime, _legacyB863976OpenCL(), batch, kvHeads,
+                                                                 headDim, kvLen);
+}
+
+static bool _computeAdrenoSparseFlashKImageShape(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                                 int kvLen, int* imageWidth, int* imageHeight) {
+    return PagedAttentionAdreno::computeAdrenoSparseFlashKImageShape(runtime, _legacyB863976OpenCL(), batch,
+                                                                     kvHeads, headDim, kvLen,
+                                                                     imageWidth, imageHeight);
+}
+
+static bool _computeAdrenoSparseFlashKVImageShapes(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                                   int kvLen,
+                                                   int* keyImageWidth, int* keyImageHeight,
+                                                   int* valueImageWidth, int* valueImageHeight) {
+    return PagedAttentionAdreno::computeAdrenoSparseFlashKVImageShapes(runtime, _legacyB863976OpenCL(), batch,
+                                                                       kvHeads, headDim, kvLen,
+                                                                       keyImageWidth, keyImageHeight,
+                                                                       valueImageWidth, valueImageHeight);
+}
+
+static bool _preferAdrenoSparseFlashKImage(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                           int kvLen) {
+    return PagedAttentionAdreno::preferAdrenoSparseFlashKImage(runtime, _legacyB863976OpenCL(), batch, kvHeads,
+                                                               headDim, kvLen);
+}
+
+static bool _allowAdrenoSparseFlashKVImageFallback(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                                   int kvLen) {
+    return PagedAttentionAdreno::allowAdrenoSparseFlashKVImageFallback(runtime, _legacyB863976OpenCL(), batch,
+                                                                       kvHeads, headDim, kvLen);
+}
+
+static bool _preferAdrenoScoreSparseFlash(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                          int activeLen, int kvLen) {
+    return PagedAttentionAdreno::preferAdrenoScoreSparseFlash(runtime, _legacyB863976OpenCL(), batch, kvHeads,
+                                                              headDim, activeLen, kvLen);
+}
+
+static bool _preferAdrenoLaterSparseQ4K8(OpenCLRuntime* runtime, int batch, int kvHeads, int headDim,
+                                         int activeLen, int kvLen) {
+    return PagedAttentionAdreno::preferAdrenoLaterSparseQ4K8(runtime, _legacyB863976OpenCL(), batch, kvHeads,
+                                                             headDim, activeLen, kvLen);
+}
+
+static bool _useAdrenoGemmTransNullLws(OpenCLRuntime* runtime, int seqLen, int kvLen, int batchHeads,
+                                       std::vector<uint32_t>* lws) {
+    return PagedAttentionAdreno::useAdrenoGemmTransNullLws(runtime, _legacyB863976OpenCL(), seqLen, kvLen,
+                                                           batchHeads, lws);
+}
+
+static bool _useAdrenoGemmClipNullLws(OpenCLRuntime* runtime, int seqLen, int numHeads, int headDim,
+                                      std::vector<uint32_t>* lws) {
+    return PagedAttentionAdreno::useAdrenoGemmClipNullLws(runtime, _legacyB863976OpenCL(), seqLen, numHeads,
+                                                          headDim, lws);
+}
+
+static bool _rejectAdrenoSparseFlashVariantFromCache(uint32_t variant, OpenCLRuntime* runtime, int batch,
+                                                     int kvHeads, int headDim, int activeLen, int kvLen,
+                                                     bool queryRowsAreFull) {
+    if (!_isSparseFlashKVImageVariant(variant)) {
+        if (!queryRowsAreFull &&
+            _preferAdrenoLaterSparseQ4K8(runtime, batch, kvHeads, headDim, activeLen, kvLen)) {
+            return variant != kSparseFlashVariantMQTileHD128Q4K8;
+        }
+        return false;
+    }
+    return _preferAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen);
+}
+
+static bool _rejectAdrenoSparseFlashScheduleFromCache(uint32_t schedule, OpenCLRuntime* runtime, int batch,
+                                                      int kvHeads, int headDim, int activeLen, int kvLen,
+                                                      bool queryRowsAreFull) {
+    if (queryRowsAreFull || schedule != kSparseFlashScheduleRangeQ128) {
+        return false;
+    }
+    return _preferAdrenoLaterSparseQ4K8(runtime, batch, kvHeads, headDim, activeLen, kvLen);
+}
+
+static bool _disableAdrenoStaticSparseFlashWorkspace(OpenCLRuntime* runtime, int numHeads, int kvHeads, int headDim,
+                                                     int activeLen, int kvLen, bool queryRowsAreFull) {
+    if (queryRowsAreFull || runtime == nullptr || runtime->getGpuType() != GpuType::ADRENO ||
+        _legacyB863976OpenCL()) {
+        return false;
+    }
+    if (headDim != 128 || numHeads < 32 || kvHeads <= 0 || activeLen < 768 || kvLen < 2048) {
+        return false;
+    }
+    return true;
 }
 
 static void _appendGemmBuildOptions(std::set<std::string>& buildOptions, const std::vector<uint32_t>& param,
@@ -1353,15 +2248,26 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
                                               mOpenCLBackend->getPrecision());
     mPackPagedKeyKernel = runtime->buildKernel("paged_attention_buf", "pack_paged_k_prefill", {},
                                                mOpenCLBackend->getPrecision());
+    mPackPagedKeyToImageKernel = runtime->buildKernel("paged_attention_buf", "pack_paged_k_prefill_to_image", {},
+                                                      mOpenCLBackend->getPrecision());
     mHydrateExternalKernel = runtime->buildKernel("paged_attention_buf", "pic_page_attention_hydrate_kv", {},
                                                   mOpenCLBackend->getPrecision());
     mExportCanonicalKeyKernel = runtime->buildKernel("paged_attention_buf", "export_canonical_paged_key", {},
                                                      mOpenCLBackend->getPrecision());
     mCacheBlendScoreKernel = runtime->buildKernel("paged_attention_buf", "pic_cacheblend_value_score", {},
                                                   mOpenCLBackend->getPrecision());
+    mCacheBlendScoreImageKernel = runtime->buildKernel("paged_attention_buf",
+                                                       "pic_cacheblend_value_score_cached_image", {},
+                                                       mOpenCLBackend->getPrecision());
     mCacheBlendTopKKernel = runtime->buildKernel("paged_attention_buf", "pic_cacheblend_topk", {},
                                                  mOpenCLBackend->getPrecision());
+    mCacheBlendTopKStage1Kernel = runtime->buildKernel("paged_attention_buf", "pic_cacheblend_topk_stage1", {},
+                                                       mOpenCLBackend->getPrecision());
+    mCacheBlendTopKStage2Kernel = runtime->buildKernel("paged_attention_buf", "pic_cacheblend_topk_stage2", {},
+                                                       mOpenCLBackend->getPrecision());
     mRearrangeQKernel = runtime->buildKernel("attention_buf", "rearrange_q", {}, mOpenCLBackend->getPrecision());
+    mRearrangeSparseQKernel = runtime->buildKernel("attention_buf", "rearrange_q_sparse", {},
+                                                   mOpenCLBackend->getPrecision());
     mRearrangeMaskKernel = runtime->buildKernel("attention_buf", "rearrange_mask_shortprefill", {"-DADD_MASK"},
                                                 mOpenCLBackend->getPrecision());
     mSoftmaxKernel = runtime->buildKernel("softmax_buf", "softmax_v4_buf", {"-DSOFTMAX_LOCAL_SIZE=64"},
@@ -1372,11 +2278,16 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
     OPENCL_CHECK_KERNEL_CTOR(mAttentionRowKernel);
     OPENCL_CHECK_KERNEL_CTOR(mPackPagedKVKernel);
     OPENCL_CHECK_KERNEL_CTOR(mPackPagedKeyKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mPackPagedKeyToImageKernel);
     OPENCL_CHECK_KERNEL_CTOR(mHydrateExternalKernel);
     OPENCL_CHECK_KERNEL_CTOR(mExportCanonicalKeyKernel);
     OPENCL_CHECK_KERNEL_CTOR(mCacheBlendScoreKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mCacheBlendScoreImageKernel);
     OPENCL_CHECK_KERNEL_CTOR(mCacheBlendTopKKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mCacheBlendTopKStage1Kernel);
+    OPENCL_CHECK_KERNEL_CTOR(mCacheBlendTopKStage2Kernel);
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeQKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mRearrangeSparseQKernel);
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeMaskKernel);
     OPENCL_CHECK_KERNEL_CTOR(mSoftmaxKernel);
     OPENCL_CHECK_KERNEL_CTOR(mZeroKernel);
@@ -1632,6 +2543,50 @@ ErrorCode PagedAttentionBufExecution::ensureFastPrefillTemps(int seqLen, int kvL
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::ensureSparseFlashTemps(int seqLen, int kvLen, bool staticWorkspace) {
+    if (seqLen <= 0 || kvLen <= 0) {
+        return INVALID_VALUE;
+    }
+    const int seqPack = ROUND_UP(seqLen, 32);
+    const int kvPack = ROUND_UP(kvLen, 32);
+    const int headPack4 = ROUND_UP(mHeadDim, 4);
+    const int headPackV = ROUND_UP(mHeadDim, 32);
+    if (!(mTempQ && mTempK && mTempV &&
+          mFastSeqLen == seqLen && mFastKvLen == kvLen && mFastQChunkLen == 0 &&
+          mFastStaticWorkspace == staticWorkspace)) {
+        mTempQ.reset(Tensor::createDevice<float>({seqPack * headPack4 * mNumHead * mBatch}));
+        mTempK.reset(Tensor::createDevice<float>({kvPack * headPack4 * mKvNumHead * mBatch}));
+        mTempV.reset(Tensor::createDevice<float>({kvPack * headPackV * mKvNumHead * mBatch}));
+        // Sparse flash does not consume legacy qk/softmax scratch. Keeping those
+        // static per layer can exhaust OrangePi memory at Qwen3-8B 2K+ high budgets.
+        mTempMask.reset();
+        mTempQK.reset();
+        mTempSoftmax.reset();
+        if (!mTempQ || !mTempK || !mTempV) {
+            return OUT_OF_MEMORY;
+        }
+        mFastSeqLen = seqLen;
+        mFastKvLen = kvLen;
+        mFastQChunkLen = 0;
+        mFastStaticWorkspace = staticWorkspace;
+        if (staticWorkspace) {
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQ.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempK.get(), Backend::STATIC));
+            OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempV.get(), Backend::STATIC));
+        }
+    }
+    if (staticWorkspace) {
+        return NO_ERROR;
+    }
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQ.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempK.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempV.get(), Backend::DYNAMIC_IN_EXECUTION));
+    mOpenCLBackend->onReleaseBuffer(mTempQ.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempK.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempV.get(), Backend::DYNAMIC_IN_EXECUTION);
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::ensureAdrenoGemmPrefillTemps(int seqLen, int kvLen, int qSplitNum) {
     if (seqLen <= 0 || kvLen <= 0 || qSplitNum <= 0 || mBatch <= 0 || mNumHead <= 0 || mHeadDim <= 0) {
         return INVALID_VALUE;
@@ -1669,22 +2624,70 @@ ErrorCode PagedAttentionBufExecution::ensureAdrenoGemmPrefillTemps(int seqLen, i
 }
 
 ErrorCode PagedAttentionBufExecution::ensureSparseFlashKernel() {
-    if (mHeadDim != 64 || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+    if ((mHeadDim != 64 && mHeadDim != 128) || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
         return INVALID_VALUE;
     }
     const int groupSize = mNumHead / mKvNumHead;
-    if (mSparseFlashKernel32 && mSparseFlashKernel64 && mSparseFlashKernelGroupSize == groupSize) {
+    if (mSparseFlashKernel32 && mSparseFlashKernel64 &&
+        mSparseFlashKernelMQTileHD64Q4K16 && mSparseFlashKernelMQTileHD128Q4K16 &&
+        mSparseFlashKernelMQTileHD128Q4K8 && mSparseFlashKernelMQTileHD128Q4K8KImage &&
+        mSparseFlashKernelMQTileHD128Q4K8KVImage &&
+        mSparseFlashKernelMQTileHD128Q8K16 && mSparseFlashKernelMQTileHD128Q8K16KImage &&
+        mSparseFlashKernelMQTileHD128Q8K16KVImage &&
+        mSparseFlashKernelGroupSize == groupSize) {
         return NO_ERROR;
     }
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    // row32/row64 refers to the lane width of the legacy sparse flash workgroup.
+    // mqtile_* carries the explicit Q/K tile suffix so variant tuning can treat
+    // tile shape as part of the stable kernel identity.
     mSparseFlashKernel32 = runtime->buildKernel("attention_buf", "sparse_flash_attention_row32",
                                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                                                 mOpenCLBackend->getPrecision());
     mSparseFlashKernel64 = runtime->buildKernel("attention_buf", "sparse_flash_attention_row64",
                                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                                                 mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD64Q4K16 = runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd64_q4k16",
+                                                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q4K16 =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q4k16",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q4K8 =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q4k8",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q4K8KImage =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q4k8_kimg",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q4K8KVImage =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q4k8_kvimg",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q8K16 =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q8k16",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q8K16KImage =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q8k16_kimg",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mSparseFlashKernelMQTileHD128Q8K16KVImage =
+        runtime->buildKernel("attention_buf", "mqtile_sparse_flash_hd128_q8k16_kvimg",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
     OPENCL_CHECK_KERNEL(mSparseFlashKernel32);
     OPENCL_CHECK_KERNEL(mSparseFlashKernel64);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD64Q4K16);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q4K16);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q4K8);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q4K8KImage);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q4K8KVImage);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q8K16);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q8K16KImage);
+    OPENCL_CHECK_KERNEL(mSparseFlashKernelMQTileHD128Q8K16KVImage);
     mSparseFlashKernelGroupSize = groupSize;
     return NO_ERROR;
 }
@@ -1739,15 +2742,22 @@ ErrorCode PagedAttentionBufExecution::ensureExternalTemps(size_t keyElements, si
     return NO_ERROR;
 }
 
-ErrorCode PagedAttentionBufExecution::ensureCacheBlendScoreTemps(int scoreCount, int indexCount) {
+ErrorCode PagedAttentionBufExecution::ensureCacheBlendScoreTemps(int scoreCount, int indexCount,
+                                                                 int stageCandidateCount) {
     if (scoreCount < 0 || indexCount < 0) {
         return INVALID_VALUE;
     }
-    if (scoreCount == 0 && indexCount == 0) {
+    if (stageCandidateCount < 0) {
+        return INVALID_VALUE;
+    }
+    if (scoreCount == 0 && indexCount == 0 && stageCandidateCount == 0) {
         return NO_ERROR;
     }
     if (mCacheBlendScores && mCacheBlendIndices && mCacheBlendScoreCount >= scoreCount &&
-        mCacheBlendIndexCount >= indexCount) {
+        mCacheBlendIndexCount >= indexCount &&
+        (stageCandidateCount == 0 ||
+         (mCacheBlendStageValues && mCacheBlendStageIndices &&
+          mCacheBlendStageCandidateCount >= stageCandidateCount))) {
         return NO_ERROR;
     }
     if (scoreCount > 0) {
@@ -1764,8 +2774,173 @@ ErrorCode PagedAttentionBufExecution::ensureCacheBlendScoreTemps(int scoreCount,
         }
         OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCacheBlendIndices.get(), Backend::STATIC));
     }
+    if (stageCandidateCount > 0) {
+        mCacheBlendStageValues.reset(Tensor::createDevice<float>({stageCandidateCount}));
+        if (!mCacheBlendStageValues) {
+            return OUT_OF_MEMORY;
+        }
+        OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCacheBlendStageValues.get(), Backend::STATIC));
+        mCacheBlendStageIndices.reset(Tensor::createDevice<int>({stageCandidateCount}));
+        if (!mCacheBlendStageIndices) {
+            return OUT_OF_MEMORY;
+        }
+        OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCacheBlendStageIndices.get(), Backend::STATIC));
+    }
     mCacheBlendScoreCount = scoreCount;
     mCacheBlendIndexCount = indexCount;
+    mCacheBlendStageCandidateCount = stageCandidateCount;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureAdrenoCacheBlendValueImage(int tokenCapacity) {
+    if (tokenCapacity <= 0 || mBatch <= 0 || mKvNumHead <= 0 || mHeadDim <= 0) {
+        return INVALID_VALUE;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (runtime == nullptr) {
+        return INVALID_VALUE;
+    }
+    int imageWidth = 0;
+    int imageHeight = 0;
+    if (!_computeAdrenoCacheBlendValueImageShape(runtime, mBatch, mKvNumHead, tokenCapacity, mHeadDim,
+                                                 &imageWidth, &imageHeight)) {
+        return NOT_SUPPORT;
+    }
+    const bool useFp32 = mBytes == static_cast<int>(sizeof(float));
+    if (!mCopyBufferToImageLinearKernel || mCopyBufferToImageLinearUseFp32 != useFp32) {
+        std::set<std::string> buildOptions;
+        if (useFp32) {
+            buildOptions.emplace("-DBUFFER_INP_FP32");
+        }
+        mCopyBufferToImageLinearKernel = runtime->buildKernel("copy_buffer_to_image2d", "copy_buffer_to_image2d",
+                                                              buildOptions, mOpenCLBackend->getPrecision());
+        if (mCopyBufferToImageLinearKernel == nullptr) {
+            return NOT_SUPPORT;
+        }
+        mCopyBufferToImageLinearUseFp32 = useFp32;
+    }
+    if (mCacheBlendSourceValueImage != nullptr && mCacheBlendSourceValueTokenCapacity >= tokenCapacity &&
+        mCacheBlendSourceValueImageHeight == imageHeight && mCacheBlendSourceValueBytes == mBytes) {
+        return NO_ERROR;
+    }
+    if (!mAdrenoImagePool) {
+        mAdrenoImagePool.reset(new ImagePool(runtime->context()));
+    }
+    auto image = mAdrenoImagePool->alloc(imageWidth, imageHeight, mOpenCLBackend->fpType());
+    if (image == nullptr) {
+        return OUT_OF_MEMORY;
+    }
+    mCacheBlendSourceValueImage = image;
+    mCacheBlendSourceValueTokenCapacity = tokenCapacity;
+    mCacheBlendSourceValueImageWidth = imageWidth;
+    mCacheBlendSourceValueImageHeight = imageHeight;
+    mCacheBlendSourceValueBytes = mBytes;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureAdrenoSparseFlashPackedKeyImage(int kvPack) {
+    if (kvPack <= 0 || mBatch <= 0 || mKvNumHead <= 0 || mHeadDim != 128) {
+        return INVALID_VALUE;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (!_supportsAdrenoSparseFlashKImage(runtime, mBatch, mKvNumHead, mHeadDim, kvPack)) {
+        return NOT_SUPPORT;
+    }
+    const bool useFp32 = mBytes == static_cast<int>(sizeof(float));
+    if (!mCopyBufferToImageLinearKernel || mCopyBufferToImageLinearUseFp32 != useFp32) {
+        std::set<std::string> buildOptions;
+        if (useFp32) {
+            buildOptions.emplace("-DBUFFER_INP_FP32");
+        }
+        mCopyBufferToImageLinearKernel = runtime->buildKernel("copy_buffer_to_image2d", "copy_buffer_to_image2d",
+                                                              buildOptions, mOpenCLBackend->getPrecision());
+        if (mCopyBufferToImageLinearKernel == nullptr) {
+            return NOT_SUPPORT;
+        }
+        mCopyBufferToImageLinearUseFp32 = useFp32;
+    }
+    int keyImageWidth = 0;
+    int keyImageHeight = 0;
+    if (!_computeAdrenoSparseFlashKImageShape(runtime, mBatch, mKvNumHead, mHeadDim, kvPack,
+                                              &keyImageWidth, &keyImageHeight)) {
+        return NOT_SUPPORT;
+    }
+    if (mSparseFlashPackedKeyImage != nullptr && mSparseFlashPackedKVLen >= kvPack &&
+        mSparseFlashPackedKeyImageWidth == keyImageWidth &&
+        mSparseFlashPackedKeyImageHeight == keyImageHeight &&
+        mSparseFlashPackedImageBytes == mBytes) {
+        return NO_ERROR;
+    }
+    if (!mAdrenoImagePool) {
+        mAdrenoImagePool.reset(new ImagePool(runtime->context()));
+    }
+    auto keyImage = mAdrenoImagePool->alloc(keyImageWidth, keyImageHeight, mOpenCLBackend->fpType());
+    if (keyImage == nullptr) {
+        return OUT_OF_MEMORY;
+    }
+    mSparseFlashPackedKeyImage = keyImage;
+    mSparseFlashPackedKVLen = kvPack;
+    mSparseFlashPackedKeyImageWidth = keyImageWidth;
+    mSparseFlashPackedKeyImageHeight = keyImageHeight;
+    mSparseFlashPackedImageBytes = mBytes;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureAdrenoSparseFlashPackedKVImages(int kvPack) {
+    if (kvPack <= 0 || mBatch <= 0 || mKvNumHead <= 0 || mHeadDim != 128) {
+        return INVALID_VALUE;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (!_supportsAdrenoSparseFlashKVImage(runtime, mBatch, mKvNumHead, mHeadDim, kvPack)) {
+        return NOT_SUPPORT;
+    }
+    const bool useFp32 = mBytes == static_cast<int>(sizeof(float));
+    if (!mCopyBufferToImageLinearKernel || mCopyBufferToImageLinearUseFp32 != useFp32) {
+        std::set<std::string> buildOptions;
+        if (useFp32) {
+            buildOptions.emplace("-DBUFFER_INP_FP32");
+        }
+        mCopyBufferToImageLinearKernel = runtime->buildKernel("copy_buffer_to_image2d", "copy_buffer_to_image2d",
+                                                              buildOptions, mOpenCLBackend->getPrecision());
+        if (mCopyBufferToImageLinearKernel == nullptr) {
+            return NOT_SUPPORT;
+        }
+        mCopyBufferToImageLinearUseFp32 = useFp32;
+    }
+    int keyImageWidth = 0;
+    int keyImageHeight = 0;
+    int valueImageWidth = 0;
+    int valueImageHeight = 0;
+    if (!_computeAdrenoSparseFlashKVImageShapes(runtime, mBatch, mKvNumHead, mHeadDim, kvPack,
+                                                &keyImageWidth, &keyImageHeight,
+                                                &valueImageWidth, &valueImageHeight)) {
+        return NOT_SUPPORT;
+    }
+    if (mSparseFlashPackedKeyImage != nullptr && mSparseFlashPackedValueImage != nullptr &&
+        mSparseFlashPackedKVLen >= kvPack &&
+        mSparseFlashPackedKeyImageWidth == keyImageWidth &&
+        mSparseFlashPackedKeyImageHeight == keyImageHeight &&
+        mSparseFlashPackedValueImageWidth == valueImageWidth &&
+        mSparseFlashPackedValueImageHeight == valueImageHeight &&
+        mSparseFlashPackedImageBytes == mBytes) {
+        return NO_ERROR;
+    }
+    if (!mAdrenoImagePool) {
+        mAdrenoImagePool.reset(new ImagePool(runtime->context()));
+    }
+    auto keyImage = mAdrenoImagePool->alloc(keyImageWidth, keyImageHeight, mOpenCLBackend->fpType());
+    auto valueImage = mAdrenoImagePool->alloc(valueImageWidth, valueImageHeight, mOpenCLBackend->fpType());
+    if (keyImage == nullptr || valueImage == nullptr) {
+        return OUT_OF_MEMORY;
+    }
+    mSparseFlashPackedKeyImage = keyImage;
+    mSparseFlashPackedValueImage = valueImage;
+    mSparseFlashPackedKVLen = kvPack;
+    mSparseFlashPackedKeyImageWidth = keyImageWidth;
+    mSparseFlashPackedKeyImageHeight = keyImageHeight;
+    mSparseFlashPackedValueImageWidth = valueImageWidth;
+    mSparseFlashPackedValueImageHeight = valueImageHeight;
+    mSparseFlashPackedImageBytes = mBytes;
     return NO_ERROR;
 }
 
@@ -1984,9 +3159,12 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
     const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
     const uint64_t startUs = profile ? _nowUs() : 0;
     uint64_t readUs = 0;
+    uint64_t imagePrepUs = 0;
     uint64_t scoreKernelUs = 0;
     uint64_t topKUs = 0;
     uint64_t readbackUs = 0;
+    int imageSegments = 0;
+    size_t imageTokens = 0;
     const int picTokenCount = mMeta->cacheblend_score_pic_token_count;
     const int topK = mMeta->cacheblend_score_top_k;
     if (picTokenCount < 0 || topK < 0 || topK > picTokenCount ||
@@ -1997,11 +3175,33 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
         mMeta->setCacheBlendScoringResult({});
         return NO_ERROR;
     }
-    auto err = ensureCacheBlendScoreTemps(picTokenCount, topK);
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto topKFamilies = _cacheBlendTopKFamilyCandidates(runtime, mCacheBlendTopKStage1Kernel,
+                                                        mCacheBlendTopKStage2Kernel, picTokenCount, topK);
+    CacheBlendTopKDispatch topKDispatch;
+    uint32_t topKFamilySource = kTuneSelectionSourceDefault;
+    const uint32_t defaultTopKFamily =
+        _cacheBlendTopKDispatchForFamily(runtime, mCacheBlendTopKStage1Kernel, mCacheBlendTopKStage2Kernel,
+                                         picTokenCount, topK, kCacheBlendTopKFamilyStage2048, &topKDispatch)
+        ? kCacheBlendTopKFamilyStage2048
+        : (topKFamilies.empty() ? kCacheBlendTopKFamilyLegacy : topKFamilies.front());
+    if (defaultTopKFamily != topKDispatch.family) {
+        _cacheBlendTopKDispatchForFamily(runtime, mCacheBlendTopKStage1Kernel, mCacheBlendTopKStage2Kernel,
+                                         picTokenCount, topK, defaultTopKFamily, &topKDispatch);
+    }
+    int stageCandidateCapacity = 0;
+    for (uint32_t family : topKFamilies) {
+        CacheBlendTopKDispatch candidateDispatch;
+        if (_cacheBlendTopKDispatchForFamily(runtime, mCacheBlendTopKStage1Kernel, mCacheBlendTopKStage2Kernel,
+                                             picTokenCount, topK, family, &candidateDispatch)) {
+            stageCandidateCapacity = std::max(stageCandidateCapacity, candidateDispatch.stageCandidateCount);
+        }
+    }
+    auto err = ensureCacheBlendScoreTemps(picTokenCount, topK, stageCandidateCapacity);
     if (err != NO_ERROR) {
         return err;
     }
-    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+    auto& queue = runtime->commandQueue();
     size_t scoreOffset = 0;
     int sourceSlotCursor = _picCacheSourceSlotBase(mMeta, kvLen);
     for (const auto& segment : mMeta->cacheblend_score_segments) {
@@ -2038,92 +3238,360 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
             static_cast<size_t>(mCache->maxSlots)) {
             return OUT_OF_MEMORY;
         }
+        const size_t valueTokenBytes = static_cast<size_t>(mHeadDim) * mBytes;
+        const size_t valueSegmentBytes = static_cast<size_t>(mBatch) * mKvNumHead * segment.tokenCount *
+                                         valueTokenBytes;
         auto& cacheValueBuffer = openCLBuffer(mCache->value.get());
+        const bool preferImageScore = _useAdrenoCacheBlendValueImage(runtime, mBatch, mKvNumHead,
+                                                                     static_cast<int>(segment.tokenCount), mHeadDim);
+        bool usedImageScore = false;
         uint64_t opStartUs = profileDetail ? _nowUs() : 0;
-        if (!_readExternalValueSegmentToPagedCacheOpenCL(
-                layer->valuePath, cacheValueBuffer, queue, mBatch, mKvNumHead, mCache->maxSlots,
-                static_cast<size_t>(sourceSlotStart), sourceTokenCount, sourceTokenOffset, segment.tokenCount,
-                mHeadDim, mBytes)) {
-            return INVALID_VALUE;
+        if (preferImageScore) {
+            const size_t valueSegmentElements = valueSegmentBytes / static_cast<size_t>(mBytes);
+            if (ensureExternalTemps(0, valueSegmentElements) == NO_ERROR &&
+                ensureAdrenoCacheBlendValueImage(static_cast<int>(segment.tokenCount)) == NO_ERROR &&
+                _readExternalValueSegmentToSourceCLBuffer(
+                    layer->valuePath, openCLBuffer(mExternalValue.get()), valueSegmentBytes, queue, mBatch,
+                    mKvNumHead, sourceTokenCount, sourceTokenOffset, segment.tokenCount, mHeadDim, mBytes)) {
+                if (profileDetail) {
+                    queue.finish();
+                    readUs += _nowUs() - opStartUs;
+                }
+                uint32_t copyIdx = 0;
+                cl_int copyRet = CL_SUCCESS;
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, openCLBuffer(mExternalValue.get()));
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, *mCacheBlendSourceValueImage);
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, mCacheBlendSourceValueImageWidth);
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, mCacheBlendSourceValueImageHeight);
+                MNN_CHECK_CL_SUCCESS(copyRet, "setArg copy_buffer_to_image2d");
+                if (copyRet == CL_SUCCESS) {
+                    opStartUs = profileDetail ? _nowUs() : 0;
+                    copyRet = queue.enqueueNDRangeKernel(mCopyBufferToImageLinearKernel->get(), cl::NullRange,
+                                                         cl::NDRange(mCacheBlendSourceValueImageWidth,
+                                                                     mCacheBlendSourceValueImageHeight),
+                                                         cl::NullRange);
+                    MNN_CHECK_CL_SUCCESS(copyRet, "enqueue copy_buffer_to_image2d");
+                    if (copyRet == CL_SUCCESS) {
+                        if (profileDetail) {
+                            queue.finish();
+                            imagePrepUs += _nowUs() - opStartUs;
+                        }
+                        uint32_t idx = 0;
+                        cl_int ret = CL_SUCCESS;
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, *mCacheBlendSourceValueImage);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, mBatch);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, mKvNumHead);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, mHeadDim);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, mCache->maxSlots);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, mCacheBlendSourceValueTokenCapacity);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, mCacheBlendSourceValueImageWidth);
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
+                        ret |= mCacheBlendScoreImageKernel->get().setArg(idx++, static_cast<int>(scoreOffset));
+                        MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_value_score_cached_image");
+                        if (ret == CL_SUCCESS) {
+                            opStartUs = profileDetail ? _nowUs() : 0;
+                            ret = queue.enqueueNDRangeKernel(mCacheBlendScoreImageKernel->get(), cl::NullRange,
+                                                             cl::NDRange(static_cast<int>(segment.tokenCount)),
+                                                             cl::NullRange);
+                            MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_value_score_cached_image");
+                            if (ret == CL_SUCCESS) {
+                                if (profileDetail) {
+                                    queue.finish();
+                                    scoreKernelUs += _nowUs() - opStartUs;
+                                }
+                                usedImageScore = true;
+                                ++imageSegments;
+                                imageTokens += segment.tokenCount;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if (profileDetail) {
-            queue.finish();
-            readUs += _nowUs() - opStartUs;
-        }
-        uint32_t idx = 0;
-        cl_int ret = CL_SUCCESS;
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mBatch);
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mKvNumHead);
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mHeadDim);
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mCache->maxSlots);
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, mCache->maxSlots);
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, sourceSlotStart);
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
-        ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(scoreOffset));
-        MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_value_score");
-        opStartUs = profileDetail ? _nowUs() : 0;
-        ret = queue.enqueueNDRangeKernel(mCacheBlendScoreKernel->get(), cl::NullRange,
-                                         cl::NDRange(static_cast<int>(segment.tokenCount)), cl::NullRange);
-        MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_value_score");
-        if (profileDetail) {
-            queue.finish();
-            scoreKernelUs += _nowUs() - opStartUs;
+        if (!usedImageScore) {
+            opStartUs = profileDetail ? _nowUs() : 0;
+            if (!_readExternalValueSegmentToPagedCacheOpenCL(
+                    layer->valuePath, cacheValueBuffer, queue, mBatch, mKvNumHead, mCache->maxSlots,
+                    static_cast<size_t>(sourceSlotStart), sourceTokenCount, sourceTokenOffset, segment.tokenCount,
+                    mHeadDim, mBytes)) {
+                return INVALID_VALUE;
+            }
+            if (profileDetail) {
+                queue.finish();
+                readUs += _nowUs() - opStartUs;
+            }
+            uint32_t idx = 0;
+            cl_int ret = CL_SUCCESS;
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, mBatch);
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, mHeadDim);
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, mCache->maxSlots);
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, mCache->maxSlots);
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, sourceSlotStart);
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.logicalStart));
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(segment.tokenCount));
+            ret |= mCacheBlendScoreKernel->get().setArg(idx++, static_cast<int>(scoreOffset));
+            MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_value_score");
+            opStartUs = profileDetail ? _nowUs() : 0;
+            ret = queue.enqueueNDRangeKernel(mCacheBlendScoreKernel->get(), cl::NullRange,
+                                             cl::NDRange(static_cast<int>(segment.tokenCount)), cl::NullRange);
+            MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_value_score");
+            if (profileDetail) {
+                queue.finish();
+                scoreKernelUs += _nowUs() - opStartUs;
+            }
         }
         scoreOffset += segment.tokenCount;
     }
     if (scoreOffset != static_cast<size_t>(picTokenCount)) {
         return INVALID_VALUE;
     }
-    uint32_t idx = 0;
-    cl_int ret = CL_SUCCESS;
-    ret |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
-    ret |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendIndices.get()));
-    ret |= mCacheBlendTopKKernel->get().setArg(idx++, picTokenCount);
-    ret |= mCacheBlendTopKKernel->get().setArg(idx++, topK);
-    MNN_CHECK_CL_SUCCESS(ret, "setArg pic_cacheblend_topk");
-    constexpr int topKLocalSize = 256;
+    auto runTopKFamily = [&](const CacheBlendTopKDispatch& dispatch) -> ErrorCode {
+        cl_int localRet = CL_SUCCESS;
+        if (!dispatch.useStage) {
+            uint32_t idx = 0;
+            localRet |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+            localRet |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendIndices.get()));
+            localRet |= mCacheBlendTopKKernel->get().setArg(idx++, picTokenCount);
+            localRet |= mCacheBlendTopKKernel->get().setArg(idx++, topK);
+            MNN_CHECK_CL_SUCCESS(localRet, "setArg pic_cacheblend_topk");
+            if (localRet != CL_SUCCESS) {
+                return INVALID_VALUE;
+            }
+            localRet = queue.enqueueNDRangeKernel(mCacheBlendTopKKernel->get(), cl::NullRange,
+                                                  cl::NDRange(256), cl::NDRange(256));
+            MNN_CHECK_CL_SUCCESS(localRet, "enqueue pic_cacheblend_topk");
+            if (localRet != CL_SUCCESS) {
+                return INVALID_VALUE;
+            }
+            return NO_ERROR;
+        }
+        uint32_t idx = 0;
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(idx++, openCLBuffer(mCacheBlendStageValues.get()));
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(idx++, openCLBuffer(mCacheBlendStageIndices.get()));
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(idx++, picTokenCount);
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(idx++, topK);
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(idx++, dispatch.blockSize);
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(
+            idx++, cl::Local(static_cast<size_t>(dispatch.blockSize) * sizeof(float)));
+        localRet |= mCacheBlendTopKStage1Kernel->get().setArg(
+            idx++, cl::Local(static_cast<size_t>(dispatch.blockSize) * sizeof(int)));
+        MNN_CHECK_CL_SUCCESS(localRet, "setArg pic_cacheblend_topk_stage1");
+        if (localRet != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        localRet = queue.enqueueNDRangeKernel(mCacheBlendTopKStage1Kernel->get(), cl::NullRange,
+                                              cl::NDRange(dispatch.blockCount * dispatch.stage1LocalSize),
+                                              cl::NDRange(dispatch.stage1LocalSize));
+        MNN_CHECK_CL_SUCCESS(localRet, "enqueue pic_cacheblend_topk_stage1");
+        if (localRet != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+
+        idx = 0;
+        localRet = CL_SUCCESS;
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(idx++, openCLBuffer(mCacheBlendStageValues.get()));
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(idx++, openCLBuffer(mCacheBlendStageIndices.get()));
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(idx++, openCLBuffer(mCacheBlendIndices.get()));
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(idx++, dispatch.stageCandidateCount);
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(idx++, topK);
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(idx++, dispatch.stageSortSize);
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(
+            idx++, cl::Local(static_cast<size_t>(dispatch.stageSortSize) * sizeof(float)));
+        localRet |= mCacheBlendTopKStage2Kernel->get().setArg(
+            idx++, cl::Local(static_cast<size_t>(dispatch.stageSortSize) * sizeof(int)));
+        MNN_CHECK_CL_SUCCESS(localRet, "setArg pic_cacheblend_topk_stage2");
+        if (localRet != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        localRet = queue.enqueueNDRangeKernel(mCacheBlendTopKStage2Kernel->get(), cl::NullRange,
+                                              cl::NDRange(dispatch.stage2LocalSize),
+                                              cl::NDRange(dispatch.stage2LocalSize));
+        MNN_CHECK_CL_SUCCESS(localRet, "enqueue pic_cacheblend_topk_stage2");
+        if (localRet != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        return NO_ERROR;
+    };
+    if (_shouldTuneCacheBlendTopKFamily(picTokenCount, topK, profile, mOpenCLBackend->getCLTuneLevel()) &&
+        !topKFamilies.empty()) {
+        const std::string tuneKey =
+            std::string("paged_cacheblend_topk_family_") + _openCLTuneDeviceKey(runtime) + "_" +
+            std::to_string(mBatch) + "_" + std::to_string(mNumHead) + "_" +
+            std::to_string(mKvNumHead) + "_" + std::to_string(mHeadDim);
+        const std::vector<uint32_t> tuneShape = {
+            static_cast<uint32_t>(picTokenCount),
+            static_cast<uint32_t>(topK),
+            static_cast<uint32_t>((static_cast<uint64_t>(topK) * 1000u) /
+                                  static_cast<uint64_t>(std::max(1, picTokenCount))),
+        };
+        std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
+        if (getTunedInfo(tuneKey, tuneShape, tuneInfo, runtime) && !tuneInfo.first.empty()) {
+            CacheBlendTopKDispatch cachedDispatch;
+            if (_cacheBlendTopKDispatchForFamily(runtime, mCacheBlendTopKStage1Kernel,
+                                                 mCacheBlendTopKStage2Kernel, picTokenCount, topK,
+                                                 tuneInfo.first[0], &cachedDispatch)) {
+                topKDispatch = cachedDispatch;
+                topKFamilySource = kTuneSelectionSourceCache;
+            }
+        } else if (topKFamilies.size() > 1) {
+            bool tuned = false;
+            uint64_t bestUs = std::numeric_limits<uint64_t>::max();
+            CacheBlendTopKDispatch bestDispatch = topKDispatch;
+            for (uint32_t family : topKFamilies) {
+                CacheBlendTopKDispatch candidateDispatch;
+                if (!_cacheBlendTopKDispatchForFamily(runtime, mCacheBlendTopKStage1Kernel,
+                                                      mCacheBlendTopKStage2Kernel, picTokenCount, topK, family,
+                                                      &candidateDispatch)) {
+                    continue;
+                }
+                uint64_t candidateUs = 0;
+                if (!_measureSteadyStateCandidate(runtime, [&]() {
+                        return runTopKFamily(candidateDispatch);
+                    }, &candidateUs)) {
+                    continue;
+                }
+                if (!tuned || candidateUs < bestUs) {
+                    tuned = true;
+                    bestUs = candidateUs;
+                    bestDispatch = candidateDispatch;
+                }
+            }
+            if (tuned) {
+                std::pair<std::vector<uint32_t>, uint32_t> bestInfo = std::make_pair(
+                    std::vector<uint32_t>{bestDispatch.family},
+                    static_cast<uint32_t>(std::min<uint64_t>(bestUs, std::numeric_limits<uint32_t>::max())));
+                setTunedInfo(tuneKey, tuneShape, bestInfo, runtime, "attention_buf");
+                topKDispatch = bestDispatch;
+                topKFamilySource = kTuneSelectionSourceOnlineTuned;
+            }
+        }
+        if (profile) {
+            MNN_PRINT("OpenCLPagedAttention profile op=cacheblend_topk_family layer=%d pic_tokens=%d top_k=%d family=%s source=%s\n",
+                      layerIndex, picTokenCount, topK, _cacheBlendTopKFamilyName(topKDispatch.family),
+                      _tuneSelectionSourceName(topKFamilySource));
+        }
+    }
     uint64_t opStartUs = profileDetail ? _nowUs() : 0;
-    ret = queue.enqueueNDRangeKernel(mCacheBlendTopKKernel->get(), cl::NullRange, cl::NDRange(topKLocalSize),
-                                     cl::NDRange(topKLocalSize));
-    MNN_CHECK_CL_SUCCESS(ret, "enqueue pic_cacheblend_topk");
+    err = runTopKFamily(topKDispatch);
+    if (err != NO_ERROR && !topKDispatch.useStage) {
+        return err;
+    }
+    if (err != NO_ERROR && topKDispatch.useStage) {
+        MNN_ERROR("OpenCLPagedAttention cacheblend staged top-k failed, retrying legacy path layer=%d "
+                  "pic_tokens=%d top_k=%d family=%s\n",
+                  layerIndex, picTokenCount, topK, _cacheBlendTopKFamilyName(topKDispatch.family));
+        CacheBlendTopKDispatch legacyDispatch;
+        auto legacyErr = runTopKFamily(legacyDispatch);
+        if (legacyErr != NO_ERROR) {
+            return legacyErr;
+        }
+        topKDispatch = legacyDispatch;
+        topKFamilySource = kTuneSelectionSourceDefault;
+    }
     if (profileDetail) {
         queue.finish();
         topKUs += _nowUs() - opStartUs;
     }
     std::vector<int> selected(topK);
+    auto readAndValidateSelected = [&](std::vector<int>* out, std::string* reason) -> ErrorCode {
+        if (out == nullptr) {
+            return INVALID_VALUE;
+        }
+        out->assign(static_cast<size_t>(topK), -1);
+        cl_int readRet = queue.enqueueReadBuffer(openCLBuffer(mCacheBlendIndices.get()), CL_TRUE, 0,
+                                                 static_cast<size_t>(topK) * sizeof(int), out->data());
+        MNN_CHECK_CL_SUCCESS(readRet, "read pic_cacheblend_topk indices");
+        if (readRet != CL_SUCCESS) {
+            if (reason != nullptr) {
+                *reason = std::string("read_failed ret=") + std::to_string(static_cast<int>(readRet));
+            }
+            return INVALID_VALUE;
+        }
+        std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
+        for (int i = 0; i < topK; ++i) {
+            const int index = (*out)[static_cast<size_t>(i)];
+            if (index < 0 || index >= picTokenCount) {
+                if (reason != nullptr) {
+                    *reason = std::string("out_of_range at=") + std::to_string(i) +
+                              " index=" + std::to_string(index);
+                }
+                return INVALID_VALUE;
+            }
+            if (seen[static_cast<size_t>(index)] != 0) {
+                if (reason != nullptr) {
+                    *reason = std::string("duplicate at=") + std::to_string(i) +
+                              " index=" + std::to_string(index);
+                }
+                return INVALID_VALUE;
+            }
+            seen[static_cast<size_t>(index)] = 1;
+        }
+        return NO_ERROR;
+    };
     opStartUs = profileDetail ? _nowUs() : 0;
-    if (queue.enqueueReadBuffer(openCLBuffer(mCacheBlendIndices.get()), CL_TRUE, 0,
-                                static_cast<size_t>(topK) * sizeof(int), selected.data()) != CL_SUCCESS) {
-        return INVALID_VALUE;
-    }
+    std::string invalidReason;
+    err = readAndValidateSelected(&selected, &invalidReason);
     if (profileDetail) {
         readbackUs += _nowUs() - opStartUs;
     }
-    std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
-    for (int index : selected) {
-        if (index < 0 || index >= picTokenCount || seen[static_cast<size_t>(index)] != 0) {
-            return INVALID_VALUE;
+    if (err != NO_ERROR && topKDispatch.useStage) {
+        MNN_ERROR("OpenCLPagedAttention cacheblend staged top-k produced invalid selected rows, "
+                  "retrying legacy path layer=%d pic_tokens=%d top_k=%d family=%s reason=%s\n",
+                  layerIndex, picTokenCount, topK, _cacheBlendTopKFamilyName(topKDispatch.family),
+                  invalidReason.c_str());
+        CacheBlendTopKDispatch legacyDispatch;
+        err = runTopKFamily(legacyDispatch);
+        if (err != NO_ERROR) {
+            return err;
         }
-        seen[static_cast<size_t>(index)] = 1;
+        topKDispatch = legacyDispatch;
+        topKFamilySource = kTuneSelectionSourceDefault;
+        opStartUs = profileDetail ? _nowUs() : 0;
+        invalidReason.clear();
+        err = readAndValidateSelected(&selected, &invalidReason);
+        if (profileDetail) {
+            readbackUs += _nowUs() - opStartUs;
+        }
+    }
+    if (err != NO_ERROR) {
+        MNN_ERROR("OpenCLPagedAttention cacheblend top-k selected rows invalid layer=%d pic_tokens=%d top_k=%d "
+                  "path=%s reason=%s\n",
+                  layerIndex, picTokenCount, topK, _cacheBlendTopKFamilyName(topKDispatch.family),
+                  invalidReason.c_str());
+        return err;
     }
     mMeta->setCacheBlendScoringResult(selected);
     if (profile) {
         queue.finish();
         const uint64_t totalUs = _nowUs() - startUs;
         MNN_PRINT("OpenCLPagedAttention profile op=cacheblend_score layer=%d pic_tokens=%d top_k=%d us=%llu "
-                  "read_us=%llu score_kernel_us=%llu topk_us=%llu readback_us=%llu detail=%d\n",
+                  "read_us=%llu image_prep_us=%llu score_kernel_us=%llu topk_us=%llu readback_us=%llu "
+                  "detail=%d topk_path=%s image_segments=%d image_tokens=%d stage_candidates=%d "
+                  "stage_block=%d stage_sort=%d\n",
                   layerIndex, picTokenCount, topK,
                   static_cast<unsigned long long>(totalUs),
                   static_cast<unsigned long long>(readUs),
+                  static_cast<unsigned long long>(imagePrepUs),
                   static_cast<unsigned long long>(scoreKernelUs),
                   static_cast<unsigned long long>(topKUs),
                   static_cast<unsigned long long>(readbackUs),
-                  profileDetail ? 1 : 0);
+                  profileDetail ? 1 : 0,
+                  _cacheBlendTopKFamilyName(topKDispatch.family),
+                  imageSegments,
+                  static_cast<int>(imageTokens),
+                  topKDispatch.useStage ? topKDispatch.stageCandidateCount : 0,
+                  topKDispatch.useStage ? topKDispatch.blockSize : 0,
+                  topKDispatch.useStage ? topKDispatch.stageSortSize : 0);
     }
     return NO_ERROR;
 }
@@ -2194,10 +3662,11 @@ bool PagedAttentionBufExecution::canUseSparseFastPrefill(const Tensor* mask, int
     if (queryRowsAreFull && mQuerySeqLen < attnLen) {
         return false;
     }
-    if (queryRowsAreFull && mPicAttentionMode != 1) {
-        return false;
-    }
-    if (mHeadDim != 64 || mNumHead % mKvNumHead != 0) {
+    // Some graph-boundary exports keep later sparse layers in a full-Q storage
+    // layout and rely on sparse_query logical rows to gather the active queries.
+    // The sparse flash kernels already support that shape via query_rows_are_full,
+    // so don't force those layers back to the row kernel.
+    if ((mHeadDim != 64 && mHeadDim != 128) || mNumHead % mKvNumHead != 0) {
         return false;
     }
     if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
@@ -2234,9 +3703,6 @@ bool PagedAttentionBufExecution::canUseSparseQSplitPrefill(const Tensor* mask, i
     if (queryRowsAreFull && mQuerySeqLen < attnLen) {
         return false;
     }
-    if (queryRowsAreFull && mPicAttentionMode != 1) {
-        return false;
-    }
     if (mHeadDim != 128 || mNumHead % mKvNumHead != 0) {
         return false;
     }
@@ -2245,6 +3711,14 @@ bool PagedAttentionBufExecution::canUseSparseQSplitPrefill(const Tensor* mask, i
     }
     if (!(mCache && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery)) {
         return false;
+    }
+    const bool ignoreFullCausalMask = mask != nullptr && mask->elementSize() > 1 &&
+        mMeta->full_causal_attention_mask;
+    // Budgeted sparse prefill already carries logical-row causality through
+    // sparse_query/q_logical. For full-causal float masks, the gathered mask
+    // rows are redundant on the q-split path and only add QK traffic.
+    if (ignoreFullCausalMask) {
+        return true;
     }
     if (mask == nullptr || mask->elementSize() <= 1) {
         return true;
@@ -2278,37 +3752,119 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     auto output = outputs[0];
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const int activeLen = attnLen;
-    if (queryRowsAreFull && mPicAttentionMode != 1) {
-        return INVALID_VALUE;
-    }
     const int qStorageLen = queryRowsAreFull ? mQuerySeqLen : activeLen;
     const bool profile = _profilePagedAttention();
     const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const bool traceProgress = _tracePagedAttentionProgress();
+    const int layerIndex = _pagedAttentionProfileLayerIndex(mLayerIndex, mMeta);
+    const char* flashScheduleTuneOp = queryRowsAreFull ? "score_flash_schedule_tune" : "sparse_flash_schedule_tune";
+    const char* flashVariantTuneOp = queryRowsAreFull ? "score_flash_variant_tune" : "sparse_flash_variant_tune";
     const uint64_t startUs = profile ? _nowUs() : 0;
+    if (traceProgress) {
+        MNN_PRINT("OpenCLPagedAttention trace phase=enter op=%s layer=%d query=%d input_query=%d full_q=%d kv_len=%d head_dim=%d heads=%d kv_heads=%d\n",
+                  queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
+                  layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, mHeadDim, mNumHead,
+                  mKvNumHead);
+        std::fflush(stdout);
+    }
     uint64_t rearrangeUs = 0;
     uint64_t packUs = 0;
+    uint64_t imageCopyUs = 0;
     uint64_t flashUs = 0;
     uint64_t qkRectTiles = 0;
     uint64_t qkActiveTiles = 0;
     uint64_t qkRowTiles = 0;
-    int flash32Pieces = 0;
-    int flash64Pieces = 0;
-    bool staticWorkspace = _useStaticFullPrefill(qStorageLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
-    const bool singlePieceSparseFlash = mMeta != nullptr && mMeta->cacheblend_score_ready;
-    const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
-    int qChunkLen = singlePieceSparseFlash
-        ? activeLen
-        : (staticWorkspace ? activeLen : _prefillQChunkLen(activeLen, kvLen, mBatch, mNumHead, layerCount));
-    if (!singlePieceSparseFlash) {
-        constexpr int sparseQChunkLimit = 64;
-        if (sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
-            qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
+    int row32Pieces = 0;
+    int row64Pieces = 0;
+    int mqtileHD64Pieces = 0;
+    int mqtileHD128Q4K16Pieces = 0;
+    int mqtileHD128Q4K8Pieces = 0;
+    int mqtileHD128Q4K8KImagePieces = 0;
+    int mqtileHD128Q8K16Pieces = 0;
+    int mqtileHD128Q8K16KImagePieces = 0;
+    int mqtileHD128Q4K8KVImagePieces = 0;
+    int mqtileHD128Q8K16KVImagePieces = 0;
+    uint32_t sparseFlashSchedule = _defaultSparseFlashSchedule(mMeta, queryRowsAreFull);
+    uint32_t sparseFlashScheduleSource = kTuneSelectionSourceDefault;
+    uint32_t forcedSparseFlashSchedule = 0;
+    const bool hasForcedSparseFlashSchedule =
+        _benchSparseFlashScheduleOverride(&forcedSparseFlashSchedule) &&
+        _sparseFlashScheduleSupported(mMeta, forcedSparseFlashSchedule, queryRowsAreFull);
+    if (hasForcedSparseFlashSchedule) {
+        sparseFlashSchedule = forcedSparseFlashSchedule;
+    } else if (!gSparseFlashScheduleTuneInProgress && !gSparseFlashVariantTuneInProgress) {
+        const std::string tuneKey =
+            std::string("paged_sparse_flash_schedule_") + _openCLTuneDeviceKey(runtime) + "_" +
+            std::to_string(mBatch) + "_" + std::to_string(mNumHead) + "_" +
+            std::to_string(mKvNumHead) + "_" + std::to_string(mHeadDim) + "_" +
+            std::to_string(queryRowsAreFull ? 1 : 0);
+        const std::vector<uint32_t> tuneShape = {
+            static_cast<uint32_t>(activeLen),
+            static_cast<uint32_t>(kvLen),
+            _sparseLogicalWorkPermille(mMeta, activeLen, kvLen),
+            static_cast<uint32_t>(_sparseSelectedRatioPercent(mMeta)),
+            static_cast<uint32_t>(queryRowsAreFull ? 1 : 0),
+        };
+        std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
+        if (getTunedInfo(tuneKey, tuneShape, tuneInfo, runtime) && !tuneInfo.first.empty()) {
+            const uint32_t tunedSchedule = tuneInfo.first[0];
+            if (_sparseFlashScheduleSupported(mMeta, tunedSchedule, queryRowsAreFull) &&
+                !_rejectAdrenoSparseFlashScheduleFromCache(tunedSchedule, runtime, mBatch, mKvNumHead, mHeadDim,
+                                                           activeLen, kvLen, queryRowsAreFull)) {
+                sparseFlashSchedule = tunedSchedule;
+                sparseFlashScheduleSource = kTuneSelectionSourceCache;
+            }
+        } else if (_shouldTuneSparseFlashSchedule(mMeta, activeLen, profile,
+                                                  mOpenCLBackend->getCLTuneLevel())) {
+            const auto candidates = _sparseFlashScheduleCandidates(mMeta, activeLen, queryRowsAreFull);
+            if (candidates.size() > 1) {
+                bool tuned = false;
+                uint64_t bestUs = std::numeric_limits<uint64_t>::max();
+                uint32_t bestSchedule = sparseFlashSchedule;
+                gSparseFlashScheduleTuneInProgress = true;
+                for (uint32_t candidate : candidates) {
+                    gSparseFlashScheduleOverride = static_cast<int>(candidate);
+                    uint64_t candidateUs = 0;
+                    const char* candidateName = _sparseFlashScheduleName(candidate);
+                    _profileTuneCandidateStart(flashScheduleTuneOp, layerIndex, activeLen, kvLen, candidateName);
+                    const bool measured = _measureSteadyStateCandidate(runtime, [&]() {
+                            return runSparseFastPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull);
+                        }, &candidateUs);
+                    _profileTuneCandidateEnd(flashScheduleTuneOp, layerIndex, activeLen, kvLen, candidateName,
+                                             measured, candidateUs);
+                    if (!measured) {
+                        continue;
+                    }
+                    if (!tuned || candidateUs < bestUs) {
+                        tuned = true;
+                        bestUs = candidateUs;
+                        bestSchedule = candidate;
+                    }
+                }
+                gSparseFlashScheduleOverride = -1;
+                gSparseFlashScheduleTuneInProgress = false;
+                if (tuned) {
+                    std::pair<std::vector<uint32_t>, uint32_t> bestInfo = std::make_pair(
+                        std::vector<uint32_t>{bestSchedule},
+                        static_cast<uint32_t>(std::min<uint64_t>(bestUs, std::numeric_limits<uint32_t>::max())));
+                    setTunedInfo(tuneKey, tuneShape, bestInfo, runtime, "attention_buf");
+                    sparseFlashSchedule = bestSchedule;
+                    sparseFlashScheduleSource = kTuneSelectionSourceOnlineTuned;
+                }
+            }
         }
     }
+    bool staticWorkspace = _useStaticFullPrefill(qStorageLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
+    if (_disableAdrenoStaticSparseFlashWorkspace(runtime, mNumHead, mKvNumHead, mHeadDim, activeLen, kvLen,
+                                                 queryRowsAreFull)) {
+        staticWorkspace = false;
+    }
+    const bool singlePieceSparseFlash = sparseFlashSchedule == kSparseFlashScheduleSinglePiece;
+    int qChunkLen = _sparseFlashScheduleQChunkLen(sparseFlashSchedule, activeLen);
     auto pieces = singlePieceSparseFlash
         ? _buildFixedSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen)
         : _buildRangeAwareSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen);
-    auto err = ensureFastPrefillTemps(qStorageLen, kvLen, qChunkLen, staticWorkspace);
+    auto err = ensureSparseFlashTemps(qStorageLen, kvLen, staticWorkspace);
     if (err != NO_ERROR) {
         return err;
     }
@@ -2316,6 +3872,75 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     if (err != NO_ERROR) {
         return err;
     }
+    uint32_t sparseFlashVariant =
+        _defaultSparseFlashVariant(mMeta, activeLen, mHeadDim, runtime, queryRowsAreFull, mBatch, mKvNumHead, kvLen);
+    uint32_t sparseFlashVariantSource = kTuneSelectionSourceDefault;
+    if (!gSparseFlashVariantTuneInProgress) {
+        const std::string tuneKey =
+            std::string("paged_sparse_flash_variant_") + _openCLTuneDeviceKey(runtime) + "_" +
+            std::to_string(mBatch) + "_" + std::to_string(mNumHead) + "_" +
+            std::to_string(mKvNumHead) + "_" + std::to_string(mHeadDim) + "_" +
+            std::to_string(sparseFlashSchedule);
+        const std::vector<uint32_t> tuneShape = {
+            static_cast<uint32_t>(activeLen),
+            static_cast<uint32_t>(kvLen),
+            _sparseLogicalWorkPermille(mMeta, activeLen, kvLen),
+            static_cast<uint32_t>(_sparseSelectedRatioPercent(mMeta)),
+            static_cast<uint32_t>(queryRowsAreFull ? 1 : 0),
+            sparseFlashSchedule,
+        };
+        std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
+        if (getTunedInfo(tuneKey, tuneShape, tuneInfo, runtime) && !tuneInfo.first.empty()) {
+            const uint32_t tunedVariant = tuneInfo.first[0];
+            if (_sparseFlashVariantSupported(tunedVariant, mHeadDim, runtime, mBatch, mKvNumHead, kvLen) &&
+                !_rejectAdrenoSparseFlashVariantFromCache(tunedVariant, runtime, mBatch, mKvNumHead,
+                                                          mHeadDim, activeLen, kvLen, queryRowsAreFull)) {
+                sparseFlashVariant = tunedVariant;
+                sparseFlashVariantSource = kTuneSelectionSourceCache;
+            }
+        } else if (_shouldTuneSparseFlashVariant(mMeta, activeLen, mHeadDim, profile,
+                                                 mOpenCLBackend->getCLTuneLevel())) {
+            const auto candidates =
+                _sparseFlashVariantCandidates(mHeadDim, runtime, mBatch, mKvNumHead, kvLen, queryRowsAreFull);
+            if (candidates.size() > 1) {
+                bool tuned = false;
+                uint64_t bestUs = std::numeric_limits<uint64_t>::max();
+                uint32_t bestVariant = sparseFlashVariant;
+                gSparseFlashVariantTuneInProgress = true;
+                for (uint32_t candidate : candidates) {
+                    gSparseFlashVariantOverride = static_cast<int>(candidate);
+                    uint64_t candidateUs = 0;
+                    const char* candidateName = _sparseFlashVariantName(candidate);
+                    _profileTuneCandidateStart(flashVariantTuneOp, layerIndex, activeLen, kvLen, candidateName);
+                    const bool measured = _measureSteadyStateCandidate(runtime, [&]() {
+                            return runSparseFastPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull);
+                        }, &candidateUs);
+                    _profileTuneCandidateEnd(flashVariantTuneOp, layerIndex, activeLen, kvLen, candidateName,
+                                             measured, candidateUs);
+                    if (!measured) {
+                        continue;
+                    }
+                    if (!tuned || candidateUs < bestUs) {
+                        tuned = true;
+                        bestUs = candidateUs;
+                        bestVariant = candidate;
+                    }
+                }
+                gSparseFlashVariantOverride = -1;
+                gSparseFlashVariantTuneInProgress = false;
+                if (tuned) {
+                    std::pair<std::vector<uint32_t>, uint32_t> bestInfo = std::make_pair(
+                        std::vector<uint32_t>{bestVariant},
+                        static_cast<uint32_t>(std::min<uint64_t>(bestUs, std::numeric_limits<uint32_t>::max())));
+                    setTunedInfo(tuneKey, tuneShape, bestInfo, runtime, "attention_buf");
+                    sparseFlashVariant = bestVariant;
+                    sparseFlashVariantSource = kTuneSelectionSourceOnlineTuned;
+                }
+            }
+        }
+    }
+    const char* sparseFlashVariantName = _sparseFlashVariantName(sparseFlashVariant);
+    const char* sparseFlashScheduleName = _sparseFlashScheduleName(sparseFlashSchedule);
     auto run3D = [&](const std::shared_ptr<KernelWrap>& kernel, std::vector<uint32_t> gws,
                     const std::string& kernelName, const std::string& programName) {
         auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
@@ -2335,7 +3960,7 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     const float scale = (mMeta && mMeta->attn_scale > 0)
         ? mMeta->attn_scale
         : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
-    const bool directValuePrefill = _useDirectValuePrefillForSparse(mMeta, activeLen) &&
+    const bool directValuePrefill = _useDirectValuePrefillForSparse(mMeta, activeLen, mHeadDim, runtime) &&
         mCache != nullptr && mCache->value != nullptr &&
         mCache->maxSlots >= kvLen && _slotTableIsIdentity(mMeta, kvLen);
     cl::Buffer& qkvValueBuffer = directValuePrefill ? openCLBuffer(mCache->value.get()) : tempBuffer(mTempV.get());
@@ -2363,25 +3988,59 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         rearrangeUs += _nowUs() - opStartUs;
     }
 
+    const bool useSparseFlashKImage =
+        sparseFlashVariant == kSparseFlashVariantMQTileHD128Q4K8KImage ||
+        sparseFlashVariant == kSparseFlashVariantMQTileHD128Q8K16KImage;
+    const bool useSparseFlashKVImage =
+        sparseFlashVariant == kSparseFlashVariantMQTileHD128Q4K8KVImage ||
+        sparseFlashVariant == kSparseFlashVariantMQTileHD128Q8K16KVImage;
+    if (useSparseFlashKImage || useSparseFlashKVImage) {
+        if (directValuePrefill && !useSparseFlashKImage) {
+            return INVALID_VALUE;
+        }
+        err = useSparseFlashKVImage ? ensureAdrenoSparseFlashPackedKVImages(kvPack)
+                                    : ensureAdrenoSparseFlashPackedKeyImage(kvPack);
+        if (err != NO_ERROR) {
+            return err;
+        }
+    }
+
     idx = 0;
     gws = {static_cast<uint32_t>(UP_DIV(kvLen, 4)), static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
            static_cast<uint32_t>(mKvNumHead * mBatch)};
     ret = CL_SUCCESS;
     opStartUs = profileDetail ? _nowUs() : 0;
     if (directValuePrefill) {
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[0]);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[1]);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[2]);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, mBatch);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, kvLen);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, mKvNumHead);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, mHeadDim);
-        ret |= mPackPagedKeyKernel->get().setArg(idx++, mCache->maxSlots);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg sparse flash pack_paged_k_prefill");
-        run3D(mPackPagedKeyKernel, gws, "pack_paged_k_prefill", "paged_attention_buf");
+        if (useSparseFlashKImage) {
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, gws[0]);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, gws[1]);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, gws[2]);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, *mSparseFlashPackedKeyImage);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, mBatch);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, kvLen);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, mHeadDim);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, mCache->maxSlots);
+            ret |= mPackPagedKeyToImageKernel->get().setArg(idx++, mSparseFlashPackedKeyImageWidth);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg sparse flash pack_paged_k_prefill_to_image");
+            run3D(mPackPagedKeyToImageKernel, gws, "pack_paged_k_prefill_to_image", "paged_attention_buf");
+        } else {
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[0]);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[1]);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, gws[2]);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, mBatch);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, kvLen);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, mHeadDim);
+            ret |= mPackPagedKeyKernel->get().setArg(idx++, mCache->maxSlots);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg sparse flash pack_paged_k_prefill");
+            run3D(mPackPagedKeyKernel, gws, "pack_paged_k_prefill", "paged_attention_buf");
+        }
     } else {
         ret |= mPackPagedKVKernel->get().setArg(idx++, gws[0]);
         ret |= mPackPagedKVKernel->get().setArg(idx++, gws[1]);
@@ -2403,8 +4062,62 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         runtime->commandQueue().finish();
         packUs += _nowUs() - opStartUs;
     }
+    if (useSparseFlashKImage || useSparseFlashKVImage) {
+        if (!(directValuePrefill && useSparseFlashKImage)) {
+            opStartUs = profileDetail ? _nowUs() : 0;
+            uint32_t copyIdx = 0;
+            cl_int copyRet = CL_SUCCESS;
+            copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, tempBuffer(mTempK.get()));
+            copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, *mSparseFlashPackedKeyImage);
+            copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, mSparseFlashPackedKeyImageWidth);
+            copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, mSparseFlashPackedKeyImageHeight);
+            MNN_CHECK_CL_SUCCESS(copyRet, "setArg sparse flash copy packed key to image");
+            copyIdx = 0;
+            copyRet = runtime->commandQueue().enqueueNDRangeKernel(
+                mCopyBufferToImageLinearKernel->get(), cl::NullRange,
+                cl::NDRange(mSparseFlashPackedKeyImageWidth, mSparseFlashPackedKeyImageHeight), cl::NullRange);
+            MNN_CHECK_CL_SUCCESS(copyRet, "enqueue sparse flash copy packed key to image");
+            if (useSparseFlashKVImage) {
+                copyIdx = 0;
+                copyRet = CL_SUCCESS;
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, tempBuffer(mTempV.get()));
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, *mSparseFlashPackedValueImage);
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, mSparseFlashPackedValueImageWidth);
+                copyRet |= mCopyBufferToImageLinearKernel->get().setArg(copyIdx++, mSparseFlashPackedValueImageHeight);
+                MNN_CHECK_CL_SUCCESS(copyRet, "setArg sparse flash copy packed value to image");
+                copyRet = runtime->commandQueue().enqueueNDRangeKernel(
+                    mCopyBufferToImageLinearKernel->get(), cl::NullRange,
+                    cl::NDRange(mSparseFlashPackedValueImageWidth, mSparseFlashPackedValueImageHeight), cl::NullRange);
+                MNN_CHECK_CL_SUCCESS(copyRet, "enqueue sparse flash copy packed value to image");
+            }
+            if (profileDetail) {
+                runtime->commandQueue().finish();
+                imageCopyUs += _nowUs() - opStartUs;
+            }
+        }
+    }
 
     const int qSplitNum = static_cast<int>(pieces.size());
+    if (profile) {
+        MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d phase=begin "
+                  "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d "
+                  "schedule=%s schedule_source=%s static=%d direct_value=%d variant=%s variant_source=%s\n",
+                  queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
+                  layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
+                  sparseFlashScheduleName, _tuneSelectionSourceName(sparseFlashScheduleSource),
+                  staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, sparseFlashVariantName,
+                  _tuneSelectionSourceName(sparseFlashVariantSource));
+        std::fflush(stdout);
+    }
+    if (traceProgress) {
+        MNN_PRINT("OpenCLPagedAttention trace phase=begin op=%s layer=%d query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d schedule=%s schedule_source=%s static=%d direct_value=%d variant=%s variant_source=%s\n",
+                  queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
+                  layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
+                  sparseFlashScheduleName, _tuneSelectionSourceName(sparseFlashScheduleSource),
+                  staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, sparseFlashVariantName,
+                  _tuneSelectionSourceName(sparseFlashVariantSource));
+        std::fflush(stdout);
+    }
     for (const auto& piece : pieces) {
         const int qStart = piece.qStart;
         const int qPieceLen = piece.qLen;
@@ -2432,41 +4145,163 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
             }
         }
 
-        const uint32_t flashLanes = _sparseFlashLaneWidth(mMeta, activeLen);
-        auto flashKernel = flashLanes == 32u ? mSparseFlashKernel32 : mSparseFlashKernel64;
-        if (flashLanes == 32u) {
-            ++flash32Pieces;
-        } else {
-            ++flash64Pieces;
+        std::shared_ptr<KernelWrap> flashKernel;
+        std::vector<uint32_t> flashLws;
+        const char* setArgLabel = nullptr;
+        switch (sparseFlashVariant) {
+            case kSparseFlashVariantRow32:
+                flashKernel = mSparseFlashKernel32;
+                gws = {32u, static_cast<uint32_t>(qPieceLen), static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {32u, 1u, 1u};
+                setArgLabel = "setArg paged sparse flash attention row32";
+                ++row32Pieces;
+                break;
+            case kSparseFlashVariantRow64:
+                flashKernel = mSparseFlashKernel64;
+                gws = {64u, static_cast<uint32_t>(qPieceLen), static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {64u, 1u, 1u};
+                setArgLabel = "setArg paged sparse flash attention row64";
+                ++row64Pieces;
+                break;
+            case kSparseFlashVariantMQTileHD64Q4K16:
+                flashKernel = mSparseFlashKernelMQTileHD64Q4K16;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 4)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 4u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd64_q4k16";
+                ++mqtileHD64Pieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q4K16:
+                flashKernel = mSparseFlashKernelMQTileHD128Q4K16;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 4)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 4u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q4k16";
+                ++mqtileHD128Q4K16Pieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q4K8:
+                flashKernel = mSparseFlashKernelMQTileHD128Q4K8;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 4)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 4u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q4k8";
+                ++mqtileHD128Q4K8Pieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q4K8KImage:
+                flashKernel = mSparseFlashKernelMQTileHD128Q4K8KImage;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 4)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 4u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q4k8_kimg";
+                ++mqtileHD128Q4K8KImagePieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q8K16:
+                flashKernel = mSparseFlashKernelMQTileHD128Q8K16;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 8)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 8u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q8k16";
+                ++mqtileHD128Q8K16Pieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q8K16KImage:
+                flashKernel = mSparseFlashKernelMQTileHD128Q8K16KImage;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 8)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 8u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q8k16_kimg";
+                ++mqtileHD128Q8K16KImagePieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q4K8KVImage:
+                flashKernel = mSparseFlashKernelMQTileHD128Q4K8KVImage;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 4)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 4u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q4k8_kvimg";
+                ++mqtileHD128Q4K8KVImagePieces;
+                break;
+            case kSparseFlashVariantMQTileHD128Q8K16KVImage:
+                flashKernel = mSparseFlashKernelMQTileHD128Q8K16KVImage;
+                gws = {16u, static_cast<uint32_t>(ROUND_UP(qPieceLen, 8)),
+                       static_cast<uint32_t>(mNumHead * mBatch)};
+                flashLws = {16u, 8u, 1u};
+                setArgLabel = "setArg paged sparse flash attention mqtile_hd128_q8k16_kvimg";
+                ++mqtileHD128Q8K16KVImagePieces;
+                break;
+            default:
+                return INVALID_VALUE;
         }
 
         idx = 0;
-        gws = {flashLanes, static_cast<uint32_t>(qPieceLen), static_cast<uint32_t>(mNumHead * mBatch)};
         ret = CL_SUCCESS;
         ret |= flashKernel->get().setArg(idx++, gws[0]);
         ret |= flashKernel->get().setArg(idx++, gws[1]);
         ret |= flashKernel->get().setArg(idx++, gws[2]);
         ret |= flashKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
-        ret |= flashKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
-        ret |= flashKernel->get().setArg(idx++, qkvValueBuffer);
-        ret |= flashKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
-        ret |= flashKernel->get().setArg(idx++, openCLBuffer(output));
-        ret |= flashKernel->get().setArg(idx++, scale);
-        ret |= flashKernel->get().setArg(idx++, qStorageLen);
-        ret |= flashKernel->get().setArg(idx++, activeLen);
-        ret |= flashKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
-        ret |= flashKernel->get().setArg(idx++, qStart);
-        ret |= flashKernel->get().setArg(idx++, qPieceLen);
-        ret |= flashKernel->get().setArg(idx++, activeKvLen);
-        ret |= flashKernel->get().setArg(idx++, kvPack);
-        ret |= flashKernel->get().setArg(idx++, qkvValueMaxLen);
-        ret |= flashKernel->get().setArg(idx++, mNumHead);
-        ret |= flashKernel->get().setArg(idx++, mKvNumHead);
-        ret |= flashKernel->get().setArg(idx++, mHeadDim);
-        MNN_CHECK_CL_SUCCESS(ret, flashLanes == 32u ? "setArg paged sparse flash attention row32"
-                                                    : "setArg paged sparse flash attention row64");
+        if (useSparseFlashKVImage) {
+            ret |= flashKernel->get().setArg(idx++, *mSparseFlashPackedKeyImage);
+            ret |= flashKernel->get().setArg(idx++, *mSparseFlashPackedValueImage);
+            ret |= flashKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= flashKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= flashKernel->get().setArg(idx++, scale);
+            ret |= flashKernel->get().setArg(idx++, qStorageLen);
+            ret |= flashKernel->get().setArg(idx++, activeLen);
+            ret |= flashKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
+            ret |= flashKernel->get().setArg(idx++, qStart);
+            ret |= flashKernel->get().setArg(idx++, qPieceLen);
+            ret |= flashKernel->get().setArg(idx++, activeKvLen);
+            ret |= flashKernel->get().setArg(idx++, kvPack);
+            ret |= flashKernel->get().setArg(idx++, qkvValueMaxLen);
+            ret |= flashKernel->get().setArg(idx++, mSparseFlashPackedKeyImageWidth);
+            ret |= flashKernel->get().setArg(idx++, mSparseFlashPackedValueImageWidth);
+            ret |= flashKernel->get().setArg(idx++, mNumHead);
+            ret |= flashKernel->get().setArg(idx++, mKvNumHead);
+            ret |= flashKernel->get().setArg(idx++, mHeadDim);
+        } else if (useSparseFlashKImage) {
+            ret |= flashKernel->get().setArg(idx++, *mSparseFlashPackedKeyImage);
+            ret |= flashKernel->get().setArg(idx++, qkvValueBuffer);
+            ret |= flashKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= flashKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= flashKernel->get().setArg(idx++, scale);
+            ret |= flashKernel->get().setArg(idx++, qStorageLen);
+            ret |= flashKernel->get().setArg(idx++, activeLen);
+            ret |= flashKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
+            ret |= flashKernel->get().setArg(idx++, qStart);
+            ret |= flashKernel->get().setArg(idx++, qPieceLen);
+            ret |= flashKernel->get().setArg(idx++, activeKvLen);
+            ret |= flashKernel->get().setArg(idx++, kvPack);
+            ret |= flashKernel->get().setArg(idx++, qkvValueMaxLen);
+            ret |= flashKernel->get().setArg(idx++, mSparseFlashPackedKeyImageWidth);
+            ret |= flashKernel->get().setArg(idx++, mNumHead);
+            ret |= flashKernel->get().setArg(idx++, mKvNumHead);
+            ret |= flashKernel->get().setArg(idx++, mHeadDim);
+        } else {
+            ret |= flashKernel->get().setArg(idx++, tempBuffer(mTempK.get()));
+            ret |= flashKernel->get().setArg(idx++, qkvValueBuffer);
+            ret |= flashKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+            ret |= flashKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= flashKernel->get().setArg(idx++, scale);
+            ret |= flashKernel->get().setArg(idx++, qStorageLen);
+            ret |= flashKernel->get().setArg(idx++, activeLen);
+            ret |= flashKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
+            ret |= flashKernel->get().setArg(idx++, qStart);
+            ret |= flashKernel->get().setArg(idx++, qPieceLen);
+            ret |= flashKernel->get().setArg(idx++, activeKvLen);
+            ret |= flashKernel->get().setArg(idx++, kvPack);
+            ret |= flashKernel->get().setArg(idx++, qkvValueMaxLen);
+            ret |= flashKernel->get().setArg(idx++, mNumHead);
+            ret |= flashKernel->get().setArg(idx++, mKvNumHead);
+            ret |= flashKernel->get().setArg(idx++, mHeadDim);
+        }
+        MNN_CHECK_CL_SUCCESS(ret, setArgLabel);
         opStartUs = profileDetail ? _nowUs() : 0;
-        run3DKernelDefault(flashKernel, gws, {flashLanes, 1u, 1u}, runtime);
+        if (traceProgress) {
+            MNN_PRINT("OpenCLPagedAttention trace phase=flash_dispatch op=%s layer=%d q_start=%d q_len=%d active_kv_len=%d kv_len=%d variant=%s gws=%u,%u,%u lws=%u,%u,%u\n",
+                      queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
+                      layerIndex, qStart, qPieceLen, activeKvLen, kvLen, sparseFlashVariantName,
+                      gws[0], gws[1], gws[2], flashLws[0], flashLws[1], flashLws[2]);
+            std::fflush(stdout);
+        }
+        run3DKernelDefault(flashKernel, gws, flashLws, runtime);
         if (profileDetail) {
             runtime->commandQueue().finish();
             flashUs += _nowUs() - opStartUs;
@@ -2474,31 +4309,53 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     }
     if (profile) {
         runtime->commandQueue().finish();
-        int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
         const uint64_t totalUs = _nowUs() - startUs;
         if (profileDetail) {
             MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d "
-                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d "
-                      "direct_value=%d lane32_pieces=%d lane64_pieces=%d us=%llu "
-                      "rearrange_us=%llu pack_us=%llu flash_us=%llu "
+                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d schedule=%s "
+                      "schedule_source=%s static=%d direct_value=%d variant=%s variant_source=%s row32_pieces=%d row64_pieces=%d "
+                      "mqtile_hd64_pieces=%d mqtile_hd128_q4k16_pieces=%d "
+                      "mqtile_hd128_q4k8_pieces=%d mqtile_hd128_q4k8_kimg_pieces=%d "
+                      "mqtile_hd128_q8k16_pieces=%d mqtile_hd128_q8k16_kimg_pieces=%d "
+                      "mqtile_hd128_q4k8_kvimg_pieces=%d mqtile_hd128_q8k16_kvimg_pieces=%d us=%llu "
+                      "rearrange_us=%llu pack_us=%llu image_copy_us=%llu flash_us=%llu "
                       "qk_rect_tiles=%llu qk_active_tiles=%llu qk_row_tiles=%llu\n",
                       queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
                       layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
-                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, flash32Pieces, flash64Pieces,
+                      sparseFlashScheduleName, _tuneSelectionSourceName(sparseFlashScheduleSource),
+                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, sparseFlashVariantName,
+                      _tuneSelectionSourceName(sparseFlashVariantSource),
+                      row32Pieces, row64Pieces, mqtileHD64Pieces, mqtileHD128Q4K16Pieces,
+                      mqtileHD128Q4K8Pieces, mqtileHD128Q4K8KImagePieces,
+                      mqtileHD128Q8K16Pieces, mqtileHD128Q8K16KImagePieces,
+                      mqtileHD128Q4K8KVImagePieces,
+                      mqtileHD128Q8K16KVImagePieces,
                       static_cast<unsigned long long>(totalUs),
                       static_cast<unsigned long long>(rearrangeUs),
                       static_cast<unsigned long long>(packUs),
+                      static_cast<unsigned long long>(imageCopyUs),
                       static_cast<unsigned long long>(flashUs),
                       static_cast<unsigned long long>(qkRectTiles),
                       static_cast<unsigned long long>(qkActiveTiles),
                       static_cast<unsigned long long>(qkRowTiles));
         } else {
             MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d "
-                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d static=%d "
-                      "direct_value=%d lane32_pieces=%d lane64_pieces=%d us=%llu\n",
+                      "query=%d input_query=%d full_q=%d kv_len=%d q_chunk=%d q_split=%d schedule=%s "
+                      "schedule_source=%s static=%d direct_value=%d variant=%s variant_source=%s row32_pieces=%d row64_pieces=%d "
+                      "mqtile_hd64_pieces=%d mqtile_hd128_q4k16_pieces=%d "
+                      "mqtile_hd128_q4k8_pieces=%d mqtile_hd128_q4k8_kimg_pieces=%d "
+                      "mqtile_hd128_q8k16_pieces=%d mqtile_hd128_q8k16_kimg_pieces=%d "
+                      "mqtile_hd128_q4k8_kvimg_pieces=%d mqtile_hd128_q8k16_kvimg_pieces=%d us=%llu\n",
                       queryRowsAreFull ? "score_flash_attention" : "sparse_flash_attention",
                       layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, qChunkLen, qSplitNum,
-                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, flash32Pieces, flash64Pieces,
+                      sparseFlashScheduleName, _tuneSelectionSourceName(sparseFlashScheduleSource),
+                      staticWorkspace ? 1 : 0, directValuePrefill ? 1 : 0, sparseFlashVariantName,
+                      _tuneSelectionSourceName(sparseFlashVariantSource),
+                      row32Pieces, row64Pieces, mqtileHD64Pieces, mqtileHD128Q4K16Pieces,
+                      mqtileHD128Q4K8Pieces, mqtileHD128Q4K8KImagePieces,
+                      mqtileHD128Q8K16Pieces, mqtileHD128Q8K16KImagePieces,
+                      mqtileHD128Q4K8KVImagePieces,
+                      mqtileHD128Q8K16KVImagePieces,
                       static_cast<unsigned long long>(totalUs));
         }
     }
@@ -2513,15 +4370,25 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
     auto mask = inputs.size() > 3 ? inputs[3] : nullptr;
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const int activeLen = attnLen;
-    if (queryRowsAreFull && mPicAttentionMode != 1) {
-        return INVALID_VALUE;
-    }
     const int qStorageLen = queryRowsAreFull ? mQuerySeqLen : activeLen;
-    const bool useMask = mask != nullptr && mask->elementSize() > 1 &&
+    const bool ignoreFullCausalMask = mask != nullptr && mask->elementSize() > 1 &&
+        mMeta != nullptr && mMeta->full_causal_attention_mask;
+    const bool useMask = !ignoreFullCausalMask && mask != nullptr && mask->elementSize() > 1 &&
         mask->getType().code == halide_type_float && maskKeyLen > 0;
+    const bool useCompactPackedScoreQ = queryRowsAreFull && !useMask;
     const bool profile = _profilePagedAttention();
     const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const bool traceProgress = _tracePagedAttentionProgress();
+    const int layerIndex = _pagedAttentionProfileLayerIndex(mLayerIndex, mMeta);
+    const char* qsplitChunkTuneOp = queryRowsAreFull ? "score_qsplit_chunk_tune" : "sparse_qsplit_chunk_tune";
     const uint64_t startUs = profile ? _nowUs() : 0;
+    if (traceProgress) {
+        MNN_PRINT("OpenCLPagedAttention trace phase=enter op=%s layer=%d query=%d input_query=%d full_q=%d kv_len=%d mask_key_len=%d head_dim=%d heads=%d kv_heads=%d\n",
+                  queryRowsAreFull ? "score_qsplit_attention" : "sparse_qsplit_attention",
+                  layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, maskKeyLen, mHeadDim,
+                  mNumHead, mKvNumHead);
+        std::fflush(stdout);
+    }
     uint64_t rearrangeUs = 0;
     uint64_t packUs = 0;
     uint64_t maskUs = 0;
@@ -2533,13 +4400,7 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
     uint64_t qkRowTiles = 0;
     bool staticWorkspace = _useStaticFullPrefill(qStorageLen, kvLen, mBatch, mNumHead, mKvNumHead, mHeadDim);
     const int layerCount = mMeta != nullptr && mMeta->layer_nums > 0 ? mMeta->layer_nums : 1;
-    int qChunkLen = staticWorkspace ? activeLen
-                                    : _prefillQChunkLen(activeLen, kvLen, mBatch, mNumHead, layerCount);
-    constexpr int sparseQChunkLimit = 64;
-    if (!staticWorkspace && sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
-        qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
-    }
-    qChunkLen = std::max(1, std::min(qChunkLen, activeLen));
+    int qChunkLen = _sparseQSplitChunkLen(mMeta, activeLen, kvLen, mBatch, mNumHead, layerCount, staticWorkspace);
 
     auto ensureTemps = [&](bool wantStaticWorkspace) {
         return ensureFastPrefillTemps(qStorageLen, kvLen, qChunkLen, wantStaticWorkspace);
@@ -2557,11 +4418,7 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         mFastQChunkLen = 0;
         mFastStaticWorkspace = false;
         staticWorkspace = false;
-        qChunkLen = _prefillQChunkLen(activeLen, kvLen, mBatch, mNumHead, layerCount);
-        if (sparseQChunkLimit > 0 && sparseQChunkLimit < qChunkLen) {
-            qChunkLen = std::max(4, std::min(activeLen, ((sparseQChunkLimit + 3) / 4) * 4));
-        }
-        qChunkLen = std::max(1, std::min(qChunkLen, activeLen));
+        qChunkLen = _sparseQSplitChunkLen(mMeta, activeLen, kvLen, mBatch, mNumHead, layerCount, false);
         err = ensureTemps(false);
     }
     if (err != NO_ERROR) {
@@ -2587,6 +4444,83 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         mFastKernelAddMask = useMask;
     }
 
+    if (!gSparseQSplitTuneInProgress) {
+        const int selectedRatioPercent = _sparseSelectedRatioPercent(mMeta);
+        const std::string tuneKey =
+            std::string("paged_sparse_qsplit_chunk_") + _openCLTuneDeviceKey(runtime) + "_" +
+            std::to_string(mBatch) + "_" + std::to_string(mNumHead) + "_" +
+            std::to_string(mKvNumHead) + "_" + std::to_string(mHeadDim) + "_" +
+            std::to_string(queryRowsAreFull ? 1 : 0) + "_" + std::to_string(useMask ? 1 : 0);
+        const std::vector<uint32_t> tuneShape = {
+            static_cast<uint32_t>(activeLen),
+            static_cast<uint32_t>(kvLen),
+            static_cast<uint32_t>(selectedRatioPercent),
+        };
+        std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
+        if (getTunedInfo(tuneKey, tuneShape, tuneInfo, runtime) && !tuneInfo.first.empty()) {
+            int tunedChunk = static_cast<int>(tuneInfo.first[0]);
+            tunedChunk = std::max(1, std::min(tunedChunk, activeLen));
+            if (tunedChunk < activeLen) {
+                tunedChunk = ((tunedChunk + 3) / 4) * 4;
+            }
+            tunedChunk = std::max(1, std::min(tunedChunk, activeLen));
+            if (tunedChunk != qChunkLen) {
+                gSparseQSplitTuneInProgress = true;
+                gSparseQSplitChunkOverride = tunedChunk;
+                auto tunedErr = runSparseQSplitPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull, maskKeyLen);
+                gSparseQSplitChunkOverride = 0;
+                gSparseQSplitTuneInProgress = false;
+                return tunedErr;
+            }
+        } else if (_shouldTuneSparseQSplitChunk(mMeta, activeLen, mHeadDim, staticWorkspace, profile,
+                                                mOpenCLBackend->getCLTuneLevel())) {
+            const auto candidates = _sparseQSplitChunkCandidates(qChunkLen, activeLen);
+            if (candidates.size() > 1) {
+                uint64_t bestUs = std::numeric_limits<uint64_t>::max();
+                int bestChunk = qChunkLen;
+                bool tuned = false;
+                gSparseQSplitTuneInProgress = true;
+                for (int candidate : candidates) {
+                    gSparseQSplitChunkOverride = candidate;
+                    uint64_t candidateUs = 0;
+                    const std::string candidateName = std::to_string(candidate);
+                    _profileTuneCandidateStart(qsplitChunkTuneOp, layerIndex, activeLen, kvLen,
+                                               candidateName.c_str());
+                    const bool measured = _measureSteadyStateCandidate(runtime, [&]() {
+                            return runSparseQSplitPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull,
+                                                          maskKeyLen);
+                        }, &candidateUs);
+                    _profileTuneCandidateEnd(qsplitChunkTuneOp, layerIndex, activeLen, kvLen,
+                                             candidateName.c_str(), measured, candidateUs);
+                    if (!measured) {
+                        continue;
+                    }
+                    if (!tuned || candidateUs < bestUs) {
+                        tuned = true;
+                        bestUs = candidateUs;
+                        bestChunk = candidate;
+                    }
+                }
+                gSparseQSplitChunkOverride = 0;
+                gSparseQSplitTuneInProgress = false;
+                if (tuned) {
+                    std::pair<std::vector<uint32_t>, uint32_t> bestInfo = std::make_pair(
+                        std::vector<uint32_t>{static_cast<uint32_t>(bestChunk)},
+                        static_cast<uint32_t>(std::min<uint64_t>(bestUs, std::numeric_limits<uint32_t>::max())));
+                    setTunedInfo(tuneKey, tuneShape, bestInfo, runtime, "attention_buf");
+                    if (bestChunk != qChunkLen) {
+                        gSparseQSplitTuneInProgress = true;
+                        gSparseQSplitChunkOverride = bestChunk;
+                        auto tunedErr = runSparseQSplitPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull, maskKeyLen);
+                        gSparseQSplitChunkOverride = 0;
+                        gSparseQSplitTuneInProgress = false;
+                        return tunedErr;
+                    }
+                }
+            }
+        }
+    }
+
     auto run3D = [&](const std::shared_ptr<KernelWrap>& kernel, std::vector<uint32_t> gws,
                     const std::string& kernelName, const std::string& programName) {
         auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
@@ -2603,6 +4537,23 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
     };
 
     auto pieces = _buildRangeAwareSparsePieces(mMeta->sparse_query_logical_indices, activeLen, kvLen, qChunkLen);
+    const int qSplitNum = static_cast<int>(pieces.size());
+    if (profile) {
+        MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d phase=begin "
+                  "query=%d input_query=%d full_q=%d kv_len=%d mask_key_len=%d q_chunk=%d q_split=%d "
+                  "static=%d compact_score_q=%d add_mask=%d\n",
+                  queryRowsAreFull ? "score_qsplit_attention" : "sparse_qsplit_attention",
+                  layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, maskKeyLen, qChunkLen,
+                  qSplitNum, staticWorkspace ? 1 : 0, useCompactPackedScoreQ ? 1 : 0, useMask ? 1 : 0);
+        std::fflush(stdout);
+    }
+    if (traceProgress) {
+        MNN_PRINT("OpenCLPagedAttention trace phase=begin op=%s layer=%d query=%d input_query=%d full_q=%d kv_len=%d mask_key_len=%d q_chunk=%d q_split=%d static=%d compact_score_q=%d add_mask=%d\n",
+                  queryRowsAreFull ? "score_qsplit_attention" : "sparse_qsplit_attention",
+                  layerIndex, activeLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, maskKeyLen, qChunkLen,
+                  qSplitNum, staticWorkspace ? 1 : 0, useCompactPackedScoreQ ? 1 : 0, useMask ? 1 : 0);
+        std::fflush(stdout);
+    }
     const int kvPack = ROUND_UP(kvLen, 32);
     const int headPack4 = ROUND_UP(mHeadDim, 4);
     const int headPack8 = ROUND_UP(mHeadDim, 8);
@@ -2615,18 +4566,34 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
     uint64_t opStartUs = profileDetail ? _nowUs() : 0;
 
     idx = 0;
-    gws = {static_cast<uint32_t>(UP_DIV(qStorageLen, 4)), static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
+    gws = {static_cast<uint32_t>(UP_DIV(useCompactPackedScoreQ ? activeLen : qStorageLen, 4)),
+           static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
            static_cast<uint32_t>(mNumHead * mBatch)};
-    ret |= mRearrangeQKernel->get().setArg(idx++, gws[0]);
-    ret |= mRearrangeQKernel->get().setArg(idx++, gws[1]);
-    ret |= mRearrangeQKernel->get().setArg(idx++, gws[2]);
-    ret |= mRearrangeQKernel->get().setArg(idx++, openCLBuffer(query));
-    ret |= mRearrangeQKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
-    ret |= mRearrangeQKernel->get().setArg(idx++, qStorageLen);
-    ret |= mRearrangeQKernel->get().setArg(idx++, mHeadDim);
-    ret |= mRearrangeQKernel->get().setArg(idx++, mNumHead);
-    MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse qsplit rearrange_q");
-    run3D(mRearrangeQKernel, gws, "rearrange_q", "attention_buf");
+    if (useCompactPackedScoreQ) {
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, gws[0]);
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, gws[1]);
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, gws[2]);
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, openCLBuffer(query));
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, activeLen);
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, mHeadDim);
+        ret |= mRearrangeSparseQKernel->get().setArg(idx++, mNumHead);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse qsplit rearrange_q_sparse");
+        run3D(mRearrangeSparseQKernel, gws, "rearrange_q_sparse", "attention_buf");
+    } else {
+        ret |= mRearrangeQKernel->get().setArg(idx++, gws[0]);
+        ret |= mRearrangeQKernel->get().setArg(idx++, gws[1]);
+        ret |= mRearrangeQKernel->get().setArg(idx++, gws[2]);
+        ret |= mRearrangeQKernel->get().setArg(idx++, openCLBuffer(query));
+        ret |= mRearrangeQKernel->get().setArg(idx++, tempBuffer(mTempQ.get()));
+        ret |= mRearrangeQKernel->get().setArg(idx++, qStorageLen);
+        ret |= mRearrangeQKernel->get().setArg(idx++, mHeadDim);
+        ret |= mRearrangeQKernel->get().setArg(idx++, mNumHead);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg paged sparse qsplit rearrange_q");
+        run3D(mRearrangeQKernel, gws, "rearrange_q", "attention_buf");
+    }
     if (profileDetail) {
         runtime->commandQueue().finish();
         rearrangeUs += _nowUs() - opStartUs;
@@ -2678,7 +4645,6 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         }
     }
 
-    const int qSplitNum = static_cast<int>(pieces.size());
     for (const auto& piece : pieces) {
         const int qStart = piece.qStart;
         const int qPieceLen = piece.qLen;
@@ -2718,9 +4684,9 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         ret |= mQKKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
         ret |= mQKKernel->get().setArg(idx++, tempBuffer(mTempQK.get()));
         ret |= mQKKernel->get().setArg(idx++, scale);
-        ret |= mQKKernel->get().setArg(idx++, qStorageLen);
+        ret |= mQKKernel->get().setArg(idx++, useCompactPackedScoreQ ? activeLen : qStorageLen);
         ret |= mQKKernel->get().setArg(idx++, activeLen);
-        ret |= mQKKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
+        ret |= mQKKernel->get().setArg(idx++, useCompactPackedScoreQ ? 0 : (queryRowsAreFull ? 1 : 0));
         ret |= mQKKernel->get().setArg(idx++, qStart);
         ret |= mQKKernel->get().setArg(idx++, qPieceLen);
         ret |= mQKKernel->get().setArg(idx++, maskKeyLen);
@@ -2731,6 +4697,12 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         ret |= mQKKernel->get().setArg(idx++, headPack4);
         MNN_CHECK_CL_SUCCESS(ret, "setArg sparse qsplit matmul_qk_div_mask_prefill_piece_sparse");
         opStartUs = profileDetail ? _nowUs() : 0;
+        if (traceProgress) {
+            MNN_PRINT("OpenCLPagedAttention trace phase=qsplit_qk_dispatch op=%s layer=%d q_start=%d q_len=%d active_kv_len=%d kv_len=%d gws=%u,%u,%u\n",
+                      queryRowsAreFull ? "score_qsplit_attention" : "sparse_qsplit_attention",
+                      layerIndex, qStart, qPieceLen, activeKvLen, kvLen, gws[0], gws[1], gws[2]);
+            std::fflush(stdout);
+        }
         run3D(mQKKernel, gws, "matmul_qk_div_mask_prefill_piece_sparse", "attention_buf");
         if (profileDetail) {
             runtime->commandQueue().finish();
@@ -2750,6 +4722,12 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         ret |= mSoftmaxKernel->get().setArg(idx++, activeKvLen);
         MNN_CHECK_CL_SUCCESS(ret, "setArg sparse qsplit softmax");
         opStartUs = profileDetail ? _nowUs() : 0;
+        if (traceProgress) {
+            MNN_PRINT("OpenCLPagedAttention trace phase=qsplit_softmax_dispatch op=%s layer=%d q_start=%d q_len=%d active_kv_len=%d kv_len=%d gws=%u,%u,%u\n",
+                      queryRowsAreFull ? "score_qsplit_attention" : "sparse_qsplit_attention",
+                      layerIndex, qStart, qPieceLen, activeKvLen, kvLen, gws[0], gws[1], gws[2]);
+            std::fflush(stdout);
+        }
         run3DKernelDefault(mSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
         if (profileDetail) {
             runtime->commandQueue().finish();
@@ -2765,7 +4743,9 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         ret |= mQKVKernel->get().setArg(idx++, gws[2]);
         ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
         ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempV.get()));
+        ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
         ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= mQKVKernel->get().setArg(idx++, activeLen);
         ret |= mQKVKernel->get().setArg(idx++, activeLen);
         ret |= mQKVKernel->get().setArg(idx++, qStart);
         ret |= mQKVKernel->get().setArg(idx++, qPieceLen);
@@ -2773,9 +4753,16 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
         ret |= mQKVKernel->get().setArg(idx++, kvPack);
         ret |= mQKVKernel->get().setArg(idx++, mNumHead);
         ret |= mQKVKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mQKVKernel->get().setArg(idx++, 1);
         ret |= mQKVKernel->get().setArg(idx++, headPack8);
         MNN_CHECK_CL_SUCCESS(ret, "setArg sparse qsplit matmul_qkv_prefill_piece");
         opStartUs = profileDetail ? _nowUs() : 0;
+        if (traceProgress) {
+            MNN_PRINT("OpenCLPagedAttention trace phase=qsplit_qkv_dispatch op=%s layer=%d q_start=%d q_len=%d active_kv_len=%d kv_len=%d gws=%u,%u,%u\n",
+                      queryRowsAreFull ? "score_qsplit_attention" : "sparse_qsplit_attention",
+                      layerIndex, qStart, qPieceLen, activeKvLen, kvLen, gws[0], gws[1], gws[2]);
+            std::fflush(stdout);
+        }
         run3D(mQKVKernel, gws, "matmul_qkv_prefill_piece", "attention_buf");
         if (profileDetail) {
             runtime->commandQueue().finish();
@@ -2785,7 +4772,6 @@ ErrorCode PagedAttentionBufExecution::runSparseQSplitPrefill(const std::vector<T
 
     if (profile) {
         runtime->commandQueue().finish();
-        int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
         const uint64_t totalUs = _nowUs() - startUs;
         if (profileDetail) {
             MNN_PRINT("OpenCLPagedAttention profile op=%s layer=%d "
@@ -2838,7 +4824,7 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttention(const std::vector
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const bool profile = _profilePagedAttention();
     const uint64_t startUs = profile ? _nowUs() : 0;
-    const uint32_t lanes = _sparseFlashLaneWidth(sparseQuery ? mMeta : nullptr, attnLen);
+    const uint32_t lanes = _sparseFlashLaneWidth(sparseQuery ? mMeta : nullptr, attnLen, mHeadDim);
     auto kernel = lanes == 32u ? mDecodeCausalKernel32 : mDecodeCausalKernel64;
     if (!kernel) {
         return INVALID_VALUE;
@@ -3168,9 +5154,12 @@ ErrorCode PagedAttentionBufExecution::runAdrenoGemmPrefill(const std::vector<Ten
             std::vector<uint32_t> gws = {static_cast<uint32_t>(ePiece / 8),
                                          static_cast<uint32_t>(kvPack / 8),
                                          static_cast<uint32_t>(loop)};
-            auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
-            auto lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, "trans_3d_buf", kernel,
-                                        mOpenCLBackend->getCLTuneLevel(), "self_attention_buf").first;
+            std::vector<uint32_t> lws;
+            if (!_useAdrenoGemmTransNullLws(runtime, ePiece, kvPack, loop, &lws)) {
+                auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(kernel));
+                lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, "trans_3d_buf", kernel,
+                                       mOpenCLBackend->getCLTuneLevel(), "self_attention_buf").first;
+            }
             gws[0] = ROUND_UP(gws[0], std::max((uint32_t)1, lws[0]));
             gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
             gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
@@ -3243,9 +5232,12 @@ ErrorCode PagedAttentionBufExecution::runAdrenoGemmPrefill(const std::vector<Ten
         std::vector<uint32_t> gws = {static_cast<uint32_t>(UP_DIV(mQuerySeqLen, 4)),
                                      static_cast<uint32_t>(UP_DIV(mHeadDim, 4)),
                                      static_cast<uint32_t>(loop)};
-        auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mAdrenoGemmClipKernel));
-        auto lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, "qkv_transpose_output",
-                                    mAdrenoGemmClipKernel, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
+        std::vector<uint32_t> lws;
+        if (!_useAdrenoGemmClipNullLws(runtime, mQuerySeqLen, mNumHead, mHeadDim, &lws)) {
+            auto maxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mAdrenoGemmClipKernel));
+            lws = localWS3DDefault(gws, maxWorkGroupSize, runtime, "qkv_transpose_output",
+                                   mAdrenoGemmClipKernel, mOpenCLBackend->getCLTuneLevel(), "attention_buf").first;
+        }
         gws[0] = ROUND_UP(gws[0], std::max((uint32_t)1, lws[0]));
         gws[1] = ROUND_UP(gws[1], std::max((uint32_t)1, lws[1]));
         gws[2] = ROUND_UP(gws[2], std::max((uint32_t)1, lws[2]));
@@ -3558,7 +5550,9 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
             ret |= mQKVKernel->get().setArg(idx++, gws[2]);
             ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempSoftmax.get()));
             ret |= mQKVKernel->get().setArg(idx++, tempBuffer(mTempV.get()));
+            ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
             ret |= mQKVKernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= mQKVKernel->get().setArg(idx++, mQuerySeqLen);
             ret |= mQKVKernel->get().setArg(idx++, mQuerySeqLen);
             ret |= mQKVKernel->get().setArg(idx++, qStart);
             ret |= mQKVKernel->get().setArg(idx++, qPieceLen);
@@ -3566,6 +5560,7 @@ ErrorCode PagedAttentionBufExecution::runFastPrefill(const std::vector<Tensor*>&
             ret |= mQKVKernel->get().setArg(idx++, kvPack);
             ret |= mQKVKernel->get().setArg(idx++, mNumHead);
             ret |= mQKVKernel->get().setArg(idx++, mKvNumHead);
+            ret |= mQKVKernel->get().setArg(idx++, 0);
             ret |= mQKVKernel->get().setArg(idx++, headPack8);
             MNN_CHECK_CL_SUCCESS(ret, "setArg paged fast matmul_qkv_prefill_piece");
             run3D(mQKVKernel, gws, "matmul_qkv_prefill_piece", "attention_buf");
@@ -3970,11 +5965,108 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     if (canUseFastPrefill(mask, baseLogical, attnLen, kvLen, sparseQuery, externalHydrated, &fastMaskKeyLen)) {
         return runFastPrefill(inputs, outputs, kvLen, fastMaskKeyLen);
     }
-    if (canUseSparseFastPrefill(mask, attnLen, kvLen, externalHydrated, queryRowsAreFull)) {
+    const bool canSparseFastPrefill =
+        canUseSparseFastPrefill(mask, attnLen, kvLen, externalHydrated, queryRowsAreFull);
+    int sparseQSplitMaskKeyLen = 0;
+    const bool canSparseQSplitPrefill =
+        canUseSparseQSplitPrefill(mask, attnLen, kvLen, externalHydrated, queryRowsAreFull,
+                                  &sparseQSplitMaskKeyLen);
+    const bool tuneFullQSparseFamily =
+        queryRowsAreFull &&
+        mHeadDim == 128 &&
+        canSparseFastPrefill &&
+        canSparseQSplitPrefill;
+    if (tuneFullQSparseFamily) {
+        auto runtime = mOpenCLBackend->getOpenCLRuntime();
+        const int layerIndex = _pagedAttentionProfileLayerIndex(mLayerIndex, mMeta);
+        const bool preferAdrenoScoreFlash =
+            _preferAdrenoScoreSparseFlash(runtime, mBatch, mKvNumHead, mHeadDim, attnLen, kvLen);
+        uint32_t sparseFamily = preferAdrenoScoreFlash ? kScoreSparseFamilyFlash : kScoreSparseFamilyQSplit;
+        uint32_t sparseFamilySource = kTuneSelectionSourceDefault;
+        const std::string tuneKey =
+            std::string("paged_score_sparse_family_") + _openCLTuneDeviceKey(runtime) + "_" +
+            std::to_string(mBatch) + "_" + std::to_string(mNumHead) + "_" +
+            std::to_string(mKvNumHead) + "_" + std::to_string(mHeadDim);
+        const std::vector<uint32_t> tuneShape = {
+            static_cast<uint32_t>(attnLen),
+            static_cast<uint32_t>(kvLen),
+            _sparseLogicalWorkPermille(mMeta, attnLen, kvLen),
+            static_cast<uint32_t>(_sparseSelectedRatioPercent(mMeta)),
+            static_cast<uint32_t>(sparseQSplitMaskKeyLen),
+        };
+        auto runFamily = [&](uint32_t family) -> ErrorCode {
+            switch (family) {
+                case kScoreSparseFamilyQSplit:
+                    return runSparseQSplitPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull,
+                                                  sparseQSplitMaskKeyLen);
+                case kScoreSparseFamilyFlash:
+                    return runSparseFastPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull);
+                default:
+                    return INVALID_VALUE;
+            }
+        };
+        uint32_t forcedFamily = 0;
+        if (_benchScoreSparseFamilyOverride(&forcedFamily) && _scoreSparseFamilySupported(forcedFamily)) {
+            sparseFamily = forcedFamily;
+            sparseFamilySource = kTuneSelectionSourceDefault;
+            if (_profilePagedAttention()) {
+                MNN_PRINT("OpenCLPagedAttention profile op=score_sparse_family layer=%d query=%d kv_len=%d family=%s source=bench_force\n",
+                          layerIndex, attnLen, kvLen, _scoreSparseFamilyName(sparseFamily));
+            }
+            return runFamily(sparseFamily);
+        }
+        std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
+        if (getTunedInfo(tuneKey, tuneShape, tuneInfo, runtime) && !tuneInfo.first.empty()) {
+            const uint32_t tunedFamily = tuneInfo.first[0];
+            if (_scoreSparseFamilySupported(tunedFamily) &&
+                !(preferAdrenoScoreFlash && tunedFamily == kScoreSparseFamilyQSplit)) {
+                sparseFamily = tunedFamily;
+                sparseFamilySource = kTuneSelectionSourceCache;
+            }
+        } else if (_shouldTuneScoreSparseFamily(attnLen, _profilePagedAttention(),
+                                                mOpenCLBackend->getCLTuneLevel())) {
+            bool tuned = false;
+            uint64_t bestUs = std::numeric_limits<uint64_t>::max();
+            uint32_t bestFamily = sparseFamily;
+            for (uint32_t candidate : {kScoreSparseFamilyQSplit, kScoreSparseFamilyFlash}) {
+                uint64_t candidateUs = 0;
+                const char* candidateName = _scoreSparseFamilyName(candidate);
+                _profileTuneCandidateStart("score_sparse_family_tune", layerIndex, attnLen, kvLen, candidateName);
+                const bool measured = _measureSteadyStateCandidate(runtime, [&]() {
+                        return runFamily(candidate);
+                    }, &candidateUs);
+                _profileTuneCandidateEnd("score_sparse_family_tune", layerIndex, attnLen, kvLen, candidateName,
+                                         measured, candidateUs);
+                if (!measured) {
+                    continue;
+                }
+                if (!tuned || candidateUs < bestUs) {
+                    tuned = true;
+                    bestUs = candidateUs;
+                    bestFamily = candidate;
+                }
+            }
+            if (tuned) {
+                std::pair<std::vector<uint32_t>, uint32_t> bestInfo = std::make_pair(
+                    std::vector<uint32_t>{bestFamily},
+                    static_cast<uint32_t>(std::min<uint64_t>(bestUs, std::numeric_limits<uint32_t>::max())));
+                setTunedInfo(tuneKey, tuneShape, bestInfo, runtime, "attention_buf");
+                sparseFamily = bestFamily;
+                sparseFamilySource = kTuneSelectionSourceOnlineTuned;
+            }
+        }
+        if (_profilePagedAttention()) {
+            MNN_PRINT("OpenCLPagedAttention profile op=score_sparse_family layer=%d query=%d kv_len=%d family=%s source=%s\n",
+                      layerIndex, attnLen, kvLen, _scoreSparseFamilyName(sparseFamily),
+                      _tuneSelectionSourceName(sparseFamilySource));
+        }
+        return runFamily(sparseFamily);
+    }
+    if (canSparseFastPrefill) {
         return runSparseFastPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull);
     }
-    if (canUseSparseQSplitPrefill(mask, attnLen, kvLen, externalHydrated, queryRowsAreFull, &fastMaskKeyLen)) {
-        return runSparseQSplitPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull, fastMaskKeyLen);
+    if (canSparseQSplitPrefill) {
+        return runSparseQSplitPrefill(inputs, outputs, kvLen, attnLen, queryRowsAreFull, sparseQSplitMaskKeyLen);
     }
     const bool benchForceRowKernel = _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_ROW_KERNEL", false) ||
         _envFlagEnabled("MNN_PAGED_ATTENTION_BENCH_FORCE_V2_KERNEL", false);
@@ -3983,6 +6075,7 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     const bool useRowKernel = rowKernelSupported && !disableRowKernel &&
         ((sparseQuery && attnLen >= 1) || benchForceRowKernel);
     const bool profileGeneric = _profilePagedAttention();
+    const bool traceProgressGeneric = _tracePagedAttentionProgress();
     const uint64_t genericStartUs = profileGeneric ? _nowUs() : 0;
     const int outputElements = mBatch * attnLen * mNumHead * mHeadDim;
     if (outputElements > 0) {
@@ -4020,6 +6113,12 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         ret |= mAttentionRowKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
         ret |= mAttentionRowKernel->get().setArg(idx++, totalRows);
         MNN_CHECK_CL_SUCCESS(ret, "setArg paged_attention_row");
+        if (traceProgressGeneric) {
+            MNN_PRINT("OpenCLPagedAttention trace phase=row_dispatch layer=%d query=%d attn=%d kv_write=%d kv_len=%d sparse=%d full_q=%d total_rows=%d\n",
+                      layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                      queryRowsAreFull ? 1 : 0, totalRows);
+            std::fflush(stdout);
+        }
         queue.enqueueNDRangeKernel(mAttentionRowKernel->get(), cl::NullRange, cl::NDRange(totalRows), cl::NullRange);
         if (profileGeneric) {
             queue.finish();
@@ -4056,6 +6155,12 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     ret |= mAttentionKernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
     ret |= mAttentionKernel->get().setArg(idx++, total);
     MNN_CHECK_CL_SUCCESS(ret, "setArg paged_attention");
+    if (traceProgressGeneric) {
+        MNN_PRINT("OpenCLPagedAttention trace phase=generic_dispatch layer=%d query=%d attn=%d kv_write=%d kv_len=%d sparse=%d full_q=%d total=%d\n",
+                  layerIndex, mQuerySeqLen, attnLen, kvWriteLen, kvLen, sparseQuery ? 1 : 0,
+                  queryRowsAreFull ? 1 : 0, total);
+        std::fflush(stdout);
+    }
     queue.enqueueNDRangeKernel(mAttentionKernel->get(), cl::NullRange, cl::NDRange(total), cl::NullRange);
     if (profileGeneric) {
         queue.finish();

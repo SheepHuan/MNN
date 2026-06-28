@@ -46,78 +46,102 @@ static bool profilePicWeightOnlyConv() {
 }
 
 static int picRows45CublasPolicy() {
-    const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS");
-    if (value == nullptr || value[0] == '\0') {
-        return 2;
-    }
-    if (value[0] == '0') {
-        return 0;
-    }
-    if (::strcmp(value, "down") == 0) {
-        return 1;
-    }
-    if (::strcmp(value, "all") == 0) {
-        return 2;
-    }
-    return std::atoi(value);
+    static const int policy = []() {
+        const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS");
+        if (value == nullptr || value[0] == '\0') {
+            return 3;
+        }
+        if (value[0] == '0') {
+            return 0;
+        }
+        if (::strcmp(value, "down") == 0) {
+            return 1;
+        }
+        if (::strcmp(value, "mlp") == 0) {
+            return 2;
+        }
+        if (::strcmp(value, "all") == 0) {
+            return 3;
+        }
+        return std::atoi(value);
+    }();
+    return policy;
 }
 
 static bool picRows45CublasMatches(int policy, int batch, int ic, int oc) {
-    if (policy <= 0 || batch < 4 || batch > 5) {
+    if (policy <= 0 || batch < 4 || batch > 8) {
         return false;
     }
-    const bool isMlpDown = ic == 8192 && oc == 2048;
-    const bool isMlpGateOrUp = ic == 2048 && oc == 8192;
+    const int minDim = std::min(ic, oc);
+    const int maxDim = std::max(ic, oc);
+    const bool isMlpLike = minDim >= 1024 && maxDim >= 2 * minDim && maxDim <= 8 * minDim;
+    const bool isMlpDown = isMlpLike && ic > oc;
+    const bool isMlpGateOrUp = isMlpLike && oc > ic;
+    const bool isAttentionSquare = ic == oc && minDim >= 1024 && maxDim <= 4096;
+    const bool isAttentionKV = ic > oc && ic <= 4096 && oc >= 512 && ic <= 4 * oc;
+    const bool isAttentionProjection = isAttentionSquare || isAttentionKV;
     if (policy == 1) {
         return isMlpDown;
     }
-    return isMlpDown || isMlpGateOrUp;
+    if (policy == 2) {
+        return isMlpDown || isMlpGateOrUp;
+    }
+    return isMlpDown || isMlpGateOrUp || isAttentionProjection;
 }
 
 static int picRows45CublasMathPolicy() {
-    const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_MATH");
-    if (value == nullptr || value[0] == '\0') {
-        return 1;
-    }
-    if (value[0] == '0' || ::strcmp(value, "keep") == 0 || ::strcmp(value, "none") == 0) {
-        return 0;
-    }
-    if (::strcmp(value, "default") == 0) {
-        return 2;
-    }
-    if (::strcmp(value, "tensor") == 0) {
-        return 1;
-    }
-    return std::atoi(value);
+    static const int policy = []() {
+        const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_MATH");
+        if (value == nullptr || value[0] == '\0') {
+            return 1;
+        }
+        if (value[0] == '0' || ::strcmp(value, "keep") == 0 || ::strcmp(value, "none") == 0) {
+            return 0;
+        }
+        if (::strcmp(value, "default") == 0) {
+            return 2;
+        }
+        if (::strcmp(value, "tensor") == 0) {
+            return 1;
+        }
+        return std::atoi(value);
+    }();
+    return policy;
 }
 
 static int picRows45CublasComputePolicy() {
-    const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_COMPUTE");
-    if (value == nullptr || value[0] == '\0' || ::strcmp(value, "32f") == 0) {
-        return 0;
-    }
-    if (::strcmp(value, "32f_fast16") == 0 || ::strcmp(value, "fast16") == 0) {
-        return 1;
-    }
-    if (::strcmp(value, "16f") == 0) {
-        return 2;
-    }
-    return std::atoi(value);
+    static const int policy = []() {
+        const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_COMPUTE");
+        if (value == nullptr || value[0] == '\0' || ::strcmp(value, "32f") == 0) {
+            return 0;
+        }
+        if (::strcmp(value, "32f_fast16") == 0 || ::strcmp(value, "fast16") == 0) {
+            return 1;
+        }
+        if (::strcmp(value, "16f") == 0) {
+            return 2;
+        }
+        return std::atoi(value);
+    }();
+    return policy;
 }
 
 static int picRows45CublasAlgoPolicy() {
-    const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_ALGO");
-    if (value == nullptr || value[0] == '\0' || ::strcmp(value, "tensor") == 0) {
+    static const int policy = []() {
+        const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS_ALGO");
+        if (value == nullptr || value[0] == '\0' || ::strcmp(value, "tensor") == 0) {
 #if CUDART_VERSION >= 9000
-        return static_cast<int>(CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+            return static_cast<int>(CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 #else
-        return static_cast<int>(CUBLAS_GEMM_DEFAULT);
+            return static_cast<int>(CUBLAS_GEMM_DEFAULT);
 #endif
-    }
-    if (::strcmp(value, "default") == 0) {
-        return static_cast<int>(CUBLAS_GEMM_DEFAULT);
-    }
-    return std::atoi(value);
+        }
+        if (::strcmp(value, "default") == 0) {
+            return static_cast<int>(CUBLAS_GEMM_DEFAULT);
+        }
+        return std::atoi(value);
+    }();
+    return policy;
 }
 
 static uint64_t convProfileNowUs() {
@@ -132,9 +156,13 @@ static size_t picStaticDequantBaseLimitBytes(const cudaDeviceProp& prop) {
     return std::max(minLimit, std::min(maxLimit, byMem));
 }
 
-static size_t picStaticDequantMlpLimitBytes(const cudaDeviceProp& prop) {
-    constexpr size_t maxLimit = 4096ull * 1024ull * 1024ull;
-    const size_t byMem = prop.totalGlobalMem / 8;
+static size_t picStaticDequantDecodeHotLimitBytes(const cudaDeviceProp& prop) {
+    constexpr size_t defaultMaxLimit = 4096ull * 1024ull * 1024ull;
+    constexpr size_t highMemMaxLimit = 6144ull * 1024ull * 1024ull;
+    constexpr size_t highMemThreshold = 30ull * 1024ull * 1024ull * 1024ull;
+    const bool highMemDevice = prop.totalGlobalMem >= highMemThreshold;
+    const size_t maxLimit = highMemDevice ? highMemMaxLimit : defaultMaxLimit;
+    const size_t byMem = highMemDevice ? prop.totalGlobalMem / 5 : prop.totalGlobalMem / 8;
     return std::max(picStaticDequantBaseLimitBytes(prop), std::min(maxLimit, byMem));
 }
 
@@ -1721,8 +1749,12 @@ ConvFpAIntBExecution::Resource::Resource(Backend* bn, const MNN::Op* op) {
                 const int maxLinearDim = std::max(hp, icp);
                 const bool mlpLikeLargeLinear = dequantBytes >= 16ull * 1024ull * 1024ull &&
                     maxLinearDim >= 2 * minLinearDim && maxLinearDim <= 8 * minLinearDim;
-                const size_t cacheLimit = mlpLikeLargeLinear
-                    ? picStaticDequantMlpLimitBytes(runtime->prop())
+                const bool attentionProjectionLikeLinear = dequantBytes >= 6ull * 1024ull * 1024ull &&
+                    dequantBytes <= 64ull * 1024ull * 1024ull &&
+                    minLinearDim >= 512 && maxLinearDim <= 4096;
+                const bool decodeHotLinear = mlpLikeLargeLinear || attentionProjectionLikeLinear;
+                const size_t cacheLimit = decodeHotLinear
+                    ? picStaticDequantDecodeHotLimitBytes(runtime->prop())
                     : picStaticDequantBaseLimitBytes(runtime->prop());
                 if (reservePicStaticDequantBytes(dequantBytes, cacheLimit)) {
                     staticDequantWeightTensor.reset(Tensor::createDevice<int16_t>({hp, icp}));

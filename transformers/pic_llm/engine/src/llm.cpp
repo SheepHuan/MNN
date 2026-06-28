@@ -7,6 +7,8 @@
 // #define MNN_OPEN_TIME_TRACE 1
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -39,6 +41,63 @@ namespace MNN {
 using namespace Express;
 namespace Transformer {
 
+static bool picRequestProfileEnabled() {
+    const char* value = std::getenv("MNN_PIC_REQUEST_PROFILE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static int64_t picRequestMonotonicUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static void picRequestProfileLog(const char* stage, int64_t elapsedUs, const std::string& detail = "") {
+    if (!picRequestProfileEnabled()) {
+        return;
+    }
+    std::fprintf(stderr, "MNN_PIC_REQUEST_PROFILE stage=%s cost_ms=%.3f", stage, elapsedUs / 1000.0);
+    if (!detail.empty()) {
+        std::fprintf(stderr, " %s", detail.c_str());
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
+static bool picDecodeRepairProfileEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("MNN_PIC_DECODE_REPAIR_PROFILE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+static void picDecodeRepairProfileLog(int step, const char* selector, int normalLogical, int repairRows,
+                                      int sparseRows, int nextRepairRows, int attentionRankCount,
+                                      int attentionRankSourceStep, int64_t buildRowsUs,
+                                      int64_t beginRecomputeUs, int64_t embeddingUs,
+                                      int64_t maskPosUs, int64_t forwardRawUs,
+                                      int64_t validateUs, int64_t rankResultUs,
+                                      int64_t finishSparseUs, int64_t bookkeepingUs,
+                                      int64_t totalUs) {
+    if (!picDecodeRepairProfileEnabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "MNN_PIC_DECODE_REPAIR_PROFILE step=%d selector=%s normal_logical=%d repair_rows=%d "
+                 "sparse_rows=%d next_repair_rows=%d attention_rank_count=%d attention_rank_source_step=%d "
+                 "build_rows_ms=%.3f begin_recompute_ms=%.3f embedding_ms=%.3f mask_pos_ms=%.3f "
+                 "forward_raw_ms=%.3f validate_ms=%.3f rank_result_ms=%.3f finish_sparse_ms=%.3f "
+                 "bookkeeping_ms=%.3f total_ms=%.3f\n",
+                 step, selector != nullptr ? selector : "", normalLogical, repairRows, sparseRows,
+                 nextRepairRows, attentionRankCount, attentionRankSourceStep,
+                 buildRowsUs / 1000.0, beginRecomputeUs / 1000.0, embeddingUs / 1000.0,
+                 maskPosUs / 1000.0, forwardRawUs / 1000.0, validateUs / 1000.0,
+                 rankResultUs / 1000.0, finishSparseUs / 1000.0, bookkeepingUs / 1000.0,
+                 totalUs / 1000.0);
+    std::fflush(stderr);
+}
+
 static MNNForwardType backend_type_convert(const std::string& type_str) {
     if (type_str == "cpu")
         return MNN_FORWARD_CPU;
@@ -55,6 +114,36 @@ static MNNForwardType backend_type_convert(const std::string& type_str) {
     if (type_str == "npu")
         return MNN_FORWARD_NN;
     return MNN_FORWARD_AUTO;
+}
+
+static int apply_opencl_tune_level_override(int numThread, MNNForwardType backendType) {
+    if (backendType != MNN_FORWARD_OPENCL) {
+        return numThread;
+    }
+    const char* envValue = std::getenv("MNN_OPENCL_TUNE_LEVEL");
+    if (envValue == nullptr || envValue[0] == '\0') {
+        return numThread;
+    }
+    std::string level(envValue);
+    std::transform(level.begin(), level.end(), level.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const int tuneMask = MNN_GPU_TUNING_NONE | MNN_GPU_TUNING_FAST | MNN_GPU_TUNING_NORMAL |
+        MNN_GPU_TUNING_HEAVY | MNN_GPU_TUNING_WIDE;
+    int tuneFlag = 0;
+    if (level == "none") {
+        tuneFlag = MNN_GPU_TUNING_NONE;
+    } else if (level == "fast") {
+        tuneFlag = MNN_GPU_TUNING_FAST;
+    } else if (level == "normal") {
+        tuneFlag = MNN_GPU_TUNING_NORMAL;
+    } else if (level == "heavy") {
+        tuneFlag = MNN_GPU_TUNING_HEAVY;
+    } else if (level == "wide") {
+        tuneFlag = MNN_GPU_TUNING_WIDE;
+    } else {
+        return numThread;
+    }
+    return (numThread & ~tuneMask) | tuneFlag;
 }
 
 template <typename T>
@@ -203,6 +292,7 @@ std::shared_ptr<Express::Executor::RuntimeManager> Llm::createRuntimeManagerForC
         // opencl need set numThread = 64(buffer mode)
         config.numThread |= 64;
     }
+    config.numThread = apply_opencl_tune_level_override(config.numThread, config.type);
     if (mConfig->power() == "high") {
         cpuBackendConfig.power = BackendConfig::Power_High;
     } else if (mConfig->power() == "low") {
@@ -813,6 +903,7 @@ bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_to
                                           const std::vector<MNN::PagedKVExternalSegment>& segments,
                                           int pic_start, int pic_token_count, int score_layer_idx,
                                           double recompute_ratio, std::vector<int>& selected_local_indices) {
+    const int64_t totalStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
     selected_local_indices.clear();
     if (!mConfig->paged_attention()) {
         MNN_ERROR("Native cacheblend scoring requires paged_attention=true\n");
@@ -839,6 +930,7 @@ bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_to
         return false;
     }
     auto oldStatus = mContext->status;
+    const int64_t scorePrefillStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
     if (!runCacheBlendScorePrefill(full_prompt_token_ids, score_layer_idx)) {
         paged->finishCacheBlendScoring();
         if (startedPagedRequest) {
@@ -849,6 +941,14 @@ bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_to
             mContext->status = oldStatus;
         }
         return false;
+    }
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "score_layer=" << score_layer_idx
+           << " pic_start=" << pic_start
+           << " pic_tokens=" << pic_token_count
+           << " topk=" << topK;
+        picRequestProfileLog("select_cacheblend_score_prefill", picRequestMonotonicUs() - scorePrefillStartUs, os.str());
     }
     const bool ready = paged->cacheblend_score_ready;
     if (ready) {
@@ -862,6 +962,14 @@ bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_to
         mContext->status != LlmStatus::TIMEOUT && mContext->status != LlmStatus::USER_CANCEL) {
         mContext->status = oldStatus;
     }
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "score_layer=" << score_layer_idx
+           << " selected_count=" << selected_local_indices.size()
+           << " topk=" << topK;
+        picRequestProfileLog("select_cacheblend_external_pagedkv_total", picRequestMonotonicUs() - totalStartUs,
+                             os.str());
+    }
     return ready && static_cast<int>(selected_local_indices.size()) == topK;
 }
 
@@ -870,6 +978,7 @@ bool Llm::prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_pro
                                                 int pic_start, int pic_token_count, int score_layer_idx,
                                                 double recompute_ratio,
                                                 std::vector<int>& selected_local_indices) {
+    const int64_t totalStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
     selected_local_indices.clear();
     if (!mConfig->paged_attention() || full_prompt_token_ids.empty()) {
         return false;
@@ -905,16 +1014,41 @@ bool Llm::prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_pro
                   static_cast<int>(cursor), pic_token_count);
         return false;
     }
+    int64_t stageStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
     if (!paged->bindExternalSegments(boundSegments, static_cast<int>(full_prompt_token_ids.size()))) {
         MNN_ERROR("Graph-level cacheblend failed to bind persistent PIC cache source segments\n");
         return false;
     }
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "pic_start=" << pic_start
+           << " pic_tokens=" << pic_token_count
+           << " full_prompt_tokens=" << full_prompt_token_ids.size()
+           << " segments=" << boundSegments.size();
+        picRequestProfileLog("graph_cacheblend_bind_external_segments", picRequestMonotonicUs() - stageStartUs,
+                             os.str());
+    }
     paged->external_hydrate_start_layer_idx = score_layer_idx + 1;
+    stageStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
     if (!paged->beginCacheBlendScoring(pic_start, pic_token_count, score_layer_idx, topK, segments)) {
         MNN_ERROR("Graph-level cacheblend failed to start score-layer scoring\n");
         return false;
     }
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "score_layer=" << score_layer_idx
+           << " topk=" << topK
+           << " pic_tokens=" << pic_token_count;
+        picRequestProfileLog("graph_cacheblend_begin_scoring", picRequestMonotonicUs() - stageStartUs, os.str());
+    }
+    stageStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
     const bool ok = prefill(full_prompt_token_ids);
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "score_layer=" << score_layer_idx
+           << " full_prompt_tokens=" << full_prompt_token_ids.size();
+        picRequestProfileLog("graph_cacheblend_prefill_full_prompt", picRequestMonotonicUs() - stageStartUs, os.str());
+    }
     const bool ready = paged->cacheblend_score_ready;
     if (ready) {
         selected_local_indices = paged->cacheblend_score_selected_local_indices;
@@ -923,6 +1057,14 @@ bool Llm::prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_pro
     paged->finishSparseQuery();
     if (!ok || !ready || static_cast<int>(selected_local_indices.size()) != topK) {
         return false;
+    }
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "score_layer=" << score_layer_idx
+           << " selected_count=" << selected_local_indices.size()
+           << " topk=" << topK;
+        picRequestProfileLog("prefill_cacheblend_graph_external_pagedkv_total",
+                             picRequestMonotonicUs() - totalStartUs, os.str());
     }
     return true;
 }
@@ -978,7 +1120,10 @@ bool Llm::prefillFixedGraphExternalPagedKV(const std::vector<int>& full_prompt_t
 bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_token_ids,
                                  const std::vector<int>& ranked_pic_local_indices,
                                  const std::vector<int>& seed_selected_pic_local_indices,
-                                 int tokens_per_decode_step) {
+                                 int tokens_per_decode_step, const std::string& selector,
+                                 int attention_layer_idx,
+                                 const std::vector<int>& attention_head_ids,
+                                 int attention_candidate_pool_size) {
     clearPicDecodeRepair();
     const int picTokenCount = static_cast<int>(pic_token_ids.size());
     if (!mConfig->paged_attention()) {
@@ -1016,10 +1161,27 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
     mPicDecodeRepair.picStart = pic_start;
     mPicDecodeRepair.picTokenCount = picTokenCount;
     mPicDecodeRepair.tokensPerDecodeStep = tokens_per_decode_step;
+    mPicDecodeRepair.selector = selector == "lagged_attention_hkvd" ? selector : "top_hkvd";
+    mPicDecodeRepair.attentionLayerIdx = attention_layer_idx;
+    mPicDecodeRepair.attentionCandidatePoolSize =
+        std::max(tokens_per_decode_step, attention_candidate_pool_size);
     mPicDecodeRepair.cursor = 0;
     mPicDecodeRepair.stepIdx = 0;
     mPicDecodeRepair.picTokenIds = pic_token_ids;
     mPicDecodeRepair.rankedLogicalIndices = std::move(ranked);
+    mPicDecodeRepair.attentionHeadIds.clear();
+    mPicDecodeRepair.attentionHeadIds.reserve(attention_head_ids.size());
+    for (int head : attention_head_ids) {
+        if (head >= 0) {
+            mPicDecodeRepair.attentionHeadIds.emplace_back(head);
+        }
+    }
+    std::sort(mPicDecodeRepair.attentionHeadIds.begin(), mPicDecodeRepair.attentionHeadIds.end());
+    mPicDecodeRepair.attentionHeadIds.erase(
+        std::unique(mPicDecodeRepair.attentionHeadIds.begin(), mPicDecodeRepair.attentionHeadIds.end()),
+        mPicDecodeRepair.attentionHeadIds.end());
+    mPicDecodeRepair.lastAttentionRankedPicLocalIndices.clear();
+    mPicDecodeRepair.lastAttentionSourceStepIdx = -2;
     mPicDecodeRepair.repairedPicLocal.assign(static_cast<size_t>(picTokenCount), 0);
     mPicDecodeRepair.picTokenEmbeddings.clear();
     mPicDecodeRepair.picTokenEmbeddingHiddenSize = 0;
@@ -1039,9 +1201,10 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
         }
     }
     mPicDecodeRepair.pendingRepairLogicalIndices = selectPicDecodeRepairLogicalIndices();
-    MNN_PRINT("Prepared PIC decode repair token-id sparse decode pic_start=%d pic_tokens=%d budget_per_step=%d "
-              "ranked_tokens=%d first_scheduled=%d\n",
-              pic_start, picTokenCount, tokens_per_decode_step,
+    MNN_PRINT("Prepared PIC decode repair token-id sparse decode selector=%s pic_start=%d pic_tokens=%d "
+              "budget_per_step=%d attention_layer=%d attention_pool=%d ranked_tokens=%d first_scheduled=%d\n",
+              mPicDecodeRepair.selector.c_str(), pic_start, picTokenCount, tokens_per_decode_step,
+              mPicDecodeRepair.attentionLayerIdx, mPicDecodeRepair.attentionCandidatePoolSize,
               static_cast<int>(mPicDecodeRepair.rankedLogicalIndices.size()),
               static_cast<int>(mPicDecodeRepair.pendingRepairLogicalIndices.size()));
     return true;
@@ -1057,18 +1220,69 @@ std::vector<int> Llm::selectPicDecodeRepairLogicalIndices() {
         return selected;
     }
     selected.reserve(static_cast<size_t>(mPicDecodeRepair.tokensPerDecodeStep));
-    while (mPicDecodeRepair.cursor < static_cast<int>(mPicDecodeRepair.rankedLogicalIndices.size()) &&
-           static_cast<int>(selected.size()) < mPicDecodeRepair.tokensPerDecodeStep) {
-        const int logical = mPicDecodeRepair.rankedLogicalIndices[mPicDecodeRepair.cursor++];
+    std::vector<uint8_t> selectedLocal(static_cast<size_t>(std::max(0, mPicDecodeRepair.picTokenCount)), 0);
+    auto tryAppendLogical = [&](int logical) {
         const int local = logical - mPicDecodeRepair.picStart;
         if (local < 0 || local >= mPicDecodeRepair.picTokenCount) {
-            continue;
+            return false;
         }
         if (mPicDecodeRepair.repairedPicLocal[static_cast<size_t>(local)] != 0) {
-            continue;
+            return false;
+        }
+        if (!selectedLocal.empty() && selectedLocal[static_cast<size_t>(local)] != 0) {
+            return false;
         }
         selected.emplace_back(logical);
+        if (!selectedLocal.empty()) {
+            selectedLocal[static_cast<size_t>(local)] = 1;
+        }
+        return true;
+    };
+    auto appendTopHkvdFill = [&]() {
+        while (mPicDecodeRepair.cursor < static_cast<int>(mPicDecodeRepair.rankedLogicalIndices.size()) &&
+               static_cast<int>(selected.size()) < mPicDecodeRepair.tokensPerDecodeStep) {
+            const int logical = mPicDecodeRepair.rankedLogicalIndices[mPicDecodeRepair.cursor++];
+            tryAppendLogical(logical);
+        }
+    };
+    if (mPicDecodeRepair.selector == "lagged_attention_hkvd" &&
+        !mPicDecodeRepair.lastAttentionRankedPicLocalIndices.empty()) {
+        std::vector<uint8_t> inAttentionPool(
+            static_cast<size_t>(std::max(0, mPicDecodeRepair.picTokenCount)), 0);
+        int poolCount = 0;
+        const int poolLimit = std::max(0, mPicDecodeRepair.attentionCandidatePoolSize);
+        for (int local : mPicDecodeRepair.lastAttentionRankedPicLocalIndices) {
+            if (local < 0 || local >= mPicDecodeRepair.picTokenCount) {
+                continue;
+            }
+            if (!inAttentionPool.empty() && inAttentionPool[static_cast<size_t>(local)] != 0) {
+                continue;
+            }
+            if (!inAttentionPool.empty()) {
+                inAttentionPool[static_cast<size_t>(local)] = 1;
+            }
+            ++poolCount;
+            if (poolLimit > 0 && poolCount >= poolLimit) {
+                break;
+            }
+        }
+        if (poolCount > 0) {
+            for (int logical : mPicDecodeRepair.rankedLogicalIndices) {
+                if (static_cast<int>(selected.size()) >= mPicDecodeRepair.tokensPerDecodeStep) {
+                    break;
+                }
+                const int local = logical - mPicDecodeRepair.picStart;
+                if (local < 0 || local >= mPicDecodeRepair.picTokenCount) {
+                    continue;
+                }
+                if (inAttentionPool.empty() || inAttentionPool[static_cast<size_t>(local)] == 0) {
+                    continue;
+                }
+                tryAppendLogical(logical);
+            }
+        }
     }
+    appendTopHkvdFill();
     std::sort(selected.begin(), selected.end());
     selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
     return selected;
@@ -1220,6 +1434,18 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
     if (paged == nullptr || !paged->request_active) {
         return forwardVec(inputIds);
     }
+    const bool profileDecodeRepair = picDecodeRepairProfileEnabled();
+    const int64_t totalStartUs = profileDecodeRepair ? picRequestMonotonicUs() : 0;
+    int64_t stageStartUs = totalStartUs;
+    auto finishProfileStage = [&]() -> int64_t {
+        if (!profileDecodeRepair) {
+            return 0;
+        }
+        const int64_t nowUs = picRequestMonotonicUs();
+        const int64_t elapsedUs = nowUs - stageStartUs;
+        stageStartUs = nowUs;
+        return elapsedUs;
+    };
     const int decodeLogical = mContext->all_seq_len;
     const auto& repairLogical = mPicDecodeRepair.pendingRepairLogicalIndices;
     auto& logicalIndices = mPicDecodeRepair.scratchLogicalIndices;
@@ -1237,13 +1463,29 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
     }
     logicalIndices.emplace_back(decodeLogical);
     sparseTokenIds.emplace_back(inputIds[0]);
+    const int actualRepairRows = std::max(0, static_cast<int>(logicalIndices.size()) - 1);
+    const int sparseRows = static_cast<int>(logicalIndices.size());
+    const int64_t buildRowsUs = finishProfileStage();
 
     if (!paged->beginPicDecodeRecomputeRows(logicalIndices, 0, 1)) {
         MNN_ERROR("PIC decode repair failed to bind token-id sparse decode rows\n");
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return {};
     }
+    if (mPicDecodeRepair.selector == "lagged_attention_hkvd" &&
+        mPicDecodeRepair.attentionLayerIdx >= 0 &&
+        mPicDecodeRepair.attentionCandidatePoolSize > 0) {
+        paged->beginPicDecodeAttentionRankCapture(
+            mPicDecodeRepair.attentionLayerIdx, mPicDecodeRepair.picStart,
+            mPicDecodeRepair.picTokenCount, mPicDecodeRepair.attentionCandidatePoolSize,
+            mPicDecodeRepair.stepIdx, mPicDecodeRepair.attentionHeadIds);
+    } else {
+        paged->finishPicDecodeAttentionRankCapture();
+        paged->clearPicDecodeAttentionRankResult();
+    }
+    const int64_t beginRecomputeUs = finishProfileStage();
     auto inputEmbeds = embeddingForPicDecodeRepair(sparseTokenIds);
+    const int64_t embeddingUs = finishProfileStage();
     if (inputEmbeds == nullptr) {
         mContext->status = LlmStatus::INTERNAL_ERROR;
         paged->finishSparseQuery();
@@ -1252,7 +1494,9 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
     mMeta->add = logicalIndices.size();
     auto repairMask = genDecodeRepairAttentionMask(logicalIndices);
     auto repairPos = genDecodeRepairPositionIds(logicalIndices);
+    const int64_t maskPosUs = finishProfileStage();
     auto outputs = forwardRaw(inputEmbeds, repairMask, repairPos);
+    const int64_t forwardRawUs = finishProfileStage();
     if (outputs.empty()) {
         mContext->status = LlmStatus::INTERNAL_ERROR;
         paged->finishSparseQuery();
@@ -1265,8 +1509,22 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
             return outputs;
         }
     }
-    paged->finishSparseQuery();
+    const int64_t validateUs = finishProfileStage();
     const int consumedStepIdx = mPicDecodeRepair.stepIdx;
+    const bool consumedAttentionRank = mPicDecodeRepair.selector == "lagged_attention_hkvd" &&
+        paged->pic_decode_attention_rank_source_step_idx == consumedStepIdx;
+    if (consumedAttentionRank) {
+        mPicDecodeRepair.lastAttentionRankedPicLocalIndices =
+            paged->pic_decode_attention_ranked_local_indices;
+        mPicDecodeRepair.lastAttentionSourceStepIdx =
+            paged->pic_decode_attention_rank_source_step_idx;
+    }
+    const int attentionRankCount =
+        consumedAttentionRank ? static_cast<int>(mPicDecodeRepair.lastAttentionRankedPicLocalIndices.size()) : 0;
+    const int attentionRankSourceStep = consumedAttentionRank ? mPicDecodeRepair.lastAttentionSourceStepIdx : -1;
+    const int64_t rankResultUs = finishProfileStage();
+    paged->finishSparseQuery();
+    const int64_t finishSparseUs = finishProfileStage();
     mPicDecodeRepair.stepLogicalIndices.emplace_back(repairLogical);
     for (int logical : repairLogical) {
         const int local = logical - mPicDecodeRepair.picStart;
@@ -1280,6 +1538,16 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
     mGenerateParam->outputs = outputs;
     mGenerateParam->validLogitSize = 0;
     mGenerateParam->validLogitStart = 0;
+    const int64_t bookkeepingUs = finishProfileStage();
+    if (profileDecodeRepair) {
+        const int64_t totalUs = picRequestMonotonicUs() - totalStartUs;
+        picDecodeRepairProfileLog(consumedStepIdx, mPicDecodeRepair.selector.c_str(), decodeLogical,
+                                  actualRepairRows, sparseRows,
+                                  static_cast<int>(mPicDecodeRepair.pendingRepairLogicalIndices.size()),
+                                  attentionRankCount, attentionRankSourceStep, buildRowsUs,
+                                  beginRecomputeUs, embeddingUs, maskPosUs, forwardRawUs, validateUs,
+                                  rankResultUs, finishSparseUs, bookkeepingUs, totalUs);
+    }
     if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
         std::fprintf(stderr,
                      "PIC decode repair token-id forward step=%d normal_logical=%d sparse_rows=%d repair_rows=%d "
@@ -1578,7 +1846,22 @@ std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
         mMeta->add = seq_len;
         auto attention_mask = gen_attention_mask(seq_len);
         auto position_ids = gen_position_ids(seq_len);
+        if (picRequestProfileEnabled()) {
+            std::ostringstream os;
+            os << "seq_len=" << seq_len
+               << " add=" << static_cast<int>(mMeta->add)
+               << " has_pic_budget=" << (mConfig->has_pic_recompute_budget() ? 1 : 0)
+               << " paged_attention=" << (mConfig->paged_attention() ? 1 : 0);
+            picRequestProfileLog("forward_raw_begin", 0, os.str());
+        }
+        const int64_t forwardRawStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
         auto res = forwardRaw(input_embeds, attention_mask, position_ids, extraArgs);
+        if (picRequestProfileEnabled()) {
+            std::ostringstream os;
+            os << "seq_len=" << seq_len
+               << " outputs=" << res.size();
+            picRequestProfileLog("forward_raw_end", picRequestMonotonicUs() - forwardRawStartUs, os.str());
+        }
         return res;
     }
     // For decode can't support seq_len <= mBlockSize
@@ -1814,6 +2097,7 @@ bool Llm::prefill(const std::vector<int>& input_ids) {
     mContext->history_tokens.insert(mContext->history_tokens.end(), input_ids.begin(), input_ids.end());
     if(!passExecute) {
         if (0 == mBlockSize || input_ids.size() <= mBlockSize) {
+            const int64_t embeddingStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
             auto hidden_states = embedding(input_ids);
             if(hidden_states == nullptr) {
                 std::ostringstream err;
@@ -1826,7 +2110,20 @@ bool Llm::prefill(const std::vector<int>& input_ids) {
                           mContext->all_seq_len);
                 return false;
             }
+            if (picRequestProfileEnabled()) {
+                std::ostringstream os;
+                os << "tokens=" << input_ids.size();
+                picRequestProfileLog("prefill_embedding", picRequestMonotonicUs() - embeddingStartUs, os.str());
+            }
+            const int64_t generateStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
             generate(hidden_states, 0);
+            if (picRequestProfileEnabled()) {
+                std::ostringstream os;
+                os << "tokens=" << input_ids.size()
+                   << " status=" << static_cast<int>(mContext->status)
+                   << " all_seq=" << mContext->all_seq_len;
+                picRequestProfileLog("prefill_generate", picRequestMonotonicUs() - generateStartUs, os.str());
+            }
             if (mContext->status == LlmStatus::INTERNAL_ERROR ||
                 mContext->status == LlmStatus::TIMEOUT ||
                 mContext->status == LlmStatus::USER_CANCEL) {

@@ -23,6 +23,7 @@ struct PicServerConfig {
     std::string host = "0.0.0.0";
     int port = 9091;
     std::string kvCacheDir = ".cache/kvshare/kvcache";
+    std::string runtimeCacheDir;
     std::string servedModelName = "mnn-pic-model";
 };
 

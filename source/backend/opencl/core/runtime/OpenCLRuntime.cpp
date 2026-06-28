@@ -7,6 +7,7 @@
 //
 
 #include "backend/opencl/core/runtime/OpenCLRuntime.hpp"
+#include <cstring>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -464,8 +465,7 @@ bool OpenCLRuntime::loadProgram(const std::string &programName, cl::Program *pro
     auto it_source = OpenCLProgramMap.find(programName);
     if (it_source != OpenCLProgramMap.end()) {
         cl::Program::Sources sources;
-        std::string source(it_source->second);
-        sources.push_back(source);
+        sources.push_back({it_source->second, ::strlen(it_source->second)});
         *program = cl::Program(context(), sources);
         return true;
     } else {
@@ -700,7 +700,7 @@ std::shared_ptr<KernelWrap> OpenCLRuntime::buildKernelFromSource(const std::stri
     buildOptionsStr += mDefaultBuildParams;
     
     cl::Program::Sources sources;
-    sources.push_back(source);
+    sources.push_back({source.c_str(), source.size()});
     cl::Program program = cl::Program(context(), sources);
     auto status = this->buildProgram(buildOptionsStr, &program);
     if (!status) {

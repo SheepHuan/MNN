@@ -163,6 +163,23 @@ template <class T> static std::string join(const std::vector<T> & values, const 
     return str.str();
 }
 
+static std::string jsonEscape(const std::string& value) {
+    std::ostringstream os;
+    for (char c : value) {
+        switch (c) {
+            case '\\': os << "\\\\"; break;
+            case '"': os << "\\\""; break;
+            case '\b': os << "\\b"; break;
+            case '\f': os << "\\f"; break;
+            case '\n': os << "\\n"; break;
+            case '\r': os << "\\r"; break;
+            case '\t': os << "\\t"; break;
+            default: os << c; break;
+        }
+    }
+    return os.str();
+}
+
 struct TestInstance {
 //    static const std::string build_commit;
     std::string              modelConfigFile;
@@ -1112,7 +1129,9 @@ static Llm* buildLLM(const std::string& config_path, int backend, int memory, in
         MNN_ERROR("use_mmap for LLM config set error\n");
         return nullptr;
     }
-    setSuccess &= llmPtr->set_config("{\"tmp_path\":\"tmp\"}");
+    const char* runtimeCacheDir = getenv("MNN_LLM_RUNTIME_CACHE_DIR");
+    std::string tmpPath = (runtimeCacheDir != nullptr && runtimeCacheDir[0] != '\0') ? runtimeCacheDir : "tmp";
+    setSuccess &= llmPtr->set_config("{\"tmp_path\":\"" + jsonEscape(tmpPath) + "\"}");
     if (!setSuccess) {
         MNN_ERROR("tmp_path for LLM config set error\n");
         return nullptr;
@@ -1285,6 +1304,7 @@ int main(int argc, char ** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
         }
+        llm->updateRuntimeCache();
     }
 
     if (enableProfile) {

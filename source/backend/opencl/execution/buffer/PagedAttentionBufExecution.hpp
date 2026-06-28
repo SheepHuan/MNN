@@ -9,6 +9,7 @@
 #define PagedAttentionBufExecution_hpp
 
 #include "backend/opencl/execution/image/CommonExecution.hpp"
+#include "backend/opencl/core/ImagePool.hpp"
 #include "core/PagedKVMeta.hpp"
 #include <vector>
 
@@ -43,11 +44,15 @@ private:
     ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
+    ErrorCode ensureSparseFlashTemps(int seqLen, int kvLen, bool staticWorkspace);
     ErrorCode ensureAdrenoGemmPrefillTemps(int seqLen, int kvLen, int qSplitNum);
     ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureDecodeCausalKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
-    ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount);
+    ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount, int stageCandidateCount = 0);
+    ErrorCode ensureAdrenoCacheBlendValueImage(int tokenCapacity);
+    ErrorCode ensureAdrenoSparseFlashPackedKeyImage(int kvPack);
+    ErrorCode ensureAdrenoSparseFlashPackedKVImages(int kvPack);
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
     ErrorCode runCacheBlendScoring(int layerIndex, int kvLen);
     bool canUseFastPrefill(const Tensor* mask, int baseLogical, int attnLen, int kvLen, bool sparseQuery,
@@ -76,11 +81,17 @@ private:
     std::shared_ptr<KernelWrap> mAttentionRowKernel;
     std::shared_ptr<KernelWrap> mPackPagedKVKernel;
     std::shared_ptr<KernelWrap> mPackPagedKeyKernel;
+    std::shared_ptr<KernelWrap> mPackPagedKeyToImageKernel;
     std::shared_ptr<KernelWrap> mHydrateExternalKernel;
     std::shared_ptr<KernelWrap> mExportCanonicalKeyKernel;
     std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
     std::shared_ptr<KernelWrap> mCacheBlendTopKKernel;
+    std::shared_ptr<KernelWrap> mCacheBlendTopKStage1Kernel;
+    std::shared_ptr<KernelWrap> mCacheBlendTopKStage2Kernel;
+    std::shared_ptr<KernelWrap> mCacheBlendScoreImageKernel;
+    std::shared_ptr<KernelWrap> mCopyBufferToImageLinearKernel;
     std::shared_ptr<KernelWrap> mRearrangeQKernel;
+    std::shared_ptr<KernelWrap> mRearrangeSparseQKernel;
     std::shared_ptr<KernelWrap> mRearrangeMaskKernel;
     std::shared_ptr<KernelWrap> mQKKernel;
     std::shared_ptr<KernelWrap> mSoftmaxKernel;
@@ -91,6 +102,14 @@ private:
     std::shared_ptr<KernelWrap> mAdrenoGemmClipKernel;
     std::shared_ptr<KernelWrap> mSparseFlashKernel32;
     std::shared_ptr<KernelWrap> mSparseFlashKernel64;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD64Q4K16;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q4K16;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q4K8;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q4K8KImage;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q4K8KVImage;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q8K16;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q8K16KImage;
+    std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q8K16KVImage;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel64;
     std::shared_ptr<KernelWrap> mZeroKernel;
@@ -105,10 +124,27 @@ private:
     std::shared_ptr<Tensor> mExternalValue;
     std::shared_ptr<Tensor> mCacheBlendScores;
     std::shared_ptr<Tensor> mCacheBlendIndices;
+    std::shared_ptr<Tensor> mCacheBlendStageValues;
+    std::shared_ptr<Tensor> mCacheBlendStageIndices;
+    std::shared_ptr<ImagePool> mAdrenoImagePool;
+    cl::Image* mCacheBlendSourceValueImage = nullptr;
+    cl::Image* mSparseFlashPackedKeyImage = nullptr;
+    cl::Image* mSparseFlashPackedValueImage = nullptr;
     size_t mExternalKeyElements = 0;
     size_t mExternalValueElements = 0;
     int mCacheBlendScoreCount = 0;
     int mCacheBlendIndexCount = 0;
+    int mCacheBlendStageCandidateCount = 0;
+    int mCacheBlendSourceValueTokenCapacity = 0;
+    int mCacheBlendSourceValueImageWidth = 0;
+    int mCacheBlendSourceValueImageHeight = 0;
+    int mCacheBlendSourceValueBytes = 0;
+    int mSparseFlashPackedKVLen = 0;
+    int mSparseFlashPackedKeyImageWidth = 0;
+    int mSparseFlashPackedKeyImageHeight = 0;
+    int mSparseFlashPackedValueImageWidth = 0;
+    int mSparseFlashPackedValueImageHeight = 0;
+    int mSparseFlashPackedImageBytes = 0;
     int mLayerIndex = -1;
     int mKVSharedLayerIndex = -1;
     int mPicAttentionMode = 0; // 0: full, 1: score layer, 2: sparse layer
@@ -133,6 +169,7 @@ private:
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;
     bool mFastKernelAddMask = false;
+    bool mCopyBufferToImageLinearUseFp32 = false;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmQKKernels;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmSoftmaxKernels;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmTransKernels;

@@ -18,11 +18,32 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_CONTEXTS = "512,1024,1536,2048,2560,3072"
-DEFAULT_BUDGETS = "0.05,0.10,0.20"
-DEFAULT_REPAIR_TOKENS = "0,1,2,3,4,5,6,7"
+DEFAULT_CONTEXTS = "512,1024,1536,2048,2560"
+DEFAULT_BUDGETS = "0.00"
+DEFAULT_REPAIR_TOKENS = "0,1,3,5,7"
+DEFAULT_DECODE_SELECTORS = "top_hkvd,lagged_attention_hkvd"
 MNN_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_TOKEN_IDS_JSON = MNN_ROOT / ".cache/latency_budget_20260611/opencl_pic_1024_current_20260622_191527/tokens.json"
+FORMAL_REQUIRED_DEVICES = ("jetson", "orangepi")
+EXTRA_PROFILE_DEVICES = ("rhino",)
+DEVICE_CHOICES = tuple(sorted(FORMAL_REQUIRED_DEVICES + EXTRA_PROFILE_DEVICES))
+HIGH_RISK_CONTEXT_POLICIES: dict[str, dict[str, Any]] = {
+    "jetson": {
+        "profiles": {"max"},
+        "max_context": 2560,
+        "reason": "jetson max-frequency decode sweep blocks context > 2560 by default to avoid OOM/shutdown risk",
+    },
+    "orangepi": {
+        "profiles": {"max"},
+        "max_context": 2560,
+        "reason": "orangepi max-frequency decode sweep blocks context > 2560 by default to avoid OOM/shutdown risk",
+    },
+    "rhino": {
+        "profiles": {"max", "cpu-high-gpu-max"},
+        "max_context": 2560,
+        "reason": "rhino high-frequency decode sweep blocks context > 2560 by default to avoid shutdown risk",
+    },
+}
 
 
 def parse_csv_ints(value: str) -> list[int]:
@@ -33,10 +54,45 @@ def parse_csv_floats(value: str) -> list[float]:
     return [float(item.strip()) for item in str(value).split(",") if item.strip()]
 
 
+def parse_csv_strings(value: str) -> list[str]:
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
 def parse_head_ids(value: str) -> list[int]:
     if not str(value).strip():
         return []
     return parse_csv_ints(value)
+
+
+def validate_device(device: str, *, allow_extra_device: bool) -> None:
+    if device not in DEVICE_CHOICES:
+        raise SystemExit(f"unknown device {device}; expected one of: {', '.join(DEVICE_CHOICES)}")
+    if device in EXTRA_PROFILE_DEVICES and not allow_extra_device:
+        formal = ",".join(FORMAL_REQUIRED_DEVICES)
+        raise SystemExit(
+            f"formal decode repair matrix requires one of {formal} per run; "
+            f"{device} is extra-profile only, use --allow-extra-device for targeted debug/profile runs"
+        )
+
+
+def high_risk_context_error(device_name: str, frequency_profile: str, context: int) -> str | None:
+    policy = HIGH_RISK_CONTEXT_POLICIES.get(str(device_name))
+    if not policy:
+        return None
+    if int(context) <= int(policy.get("max_context", 0) or 0):
+        return None
+    if str(frequency_profile or "") not in set(policy.get("profiles", set())):
+        return None
+    reason = str(policy.get("reason", "")).strip() or "high-risk context is blocked by default"
+    return f"{reason}; use --allow-high-risk-contexts to override"
+
+
+def json_safe_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    out = dict(policy)
+    profiles = out.get("profiles")
+    if isinstance(profiles, set):
+        out["profiles"] = sorted(profiles)
+    return out
 
 
 def is_unsupported_error(message: str) -> bool:
@@ -294,19 +350,27 @@ def main() -> int:
     parser.add_argument("--output-csv", default="benchmark_decode.csv")
     parser.add_argument("--output-dir", default=".cache/mnn-pic-benchmark/decode_repair")
     parser.add_argument("--append", action="store_true")
-    parser.add_argument("--device", required=True)
+    parser.add_argument(
+        "--device",
+        required=True,
+        choices=DEVICE_CHOICES,
+        help="Formal decode matrix runs once per device for jetson/orangepi. Rhino requires --allow-extra-device.",
+    )
     parser.add_argument("--device-display", required=True)
     parser.add_argument("--backend", required=True)
     parser.add_argument("--frequency-profile", default="max")
     parser.add_argument("--model", default="llama-pic")
     parser.add_argument("--model-name", default="Llama3.2 3B")
     parser.add_argument("--model-config", default="")
-    parser.add_argument("--mode", default="epic")
+    parser.add_argument("--mode", default="full-reuse")
     parser.add_argument("--contexts", default=DEFAULT_CONTEXTS)
     parser.add_argument("--budgets", default=DEFAULT_BUDGETS)
     parser.add_argument("--repair-tokens", default=DEFAULT_REPAIR_TOKENS)
-    parser.add_argument("--decode-selector", default="lagged_attention_hkvd")
-    parser.add_argument("--attention-layer-idx", type=int, default=-1)
+    parser.add_argument("--decode-selector", default="",
+                        help="Single decode selector. Ignored when --decode-selectors is set.")
+    parser.add_argument("--decode-selectors", default=DEFAULT_DECODE_SELECTORS,
+                        help="Comma-separated selectors, e.g. top_hkvd,lagged_attention_hkvd")
+    parser.add_argument("--attention-layer-idx", type=int, default=1)
     parser.add_argument("--attention-head-ids", default="")
     parser.add_argument("--top-m", type=int, default=32)
     parser.add_argument("--score-layer-idx", type=int, default=1)
@@ -325,10 +389,29 @@ def main() -> int:
     parser.add_argument("--require-exact-context", action="store_true")
     parser.add_argument("--require-decode-runtime", default="mnn_token_id_sparse_decode")
     parser.add_argument("--continue-on-unsupported", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--allow-high-risk-contexts",
+        action="store_true",
+        help="Allow contexts above the default safety limit, for example 3072.",
+    )
+    parser.add_argument(
+        "--allow-extra-device",
+        action="store_true",
+        help="Allow extra-profile devices such as rhino. Formal regression still requires separate jetson+orangepi runs.",
+    )
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
 
-    if args.decode_selector == "lagged_attention_hkvd" and int(args.attention_layer_idx) < 0:
+    validate_device(str(args.device), allow_extra_device=bool(args.allow_extra_device))
+    decode_selectors = parse_csv_strings(args.decode_selectors)
+    if not decode_selectors and str(args.decode_selector).strip():
+        decode_selectors = [str(args.decode_selector).strip()]
+    if not decode_selectors:
+        decode_selectors = ["top_hkvd"]
+    for selector in decode_selectors:
+        if selector not in {"top_hkvd", "lagged_attention_hkvd"}:
+            raise SystemExit(f"unsupported --decode-selectors value: {selector}")
+    if "lagged_attention_hkvd" in decode_selectors and int(args.attention_layer_idx) < 0:
         raise SystemExit("--decode-selector lagged_attention_hkvd requires --attention-layer-idx")
 
     contexts = parse_csv_ints(args.contexts)
@@ -359,7 +442,39 @@ def main() -> int:
 
     all_rows: list[dict[str, Any]] = []
     run_id = time.strftime("%Y%m%d_%H%M%S")
+    write_json(
+        output_root / run_id / "run_config.json",
+        {
+            "device": args.device,
+            "device_display": args.device_display,
+            "device_role": "formal" if args.device in FORMAL_REQUIRED_DEVICES else "extra-profile",
+            "formal_required_devices": list(FORMAL_REQUIRED_DEVICES),
+            "extra_profile_devices": list(EXTRA_PROFILE_DEVICES),
+            "formal_matrix_device_covered": args.device in FORMAL_REQUIRED_DEVICES,
+            "formal_matrix_complete": False,
+            "model_name": args.model_name,
+            "model_config": args.model_config,
+            "backend": args.backend,
+            "frequency_profile": args.frequency_profile,
+            "contexts": contexts,
+            "budgets": [fmt_budget(budget) for budget in budgets],
+            "repair_tokens": repair_tokens,
+            "decode_selectors": decode_selectors,
+            "allow_high_risk_contexts": bool(args.allow_high_risk_contexts),
+            "allow_extra_device": bool(args.allow_extra_device),
+            "high_risk_context_policy": json_safe_policy(
+                HIGH_RISK_CONTEXT_POLICIES.get(str(args.device), {})
+            ),
+        },
+    )
     for target_context in contexts:
+        high_risk_error = None if bool(args.allow_high_risk_contexts) else high_risk_context_error(
+            str(args.device),
+            str(args.frequency_profile),
+            int(target_context),
+        )
+        if high_risk_error:
+            raise SystemExit(f"context {target_context} blocked for device {args.device}: {high_risk_error}")
         doc_id = f"decode_bench_doc_ctx{target_context}_{run_id}"
         doc_token_ids = make_doc_token_ids(target_context, base_doc_token_ids)
         if doc_token_ids:
@@ -401,109 +516,118 @@ def main() -> int:
                 pic_response,
             )
 
-            # Warm all requested repair shapes before formal timing, then persist
-            # the MNN runtime cache for OpenCL backends.
-            for _ in range(max(0, int(args.warm_repeats))):
-                for repair in repair_tokens:
-                    spec = build_pic_spec(
-                        pic_id=pic_id,
-                        doc_id=doc_id,
-                        mode=args.mode,
-                        budget=budget,
-                        score_layer_idx=args.score_layer_idx,
-                        token_ids=token_ids,
-                        suffix_tokens=args.suffix_from_cache_tokens,
-                        repair_tokens=repair,
-                        selector=args.decode_selector,
-                        attention_layer_idx=args.attention_layer_idx,
-                        attention_head_ids=head_ids,
-                        top_m=args.top_m,
-                    )
-                    metrics = run_chat_metrics(
-                        args, spec,
-                        output_root / run_id / "warm" / f"ctx{target_context}_b{fmt_budget(budget)}_r{repair}",
-                        repair,
-                    )
-                    if metrics.get("benchmark_status") == "unsupported":
-                        print(
-                            f"warm unsupported: device={args.device} context={actual_context or target_context} "
-                            f"budget={fmt_budget(budget)} repair={repair}: {metrics.get('error_message')}",
-                            flush=True,
+            for selector in decode_selectors:
+                selector_dir = selector.replace("/", "_")
+                selector_repair_tokens = repair_tokens
+                if selector != decode_selectors[0]:
+                    selector_repair_tokens = [repair for repair in repair_tokens if repair > 0]
+                # Warm all requested repair shapes before formal timing, then persist
+                # the MNN runtime cache for OpenCL backends.
+                for _ in range(max(0, int(args.warm_repeats))):
+                    for repair in selector_repair_tokens:
+                        spec = build_pic_spec(
+                            pic_id=pic_id,
+                            doc_id=doc_id,
+                            mode=args.mode,
+                            budget=budget,
+                            score_layer_idx=args.score_layer_idx,
+                            token_ids=token_ids,
+                            suffix_tokens=args.suffix_from_cache_tokens,
+                            repair_tokens=repair,
+                            selector=selector,
+                            attention_layer_idx=args.attention_layer_idx,
+                            attention_head_ids=head_ids,
+                            top_m=args.top_m,
                         )
-            if args.update_cache:
-                update_response = post_json(args.base_url, "/v1/tune/update_cache", {}, args.timeout)
-                write_json(
-                    output_root / run_id / f"context_{target_context}" / f"budget_{fmt_budget(budget)}" / "update_cache.response.json",
-                    update_response,
-                )
-
-            by_repair: dict[int, dict[str, Any]] = {}
-            for repair in repair_tokens:
-                samples: list[dict[str, Any]] = []
-                for repeat in range(1, max(1, int(args.repeats)) + 1):
-                    spec = build_pic_spec(
-                        pic_id=pic_id,
-                        doc_id=doc_id,
-                        mode=args.mode,
-                        budget=budget,
-                        score_layer_idx=args.score_layer_idx,
-                        token_ids=token_ids,
-                        suffix_tokens=args.suffix_from_cache_tokens,
-                        repair_tokens=repair,
-                        selector=args.decode_selector,
-                        attention_layer_idx=args.attention_layer_idx,
-                        attention_head_ids=head_ids,
-                        top_m=args.top_m,
-                    )
-                    repeat_dir = (
-                        output_root
-                        / run_id
-                        / f"context_{target_context}"
-                        / f"budget_{fmt_budget(budget)}"
-                        / f"repair_{repair}"
-                        / f"repeat_{repeat}"
-                    )
-                    metrics = run_chat_metrics(args, spec, repeat_dir, repair)
-                    if metrics.get("benchmark_status") == "unsupported":
-                        samples.append(metrics)
-                        break
-                    if repair > 0 and args.require_decode_runtime:
-                        if metrics.get("decode_runtime") != args.require_decode_runtime:
-                            raise RuntimeError(
-                                "decode repair did not enter required runtime: "
-                                f"repair={repair} runtime={metrics.get('decode_runtime')!r}"
+                        metrics = run_chat_metrics(
+                            args, spec,
+                            output_root / run_id / "warm" / f"ctx{target_context}_b{fmt_budget(budget)}"
+                            / selector_dir / f"r{repair}",
+                            repair,
+                        )
+                        if metrics.get("benchmark_status") == "unsupported":
+                            print(
+                                f"warm unsupported: device={args.device} context={actual_context or target_context} "
+                                f"budget={fmt_budget(budget)} selector={selector} repair={repair}: "
+                                f"{metrics.get('error_message')}",
+                                flush=True,
                             )
-                    samples.append(metrics)
-                by_repair[repair] = average_metrics(samples)
+                if args.update_cache:
+                    update_response = post_json(args.base_url, "/v1/tune/update_cache", {}, args.timeout)
+                    write_json(
+                        output_root / run_id / f"context_{target_context}" / f"budget_{fmt_budget(budget)}"
+                        / selector_dir / "update_cache.response.json",
+                        update_response,
+                    )
 
-            rows: list[dict[str, Any]] = []
-            for repair in repair_tokens:
-                metrics = by_repair[repair]
-                row = {
-                    "device": args.device,
-                    "device_display": args.device_display,
-                    "model": args.model_name,
-                    "backend": args.backend,
-                    "frequency_profile": args.frequency_profile,
-                    "context_tokens": actual_context or target_context,
-                    "mode": args.mode,
-                    "budget": fmt_budget(budget),
-                    "decode_selector": args.decode_selector if repair > 0 else "none",
-                    "repair_tokens": repair,
-                    "generated_tokens": int(args.max_tokens),
-                    "decode_latency_s": metrics.get("decode_latency_s", ""),
-                    "decode_tpot_ms": metrics.get("decode_tpot_ms", ""),
-                    "decode_tps": metrics.get("decode_tps", ""),
-                    "benchmark_status": metrics.get("benchmark_status", ""),
-                }
-                rows.append(row)
-            append_rows(output_csv, fields, rows)
-            all_rows.extend(rows)
-            print(
-                f"wrote {len(rows)} rows for device={args.device} context={actual_context or target_context} "
-                f"budget={fmt_budget(budget)}",
-                flush=True,
-            )
+                by_repair: dict[int, dict[str, Any]] = {}
+                for repair in selector_repair_tokens:
+                    samples: list[dict[str, Any]] = []
+                    for repeat in range(1, max(1, int(args.repeats)) + 1):
+                        spec = build_pic_spec(
+                            pic_id=pic_id,
+                            doc_id=doc_id,
+                            mode=args.mode,
+                            budget=budget,
+                            score_layer_idx=args.score_layer_idx,
+                            token_ids=token_ids,
+                            suffix_tokens=args.suffix_from_cache_tokens,
+                            repair_tokens=repair,
+                            selector=selector,
+                            attention_layer_idx=args.attention_layer_idx,
+                            attention_head_ids=head_ids,
+                            top_m=args.top_m,
+                        )
+                        repeat_dir = (
+                            output_root
+                            / run_id
+                            / f"context_{target_context}"
+                            / f"budget_{fmt_budget(budget)}"
+                            / selector_dir
+                            / f"repair_{repair}"
+                            / f"repeat_{repeat}"
+                        )
+                        metrics = run_chat_metrics(args, spec, repeat_dir, repair)
+                        if metrics.get("benchmark_status") == "unsupported":
+                            samples.append(metrics)
+                            break
+                        if repair > 0 and args.require_decode_runtime:
+                            if metrics.get("decode_runtime") != args.require_decode_runtime:
+                                raise RuntimeError(
+                                    "decode repair did not enter required runtime: "
+                                    f"selector={selector} repair={repair} runtime={metrics.get('decode_runtime')!r}"
+                                )
+                        samples.append(metrics)
+                    by_repair[repair] = average_metrics(samples)
+
+                rows: list[dict[str, Any]] = []
+                for repair in selector_repair_tokens:
+                    metrics = by_repair[repair]
+                    row = {
+                        "device": args.device,
+                        "device_display": args.device_display,
+                        "model": args.model_name,
+                        "backend": args.backend,
+                        "frequency_profile": args.frequency_profile,
+                        "context_tokens": actual_context or target_context,
+                        "mode": args.mode,
+                        "budget": fmt_budget(budget),
+                        "decode_selector": selector if repair > 0 else "none",
+                        "repair_tokens": repair,
+                        "generated_tokens": int(args.max_tokens),
+                        "decode_latency_s": metrics.get("decode_latency_s", ""),
+                        "decode_tpot_ms": metrics.get("decode_tpot_ms", ""),
+                        "decode_tps": metrics.get("decode_tps", ""),
+                        "benchmark_status": metrics.get("benchmark_status", ""),
+                    }
+                    rows.append(row)
+                append_rows(output_csv, fields, rows)
+                all_rows.extend(rows)
+                print(
+                    f"wrote {len(rows)} rows for device={args.device} context={actual_context or target_context} "
+                    f"budget={fmt_budget(budget)} selector={selector}",
+                    flush=True,
+                )
 
     print(f"benchmark rows written: {len(all_rows)} -> {output_csv}", flush=True)
     return 0

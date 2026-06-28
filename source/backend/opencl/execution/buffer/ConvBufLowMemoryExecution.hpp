@@ -32,7 +32,7 @@ private:
     void tuneGeneralCaseLowMemory(Tensor * input, Tensor * output);
 	void useFPWeightGemmLowMemory(Tensor * input, Tensor * output);
     void tuneGemvLowMemory(Tensor * input, Tensor * output);
-    void tuneGemmLowMemory(Tensor * input, Tensor * output);
+    bool tuneGemmLowMemory(Tensor * input, Tensor * output, int compactKernelMode = -1);
     bool usePicCompactGemmLowMemory(Tensor * input, Tensor * output) const;
     bool convertToQuantWeight1x1Buffer(cl::Buffer input);
     std::vector<int> mPaddings{0, 0};

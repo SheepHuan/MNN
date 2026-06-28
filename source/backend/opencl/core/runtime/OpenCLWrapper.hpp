@@ -142,6 +142,7 @@ public:
     using clGetDeviceInfoFunc           = cl_int (CL_API_CALL *)(cl_device_id, cl_device_info, size_t, void *, size_t *);
     using clGetDeviceIDsFunc           = cl_int (CL_API_CALL *)(cl_platform_id, cl_device_type, cl_uint, cl_device_id *, cl_uint *);
     using clRetainEventFunc            = cl_int (CL_API_CALL *)(cl_event);
+    using clGetKernelInfoFunc          = cl_int (CL_API_CALL *)(cl_kernel, cl_kernel_info, size_t, void *, size_t *);
     using clGetKernelWorkGroupInfoFunc = cl_int (CL_API_CALL *)(cl_kernel, cl_device_id, cl_kernel_work_group_info, size_t, void *,
                                                     size_t *);
     using clGetEventInfoFunc           = cl_int (CL_API_CALL *)(cl_event event, cl_event_info param_name, size_t param_value_size,
@@ -229,6 +230,7 @@ public:
     MNN_CL_DEFINE_FUNC_PTR(clGetDeviceInfo);
     MNN_CL_DEFINE_FUNC_PTR(clGetDeviceIDs);
     MNN_CL_DEFINE_FUNC_PTR(clRetainEvent);
+    MNN_CL_DEFINE_FUNC_PTR(clGetKernelInfo);
     MNN_CL_DEFINE_FUNC_PTR(clGetKernelWorkGroupInfo);
     MNN_CL_DEFINE_FUNC_PTR(clGetEventInfo);
     MNN_CL_DEFINE_FUNC_PTR(clGetEventProfilingInfo);

@@ -213,6 +213,13 @@ __private const int channelAlign
     wei.s7 = CONVERT_FLOAT((b.s3 & 15) - 8); \
     wei = wei * scale + offset;
 
+#define UCHAR2_TO_FLOAT4(b, scale, offset) \
+    wei.s0 = CONVERT_FLOAT((b.s0 >> 4) - 8); \
+    wei.s1 = CONVERT_FLOAT((b.s0 & 15) - 8); \
+    wei.s2 = CONVERT_FLOAT((b.s1 >> 4) - 8); \
+    wei.s3 = CONVERT_FLOAT((b.s1 & 15) - 8); \
+    wei = wei * scale + offset;
+
 static inline void gemm_b4_c8_int4_buf_impl(GLOBAL_SIZE_DIM2
                         __global const FLOAT* input,
 #ifdef USE_IMAGE
@@ -557,6 +564,1042 @@ __kernel void pic_gemm_b4_c8_int4_buf(GLOBAL_SIZE_DIM2
                              bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
 }
 
+__attribute__((reqd_work_group_size(1, 64, 1)))
+__kernel void pic_gemm_b4_c8_wg64_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(1, 128, 1)))
+__kernel void pic_gemm_b4_c8_wg128_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(4, 32, 1)))
+__kernel void pic_gemm_b4_c8_wg4x32_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(8, 16, 1)))
+__kernel void pic_gemm_b4_c8_wg8x16_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+// Adreno compact-row low/mid-M path: all lanes along Y reuse the same input
+// tile for one x-row block, so load it once into local memory instead of
+// re-reading it per output-channel lane.
+static inline void gemm_b4_c8_int4_buf_input_cache_impl(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __local FLOAT4* cached_input4,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    const int x = get_global_id(0); // b/4
+    const int y = get_global_id(1); // c/8
+
+    UNIFORM_BOUNDRY_CHECK(x, y);
+
+    const int local_y = get_local_id(1);
+    const int out_b_idx = x << 2;
+    const int out_c_idx = y << 1;
+
+    COMPUTE_FLOAT8 out0 = CONVERT_COMPUTE_FLOAT8(vload8(0, bias + (out_c_idx << 2)));
+    COMPUTE_FLOAT8 out1 = out0;
+    COMPUTE_FLOAT8 out2 = out0;
+    COMPUTE_FLOAT8 out3 = out0;
+
+    const int bhw4 = bhw << 2;
+    const int input_offset = out_b_idx * 4;
+    int out_offset = out_c_idx * bhw4 + out_b_idx * 4;
+#ifndef USE_IMAGE
+    const int weight_offset = y * srcChannelAlign * 4;
+#endif
+    const int loop = (blockDim + 4 - 1) / 4;
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+    const int loop_end = max(loop - 1, 0);
+#else
+    const int loop_end = loop;
+#endif
+
+#if INPUT_BATCH_LEAVES_NUM != 0
+    if(out_b_idx + 3 >= bhw){
+        for (int i = 0; i < blockNum; i++){
+            #ifdef ASYMMETRIC
+            COMPUTE_FLOAT8 scale, offset;
+            {
+                COMPUTE_FLOAT16 scaleOffset = CONVERT_COMPUTE_FLOAT16(convert_float16(vload16(0, dequantScaleOffset + (out_c_idx << 3) + i * dstChannelAlign * 2)) / coef);
+                scale = scaleOffset.s02468ace;
+                offset = scaleOffset.s13579bdf;
+            }
+            #else
+            COMPUTE_FLOAT8 scale = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + (out_c_idx << 2) + i * dstChannelAlign)) / coef);
+            COMPUTE_FLOAT8 offset = 0;
+            #endif
+            for (int j = 0; j < loop_end; j++) {
+                int k = i * loop + j;
+                COMPUTE_FLOAT8 wei;
+                #ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+                #else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+                #endif
+                if (local_y == 0) {
+                    cached_input4[0] = vload4(0, input + input_offset + k * bhw4);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    cached_input4[1] = vload4(0, input + input_offset + k * bhw4 + 4);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    cached_input4[2] = vload4(0, input + input_offset + k * bhw4 + 8);
+                    #endif
+                }
+                barrier(CLK_LOCAL_MEM_FENCE);
+                COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(cached_input4[0]);
+                #if INPUT_BATCH_LEAVES_NUM >= 2
+                COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(cached_input4[1]);
+                #endif
+                #if INPUT_BATCH_LEAVES_NUM >= 3
+                COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(cached_input4[2]);
+                #endif
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s0, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s0, wei, out2);
+                    #endif
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s1, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s1, wei, out2);
+                    #endif
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s2, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s2, wei, out2);
+                    #endif
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.scdef, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s3, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s3, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s3, wei, out2);
+                    #endif
+                }
+                barrier(CLK_LOCAL_MEM_FENCE);
+            }
+            #if INPUT_CHANNEL_LEAVES_NUM != 0
+            {
+                int k = i * loop + loop_end;
+                COMPUTE_FLOAT8 wei;
+                #ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+                #else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+                #endif
+                if (local_y == 0) {
+                    cached_input4[0] = vload4(0, input + input_offset + k * bhw4);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    cached_input4[1] = vload4(0, input + input_offset + k * bhw4 + 4);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    cached_input4[2] = vload4(0, input + input_offset + k * bhw4 + 8);
+                    #endif
+                }
+                barrier(CLK_LOCAL_MEM_FENCE);
+                COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(cached_input4[0]);
+                #if INPUT_BATCH_LEAVES_NUM >= 2
+                COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(cached_input4[1]);
+                #endif
+                #if INPUT_BATCH_LEAVES_NUM >= 3
+                COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(cached_input4[2]);
+                #endif
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s0, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s0, wei, out2);
+                    #endif
+                }
+                #if INPUT_CHANNEL_LEAVES_NUM >= 2
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s1, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s1, wei, out2);
+                    #endif
+                }
+                #endif
+                #if INPUT_CHANNEL_LEAVES_NUM >= 3
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+                    #if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT8)in1.s2, wei, out1);
+                    #endif
+                    #if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT8)in2.s2, wei, out2);
+                    #endif
+                }
+                #endif
+                barrier(CLK_LOCAL_MEM_FENCE);
+            }
+            #endif
+        }
+    } else {
+#endif
+    for (int i = 0; i < blockNum; i++){
+        #ifdef ASYMMETRIC
+        COMPUTE_FLOAT8 scale, offset;
+        {
+            COMPUTE_FLOAT16 scaleOffset = CONVERT_COMPUTE_FLOAT16(convert_float16(vload16(0, dequantScaleOffset + (out_c_idx << 3) + i * dstChannelAlign * 2)) / coef);
+            scale = scaleOffset.s02468ace;
+            offset = scaleOffset.s13579bdf;
+        }
+        #else
+        COMPUTE_FLOAT8 scale = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + (out_c_idx << 2) + i * dstChannelAlign)) / coef);
+        COMPUTE_FLOAT8 offset = 0;
+        #endif
+        for (int j = 0; j < loop_end; j++) {
+            int k = i * loop + j;
+            COMPUTE_FLOAT8 wei;
+            #ifdef USE_IMAGE
+            uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+            #else
+            uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+            #endif
+            if (local_y == 0) {
+                cached_input4[0] = vload4(0, input + input_offset + k * bhw4);
+                cached_input4[1] = vload4(0, input + input_offset + k * bhw4 + 4);
+                cached_input4[2] = vload4(0, input + input_offset + k * bhw4 + 8);
+                cached_input4[3] = vload4(0, input + input_offset + k * bhw4 + 12);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+            COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(cached_input4[0]);
+            COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(cached_input4[1]);
+            COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(cached_input4[2]);
+            COMPUTE_FLOAT4 in3 = CONVERT_COMPUTE_FLOAT4(cached_input4[3]);
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s0, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s0, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s0, wei, out3);
+            }
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s1, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s1, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s1, wei, out3);
+            }
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s2, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s2, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s2, wei, out3);
+            }
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.scdef, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s3, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s3, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s3, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s3, wei, out3);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        #if INPUT_CHANNEL_LEAVES_NUM != 0
+        {
+            int k = i * loop + loop_end;
+            COMPUTE_FLOAT8 wei;
+            #ifdef USE_IMAGE
+            uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+            #else
+            uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+            #endif
+            if (local_y == 0) {
+                cached_input4[0] = vload4(0, input + input_offset + k * bhw4);
+                cached_input4[1] = vload4(0, input + input_offset + k * bhw4 + 4);
+                cached_input4[2] = vload4(0, input + input_offset + k * bhw4 + 8);
+                cached_input4[3] = vload4(0, input + input_offset + k * bhw4 + 12);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+            COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(cached_input4[0]);
+            COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(cached_input4[1]);
+            COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(cached_input4[2]);
+            COMPUTE_FLOAT4 in3 = CONVERT_COMPUTE_FLOAT4(cached_input4[3]);
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s0, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s0, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s0, wei, out3);
+            }
+            #if INPUT_CHANNEL_LEAVES_NUM >= 2
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s1, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s1, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s1, wei, out3);
+            }
+            #endif
+            #if INPUT_CHANNEL_LEAVES_NUM >= 3
+            {
+                UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+                out1 = mad((COMPUTE_FLOAT8)in1.s2, wei, out1);
+                out2 = mad((COMPUTE_FLOAT8)in2.s2, wei, out2);
+                out3 = mad((COMPUTE_FLOAT8)in3.s2, wei, out3);
+            }
+            #endif
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        #endif
+    }
+#if INPUT_BATCH_LEAVES_NUM != 0
+    }
+#endif
+
+#ifdef RELU
+    out0 = fmax(out0, (COMPUTE_FLOAT8)0);
+    out1 = fmax(out1, (COMPUTE_FLOAT8)0);
+    out2 = fmax(out2, (COMPUTE_FLOAT8)0);
+    out3 = fmax(out3, (COMPUTE_FLOAT8)0);
+#endif
+
+#ifdef RELU6
+    out0 = clamp(out0, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+    out1 = clamp(out1, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+    out2 = clamp(out2, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+    out3 = clamp(out3, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+#endif
+
+#if INPUT_BATCH_LEAVES_NUM != 0
+    if(out_b_idx + 3 >= bhw){
+        #if INPUT_BATCH_LEAVES_NUM == 3
+        vstore8(CONVERT_FLOAT8((COMPUTE_FLOAT8)(out0.s0123, out1.s0123)), 0, output+out_offset);
+        vstore4(CONVERT_FLOAT4(out2.s0123), 0, output+out_offset+8);
+        if((out_c_idx << 2) + 4 < dstChannelAlign){
+            vstore8(CONVERT_FLOAT8((COMPUTE_FLOAT8)(out0.s4567, out1.s4567)), 0, output+out_offset+bhw4);
+            vstore4(CONVERT_FLOAT4(out2.s4567), 0, output+out_offset+bhw4+8);
+        }
+        #elif INPUT_BATCH_LEAVES_NUM == 2
+        vstore8(CONVERT_FLOAT8((COMPUTE_FLOAT8)(out0.s0123, out1.s0123)), 0, output+out_offset);
+        if((out_c_idx << 2) + 4 < dstChannelAlign){
+            vstore8(CONVERT_FLOAT8((COMPUTE_FLOAT8)(out0.s4567, out1.s4567)), 0, output+out_offset+bhw4);
+        }
+        #elif INPUT_BATCH_LEAVES_NUM == 1
+        vstore4(CONVERT_FLOAT4(out0.s0123), 0, output+out_offset);
+        if((out_c_idx << 2) + 4 < dstChannelAlign){
+            vstore4(CONVERT_FLOAT4(out0.s4567), 0, output+out_offset+bhw4);
+        }
+        #endif
+    }else{
+#endif
+        vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0.s0123, out1.s0123, out2.s0123, out3.s0123)), 0, output+out_offset);
+        if((out_c_idx << 2) + 4 < dstChannelAlign){
+            vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0.s4567, out1.s4567, out2.s4567, out3.s4567)), 0, output+out_offset+bhw4);
+        }
+#if INPUT_BATCH_LEAVES_NUM != 0
+    }
+#endif
+}
+
+__attribute__((reqd_work_group_size(1, 32, 1)))
+__kernel void pic_gemm_b4_c8_incache32_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    __local FLOAT4 cached_input4[4];
+    gemm_b4_c8_int4_buf_input_cache_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                                         cached_input4, bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(1, 64, 1)))
+__kernel void pic_gemm_b4_c8_incache64_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    __local FLOAT4 cached_input4[4];
+    gemm_b4_c8_int4_buf_input_cache_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                                         cached_input4, bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+static inline void gemm_b4_c4_int4_buf_impl(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    const int x = get_global_id(0); // b/4
+    const int y = get_global_id(1); // c/4
+
+    UNIFORM_BOUNDRY_CHECK(x, y);
+
+    const int out_b_idx = x << 2;
+    const int out_c_idx = y;
+    const int weight_y = y >> 1;
+    const bool high_half = (y & 1) != 0;
+
+    COMPUTE_FLOAT4 out0 = CONVERT_COMPUTE_FLOAT4(vload4(0, bias + (out_c_idx << 2)));
+    COMPUTE_FLOAT4 out1 = out0;
+    COMPUTE_FLOAT4 out2 = out0;
+    COMPUTE_FLOAT4 out3 = out0;
+
+    const int bhw4 = bhw << 2;
+    const int input_offset = out_b_idx * 4;
+    int out_offset = out_c_idx * bhw4 + out_b_idx * 4;
+#ifndef USE_IMAGE
+    const int weight_offset = weight_y * srcChannelAlign * 4;
+#endif
+    const int loop = (blockDim + 4 - 1) / 4;
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+    const int loop_end = max(loop - 1, 0);
+#else
+    const int loop_end = loop;
+#endif
+
+#define PICK_HALF_PACK(low_swizzle, high_swizzle) (high_half ? charWeightsInt40.high_swizzle : charWeightsInt40.low_swizzle)
+
+#if INPUT_BATCH_LEAVES_NUM != 0
+    if(out_b_idx + 3 >= bhw){
+        for (int i = 0; i < blockNum; i++){
+#ifdef ASYMMETRIC
+            COMPUTE_FLOAT4 scale, offset;
+            {
+                COMPUTE_FLOAT8 scaleOffset = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + (out_c_idx << 3) + i * dstChannelAlign * 2)) / coef);
+                scale = scaleOffset.s0246;
+                offset = scaleOffset.s1357;
+            }
+#else
+            COMPUTE_FLOAT4 scale = CONVERT_COMPUTE_FLOAT4(convert_float4(vload4(0, dequantScaleOffset + (out_c_idx << 2) + i * dstChannelAlign)) / coef);
+            COMPUTE_FLOAT4 offset = 0;
+#endif
+            for (int j = 0; j < loop_end; j++) {
+                int k = i * loop + j;
+                COMPUTE_FLOAT4 wei;
+#ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, weight_y)));
+#else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+                COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4));
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4 + 4));
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4 + 8));
+#endif
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s01, s23), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s0, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s0, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s0, wei, out2);
+#endif
+                }
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s45, s67), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s1, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s1, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s1, wei, out2);
+#endif
+                }
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s89, sab), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s2, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s2, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s2, wei, out2);
+#endif
+                }
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(scd, sef), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s3, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s3, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s3, wei, out2);
+#endif
+                }
+            }
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+            {
+                int k = i * loop + loop_end;
+                COMPUTE_FLOAT4 wei;
+                COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4));
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4 + 4));
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4 + 8));
+#endif
+#ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, weight_y)));
+#else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s01, s23), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s0, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s0, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s0, wei, out2);
+#endif
+                }
+#if INPUT_CHANNEL_LEAVES_NUM >= 2
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s45, s67), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s1, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s1, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s1, wei, out2);
+#endif
+                }
+#endif
+#if INPUT_CHANNEL_LEAVES_NUM >= 3
+                {
+                    UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s89, sab), scale, offset);
+                    out0 = mad((COMPUTE_FLOAT4)in0.s2, wei, out0);
+#if INPUT_BATCH_LEAVES_NUM >= 2
+                    out1 = mad((COMPUTE_FLOAT4)in1.s2, wei, out1);
+#endif
+#if INPUT_BATCH_LEAVES_NUM >= 3
+                    out2 = mad((COMPUTE_FLOAT4)in2.s2, wei, out2);
+#endif
+                }
+#endif
+            }
+#endif
+        }
+    } else {
+#endif
+    for (int i = 0; i < blockNum; i++){
+#ifdef ASYMMETRIC
+        COMPUTE_FLOAT4 scale, offset;
+        {
+            COMPUTE_FLOAT8 scaleOffset = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + (out_c_idx << 3) + i * dstChannelAlign * 2)) / coef);
+            scale = scaleOffset.s0246;
+            offset = scaleOffset.s1357;
+        }
+#else
+        COMPUTE_FLOAT4 scale = CONVERT_COMPUTE_FLOAT4(convert_float4(vload4(0, dequantScaleOffset + (out_c_idx << 2) + i * dstChannelAlign)) / coef);
+        COMPUTE_FLOAT4 offset = 0;
+#endif
+        for (int j = 0; j < loop_end; j++) {
+            int k = i * loop + j;
+            COMPUTE_FLOAT4 wei;
+            COMPUTE_FLOAT16 in = CONVERT_COMPUTE_FLOAT16(vload16(0, input + input_offset + k * bhw4));
+#ifdef USE_IMAGE
+            uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, weight_y)));
+#else
+            uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s01, s23), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s0, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s4, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.s8, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.sc, wei, out3);
+            }
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s45, s67), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s1, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s5, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.s9, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.sd, wei, out3);
+            }
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s89, sab), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s2, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s6, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.sa, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.se, wei, out3);
+            }
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(scd, sef), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s3, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s7, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.sb, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.sf, wei, out3);
+            }
+        }
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+        {
+            int k = i * loop + loop_end;
+            COMPUTE_FLOAT4 wei;
+            COMPUTE_FLOAT16 in = CONVERT_COMPUTE_FLOAT16(vload16(0, input + input_offset + k * bhw4));
+#ifdef USE_IMAGE
+            uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, weight_y)));
+#else
+            uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s01, s23), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s0, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s4, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.s8, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.sc, wei, out3);
+            }
+#if INPUT_CHANNEL_LEAVES_NUM >= 2
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s45, s67), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s1, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s5, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.s9, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.sd, wei, out3);
+            }
+#endif
+#if INPUT_CHANNEL_LEAVES_NUM >= 3
+            {
+                UCHAR2_TO_FLOAT4(PICK_HALF_PACK(s89, sab), scale, offset);
+                out0 = mad((COMPUTE_FLOAT4)in.s2, wei, out0);
+                out1 = mad((COMPUTE_FLOAT4)in.s6, wei, out1);
+                out2 = mad((COMPUTE_FLOAT4)in.sa, wei, out2);
+                out3 = mad((COMPUTE_FLOAT4)in.se, wei, out3);
+            }
+#endif
+        }
+#endif
+    }
+#if INPUT_BATCH_LEAVES_NUM != 0
+    }
+#endif
+
+#undef PICK_HALF_PACK
+
+#ifdef RELU
+    out0 = fmax(out0, (COMPUTE_FLOAT4)0);
+    out1 = fmax(out1, (COMPUTE_FLOAT4)0);
+    out2 = fmax(out2, (COMPUTE_FLOAT4)0);
+    out3 = fmax(out3, (COMPUTE_FLOAT4)0);
+#endif
+
+#ifdef RELU6
+    out0 = clamp(out0, (COMPUTE_FLOAT4)0, (COMPUTE_FLOAT4)6);
+    out1 = clamp(out1, (COMPUTE_FLOAT4)0, (COMPUTE_FLOAT4)6);
+    out2 = clamp(out2, (COMPUTE_FLOAT4)0, (COMPUTE_FLOAT4)6);
+    out3 = clamp(out3, (COMPUTE_FLOAT4)0, (COMPUTE_FLOAT4)6);
+#endif
+
+#if INPUT_BATCH_LEAVES_NUM != 0
+    if(out_b_idx + 3 >= bhw){
+    #if INPUT_BATCH_LEAVES_NUM == 3
+        vstore4(CONVERT_FLOAT4(out0), 0, output + out_offset);
+        vstore4(CONVERT_FLOAT4(out1), 0, output + out_offset + 4);
+        vstore4(CONVERT_FLOAT4(out2), 0, output + out_offset + 8);
+    #elif INPUT_BATCH_LEAVES_NUM == 2
+        vstore4(CONVERT_FLOAT4(out0), 0, output + out_offset);
+        vstore4(CONVERT_FLOAT4(out1), 0, output + out_offset + 4);
+    #elif INPUT_BATCH_LEAVES_NUM == 1
+        vstore4(CONVERT_FLOAT4(out0), 0, output + out_offset);
+    #endif
+    } else {
+#endif
+        vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0, out1, out2, out3)), 0, output + out_offset);
+#if INPUT_BATCH_LEAVES_NUM != 0
+    }
+#endif
+}
+
+__kernel void pic_gemm_b4_c4_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c4_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+static inline void gemm_b2_c8_int4_buf_impl(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    const int x = get_global_id(0); //b/2
+    const int y = get_global_id(1); //c/8
+
+    UNIFORM_BOUNDRY_CHECK(x, y);
+
+    const int out_b_idx = x << 1;
+    const int out_c_idx = y << 1;
+
+    COMPUTE_FLOAT8 out0 = CONVERT_COMPUTE_FLOAT8(vload8(0, bias + (out_c_idx << 2)));
+    COMPUTE_FLOAT8 out1 = out0;
+
+    const int bhw4 = bhw << 2;
+    const int input_offset = out_b_idx * 4;
+    int out_offset = out_c_idx * bhw4 + out_b_idx * 4;
+#ifndef USE_IMAGE
+    const int weight_offset = y * srcChannelAlign * 4;
+#endif
+    const int loop = (blockDim + 4 - 1) / 4;
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+    const int loop_end = max(loop - 1, 0);
+#else
+    const int loop_end = loop;
+#endif
+
+#if INPUT_BATCH_LEAVES_NUM != 0
+    if (out_b_idx + 1 >= bhw) {
+        for (int i = 0; i < blockNum; i++) {
+#ifdef ASYMMETRIC
+            COMPUTE_FLOAT8 scale, offset;
+            {
+                COMPUTE_FLOAT16 scaleOffset = CONVERT_COMPUTE_FLOAT16(convert_float16(vload16(0, dequantScaleOffset + (out_c_idx << 3) + i * dstChannelAlign * 2)) / coef);
+                scale = scaleOffset.s02468ace;
+                offset = scaleOffset.s13579bdf;
+            }
+#else
+            COMPUTE_FLOAT8 scale = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + (out_c_idx << 2) + i * dstChannelAlign)) / coef);
+            COMPUTE_FLOAT8 offset = 0;
+#endif
+            for (int j = 0; j < loop_end; j++) {
+                int k = i * loop + j;
+                COMPUTE_FLOAT8 wei;
+                COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4));
+#ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+#else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.scdef, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s3, wei, out0);
+                }
+            }
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+            {
+                int k = i * loop + loop_end;
+                COMPUTE_FLOAT8 wei;
+                COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k * bhw4));
+#ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+#else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+                }
+#if INPUT_CHANNEL_LEAVES_NUM >= 2
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+                }
+#endif
+#if INPUT_CHANNEL_LEAVES_NUM >= 3
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+                }
+#endif
+            }
+#endif
+        }
+    } else {
+#endif
+        for (int i = 0; i < blockNum; i++) {
+#ifdef ASYMMETRIC
+            COMPUTE_FLOAT8 scale, offset;
+            {
+                COMPUTE_FLOAT16 scaleOffset = CONVERT_COMPUTE_FLOAT16(convert_float16(vload16(0, dequantScaleOffset + (out_c_idx << 3) + i * dstChannelAlign * 2)) / coef);
+                scale = scaleOffset.s02468ace;
+                offset = scaleOffset.s13579bdf;
+            }
+#else
+            COMPUTE_FLOAT8 scale = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + (out_c_idx << 2) + i * dstChannelAlign)) / coef);
+            COMPUTE_FLOAT8 offset = 0;
+#endif
+            for (int j = 0; j < loop_end; j++) {
+                int k = i * loop + j;
+                COMPUTE_FLOAT8 wei;
+                COMPUTE_FLOAT8 in = CONVERT_COMPUTE_FLOAT8(vload8(0, input + input_offset + k * bhw4));
+#ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+#else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s0, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s4, wei, out1);
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s1, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s5, wei, out1);
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s2, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s6, wei, out1);
+                }
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.scdef, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s3, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s7, wei, out1);
+                }
+            }
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+            {
+                int k = i * loop + loop_end;
+                COMPUTE_FLOAT8 wei;
+                COMPUTE_FLOAT8 in = CONVERT_COMPUTE_FLOAT8(vload8(0, input + input_offset + k * bhw4));
+#ifdef USE_IMAGE
+                uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(k, y)));
+#else
+                uchar16 charWeightsInt40 = vload16(k, weight + weight_offset);
+#endif
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s0123, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s0, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s4, wei, out1);
+                }
+#if INPUT_CHANNEL_LEAVES_NUM >= 2
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s4567, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s1, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s5, wei, out1);
+                }
+#endif
+#if INPUT_CHANNEL_LEAVES_NUM >= 3
+                {
+                    UCHAR4_TO_FLOAT8(charWeightsInt40.s89ab, scale, offset);
+                    out0 = mad((COMPUTE_FLOAT8)in.s2, wei, out0);
+                    out1 = mad((COMPUTE_FLOAT8)in.s6, wei, out1);
+                }
+#endif
+            }
+#endif
+        }
+#if INPUT_BATCH_LEAVES_NUM != 0
+    }
+#endif
+
+#ifdef RELU
+    out0 = fmax(out0, (COMPUTE_FLOAT8)0);
+    out1 = fmax(out1, (COMPUTE_FLOAT8)0);
+#endif
+
+#ifdef RELU6
+    out0 = clamp(out0, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+    out1 = clamp(out1, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+#endif
+
+#if INPUT_BATCH_LEAVES_NUM != 0
+    if (out_b_idx + 1 >= bhw) {
+        vstore4(CONVERT_FLOAT4(out0.s0123), 0, output + out_offset);
+        if ((out_c_idx << 2) + 4 < dstChannelAlign) {
+            vstore4(CONVERT_FLOAT4(out0.s4567), 0, output + out_offset + bhw4);
+        }
+    } else {
+#endif
+        vstore8(CONVERT_FLOAT8((COMPUTE_FLOAT8)(out0.s0123, out1.s0123)), 0, output + out_offset);
+        if ((out_c_idx << 2) + 4 < dstChannelAlign) {
+            vstore8(CONVERT_FLOAT8((COMPUTE_FLOAT8)(out0.s4567, out1.s4567)), 0, output + out_offset + bhw4);
+        }
+#if INPUT_BATCH_LEAVES_NUM != 0
+    }
+#endif
+}
+
+__kernel void pic_gemm_b2_c8_int4_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b2_c8_int4_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
 static inline void gemm_b4_c8_int8_buf_impl(GLOBAL_SIZE_DIM2
                         __global const FLOAT* input,
 #ifdef USE_IMAGE
@@ -878,6 +1921,90 @@ __kernel void gemm_b4_c8_int8_buf(GLOBAL_SIZE_DIM2
 }
 
 __kernel void pic_gemm_b4_c8_int8_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const char *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int8_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(1, 64, 1)))
+__kernel void pic_gemm_b4_c8_wg64_int8_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const char *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int8_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(1, 128, 1)))
+__kernel void pic_gemm_b4_c8_wg128_int8_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const char *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int8_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(4, 32, 1)))
+__kernel void pic_gemm_b4_c8_wg4x32_int8_buf(GLOBAL_SIZE_DIM2
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const char *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int srcChannelAlign,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    gemm_b4_c8_int8_buf_impl(global_size_dim0, global_size_dim1, input, weight, dequantScaleOffset, bias, output,
+                             bhw, dstChannelAlign, srcChannelAlign, blockNum, blockDim, coef);
+}
+
+__attribute__((reqd_work_group_size(8, 16, 1)))
+__kernel void pic_gemm_b4_c8_wg8x16_int8_buf(GLOBAL_SIZE_DIM2
                         __global const FLOAT* input,
 #ifdef USE_IMAGE
                         __read_only image2d_t weight,

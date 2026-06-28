@@ -158,6 +158,9 @@ class MNNConverter:
             self.json2mnn(mnn_json, self.mnn_model_path)
             self.removeDupOps(self.mnn_model_path)
             self.mnn2json(self.mnn_model_path, mnn_json)
+            if self.rewrite_attention_param_fallbacks(mnn_json) > 0:
+                self.json2mnn(mnn_json, self.mnn_model_path)
+                self.mnn2json(self.mnn_model_path, mnn_json)
             if self.args.gptq_path is not None:
                 self.apply_gptq(mnn_json)
             if self.args.lora_path is not None and self.args.lora_split:
@@ -271,8 +274,12 @@ class MNNConverter:
         # Rebuild ops
         with open(self.mnn_weight_path, 'wb') as self.mnn_weight:
             for op in tqdm(mnn_graph['oplists'], 'Quant weights'):
-                if op['type'] == 'Extra' or op['type'] == 'LayerNorm':
-                    new_ops += self.rebuild_op(op, mnn_graph)
+                if op['type'] == 'Extra' or op['type'] == 'LayerNorm' or self._is_attention_param_fallback(op):
+                    rebuilt = self.rebuild_op(op, mnn_graph)
+                    if rebuilt is not None:
+                        new_ops += rebuilt
+                    else:
+                        new_ops.append(op)
                 else:
                     new_ops.append(op)
             mnn_graph['oplists'] = new_ops
@@ -280,8 +287,12 @@ class MNNConverter:
                 for subgraph in tqdm(mnn_graph['subgraphs'], 'Quant subgraphs weights'):
                     new_subops = []
                     for op in subgraph['nodes']:
-                        if op['type'] == 'Extra' or op['type'] == 'LayerNorm':
-                            new_subops += self.rebuild_op(op, subgraph)
+                        if op['type'] == 'Extra' or op['type'] == 'LayerNorm' or self._is_attention_param_fallback(op):
+                            rebuilt = self.rebuild_op(op, subgraph)
+                            if rebuilt is not None:
+                                new_subops += rebuilt
+                            else:
+                                new_subops.append(op)
                         else:
                             new_subops.append(op)
                     subgraph['nodes'] = new_subops
@@ -386,8 +397,49 @@ class MNNConverter:
         graph[tensor_key].append(tensor_name)
         return tensor_idx
 
+    @staticmethod
+    def _is_attention_param_fallback(op):
+        return op.get('type') == -1 and op.get('main_type') == 'AttentionParam'
+
+    def _infer_attention_param_fallback_type(self, op):
+        if not self._is_attention_param_fallback(op):
+            return None
+        main = op.get('main', {})
+        layer_index = int(main.get('layer_index', -1))
+        score_layer = int(getattr(self.args, 'pic_recompute_score_layer_idx', -1))
+        if len(op.get('outputIndexes', [])) == 2 or len(op.get('inputIndexes', [])) >= 5:
+            return 'PicScoreAttention'
+        if bool(getattr(self.args, 'pic_recompute_budget', False)) and score_layer >= 0 and layer_index > score_layer:
+            return 'PicSparseAttention'
+        return 'PagedAttention'
+
+    def _rewrite_attention_param_fallback_ops(self, nodes):
+        changed = 0
+        for op in nodes:
+            if not self._is_attention_param_fallback(op):
+                continue
+            op_type = self._infer_attention_param_fallback_type(op)
+            if op_type is None:
+                continue
+            op['type'] = op_type
+            changed += 1
+        return changed
+
+    def rewrite_attention_param_fallbacks(self, json_path):
+        with open(json_path, 'r', encoding='utf-8') as f:
+            graph = json.load(f)
+        changed = self._rewrite_attention_param_fallback_ops(graph.get('oplists', []))
+        for subgraph in graph.get('subgraphs', []):
+            changed += self._rewrite_attention_param_fallback_ops(subgraph.get('nodes', []))
+        if changed > 0:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(graph, f, ensure_ascii=False, indent=4)
+        return changed
+
     def rebuild_op(self, op, graph):
-        if "type" in op['main']:
+        if self._is_attention_param_fallback(op):
+            op_type = self._infer_attention_param_fallback_type(op)
+        elif "type" in op['main']:
             op_type = op['main']['type']
         else:
             op_type = op['type']
@@ -986,6 +1038,22 @@ class MNNConverter:
         return [layernorm_op]
 
     def rebuild_attnention(self, op, graph, mnn_op_type='Attention'):
+        if self._is_attention_param_fallback(op):
+            main = op.get('main', {})
+            fused_attention = {
+                "inputIndexes": op['inputIndexes'],
+                "main_type": "AttentionParam",
+                "main": {
+                    "kv_cache": bool(main.get('kv_cache', True)),
+                    "layer_index": int(main.get('layer_index', -1)),
+                    "kv_shared_layer_index": int(main.get('kv_shared_layer_index', -1)),
+                },
+                "name": op.get('name', 'PagedAttention'),
+                "outputIndexes": op['outputIndexes'],
+                "type": mnn_op_type,
+                "defaultDimentionFormat": op.get("defaultDimentionFormat", "NHWC")
+            }
+            return [fused_attention]
         attrs = op['main']['attr']
         layer_index = -1
         kv_shared_layer_index = -1

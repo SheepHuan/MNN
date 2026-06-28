@@ -181,7 +181,10 @@ public:
     bool preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_token_ids,
                                 const std::vector<int>& ranked_pic_local_indices,
                                 const std::vector<int>& seed_selected_pic_local_indices,
-                                int tokens_per_decode_step);
+                                int tokens_per_decode_step, const std::string& selector = "top_hkvd",
+                                int attention_layer_idx = -1,
+                                const std::vector<int>& attention_head_ids = {},
+                                int attention_candidate_pool_size = 0);
     int picDecodeRepairCandidateCount() const;
     std::vector<int> picDecodeRepairRepairedLogicalIndices() const;
     std::vector<std::vector<int>> picDecodeRepairStepLogicalIndices() const;
@@ -307,10 +310,16 @@ private:
         int picStart = 0;
         int picTokenCount = 0;
         int tokensPerDecodeStep = 0;
+        std::string selector = "top_hkvd";
+        int attentionLayerIdx = -1;
+        int attentionCandidatePoolSize = 0;
         int cursor = 0;
         int stepIdx = 0;
         std::vector<int> picTokenIds;
         std::vector<int> rankedLogicalIndices;
+        std::vector<int> attentionHeadIds;
+        std::vector<int> lastAttentionRankedPicLocalIndices;
+        int lastAttentionSourceStepIdx = -2;
         std::vector<uint8_t> repairedPicLocal;
         std::vector<int> pendingRepairLogicalIndices;
         std::vector<int> scratchLogicalIndices;

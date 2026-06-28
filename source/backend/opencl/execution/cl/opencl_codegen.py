@@ -22,6 +22,7 @@ def opencl_codegen():
     print("Generating OpenCL Kernels in "+cl_kernel_dir+" to this file")
     if not os.path.exists(cl_kernel_dir):
         print(cl_kernel_dir + " doesn't exist!")
+    cl_kernel_dir = os.path.abspath(cl_kernel_dir)
 
     opencl_source_hpp = "#include <map> \n"
     opencl_source_hpp += "#include <string> \n"
@@ -99,12 +100,13 @@ def opencl_codegen():
     opencl_source_map_hpp += "};\n"
     opencl_source_map_hpp += "}\n"
     opencl_md5_map_hpp += "};\n"
-    with open("opencl_source_map.hpp", "w") as w_file:
+    source_map_path = os.path.join(cl_kernel_dir, "opencl_source_map.hpp")
+    with open(source_map_path, "w") as w_file:
         w_file.write(opencl_source_hpp)
         w_file.write(opencl_source_map_hpp)
         w_file.write(opencl_md5_map_hpp)
 
-    print("Generate OpenCL Source done !!! \n")
+    print("Generate OpenCL Source done !!! " + source_map_path + "\n")
 
 if __name__ == '__main__':
     opencl_codegen()

@@ -83,6 +83,8 @@ __kernel void transpose_bias(GLOBAL_SIZE_DIM2
         #ifdef PRELU
         res = select(res * slope_in, res, res >= 0);
         #endif
-        vstore4(res, 0, output + ((idx_n4 * M + idx_m + i) << 2));
+        if (idx_m + i < M) {
+            vstore4(res, 0, output + ((idx_n4 * M + idx_m + i) << 2));
+        }
     }
 }

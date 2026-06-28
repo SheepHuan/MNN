@@ -13,7 +13,8 @@ namespace {
 void printUsage(const char* argv0) {
     std::cout << "Usage: " << argv0
               << " --config config.json [--host 0.0.0.0] [--port 9091]"
-              << " [--kv-cache-dir .cache/kvshare/kvcache] [--model name]\n";
+              << " [--kv-cache-dir .cache/kvshare/kvcache]"
+              << " [--runtime-cache-dir .cache/mnn_runtime_cache] [--model name]\n";
 }
 
 } // namespace
@@ -38,6 +39,8 @@ int main(int argc, const char* argv[]) {
             config.port = std::atoi(needValue(arg.c_str()));
         } else if (arg == "--kv-cache-dir") {
             config.kvCacheDir = needValue(arg.c_str());
+        } else if (arg == "--runtime-cache-dir") {
+            config.runtimeCacheDir = needValue(arg.c_str());
         } else if (arg == "--model") {
             config.servedModelName = needValue(arg.c_str());
         } else if (arg == "--help" || arg == "-h") {
