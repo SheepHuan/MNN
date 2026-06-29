@@ -1247,7 +1247,7 @@ bool validateHomogeneousChatBatchRequest(const std::vector<json>& requests, std:
 
 void writeJson(httplib::Response& res, const json& body, int status = 200, int indent = 2) {
     res.status = status;
-    res.set_content(body.dump(indent), "application/json");
+    res.set_content(body.dump(indent, ' ', false, json::error_handler_t::replace), "application/json");
 }
 
 void writeJsonError(httplib::Response& res, int status, const std::string& error) {

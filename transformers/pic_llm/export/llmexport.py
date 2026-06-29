@@ -108,6 +108,10 @@ class LlmExporter(torch.nn.Module):
             'pic_decode_repair_outputs': bool(getattr(self.args, 'pic_decode_repair_outputs', False)),
             'pic_decode_tiny_fusion': bool(getattr(self.args, 'pic_decode_tiny_fusion', False)),
             'pic_decode_gateup_fusion': bool(getattr(self.args, 'pic_decode_gateup_fusion', False)),
+            'pic_decode_gateup_direct_fusion': bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False)),
+            'pic_decode_gateup_split_fusion': bool(getattr(self.args, 'pic_decode_gateup_split_fusion', False)),
+            'pic_decode_nhwc_linear_fusion': bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)),
+            'pic_decode_nhwc_linear_scope': getattr(self.args, 'pic_decode_nhwc_linear_scope', 'all'),
             'is_mrope': self.model.rotary.is_mrope
         }
         for key in [
@@ -887,6 +891,12 @@ def build_args(parser):
     parser.add_argument('--pic_decode_repair_outputs', action='store_true', help='Expose score-layer hidden states needed by PIC decode repair.')
     parser.add_argument('--pic_decode_tiny_fusion', action='store_true', help='Export PIC decode tiny elementwise fusion ops such as PicSiluMul.')
     parser.add_argument('--pic_decode_gateup_fusion', action='store_true', help='Opt in to experimental PicGateUpWeightOnly export; keep disabled for formal TPOT unless its fused/fallback paths are validated.')
+    parser.add_argument('--pic_decode_gateup_direct_fusion', action='store_true', help='Preserve PicGateUpWeightOnly Extra so OpenCL can fuse gate/up weight-only projections directly before PicSiluMul.')
+    parser.add_argument('--pic_decode_gateup_split_fusion', action='store_true', help='Export gate/up with shared input layout but separate weight-only Conv nodes before PicSiluMul.')
+    parser.add_argument('--pic_decode_nhwc_linear_fusion', action='store_true', help='Export experimental NHWC weight-only Linear Extra ops for PIC decode repair A/B.')
+    parser.add_argument('--pic_decode_nhwc_linear_scope', type=str, default='all',
+                        choices=['all', 'attn', 'mlp', 'qkv', 'o', 'mlp_gateup', 'mlp_down'],
+                        help='Limit --pic_decode_nhwc_linear_fusion to a Linear subset for PIC decode repair A/B.')
     # omni quant
     parser.add_argument('--omni_epochs', type=int, default=20, help='OmniQuant 优化的轮数')
     parser.add_argument('--omni_lr', type=float, default=5e-3, help='OmniQuant 的学习率')

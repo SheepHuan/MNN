@@ -66,6 +66,14 @@ if(MNN_CUDA)
       target_link_libraries(run_test.out -lcublas)
     endif()
   endif()
+  find_library(CUDA_CUBLASLT_LIBRARY cublasLt
+    HINTS
+      ${CUDA_TOOLKIT_ROOT_DIR}/lib64
+      ${CUDA_TOOLKIT_ROOT_DIR}/lib
+      ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+  if(CUDA_CUBLASLT_LIBRARY)
+    target_link_libraries(run_test.out ${CUDA_CUBLASLT_LIBRARY})
+  endif()
 endif()
 target_link_libraries(run_test.out ${MNN_DEPS})
 if(RUN_TEST_OPENCL_USE_WRAPPER)

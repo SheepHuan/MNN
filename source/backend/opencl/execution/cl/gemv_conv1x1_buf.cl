@@ -78,6 +78,9 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
     __local COMPUTE_FLOAT8 sum0[WGS];
 #ifdef COMPUTE_BATCH
     const int out_b_idx  = get_global_id(2) << 2; //b/4
+#ifndef PIC_BATCH_VALID_ROWS
+#define PIC_BATCH_VALID_ROWS 4
+#endif
     __local COMPUTE_FLOAT8 sum1[WGS];
     __local COMPUTE_FLOAT8 sum2[WGS];
     __local COMPUTE_FLOAT8 sum3[WGS];
@@ -102,9 +105,24 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         }
         COMPUTE_FLOAT2 in = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + k2));
         #ifdef COMPUTE_BATCH
-        COMPUTE_FLOAT2 in1 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign + k2));
-        COMPUTE_FLOAT2 in2 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 2 + k2));
-        COMPUTE_FLOAT2 in3 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 3 + k2));
+        COMPUTE_FLOAT2 in1 = (COMPUTE_FLOAT2)0;
+        COMPUTE_FLOAT2 in2 = (COMPUTE_FLOAT2)0;
+        COMPUTE_FLOAT2 in3 = (COMPUTE_FLOAT2)0;
+        #if PIC_BATCH_VALID_ROWS >= 2
+        in1 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign + k2));
+        #else
+        in1 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + k2));
+        #endif
+        #if PIC_BATCH_VALID_ROWS >= 3
+        in2 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 2 + k2));
+        #else
+        in2 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + k2));
+        #endif
+        #if PIC_BATCH_VALID_ROWS >= 4
+        in3 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 3 + k2));
+        #else
+        in3 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + k2));
+        #endif
         #endif
         #ifdef USE_IMAGE
         COMPUTE_FLOAT16 wei = CONVERT_COMPUTE_FLOAT16(as_char16(read_imagei(weight, SAMPLER, (int2)(j, oc)))) * scale + offset;
@@ -143,9 +161,24 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         COMPUTE_FLOAT8 wei;
         COMPUTE_FLOAT4 in = CONVERT_COMPUTE_FLOAT4(vload4(0, input + k4 + input_offset));
         #ifdef COMPUTE_BATCH
-        COMPUTE_FLOAT4 in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign + k4));
-        COMPUTE_FLOAT4 in2 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 2 + k4));
-        COMPUTE_FLOAT4 in3 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 3 + k4));
+        COMPUTE_FLOAT4 in1 = (COMPUTE_FLOAT4)0;
+        COMPUTE_FLOAT4 in2 = (COMPUTE_FLOAT4)0;
+        COMPUTE_FLOAT4 in3 = (COMPUTE_FLOAT4)0;
+        #if PIC_BATCH_VALID_ROWS >= 2
+        in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign + k4));
+        #else
+        in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k4));
+        #endif
+        #if PIC_BATCH_VALID_ROWS >= 3
+        in2 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 2 + k4));
+        #else
+        in2 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k4));
+        #endif
+        #if PIC_BATCH_VALID_ROWS >= 4
+        in3 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 3 + k4));
+        #else
+        in3 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k4));
+        #endif
         #endif
         #ifdef USE_IMAGE
         uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(j, oc)));
@@ -278,6 +311,7 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
     #ifdef RELU6
         out0 = clamp(out0, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
     #endif
+#ifndef OUTPUT_C4NHW4
     #ifdef OUTPUT_CHANNEL_LEAVES
         vstore4(CONVERT_FLOAT4(out0.s0123), 0, output + output_offset);
         if(oc8 + 4 < dstChannelC4 * 4)
@@ -285,6 +319,7 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
     #else
         vstore8(CONVERT_FLOAT8(out0), 0, output  + output_offset);
     #endif
+#endif
     #ifdef COMPUTE_BATCH
         out1 = sum1[0] + vBias; out2 = sum2[0] + vBias; out3 = sum3[0] + vBias;
         #ifdef RELU
@@ -293,10 +328,271 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         #ifdef RELU6
         out1 = clamp(out1, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);out2 = clamp(out2, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);out3 = clamp(out3, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
         #endif
+#ifdef OUTPUT_C4NHW4
+        const int out_c_idx = oc << 1;
+        const int bhw4 = OUTPUT_BHW << 2;
+        const int c4_offset = out_c_idx * bhw4 + out_b_idx * 4;
+        if(out_b_idx + 3 < OUTPUT_BHW){
+            vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0.s0123, out1.s0123, out2.s0123, out3.s0123)), 0, output + c4_offset);
+            if(oc8 + 4 < dstChannelC4 * 4){
+                vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0.s4567, out1.s4567, out2.s4567, out3.s4567)), 0, output + c4_offset + bhw4);
+            }
+        } else {
+            vstore4(CONVERT_FLOAT4(out0.s0123), 0, output + c4_offset);
+            if(out_b_idx + 1 < OUTPUT_BHW){
+                vstore4(CONVERT_FLOAT4(out1.s0123), 0, output + c4_offset + 4);
+            }
+            if(out_b_idx + 2 < OUTPUT_BHW){
+                vstore4(CONVERT_FLOAT4(out2.s0123), 0, output + c4_offset + 8);
+            }
+            if(oc8 + 4 < dstChannelC4 * 4){
+                const int c4_offset_hi = c4_offset + bhw4;
+                vstore4(CONVERT_FLOAT4(out0.s4567), 0, output + c4_offset_hi);
+                if(out_b_idx + 1 < OUTPUT_BHW){
+                    vstore4(CONVERT_FLOAT4(out1.s4567), 0, output + c4_offset_hi + 4);
+                }
+                if(out_b_idx + 2 < OUTPUT_BHW){
+                    vstore4(CONVERT_FLOAT4(out2.s4567), 0, output + c4_offset_hi + 8);
+                }
+            }
+        }
+#else
+#ifdef OUTPUT_BHW
+        if (out_b_idx + 1 < OUTPUT_BHW) {
+            vstore8(CONVERT_FLOAT8(out1), 0, output + output_offset + dstChannelAlign);
+        }
+        if (out_b_idx + 2 < OUTPUT_BHW) {
+            vstore8(CONVERT_FLOAT8(out2), 0, output + output_offset + dstChannelAlign + dstChannelAlign);
+        }
+        if (out_b_idx + 3 < OUTPUT_BHW) {
+            vstore8(CONVERT_FLOAT8(out3), 0, output + output_offset + dstChannelAlign + dstChannelAlign + dstChannelAlign);
+        }
+#else
         vstore8(CONVERT_FLOAT8(out1), 0, output + output_offset + dstChannelAlign);
         vstore8(CONVERT_FLOAT8(out2), 0, output + output_offset + dstChannelAlign + dstChannelAlign);
         vstore8(CONVERT_FLOAT8(out3), 0, output + output_offset + dstChannelAlign + dstChannelAlign + dstChannelAlign);
+#endif
+#endif
     #endif
+    }
+}
+
+// Tiny-row Adreno PIC decode repair path. It keeps the arithmetic structure of
+// the batch GEMV kernel above, but reads and writes C4NHW4 directly so x=1/3/5/7
+// decode repair avoids two layout-conversion launches per Linear op.
+__kernel void gemv_conv_c8_c4nhw4_buf(GLOBAL_SIZE_DIM_3
+                        __global const FLOAT* input,
+#ifdef USE_IMAGE
+                        __read_only image2d_t weight,
+#else
+                        __global const uchar *weight,
+#endif
+                        __global const FLOAT *dequantScaleOffset,
+                        __global const FLOAT *bias,
+                        __global FLOAT* output,
+                        __private const int bhw,
+                        __private const int dstChannelAlign,
+                        __private const int dstChannelC4,
+                        __private const int srcChannelC4,
+                        __private const int srcChannel,
+                        __private const int blockNum,
+                        __private const int blockDim,
+                        __private const float coef) {
+    const int lid = get_local_id(0);
+    const int oc = get_global_id(1); // oc/8
+    const int b4_idx = get_global_id(2); // b/4
+    if (lid >= global_size_dim0 || oc >= global_size_dim1 || b4_idx >= global_size_dim2) {
+        return;
+    }
+
+    (void)blockNum;
+    const int row = b4_idx << 2;
+    const int oc8 = oc << 3;
+    const int out_c_idx = oc << 1;
+    const int bhw4 = bhw << 2;
+#ifndef USE_IMAGE
+    const int weight_offset = oc * srcChannelC4 * 16;
+#endif
+    const int loop = (srcChannel + 4 - 1) / 4;
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+    const int loop_end = max(loop - 1, 0);
+#else
+    const int loop_end = loop;
+#endif
+
+    COMPUTE_FLOAT8 out0 = 0;
+    COMPUTE_FLOAT8 out1 = 0;
+    COMPUTE_FLOAT8 out2 = 0;
+    COMPUTE_FLOAT8 out3 = 0;
+    __local COMPUTE_FLOAT8 sum0[WGS];
+    __local COMPUTE_FLOAT8 sum1[WGS];
+    __local COMPUTE_FLOAT8 sum2[WGS];
+    __local COMPUTE_FLOAT8 sum3[WGS];
+
+    for (int j = lid; j < loop_end; j += WGS) {
+        const int k4 = j << 2;
+#ifdef ASYMMETRIC
+        COMPUTE_FLOAT8 scale, offset;
+        {
+            COMPUTE_FLOAT16 scaleOffset = CONVERT_COMPUTE_FLOAT16(convert_float16(vload16(0, dequantScaleOffset + oc8 * 2 + (k4 / blockDim) * dstChannelC4 * 8)) / coef);
+            scale = scaleOffset.s02468ace;
+            offset = scaleOffset.s13579bdf;
+        }
+#else
+        COMPUTE_FLOAT8 scale = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + oc8 + (k4 / blockDim) * dstChannelC4 * 4)) / coef);
+        COMPUTE_FLOAT8 offset = 0;
+#endif
+        COMPUTE_FLOAT8 wei;
+        const int input_base = j * bhw4 + row * 4;
+        COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base));
+        COMPUTE_FLOAT4 in1 = row + 1 < bhw ? CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base + 4)) : (COMPUTE_FLOAT4)0;
+        COMPUTE_FLOAT4 in2 = row + 2 < bhw ? CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base + 8)) : (COMPUTE_FLOAT4)0;
+        COMPUTE_FLOAT4 in3 = row + 3 < bhw ? CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base + 12)) : (COMPUTE_FLOAT4)0;
+#ifdef USE_IMAGE
+        uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(j, oc)));
+#else
+        uchar16 charWeightsInt40 = vload16(j, weight + weight_offset);
+#endif
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.s0123, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s0, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s0, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s0, wei, out3);
+        }
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.s4567, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s1, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s1, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s1, wei, out3);
+        }
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.s89ab, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s2, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s2, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s2, wei, out3);
+        }
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.scdef, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s3, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s3, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s3, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s3, wei, out3);
+        }
+    }
+#if INPUT_CHANNEL_LEAVES_NUM != 0
+    if (lid == 0 && loop_end < loop) {
+        const int j = loop_end;
+        const int k4 = j << 2;
+#ifdef ASYMMETRIC
+        COMPUTE_FLOAT8 scale, offset;
+        {
+            COMPUTE_FLOAT16 scaleOffset = CONVERT_COMPUTE_FLOAT16(convert_float16(vload16(0, dequantScaleOffset + oc8 * 2 + (k4 / blockDim) * dstChannelC4 * 8)) / coef);
+            scale = scaleOffset.s02468ace;
+            offset = scaleOffset.s13579bdf;
+        }
+#else
+        COMPUTE_FLOAT8 scale = CONVERT_COMPUTE_FLOAT8(convert_float8(vload8(0, dequantScaleOffset + oc8 + (k4 / blockDim) * dstChannelC4 * 4)) / coef);
+        COMPUTE_FLOAT8 offset = 0;
+#endif
+        COMPUTE_FLOAT8 wei;
+        const int input_base = j * bhw4 + row * 4;
+        COMPUTE_FLOAT4 in0 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base));
+        COMPUTE_FLOAT4 in1 = row + 1 < bhw ? CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base + 4)) : (COMPUTE_FLOAT4)0;
+        COMPUTE_FLOAT4 in2 = row + 2 < bhw ? CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base + 8)) : (COMPUTE_FLOAT4)0;
+        COMPUTE_FLOAT4 in3 = row + 3 < bhw ? CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_base + 12)) : (COMPUTE_FLOAT4)0;
+#ifdef USE_IMAGE
+        uchar16 charWeightsInt40 = as_uchar16(read_imagei(weight, SAMPLER, (int2)(j, oc)));
+#else
+        uchar16 charWeightsInt40 = vload16(j, weight + weight_offset);
+#endif
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.s0123, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s0, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s0, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s0, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s0, wei, out3);
+        }
+#if INPUT_CHANNEL_LEAVES_NUM >= 2
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.s4567, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s1, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s1, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s1, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s1, wei, out3);
+        }
+#endif
+#if INPUT_CHANNEL_LEAVES_NUM >= 3
+        {
+            UCHAR4_TO_CHAR8(charWeightsInt40.s89ab, scale, offset);
+            out0 = mad((COMPUTE_FLOAT8)in0.s2, wei, out0);
+            out1 = mad((COMPUTE_FLOAT8)in1.s2, wei, out1);
+            out2 = mad((COMPUTE_FLOAT8)in2.s2, wei, out2);
+            out3 = mad((COMPUTE_FLOAT8)in3.s2, wei, out3);
+        }
+#endif
+    }
+#endif
+
+    sum0[lid] = out0;
+    sum1[lid] = out1;
+    sum2[lid] = out2;
+    sum3[lid] = out3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int i = WGS / 2; i > 0; i /= 2) {
+        if (lid < i) {
+            sum0[lid] = sum0[lid] + sum0[lid + i];
+            sum1[lid] = sum1[lid] + sum1[lid + i];
+            sum2[lid] = sum2[lid] + sum2[lid + i];
+            sum3[lid] = sum3[lid] + sum3[lid + i];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        COMPUTE_FLOAT8 vBias = CONVERT_COMPUTE_FLOAT8(vload8(0, bias + oc8));
+        out0 = sum0[0] + vBias;
+        out1 = sum1[0] + vBias;
+        out2 = sum2[0] + vBias;
+        out3 = sum3[0] + vBias;
+#ifdef RELU
+        out0 = fmax(out0, (COMPUTE_FLOAT8)0);
+        out1 = fmax(out1, (COMPUTE_FLOAT8)0);
+        out2 = fmax(out2, (COMPUTE_FLOAT8)0);
+        out3 = fmax(out3, (COMPUTE_FLOAT8)0);
+#endif
+#ifdef RELU6
+        out0 = clamp(out0, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+        out1 = clamp(out1, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+        out2 = clamp(out2, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+        out3 = clamp(out3, (COMPUTE_FLOAT8)0, (COMPUTE_FLOAT8)6);
+#endif
+        const int out_offset = out_c_idx * bhw4 + row * 4;
+        if (row + 3 < bhw) {
+            vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0.s0123, out1.s0123, out2.s0123, out3.s0123)), 0, output + out_offset);
+            if (oc8 + 4 < dstChannelAlign) {
+                vstore16(CONVERT_FLOAT16((COMPUTE_FLOAT16)(out0.s4567, out1.s4567, out2.s4567, out3.s4567)), 0, output + out_offset + bhw4);
+            }
+        } else {
+            vstore4(CONVERT_FLOAT4(out0.s0123), 0, output + out_offset);
+            if (row + 1 < bhw) {
+                vstore4(CONVERT_FLOAT4(out1.s0123), 0, output + out_offset + 4);
+            }
+            if (row + 2 < bhw) {
+                vstore4(CONVERT_FLOAT4(out2.s0123), 0, output + out_offset + 8);
+            }
+            if (oc8 + 4 < dstChannelAlign) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore4(CONVERT_FLOAT4(out0.s4567), 0, output + out_offset_hi);
+                if (row + 1 < bhw) {
+                    vstore4(CONVERT_FLOAT4(out1.s4567), 0, output + out_offset_hi + 4);
+                }
+                if (row + 2 < bhw) {
+                    vstore4(CONVERT_FLOAT4(out2.s4567), 0, output + out_offset_hi + 8);
+                }
+            }
+        }
     }
 }
 #else

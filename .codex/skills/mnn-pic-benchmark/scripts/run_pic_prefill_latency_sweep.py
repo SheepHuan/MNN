@@ -231,6 +231,36 @@ MODELS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "qwen3-4b": {
+        "name": "Qwen3-4B",
+        "served_model": "qwen3-4b-pic",
+        "paths": {
+            "jetson": {
+                "normal_config": [
+                    "/home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-llm-export/Qwen__Qwen3-4B/config_cuda_greedy.json",
+                ],
+                "pic_config": [
+                    "/home/jetson/code/kvshare-edge/impl/MNN/.cache/weight/Qwen__Qwen3-4B-pic-boundary/config_cuda_greedy.json",
+                ],
+            },
+            "orangepi": {
+                "normal_config": [
+                    "/mnt/ssd/code/.cache/mnn_opencl_pic/models/normal/Qwen__Qwen3-4B/config_opencl_greedy.json",
+                ],
+                "pic_config": [
+                    "/mnt/ssd/code/.cache/mnn_opencl_pic/models/pic/Qwen__Qwen3-4B-pic-boundary/config_opencl_greedy.json",
+                ],
+            },
+            "rhino": {
+                "normal_config": [
+                    "/mnt/nvme/mnn_pic_opencl/models/normal/Qwen__Qwen3-4B/config_opencl_greedy.json",
+                ],
+                "pic_config": [
+                    "/mnt/nvme/mnn_pic_opencl/models/pic/Qwen__Qwen3-4B-pic-boundary/config_opencl_greedy.json",
+                ],
+            },
+        },
+    },
 }
 
 DEFAULT_MAX_FREQUENCY_NOTES: dict[str, str] = {

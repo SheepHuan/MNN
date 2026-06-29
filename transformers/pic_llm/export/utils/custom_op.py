@@ -93,13 +93,14 @@ class PicGateUpWeightOnly(torch.nn.Module):
 
 class PicGateUpSiluWeightOnlyOp(torch.autograd.Function):
     @staticmethod
-    def symbolic(g, input, in_features, out_features, gate_name, up_name, name):
+    def symbolic(g, input, in_features, out_features, gate_name, up_name, name, split_fusion):
         kwargs = {
             "in_features_i": in_features,
             "out_features_i": out_features,
             "gate_name_s": gate_name,
             "up_name_s": up_name,
             "name_s": name,
+            "split_fusion_i": int(split_fusion),
         }
         from torch.onnx.symbolic_helper import _get_tensor_sizes
         out_sizes = _get_tensor_sizes(input)[:-1] + [out_features]
@@ -107,22 +108,23 @@ class PicGateUpSiluWeightOnlyOp(torch.autograd.Function):
         return g.op("LlmExporter::PicGateUpSiluWeightOnly", input, **kwargs).setType(output_type)
 
     @staticmethod
-    def forward(ctx, input, in_features, out_features, gate_name, up_name, name):
+    def forward(ctx, input, in_features, out_features, gate_name, up_name, name, split_fusion):
         out_shape = list(input.shape)[:-1] + [out_features]
         return input.new_zeros(out_shape)
 
 class PicGateUpSiluWeightOnly(torch.nn.Module):
-    def __init__(self, in_features, out_features, gate_name, up_name, name):
+    def __init__(self, in_features, out_features, gate_name, up_name, name, split_fusion=False):
         super(PicGateUpSiluWeightOnly, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.gate_name = gate_name
         self.up_name = up_name
         self.name = name
+        self.split_fusion = bool(split_fusion)
 
     def forward(self, x):
         return PicGateUpSiluWeightOnlyOp.apply(
-            x, self.in_features, self.out_features, self.gate_name, self.up_name, self.name)
+            x, self.in_features, self.out_features, self.gate_name, self.up_name, self.name, self.split_fusion)
 
 class FusedAttentionOp(torch.autograd.Function):
     @staticmethod

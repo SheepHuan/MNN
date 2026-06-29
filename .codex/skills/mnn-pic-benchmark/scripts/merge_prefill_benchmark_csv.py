@@ -27,6 +27,7 @@ MODEL_ORDER = {
     "MiniCPM5-1B": 1,
     "Llama3.2 3B": 2,
     "Qwen3-8B": 3,
+    "Qwen3-4B": 4,
 }
 MODE_ORDER = {
     "normal-full-recompute": 0,

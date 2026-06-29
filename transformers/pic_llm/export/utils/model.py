@@ -75,6 +75,8 @@ class LlmModel(PreTrainedModel):
             config.pic_decode_repair_outputs = bool(getattr(args, 'pic_decode_repair_outputs', False))
             config.pic_decode_tiny_fusion = bool(getattr(args, 'pic_decode_tiny_fusion', False))
             config.pic_decode_gateup_fusion = bool(getattr(args, 'pic_decode_gateup_fusion', False))
+            config.pic_decode_gateup_direct_fusion = bool(getattr(args, 'pic_decode_gateup_direct_fusion', False))
+            config.pic_decode_gateup_split_fusion = bool(getattr(args, 'pic_decode_gateup_split_fusion', False))
         model_type = config.model_type
         model_class = cls.get_model_class(model_type)
 

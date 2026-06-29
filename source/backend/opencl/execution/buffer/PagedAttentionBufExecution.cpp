@@ -226,6 +226,7 @@ enum TuneSelectionSource : uint32_t {
     kTuneSelectionSourceDefault = 0,
     kTuneSelectionSourceCache = 1,
     kTuneSelectionSourceOnlineTuned = 2,
+    kTuneSelectionSourceBenchOverride = 3,
 };
 static thread_local int gSparseFlashVariantOverride = -1;
 static thread_local bool gSparseFlashVariantTuneInProgress = false;
@@ -273,6 +274,8 @@ static const char* _tuneSelectionSourceName(uint32_t source) {
             return "cache";
         case kTuneSelectionSourceOnlineTuned:
             return "online_tuned";
+        case kTuneSelectionSourceBenchOverride:
+            return "bench_override";
         case kTuneSelectionSourceDefault:
         default:
             return "default";
@@ -281,6 +284,10 @@ static const char* _tuneSelectionSourceName(uint32_t source) {
 
 static bool _picOpenCLDebug() {
     return _envFlagEnabled("MNN_PIC_DECODE_DEBUG", false);
+}
+
+static bool _compareCacheBlendTopK() {
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_COMPARE_CACHEBLEND_TOPK", false);
 }
 
 static bool _legacyB863976OpenCL() {
@@ -800,6 +807,12 @@ static bool _cacheBlendTopKDispatchForFamily(OpenCLRuntime* runtime,
     if (picTokenCount <= 1024 || topK <= 0) {
         return false;
     }
+    if (runtime->getGpuType() == GpuType::MALI) {
+        // Mali-G610 returns different or even invalid indices from the staged
+        // path at high context lengths. Keep Mali on the deterministic legacy
+        // top-k until the staged kernel is fixed.
+        return false;
+    }
     int blockSize = 0;
     switch (family) {
         case kCacheBlendTopKFamilyStage1024:
@@ -824,13 +837,6 @@ static bool _cacheBlendTopKDispatchForFamily(OpenCLRuntime* runtime,
     const size_t stage1Bytes = static_cast<size_t>(blockSize) * (sizeof(float) + sizeof(int));
     const size_t stage2Bytes = static_cast<size_t>(sortSize) * (sizeof(float) + sizeof(int));
     size_t localMem = runtime->getMaxLocalMem();
-    if (runtime->getGpuType() == GpuType::MALI) {
-        // Mali-G610 reports 32KiB local memory, but cacheblend staged top-k
-        // becomes unstable once the dynamic local allocation crosses 8KiB.
-        // Keep the small staged path for low ratios and let high ratios use
-        // the legacy top-k path rather than returning invalid selected rows.
-        localMem = std::min<size_t>(localMem, 8 * 1024);
-    }
     if (std::max(stage1Bytes, stage2Bytes) > localMem) {
         return false;
     }
@@ -930,13 +936,30 @@ static bool _benchScoreSparseFamilyOverride(uint32_t* family) {
            _parseScoreSparseFamilyName(::getenv("MNN_PAGED_ATTENTION_BENCH_FORCE_SCORE_SPARSE_FAMILY"), family);
 }
 
+static bool _preferMaliLaterSparseQ8K16(OpenCLRuntime* runtime, int headDim, int kvLen, bool queryRowsAreFull) {
+    return runtime != nullptr && runtime->getGpuType() == GpuType::MALI && headDim == 128 &&
+        !queryRowsAreFull && kvLen > 0 && kvLen <= 2048;
+}
+
+static bool _maliHeadDim128SparseVariantSupported(uint32_t variant, int headDim, OpenCLRuntime* runtime, int kvLen) {
+    if (runtime == nullptr || runtime->getGpuType() != GpuType::MALI || headDim != 128) {
+        return false;
+    }
+    if (kvLen > 0 && kvLen <= 2048 && variant == kSparseFlashVariantMQTileHD128Q8K16) {
+        return true;
+    }
+    return variant == kSparseFlashVariantRow32;
+}
+
 static bool _sparseFlashVariantSupported(uint32_t variant, int headDim, OpenCLRuntime* runtime = nullptr,
-                                         int batch = 0, int kvHeads = 0, int kvLen = 0) {
-    if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI && headDim == 128) {
-        // Mali G610 can hard-hang on the larger headDim=128 sparse-flash variants
-        // at Qwen3-8B 2K+ high-budget shapes. Keep the production path on the
-        // smaller row32 kernel; Adreno keeps its image/mqtile variants below.
-        return variant == kSparseFlashVariantRow32;
+                                         int batch = 0, int kvHeads = 0, int kvLen = 0,
+                                         bool allowMaliExperimentalVariant = false) {
+    if (!allowMaliExperimentalVariant &&
+        runtime != nullptr && runtime->getGpuType() == GpuType::MALI && headDim == 128) {
+        // Keep Mali routing separate from Adreno image/mqtile logic. Qwen3-4B
+        // ctx1536/2048 validates q8k16 for later sparse layers; larger contexts
+        // remain on the smaller row32 kernel unless explicitly bench-forced.
+        return _maliHeadDim128SparseVariantSupported(variant, headDim, runtime, kvLen);
     }
     switch (variant) {
         case kSparseFlashVariantRow32:
@@ -971,6 +994,9 @@ static std::vector<uint32_t> _sparseFlashVariantCandidates(int headDim, OpenCLRu
     }
     if (headDim == 128) {
         if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI) {
+            if (_preferMaliLaterSparseQ8K16(runtime, headDim, kvLen, queryRowsAreFull)) {
+                return {kSparseFlashVariantMQTileHD128Q8K16};
+            }
             return {kSparseFlashVariantRow32};
         }
         const bool adrenoScoreFlash = queryRowsAreFull && runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO;
@@ -1085,7 +1111,8 @@ static uint32_t _defaultSparseFlashVariant(const PagedKVMeta* meta, int activeLe
                                            int batch = 0, int kvHeads = 0, int kvLen = 0) {
     uint32_t forcedVariant = 0;
     if (_benchSparseFlashVariantOverride(&forcedVariant) &&
-        _sparseFlashVariantSupported(forcedVariant, headDim, runtime, batch, kvHeads, kvLen)) {
+        _sparseFlashVariantSupported(forcedVariant, headDim, runtime, batch, kvHeads, kvLen,
+                                     true /* allowMaliExperimentalVariant */)) {
         return forcedVariant;
     }
     if (gSparseFlashVariantOverride >= 0 &&
@@ -1095,6 +1122,9 @@ static uint32_t _defaultSparseFlashVariant(const PagedKVMeta* meta, int activeLe
     }
     if (headDim == 128) {
         if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI) {
+            if (_preferMaliLaterSparseQ8K16(runtime, headDim, kvLen, queryRowsAreFull)) {
+                return kSparseFlashVariantMQTileHD128Q8K16;
+            }
             return kSparseFlashVariantRow32;
         }
         if (queryRowsAreFull && runtime != nullptr && runtime->getGpuType() == GpuType::ADRENO) {
@@ -1313,6 +1343,17 @@ static bool _rejectAdrenoSparseFlashVariantFromCache(uint32_t variant, OpenCLRun
         return false;
     }
     return _preferAdrenoSparseFlashKImage(runtime, batch, kvHeads, headDim, kvLen);
+}
+
+static bool _rejectMaliSparseFlashVariantFromCache(uint32_t variant, OpenCLRuntime* runtime, int headDim,
+                                                   int kvLen, bool queryRowsAreFull) {
+    if (runtime == nullptr || runtime->getGpuType() != GpuType::MALI || headDim != 128) {
+        return false;
+    }
+    if (_preferMaliLaterSparseQ8K16(runtime, headDim, kvLen, queryRowsAreFull)) {
+        return variant != kSparseFlashVariantMQTileHD128Q8K16;
+    }
+    return variant != kSparseFlashVariantRow32;
 }
 
 static bool _rejectAdrenoSparseFlashScheduleFromCache(uint32_t schedule, OpenCLRuntime* runtime, int batch,
@@ -2422,6 +2463,34 @@ ErrorCode PagedAttentionBufExecution::syncSparseQuery(int attnLen) {
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::syncDecodeAttentionHeadIds() {
+    if (mMeta == nullptr || mMeta->pic_decode_attention_head_ids.empty()) {
+        mDecodeAttentionHeadIdsHost.clear();
+        return NO_ERROR;
+    }
+    const auto& heads = mMeta->pic_decode_attention_head_ids;
+    if (mDecodeAttentionHeadIds == nullptr ||
+        mDecodeAttentionHeadIdCapacity < static_cast<int>(heads.size())) {
+        mDecodeAttentionHeadIds.reset(Tensor::createDevice<int>({static_cast<int>(heads.size())}));
+        if (!mDecodeAttentionHeadIds) {
+            return OUT_OF_MEMORY;
+        }
+        OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mDecodeAttentionHeadIds.get(), Backend::STATIC));
+        mDecodeAttentionHeadIdCapacity = static_cast<int>(heads.size());
+        mDecodeAttentionHeadIdsHost.clear();
+    }
+    if (mDecodeAttentionHeadIdsHost != heads) {
+        auto ret = mOpenCLBackend->getOpenCLRuntime()->commandQueue().enqueueWriteBuffer(
+            openCLBuffer(mDecodeAttentionHeadIds.get()), CL_TRUE, 0, heads.size() * sizeof(int), heads.data());
+        if (ret != CL_SUCCESS) {
+            mDecodeAttentionHeadIdsHost.clear();
+            return INVALID_VALUE;
+        }
+        mDecodeAttentionHeadIdsHost = heads;
+    }
+    return NO_ERROR;
+}
+
 static ErrorCode _emitActiveIndicesOpenCL(PagedKVMeta* meta, int layerIndex, int kvLen, Tensor* output,
                                           OpenCLBackend* backend) {
     if (output == nullptr) {
@@ -2710,6 +2779,35 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernel() {
     OPENCL_CHECK_KERNEL(mDecodeCausalKernel32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernel64);
     mDecodeCausalKernelGroupSize = groupSize;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureDecodeRepairKernel() {
+    if (mHeadDim != 128 || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    const int groupSize = mNumHead / mKvNumHead;
+    if (mDecodeRepairCausalKernelHD128Row32 && mDecodeRepairCausalKernelHD128Row64 &&
+        mDecodeAttentionRankScoreKernelHD128 &&
+        mDecodeRepairKernelGroupSize == groupSize) {
+        return NO_ERROR;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    mDecodeRepairCausalKernelHD128Row32 =
+        runtime->buildKernel("attention_buf", "decode_repair_causal_attention_hd128_row32",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mDecodeRepairCausalKernelHD128Row64 =
+        runtime->buildKernel("attention_buf", "decode_repair_causal_attention_hd128_row64",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
+    mDecodeAttentionRankScoreKernelHD128 =
+        runtime->buildKernel("attention_buf", "decode_attention_pic_rank_score_hd128", {},
+                             mOpenCLBackend->getPrecision());
+    OPENCL_CHECK_KERNEL(mDecodeRepairCausalKernelHD128Row32);
+    OPENCL_CHECK_KERNEL(mDecodeRepairCausalKernelHD128Row64);
+    OPENCL_CHECK_KERNEL(mDecodeAttentionRankScoreKernelHD128);
+    mDecodeRepairKernelGroupSize = groupSize;
     return NO_ERROR;
 }
 
@@ -3544,6 +3642,68 @@ ErrorCode PagedAttentionBufExecution::runCacheBlendScoring(int layerIndex, int k
     if (profileDetail) {
         readbackUs += _nowUs() - opStartUs;
     }
+    if (_compareCacheBlendTopK() && topKDispatch.useStage) {
+        const auto stagedErr = err;
+        const auto stagedReason = invalidReason;
+        const auto stagedSelected = selected;
+        CacheBlendTopKDispatch legacyDispatch;
+        std::vector<int> legacySelected;
+        std::string legacyReason;
+        auto legacyErr = runTopKFamily(legacyDispatch);
+        if (legacyErr == NO_ERROR) {
+            legacyErr = readAndValidateSelected(&legacySelected, &legacyReason);
+        }
+        auto summarize = [](const std::vector<int>& values) -> std::string {
+            std::ostringstream os;
+            os << "[";
+            const int count = std::min<int>(static_cast<int>(values.size()), 16);
+            for (int i = 0; i < count; ++i) {
+                if (i > 0) {
+                    os << ",";
+                }
+                os << values[static_cast<size_t>(i)];
+            }
+            if (static_cast<int>(values.size()) > count) {
+                os << ",...";
+            }
+            os << "]";
+            return os.str();
+        };
+        auto setEqual = [](std::vector<int> lhs, std::vector<int> rhs) -> bool {
+            std::sort(lhs.begin(), lhs.end());
+            std::sort(rhs.begin(), rhs.end());
+            return lhs == rhs;
+        };
+        int firstMismatch = -1;
+        const int compareCount = std::min<int>(static_cast<int>(stagedSelected.size()),
+                                               static_cast<int>(legacySelected.size()));
+        for (int i = 0; i < compareCount; ++i) {
+            if (stagedSelected[static_cast<size_t>(i)] != legacySelected[static_cast<size_t>(i)]) {
+                firstMismatch = i;
+                break;
+            }
+        }
+        if (firstMismatch < 0 && stagedSelected.size() != legacySelected.size()) {
+            firstMismatch = compareCount;
+        }
+        const bool bothValid = stagedErr == NO_ERROR && legacyErr == NO_ERROR;
+        const bool orderedEqual = bothValid && stagedSelected == legacySelected;
+        const bool sameSet = bothValid && setEqual(stagedSelected, legacySelected);
+        if (orderedEqual) {
+            MNN_PRINT("OpenCLPagedAttention cacheblend top-k compare layer=%d pic_tokens=%d top_k=%d "
+                      "staged=%s legacy=legacy ordered_equal=1 set_equal=1 sample=%s\n",
+                      layerIndex, picTokenCount, topK, _cacheBlendTopKFamilyName(topKDispatch.family),
+                      summarize(stagedSelected).c_str());
+        } else {
+            MNN_ERROR("OpenCLPagedAttention cacheblend top-k compare mismatch layer=%d pic_tokens=%d top_k=%d "
+                      "staged=%s staged_err=%d staged_reason=%s legacy_err=%d legacy_reason=%s "
+                      "ordered_equal=%d set_equal=%d first_mismatch=%d staged_sample=%s legacy_sample=%s\n",
+                      layerIndex, picTokenCount, topK, _cacheBlendTopKFamilyName(topKDispatch.family),
+                      static_cast<int>(stagedErr), stagedReason.c_str(), static_cast<int>(legacyErr),
+                      legacyReason.c_str(), orderedEqual ? 1 : 0, sameSet ? 1 : 0, firstMismatch,
+                      summarize(stagedSelected).c_str(), summarize(legacySelected).c_str());
+        }
+    }
     if (err != NO_ERROR && topKDispatch.useStage) {
         MNN_ERROR("OpenCLPagedAttention cacheblend staged top-k produced invalid selected rows, "
                   "retrying legacy path layer=%d pic_tokens=%d top_k=%d family=%s reason=%s\n",
@@ -3872,9 +4032,17 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
     if (err != NO_ERROR) {
         return err;
     }
+    uint32_t forcedSparseFlashVariant = 0;
+    const bool sparseFlashBenchOverride =
+        _benchSparseFlashVariantOverride(&forcedSparseFlashVariant) &&
+        _sparseFlashVariantSupported(forcedSparseFlashVariant, mHeadDim, runtime, mBatch, mKvNumHead, kvLen,
+                                     true /* allowMaliExperimentalVariant */);
     uint32_t sparseFlashVariant =
         _defaultSparseFlashVariant(mMeta, activeLen, mHeadDim, runtime, queryRowsAreFull, mBatch, mKvNumHead, kvLen);
-    uint32_t sparseFlashVariantSource = kTuneSelectionSourceDefault;
+    uint32_t sparseFlashVariantSource =
+        (sparseFlashBenchOverride && sparseFlashVariant == forcedSparseFlashVariant)
+            ? kTuneSelectionSourceBenchOverride
+            : kTuneSelectionSourceDefault;
     if (!gSparseFlashVariantTuneInProgress) {
         const std::string tuneKey =
             std::string("paged_sparse_flash_variant_") + _openCLTuneDeviceKey(runtime) + "_" +
@@ -3893,6 +4061,7 @@ ErrorCode PagedAttentionBufExecution::runSparseFastPrefill(const std::vector<Ten
         if (getTunedInfo(tuneKey, tuneShape, tuneInfo, runtime) && !tuneInfo.first.empty()) {
             const uint32_t tunedVariant = tuneInfo.first[0];
             if (_sparseFlashVariantSupported(tunedVariant, mHeadDim, runtime, mBatch, mKvNumHead, kvLen) &&
+                !_rejectMaliSparseFlashVariantFromCache(tunedVariant, runtime, mHeadDim, kvLen, queryRowsAreFull) &&
                 !_rejectAdrenoSparseFlashVariantFromCache(tunedVariant, runtime, mBatch, mKvNumHead,
                                                           mHeadDim, activeLen, kvLen, queryRowsAreFull)) {
                 sparseFlashVariant = tunedVariant;
@@ -4879,6 +5048,236 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttention(const std::vector
                   kvLen, lanes,
                   static_cast<unsigned long long>(denseWork),
                   static_cast<unsigned long long>(causalWork),
+                  static_cast<unsigned long long>(_nowUs() - startUs));
+    }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeAttentionRankCaptureOpenCL(const Tensor* query, int layerIndex,
+                                                                          int kvLen, int attnLen,
+                                                                          bool queryRowsAreFull) {
+    if (mMeta == nullptr || !mMeta->needsPicDecodeAttentionRankCapture(layerIndex)) {
+        return NO_ERROR;
+    }
+    if (query == nullptr || attnLen <= 0 || kvLen <= 0) {
+        return NO_ERROR;
+    }
+    if (mHeadDim != 128 || mCache == nullptr || !mCache->key || !mCache->slotTable || !mCache->sparseQuery) {
+        return NO_ERROR;
+    }
+    if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+        return NO_ERROR;
+    }
+    const int picStart = mMeta->pic_decode_attention_pic_start;
+    const int picTokenCount = mMeta->pic_decode_attention_pic_token_count;
+    const int topM = std::min(mMeta->pic_decode_attention_top_m, picTokenCount);
+    if (picStart < 0 || picTokenCount <= 0 || topM <= 0 || picStart + picTokenCount > kvLen ||
+        mBatch <= 0 || mNumHead <= 0 || mKvNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return NO_ERROR;
+    }
+    const int qIndex = attnLen - 1;
+    const int qLogical = mMeta->sparse_query_logical_indices[static_cast<size_t>(qIndex)];
+    const int qRow = queryRowsAreFull ? qLogical : qIndex;
+    if (qLogical < 0 || qLogical >= kvLen || qRow < 0 || qRow >= mQuerySeqLen ||
+        picStart + picTokenCount > qLogical + 1) {
+        return NO_ERROR;
+    }
+    if (!mMeta->pic_decode_attention_head_ids.empty()) {
+        bool hasValidHead = false;
+        for (int head : mMeta->pic_decode_attention_head_ids) {
+            if (head >= 0 && head < mNumHead) {
+                hasValidHead = true;
+                break;
+            }
+        }
+        if (!hasValidHead) {
+            return NO_ERROR;
+        }
+    }
+    auto err = ensureDecodeRepairKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    err = ensureCacheBlendScoreTemps(picTokenCount, topM, 0);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    err = syncDecodeAttentionHeadIds();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto& queue = runtime->commandQueue();
+    const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t scoreUs = 0;
+    uint64_t topKUs = 0;
+    uint64_t readbackUs = 0;
+
+    cl::Buffer& headIdsBuffer = (mDecodeAttentionHeadIds && !mMeta->pic_decode_attention_head_ids.empty())
+        ? openCLBuffer(mDecodeAttentionHeadIds.get())
+        : openCLBuffer(mCache->sparseQuery.get());
+    const int headIdCount = mMeta->pic_decode_attention_head_ids.empty()
+        ? 0
+        : static_cast<int>(mMeta->pic_decode_attention_head_ids.size());
+
+    uint32_t idx = 0;
+    cl_int ret = CL_SUCCESS;
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, openCLBuffer(query));
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, headIdsBuffer);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, mBatch);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, mQuerySeqLen);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, mNumHead);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, mKvNumHead);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, kvLen);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, mCache->maxSlots);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, picStart);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, picTokenCount);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, qRow);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, qLogical);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, headIdCount);
+    ret |= mDecodeAttentionRankScoreKernelHD128->get().setArg(idx++, mScale);
+    MNN_CHECK_CL_SUCCESS(ret, "setArg decode_attention_pic_rank_score_hd128");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    const uint64_t scoreStartUs = profileDetail ? _nowUs() : 0;
+    const size_t localSize = 128;
+    const size_t globalSize =
+        ((static_cast<size_t>(picTokenCount) + localSize - 1) / localSize) * localSize;
+    ret = queue.enqueueNDRangeKernel(mDecodeAttentionRankScoreKernelHD128->get(), cl::NullRange,
+                                     cl::NDRange(globalSize), cl::NDRange(localSize));
+    MNN_CHECK_CL_SUCCESS(ret, "enqueue decode_attention_pic_rank_score_hd128");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    if (profileDetail) {
+        queue.finish();
+        scoreUs = _nowUs() - scoreStartUs;
+    }
+
+    idx = 0;
+    ret = CL_SUCCESS;
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendScores.get()));
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, openCLBuffer(mCacheBlendIndices.get()));
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, picTokenCount);
+    ret |= mCacheBlendTopKKernel->get().setArg(idx++, topM);
+    MNN_CHECK_CL_SUCCESS(ret, "setArg decode_attention_rank_topk");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    const uint64_t topKStartUs = profileDetail ? _nowUs() : 0;
+    ret = queue.enqueueNDRangeKernel(mCacheBlendTopKKernel->get(), cl::NullRange,
+                                     cl::NDRange(256), cl::NDRange(256));
+    MNN_CHECK_CL_SUCCESS(ret, "enqueue decode_attention_rank_topk");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    if (profileDetail) {
+        queue.finish();
+        topKUs = _nowUs() - topKStartUs;
+    }
+
+    std::vector<int> selected(static_cast<size_t>(topM), -1);
+    const uint64_t readStartUs = profileDetail ? _nowUs() : 0;
+    ret = queue.enqueueReadBuffer(openCLBuffer(mCacheBlendIndices.get()), CL_TRUE, 0,
+                                  static_cast<size_t>(topM) * sizeof(int), selected.data());
+    MNN_CHECK_CL_SUCCESS(ret, "read decode_attention_rank_topk indices");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    if (profileDetail) {
+        readbackUs = _nowUs() - readStartUs;
+    }
+    mMeta->setPicDecodeAttentionRankResult(selected, mMeta->pic_decode_attention_step_idx);
+    if (profile) {
+        queue.finish();
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_attention_rank layer=%d pic_tokens=%d top_m=%d "
+                  "heads=%d q_logical=%d us=%llu score_us=%llu topk_us=%llu readback_us=%llu\n",
+                  layerIndex, picTokenCount, topM,
+                  headIdCount > 0 ? headIdCount : mNumHead, qLogical,
+                  static_cast<unsigned long long>(_nowUs() - startUs),
+                  static_cast<unsigned long long>(scoreUs),
+                  static_cast<unsigned long long>(topKUs),
+                  static_cast<unsigned long long>(readbackUs));
+    }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeRepairCausalAttentionHD128(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, bool queryRowsAreFull, int layerIndex) {
+    if (attnLen <= 0 || kvLen <= 0 || mHeadDim != 128 || mMeta == nullptr ||
+        static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeRepairKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto query = inputs[0];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    const bool profile = _profilePagedAttention();
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    const uint64_t causalWorkForLane = _sparseLogicalWork(mMeta, attnLen, kvLen);
+    const uint32_t lanes = (attnLen > 0 && causalWorkForLane / static_cast<uint64_t>(attnLen) >= 512u)
+        ? 64u : 32u;
+    auto kernel = lanes == 64u ? mDecodeRepairCausalKernelHD128Row64 : mDecodeRepairCausalKernelHD128Row32;
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    std::vector<uint32_t> gws = {
+        lanes,
+        static_cast<uint32_t>(attnLen),
+        static_cast<uint32_t>(mNumHead * mBatch),
+    };
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    ret |= kernel->get().setArg(idx++, gws[0]);
+    ret |= kernel->get().setArg(idx++, gws[1]);
+    ret |= kernel->get().setArg(idx++, gws[2]);
+    ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+    ret |= kernel->get().setArg(idx++, mScale);
+    ret |= kernel->get().setArg(idx++, mBatch);
+    ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= kernel->get().setArg(idx++, attnLen);
+    ret |= kernel->get().setArg(idx++, baseLogical);
+    ret |= kernel->get().setArg(idx++, 1);
+    ret |= kernel->get().setArg(idx++, queryRowsAreFull ? 1 : 0);
+    ret |= kernel->get().setArg(idx++, kvLen);
+    ret |= kernel->get().setArg(idx++, mCache->maxSlots);
+    ret |= kernel->get().setArg(idx++, mNumHead);
+    ret |= kernel->get().setArg(idx++, mKvNumHead);
+    ret |= kernel->get().setArg(idx++, mHeadDim);
+    MNN_CHECK_CL_SUCCESS(ret, lanes == 64u ? "setArg decode_repair_causal_attention_hd128_row64"
+                                           : "setArg decode_repair_causal_attention_hd128_row32");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    err = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, queryRowsAreFull);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    if (profile) {
+        runtime->commandQueue().finish();
+        const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_repair_causal_attention_hd128 layer=%d "
+                  "query=%d input_query=%d full_q=%d kv_len=%d lane=%u "
+                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
+                  layerIndex, attnLen, mQuerySeqLen, queryRowsAreFull ? 1 : 0, kvLen, lanes,
+                  static_cast<unsigned long long>(denseWork),
+                  static_cast<unsigned long long>(causalWorkForLane),
                   static_cast<unsigned long long>(_nowUs() - startUs));
     }
     return NO_ERROR;
@@ -5957,10 +6356,16 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     const bool repairDecodeCausal = picDecodeRecompute && sparseQuery;
     const bool ordinaryDecodeCausal = decodeStep && !sparseQuery && attnLen == 1 &&
         mQuerySeqLen == 1 && mNewKvSeqLen == 1;
-    if ((repairDecodeCausal || ordinaryDecodeCausal) && decodeCausalMask && mHeadDim == 64 &&
+    if ((repairDecodeCausal || ordinaryDecodeCausal) && decodeCausalMask &&
         mCache != nullptr && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery) {
-        return runDecodeCausalAttention(inputs, outputs, kvLen, attnLen, baseLogical, sparseQuery,
-                                        queryRowsAreFull);
+        if (repairDecodeCausal && mHeadDim == 128) {
+            return runDecodeRepairCausalAttentionHD128(inputs, outputs, kvLen, attnLen, baseLogical,
+                                                       queryRowsAreFull, layerIndex);
+        }
+        if (mHeadDim == 64) {
+            return runDecodeCausalAttention(inputs, outputs, kvLen, attnLen, baseLogical, sparseQuery,
+                                            queryRowsAreFull);
+        }
     }
     if (canUseFastPrefill(mask, baseLogical, attnLen, kvLen, sparseQuery, externalHydrated, &fastMaskKeyLen)) {
         return runFastPrefill(inputs, outputs, kvLen, fastMaskKeyLen);

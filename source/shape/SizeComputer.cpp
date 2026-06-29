@@ -37,11 +37,27 @@ SizeComputerSuite* SizeComputerSuite::get() {
     return gInstance;
 }
 
+static SizeComputerSuite* getOrInitSizeComputerSuite() {
+    auto suite = SizeComputerSuite::get();
+    if (suite == nullptr) {
+        SizeComputerSuite::init();
+        suite = SizeComputerSuite::get();
+    }
+    return suite;
+}
+
 void SizeComputerSuite::insert(SizeComputer* t, OpType type) {
+    if (type < 0 || type >= static_cast<OpType>(mRegistry.size())) {
+        delete t;
+        return;
+    }
     mRegistry[type] = t;
 }
 
 SizeComputer* SizeComputerSuite::search(OpType name) {
+    if (name < 0 || name >= static_cast<OpType>(mRegistry.size())) {
+        return nullptr;
+    }
     auto iter = mRegistry[name];
     if (iter == nullptr) {
         return nullptr;
@@ -56,7 +72,7 @@ float SizeComputer::onComputeFlops(const MNN::Op* op, const std::vector<Tensor*>
 
 float SizeComputer::computeFlops(const MNN::Op* op, const std::vector<Tensor*>& inputs,
                                  const std::vector<Tensor*>& outputs) {
-    auto computeFactory = SizeComputerSuite::get();
+    auto computeFactory = getOrInitSizeComputerSuite();
     auto computer       = computeFactory->search(op->type());
     if (nullptr != computer) {
         return computer->onComputeFlops(op, inputs, outputs);
@@ -119,7 +135,7 @@ static void _printShape(const MNN::Op* op, const std::vector<Tensor*>& inputs,
 
 bool SizeComputer::computeOutputSize(const MNN::Op* op, const std::vector<Tensor*>& inputs,
                                      const std::vector<Tensor*>& outputs) {
-    auto computeFactory = SizeComputerSuite::get();
+    auto computeFactory = getOrInitSizeComputerSuite();
     // When op is nullptr, it means a copy op
     if (nullptr != op) {
         if (op->main_type() == OpParameter_Blob) {
@@ -199,7 +215,7 @@ bool SizeComputer::computeOutputSize(const MNN::Op* op, const std::vector<Tensor
 }
 
 std::vector<int> SizeComputer::needInputContent(const MNN::Op* op, int inputSize) {
-    auto computeFactory = SizeComputerSuite::get();
+    auto computeFactory = getOrInitSizeComputerSuite();
     // When op is nullptr, it means a copy op
     if (nullptr != op) {
         // when hasOutputShape = true, deconv last is outputShape

@@ -622,6 +622,276 @@ private:
     std::shared_ptr<ConvFpAIntBExecution> mGateConv;
     std::shared_ptr<ConvFpAIntBExecution> mUpConv;
 };
+
+template<typename T, int OC_PER_BLK, int MAX_BATCH>
+__global__ void __launch_bounds__(128, 6) PicGateUpSiluInt4V14MBKernel(
+    const T* __restrict__ input,
+    const uint8_t* __restrict__ gateKernel,
+    const float2* __restrict__ gateParams,
+    const T* __restrict__ gateBias,
+    const uint8_t* __restrict__ upKernel,
+    const float2* __restrict__ upParams,
+    const T* __restrict__ upBias,
+    T* __restrict__ output,
+    const float maxV, const float minV,
+    const int batch, const int ic, const int icp,
+    const int oc, const int ocp, const int numQg
+) {
+    const int ocBase = blockIdx.x * OC_PER_BLK;
+    if (ocBase >= oc) {
+        return;
+    }
+    const int tid = threadIdx.x;
+    const int warpId = tid / 32;
+    const int laneId = tid % 32;
+    const int nwarps = blockDim.x / 32;
+    const int icPerGroup = ic / numQg;
+    const int rowBytes = icp / 2;
+
+    float gateAcc[MAX_BATCH * OC_PER_BLK];
+    float upAcc[MAX_BATCH * OC_PER_BLK];
+    #pragma unroll
+    for (int i = 0; i < MAX_BATCH * OC_PER_BLK; ++i) {
+        gateAcc[i] = 0.0f;
+        upAcc[i] = 0.0f;
+    }
+
+    const int stride = blockDim.x * 8;
+    for (int k = tid * 8; k < ic; k += stride) {
+        const int gidx = k / icPerGroup;
+        uint32_t gateW[OC_PER_BLK];
+        uint32_t upW[OC_PER_BLK];
+        float gateS[OC_PER_BLK], gateAdj[OC_PER_BLK];
+        float upS[OC_PER_BLK], upAdj[OC_PER_BLK];
+        #pragma unroll
+        for (int oi = 0; oi < OC_PER_BLK; ++oi) {
+            const int ocIdx = ocBase + oi;
+            if (ocIdx < oc) {
+                gateW[oi] = __ldg(reinterpret_cast<const uint32_t*>(
+                    gateKernel + ocIdx * rowBytes + k / 2));
+                upW[oi] = __ldg(reinterpret_cast<const uint32_t*>(
+                    upKernel + ocIdx * rowBytes + k / 2));
+                const float2 gp = __ldg(gateParams + ocIdx * numQg + gidx);
+                const float2 up = __ldg(upParams + ocIdx * numQg + gidx);
+                gateS[oi] = gp.x;
+                gateAdj[oi] = gp.y;
+                upS[oi] = up.x;
+                upAdj[oi] = up.y;
+            }
+        }
+
+        #pragma unroll
+        for (int b = 0; b < MAX_BATCH; ++b) {
+            if (b >= batch) {
+                break;
+            }
+            const T* inPtr = input + b * icp;
+            float inVals[8];
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                inVals[j] = (float)inPtr[k + j];
+            }
+            const float inputSum = inVals[0] + inVals[1] + inVals[2] + inVals[3] +
+                                   inVals[4] + inVals[5] + inVals[6] + inVals[7];
+            #pragma unroll
+            for (int oi = 0; oi < OC_PER_BLK; ++oi) {
+                if (ocBase + oi >= oc) {
+                    break;
+                }
+                float gateRaw = 0.0f;
+                float upRaw = 0.0f;
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const uint32_t gatePacked = (gateW[oi] >> (j * 8)) & 0xFF;
+                    const uint32_t upPacked = (upW[oi] >> (j * 8)) & 0xFF;
+                    gateRaw += inVals[j * 2] * (float)(gatePacked >> 4);
+                    gateRaw += inVals[j * 2 + 1] * (float)(gatePacked & 0x0F);
+                    upRaw += inVals[j * 2] * (float)(upPacked >> 4);
+                    upRaw += inVals[j * 2 + 1] * (float)(upPacked & 0x0F);
+                }
+                const int accIdx = b * OC_PER_BLK + oi;
+                gateAcc[accIdx] = fmaf(gateAdj[oi], inputSum, fmaf(gateS[oi], gateRaw, gateAcc[accIdx]));
+                upAcc[accIdx] = fmaf(upAdj[oi], inputSum, fmaf(upS[oi], upRaw, upAcc[accIdx]));
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int i = 0; i < MAX_BATCH * OC_PER_BLK; ++i) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            gateAcc[i] += __shfl_xor_sync(0xffffffff, gateAcc[i], off);
+            upAcc[i] += __shfl_xor_sync(0xffffffff, upAcc[i], off);
+        }
+    }
+
+    __shared__ float gateSmem[MAX_BATCH * OC_PER_BLK][4];
+    __shared__ float upSmem[MAX_BATCH * OC_PER_BLK][4];
+    if (laneId == 0) {
+        #pragma unroll
+        for (int i = 0; i < MAX_BATCH * OC_PER_BLK; ++i) {
+            gateSmem[i][warpId] = gateAcc[i];
+            upSmem[i][warpId] = upAcc[i];
+        }
+    }
+    __syncthreads();
+
+    const int reduceCount = batch * OC_PER_BLK;
+    if (tid < reduceCount) {
+        const int b = tid / OC_PER_BLK;
+        const int oi = tid % OC_PER_BLK;
+        if (ocBase + oi < oc) {
+            float gateResult = 0.0f;
+            float upResult = 0.0f;
+            for (int w = 0; w < nwarps; ++w) {
+                gateResult += gateSmem[tid][w];
+                upResult += upSmem[tid][w];
+            }
+            gateResult += (float)__ldg(&gateBias[ocBase + oi]);
+            upResult += (float)__ldg(&upBias[ocBase + oi]);
+            gateResult = fmaxf(fminf(gateResult, maxV), minV);
+            upResult = fmaxf(fminf(upResult, maxV), minV);
+            const float silu = gateResult > 87.0f ? gateResult :
+                (gateResult < -87.0f ? 0.0f : gateResult / (1.0f + __expf(-gateResult)));
+            output[b * ocp + ocBase + oi] = (T)(silu * upResult);
+        }
+    }
+}
+
+class PicGateUpSiluWeightOnlyExecution : public Execution {
+public:
+    PicGateUpSiluWeightOnlyExecution(const Op* op, Backend* backend) : Execution(backend) {
+        auto extra = op->main_as_Extra();
+        mGateSpec = parsePicGateUpConvSpec(extra, "gate");
+        mUpSpec = parsePicGateUpConvSpec(extra, "up");
+        const char* externalPath = op->externalPath() != nullptr ? op->externalPath()->c_str() : nullptr;
+        if (mGateSpec.ic <= 0 || mGateSpec.oc <= 0 || mUpSpec.ic != mGateSpec.ic || mUpSpec.oc != mGateSpec.oc) {
+            mValid = false;
+            return;
+        }
+        mGateOpBuffer = buildPicGateUpChildConvOp(mGateSpec, externalPath);
+        mUpOpBuffer = buildPicGateUpChildConvOp(mUpSpec, externalPath);
+        mGateOp = flatbuffers::GetRoot<Op>(mGateOpBuffer.data());
+        mUpOp = flatbuffers::GetRoot<Op>(mUpOpBuffer.data());
+        mGateResource.reset(new ConvFpAIntBExecution::Resource(backend, mGateOp));
+        mUpResource.reset(new ConvFpAIntBExecution::Resource(backend, mUpOp));
+        mGateConv.reset(new ConvFpAIntBExecution(backend, mGateOp, mGateResource));
+        mUpConv.reset(new ConvFpAIntBExecution(backend, mUpOp, mUpResource));
+        mSilu.reset(new PicSiluMulExecution(backend));
+    }
+
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (!mValid || inputs.size() != 1 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        mGateTemp.reset(Tensor::createDevice(outputs[0]->shape(), outputs[0]->getType(), outputs[0]->getDimensionType()));
+        mUpTemp.reset(Tensor::createDevice(outputs[0]->shape(), outputs[0]->getType(), outputs[0]->getDimensionType()));
+        if (mGateTemp == nullptr || mUpTemp == nullptr ||
+            !backend()->onAcquireBuffer(mGateTemp.get(), Backend::DYNAMIC) ||
+            !backend()->onAcquireBuffer(mUpTemp.get(), Backend::DYNAMIC)) {
+            return OUT_OF_MEMORY;
+        }
+        auto code = mGateConv->onResize(inputs, {mGateTemp.get()});
+        if (code == NO_ERROR) {
+            code = mUpConv->onResize(inputs, {mUpTemp.get()});
+        }
+        if (code == NO_ERROR) {
+            code = mSilu->onResize({mGateTemp.get(), mUpTemp.get()}, outputs);
+        }
+        backend()->onReleaseBuffer(mGateTemp.get(), Backend::DYNAMIC);
+        backend()->onReleaseBuffer(mUpTemp.get(), Backend::DYNAMIC);
+        return code;
+    }
+
+    virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (!mValid || inputs.size() != 1 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        auto meta = static_cast<KVMeta*>(static_cast<CUDABackend*>(backend())->getMetaPtr());
+        const bool decodeRepairActive = meta != nullptr && meta->pic_decode_repair_sparse_active;
+        if (canUseScalarFused(inputs, outputs, decodeRepairActive)) {
+            launchFused(inputs[0], outputs[0]);
+            return NO_ERROR;
+        }
+        auto code = mGateConv->onExecute(inputs, {mGateTemp.get()});
+        if (code != NO_ERROR) {
+            return code;
+        }
+        code = mUpConv->onExecute(inputs, {mUpTemp.get()});
+        if (code != NO_ERROR) {
+            return code;
+        }
+        return mSilu->onExecute({mGateTemp.get(), mUpTemp.get()}, outputs);
+    }
+
+private:
+    bool canUseScalarFused(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                           bool decodeRepairActive) const {
+        if (!decodeRepairActive) {
+            return false;
+        }
+        if (!mGateResource->mIsWeightInt4 || !mUpResource->mIsWeightInt4 ||
+            mGateResource->mGemvParams == nullptr || mUpResource->mGemvParams == nullptr) {
+            return false;
+        }
+        if (!static_cast<CUDABackend*>(backend())->useFp16()) {
+            return false;
+        }
+        const int batch = inputs[0]->batch();
+        if (batch < 2 || batch > 8) {
+            return false;
+        }
+        return outputs[0]->channel() == mGateSpec.oc;
+    }
+
+    void launchFused(const Tensor* input, Tensor* output) {
+        auto runtime = static_cast<CUDABackend*>(backend())->getCUDARuntime();
+        constexpr int kOcPerBlock = 2;
+        const int batch = input->batch();
+        const int ic = mGateSpec.ic;
+        const int icp = UP_DIV(ic, 8) * 8;
+        const int oc = mGateSpec.oc;
+        const int ocp = UP_DIV(oc, 8) * 8;
+        const int numQg = (mGateResource->mQuanC > 0) ? (mGateResource->mQuanC / oc) : 1;
+        dim3 grid((oc + kOcPerBlock - 1) / kOcPerBlock);
+        dim3 block(128);
+        if (batch <= 3) {
+            PicGateUpSiluInt4V14MBKernel<half, kOcPerBlock, 3><<<grid, block>>>(
+                reinterpret_cast<const half*>(input->deviceId()),
+                reinterpret_cast<const uint8_t*>(mGateResource->mFilter), mGateResource->mGemvParams,
+                reinterpret_cast<const half*>(mGateResource->mBias),
+                reinterpret_cast<const uint8_t*>(mUpResource->mFilter), mUpResource->mGemvParams,
+                reinterpret_cast<const half*>(mUpResource->mBias),
+                reinterpret_cast<half*>(output->deviceId()),
+                FLT_MAX, -FLT_MAX, batch, ic, icp, oc, ocp, numQg);
+        } else {
+            PicGateUpSiluInt4V14MBKernel<half, kOcPerBlock, 8><<<grid, block>>>(
+                reinterpret_cast<const half*>(input->deviceId()),
+                reinterpret_cast<const uint8_t*>(mGateResource->mFilter), mGateResource->mGemvParams,
+                reinterpret_cast<const half*>(mGateResource->mBias),
+                reinterpret_cast<const uint8_t*>(mUpResource->mFilter), mUpResource->mGemvParams,
+                reinterpret_cast<const half*>(mUpResource->mBias),
+                reinterpret_cast<half*>(output->deviceId()),
+                FLT_MAX, -FLT_MAX, batch, ic, icp, oc, ocp, numQg);
+        }
+        checkKernelErrors;
+    }
+
+    bool mValid = true;
+    PicGateUpConvSpec mGateSpec;
+    PicGateUpConvSpec mUpSpec;
+    std::vector<uint8_t> mGateOpBuffer;
+    std::vector<uint8_t> mUpOpBuffer;
+    const Op* mGateOp = nullptr;
+    const Op* mUpOp = nullptr;
+    std::shared_ptr<ConvFpAIntBExecution::Resource> mGateResource;
+    std::shared_ptr<ConvFpAIntBExecution::Resource> mUpResource;
+    std::shared_ptr<ConvFpAIntBExecution> mGateConv;
+    std::shared_ptr<ConvFpAIntBExecution> mUpConv;
+    std::shared_ptr<Execution> mSilu;
+    std::shared_ptr<Tensor> mGateTemp;
+    std::shared_ptr<Tensor> mUpTemp;
+};
 #endif
 
 #ifdef MNN_CODEGEN_CUDA
@@ -760,6 +1030,13 @@ public:
         if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicGateUpWeightOnly") {
 #ifdef MNN_LOW_MEMORY
             return new PicGateUpWeightOnlyExecution(op, backend);
+#else
+            return nullptr;
+#endif
+        }
+        if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicGateUpSiluWeightOnly") {
+#ifdef MNN_LOW_MEMORY
+            return new PicGateUpSiluWeightOnlyExecution(op, backend);
 #else
             return nullptr;
 #endif

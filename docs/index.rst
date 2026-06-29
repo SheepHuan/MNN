@@ -32,6 +32,7 @@ MNN 是一个高效、轻量的深度学习推理引擎，支持 CNN / Transform
    transformers/llm
    transformers/tokenizer
    transformers/models
+   transformers/pic_qtile_sparse_attention
 
 .. toctree::
    :maxdepth: 1

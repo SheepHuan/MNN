@@ -24,6 +24,7 @@ public:
     virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override;
+    std::shared_ptr<ConvBufResource> resource() const { return mResource; }
 private:
     int getExecuteTime();
     void getInfoFromOpLowMemory(void *weight_ptr);

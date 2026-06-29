@@ -534,6 +534,16 @@ void OpCommonUtils::rasterInputReset(const std::vector<Tensor *> &inputs, Tensor
         outputDes->regions[i].origin = inputs[i];
     }
 }
+static bool _isPicExtraWithExternalWeights(const MNN::Extra* extra) {
+    if (extra == nullptr || extra->type() == nullptr) {
+        return false;
+    }
+    const auto type = extra->type()->str();
+    return type == "PicGateUpWeightOnly" ||
+           type == "PicGateUpSiluWeightOnly" ||
+           type == "PicLinearNhwcWeightOnly";
+}
+
 static bool _RebuildExternalOp(FileLoader* external, const MNN::Op* origin, flatbuffers::FlatBufferBuilder& builder) {
     if (nullptr == external) {
         MNN_ERROR("Can't rebuild external op because external is nullptr\n");
@@ -653,8 +663,7 @@ static bool _RebuildExternalOp(FileLoader* external, const MNN::Op* origin, flat
         case OpParameter_Extra:
         {
             auto extra = origin->main_as_Extra();
-            if (extra != nullptr && extra->type() != nullptr &&
-                extra->type()->str() == "PicGateUpWeightOnly") {
+            if (_isPicExtraWithExternalWeights(extra)) {
                 std::unique_ptr<ExtraT> param(extra->UnPack());
                 externalPathFbb = builder.CreateString(external->path());
                 parameterMain = Extra::Pack(builder, param.get()).Union();
@@ -695,8 +704,7 @@ Execution* OpCommonUtils::createExecutionWithExternal(Backend* backend, const st
         case OpParameter_Extra:
         {
             auto extra = op->main_as_Extra();
-            hasExternal = extra != nullptr && extra->type() != nullptr &&
-                extra->type()->str() == "PicGateUpWeightOnly";
+            hasExternal = _isPicExtraWithExternalWeights(extra);
             break;
         }
         default:

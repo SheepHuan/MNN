@@ -7,16 +7,26 @@
 
 #include "CudaOpBenchUtils.hpp"
 #include "core/IDSTEncoder.hpp"
+#include "core/TensorUtils.hpp"
 
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
+#if __has_include(<cublasLt.h>)
+#include <cublasLt.h>
+#define MNN_BENCH_HAS_CUBLASLT 1
+#else
+#define MNN_BENCH_HAS_CUBLASLT 0
+#endif
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
+#include <sstream>
+#include <sys/stat.h>
 #include <utility>
 #include <vector>
 
@@ -42,6 +52,26 @@ struct GemmFloorCase {
     int oc;
     int warmup;
     int repeat;
+};
+
+struct LinearConvertChainCase {
+    const char* name;
+    int rows;
+    int ic;
+    int oc;
+    int quantBlock;
+    int warmup;
+    int repeat;
+};
+
+struct PicExternalPlan {
+    std::vector<int64_t> external;
+    int quantBit = 4;
+    int quantBlock = 64;
+    int aMin = 0;
+    int readType = 0;
+    bool shapeInt32 = false;
+    bool hasBias = false;
 };
 
 class CudaDeviceBuffer {
@@ -179,6 +209,79 @@ static std::unique_ptr<OpHolder> makePicPackedSiluMulOp(const char* name) {
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
+static std::string externalToString(const std::vector<int64_t>& external) {
+    std::ostringstream os;
+    for (size_t i = 0; i < external.size(); ++i) {
+        if (i > 0) {
+            os << ",";
+        }
+        os << external[i];
+    }
+    return os.str();
+}
+
+static void addStringAttr(ExtraT* extra, const std::string& key, const std::string& value) {
+    auto attr = std::unique_ptr<AttributeT>(new AttributeT);
+    attr->key = key;
+    attr->s = value;
+    extra->attr.emplace_back(std::move(attr));
+}
+
+static void addIntAttr(ExtraT* extra, const std::string& key, int value) {
+    auto attr = std::unique_ptr<AttributeT>(new AttributeT);
+    attr->key = key;
+    attr->i = value;
+    extra->attr.emplace_back(std::move(attr));
+}
+
+static void addPicGateUpConvAttrs(ExtraT* extra, const char* prefix, const char* name,
+                                  int ic, int oc, const PicExternalPlan& plan) {
+    const std::string p(prefix != nullptr ? prefix : "");
+    addStringAttr(extra, p + "_name", name != nullptr ? name : p);
+    addStringAttr(extra, p + "_external", externalToString(plan.external));
+    addIntAttr(extra, p + "_in_features", ic);
+    addIntAttr(extra, p + "_out_features", oc);
+    addIntAttr(extra, p + "_quant_bit", plan.quantBit);
+    addIntAttr(extra, p + "_quant_block", plan.quantBlock);
+    addIntAttr(extra, p + "_a_min", plan.aMin);
+    addIntAttr(extra, p + "_read_type", plan.readType);
+    addIntAttr(extra, p + "_shape_int32", plan.shapeInt32 ? 1 : 0);
+    addIntAttr(extra, p + "_has_bias", plan.hasBias ? 1 : 0);
+}
+
+static std::unique_ptr<OpHolder> makePicGateUpWeightOnlyExtraOp(const char* type, const char* name,
+                                                                const std::string& externalPath,
+                                                                int ic, int oc,
+                                                                const PicExternalPlan& gatePlan,
+                                                                const PicExternalPlan& upPlan) {
+    OpT op;
+    op.name = name != nullptr ? name : type;
+    op.type = OpType_Extra;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NHWC;
+    op.externalPath = externalPath;
+    op.main.type = OpParameter_Extra;
+    op.main.value = new ExtraT;
+    auto* extra = op.main.AsExtra();
+    extra->type = type != nullptr ? type : "PicGateUpWeightOnly";
+    extra->engine = "MNN";
+    addStringAttr(extra, "name", op.name);
+    addIntAttr(extra, "in_features", ic);
+    addIntAttr(extra, "out_features", oc);
+    addPicGateUpConvAttrs(extra, "gate", "bench_gate", ic, oc, gatePlan);
+    addPicGateUpConvAttrs(extra, "up", "bench_up", ic, oc, upPlan);
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
+static std::unique_ptr<OpHolder> makeRasterOp(const char* name) {
+    OpT op;
+    op.name = name != nullptr ? name : "bench_raster";
+    op.type = OpType_Raster;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NCHW;
+    op.main.type = OpParameter_NONE;
+    op.main.value = nullptr;
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
 static bool runWeightOnlyConvCase(const WeightOnlyConvCase& c) {
     KVMeta meta;
     meta.pic_decode_repair_sparse_active = true;
@@ -289,6 +392,94 @@ static bool requireMemoryLow(const char* testName) {
     return true;
 }
 
+static bool ensureBenchCacheDirs() {
+    ::mkdir(".cache", 0777);
+    ::mkdir(".cache/bench_ops", 0777);
+    return true;
+}
+
+static bool appendExternalInt4Linear(std::ofstream& out, int ic, int oc, int quantBlock,
+                                     int patternSalt, PicExternalPlan* plan) {
+    if (!out.good() || ic <= 0 || oc <= 0 || quantBlock <= 0 || plan == nullptr) {
+        return false;
+    }
+    const int blockCount = upDivInt(ic, quantBlock);
+    const size_t dataCount = static_cast<size_t>(ic) * static_cast<size_t>(oc);
+    const size_t packedBytes = (dataCount + 1) / 2;
+    const int64_t offset = static_cast<int64_t>(out.tellp());
+
+    const uint8_t dim = 2;
+    const uint16_t shape[2] = {static_cast<uint16_t>(oc), static_cast<uint16_t>(ic)};
+    const int8_t sampleCount = 16;
+    int8_t samples[16];
+    for (int i = 0; i < 16; ++i) {
+        samples[i] = static_cast<int8_t>(i - 8);
+    }
+    out.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
+    out.write(reinterpret_cast<const char*>(shape), sizeof(shape));
+    out.write(reinterpret_cast<const char*>(&sampleCount), sizeof(sampleCount));
+    out.write(reinterpret_cast<const char*>(samples), sizeof(samples));
+
+    std::vector<uint8_t> packed(packedBytes);
+    for (size_t i = 0; i < packedBytes; ++i) {
+        const int idx0 = static_cast<int>((((2 * i) * 13 + 7 + patternSalt) & 15));
+        int idx1 = 0;
+        if (2 * i + 1 < dataCount) {
+            idx1 = static_cast<int>((((2 * i + 1) * 13 + 7 + patternSalt) & 15));
+        }
+        packed[i] = static_cast<uint8_t>((idx0 << 4) | idx1);
+    }
+    out.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
+
+    std::vector<float> alpha(static_cast<size_t>(oc) * static_cast<size_t>(blockCount), 0.03125f);
+    out.write(reinterpret_cast<const char*>(alpha.data()),
+              static_cast<std::streamsize>(alpha.size() * sizeof(float)));
+    if (!out.good()) {
+        return false;
+    }
+
+    constexpr int headerBytes = 1 + 2 * 2 + 1 + 16;
+    const int64_t weightLen = static_cast<int64_t>(headerBytes + packed.size());
+    const int64_t alphaLen = static_cast<int64_t>(alpha.size() * sizeof(float));
+    plan->external = {offset, weightLen, alphaLen, 0, 0};
+    plan->quantBit = 4;
+    plan->quantBlock = quantBlock;
+    plan->aMin = 0;
+    plan->readType = 0;
+    plan->shapeInt32 = false;
+    plan->hasBias = false;
+    return true;
+}
+
+static std::string gateUpExternalWeightPath(int hidden, int inter, int quantBlock) {
+    const char* explicitPath = ::getenv("MNN_BENCH_MLP_EXTERNAL_WEIGHT");
+    if (explicitPath != nullptr && explicitPath[0] != '\0') {
+        return explicitPath;
+    }
+    ensureBenchCacheDirs();
+    char path[256];
+    ::snprintf(path, sizeof(path), ".cache/bench_ops/decode_repair_gateup_%d_%d_q%d.weight",
+               hidden, inter, quantBlock);
+    return path;
+}
+
+static bool buildGateUpExternalWeights(const std::string& path, int hidden, int inter, int quantBlock,
+                                       PicExternalPlan* gatePlan, PicExternalPlan* upPlan) {
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!out.good()) {
+        MNN_ERROR("failed to open %s for PicGateUp external weight\n", path.c_str());
+        return false;
+    }
+    if (!appendExternalInt4Linear(out, hidden, inter, quantBlock, 0, gatePlan)) {
+        return false;
+    }
+    if (!appendExternalInt4Linear(out, hidden, inter, quantBlock, 5, upPlan)) {
+        return false;
+    }
+    out.close();
+    return out.good();
+}
+
 static uint16_t floatToHalfBits(float value) {
     const __half h = __float2half(value);
     uint16_t bits = 0;
@@ -377,6 +568,109 @@ static bool checkCublas(cublasStatus_t status, const char* where) {
     return true;
 }
 
+#if MNN_BENCH_HAS_CUBLASLT
+static bool checkCublasLt(cublasStatus_t status, const char* where) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        MNN_ERROR("%s failed: %d\n", where, static_cast<int>(status));
+        return false;
+    }
+    return true;
+}
+
+class CublasLtMatmulPlan {
+public:
+    CublasLtMatmulPlan() = default;
+    ~CublasLtMatmulPlan() {
+        if (mPreference != nullptr) {
+            cublasLtMatmulPreferenceDestroy(mPreference);
+        }
+        if (mCDesc != nullptr) {
+            cublasLtMatrixLayoutDestroy(mCDesc);
+        }
+        if (mBDesc != nullptr) {
+            cublasLtMatrixLayoutDestroy(mBDesc);
+        }
+        if (mADesc != nullptr) {
+            cublasLtMatrixLayoutDestroy(mADesc);
+        }
+        if (mOpDesc != nullptr) {
+            cublasLtMatmulDescDestroy(mOpDesc);
+        }
+    }
+
+    CublasLtMatmulPlan(const CublasLtMatmulPlan&) = delete;
+    CublasLtMatmulPlan& operator=(const CublasLtMatmulPlan&) = delete;
+
+    bool init(cublasLtHandle_t handle, int rows, int ic, int oc, size_t workspaceBytes) {
+        cublasOperation_t transA = CUBLAS_OP_T;
+        cublasOperation_t transB = CUBLAS_OP_N;
+        if (!checkCublasLt(cublasLtMatmulDescCreate(&mOpDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F),
+                           "cublasLtMatmulDescCreate") ||
+            !checkCublasLt(cublasLtMatmulDescSetAttribute(
+                               mOpDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)),
+                           "cublasLtMatmulDescSetAttribute(TRANSA)") ||
+            !checkCublasLt(cublasLtMatmulDescSetAttribute(
+                               mOpDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)),
+                           "cublasLtMatmulDescSetAttribute(TRANSB)") ||
+            !checkCublasLt(cublasLtMatrixLayoutCreate(&mADesc, CUDA_R_16F, ic, oc, ic),
+                           "cublasLtMatrixLayoutCreate(A)") ||
+            !checkCublasLt(cublasLtMatrixLayoutCreate(&mBDesc, CUDA_R_16F, ic, rows, ic),
+                           "cublasLtMatrixLayoutCreate(B)") ||
+            !checkCublasLt(cublasLtMatrixLayoutCreate(&mCDesc, CUDA_R_16F, oc, rows, oc),
+                           "cublasLtMatrixLayoutCreate(C)") ||
+            !checkCublasLt(cublasLtMatmulPreferenceCreate(&mPreference),
+                           "cublasLtMatmulPreferenceCreate") ||
+            !checkCublasLt(cublasLtMatmulPreferenceSetAttribute(
+                               mPreference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                               &workspaceBytes, sizeof(workspaceBytes)),
+                           "cublasLtMatmulPreferenceSetAttribute(workspace)")) {
+            return false;
+        }
+
+        int returned = 0;
+        if (!checkCublasLt(cublasLtMatmulAlgoGetHeuristic(
+                               handle, mOpDesc, mADesc, mBDesc, mCDesc, mCDesc,
+                               mPreference, 1, &mHeuristic, &returned),
+                           "cublasLtMatmulAlgoGetHeuristic") ||
+            returned <= 0) {
+            MNN_ERROR("cublasLt did not return a heuristic for rows=%d ic=%d oc=%d\n", rows, ic, oc);
+            return false;
+        }
+        mReady = true;
+        return true;
+    }
+
+    bool run(cublasLtHandle_t handle, const void* weight, const void* input, void* output,
+             void* workspace, size_t workspaceBytes) const {
+        if (!mReady) {
+            return false;
+        }
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        return checkCublasLt(cublasLtMatmul(handle, mOpDesc,
+                                            &alpha,
+                                            weight, mADesc,
+                                            input, mBDesc,
+                                            &beta,
+                                            output, mCDesc,
+                                            output, mCDesc,
+                                            &mHeuristic.algo,
+                                            workspace, workspaceBytes,
+                                            0),
+                             "cublasLtMatmul");
+    }
+
+private:
+    cublasLtMatmulDesc_t mOpDesc = nullptr;
+    cublasLtMatrixLayout_t mADesc = nullptr;
+    cublasLtMatrixLayout_t mBDesc = nullptr;
+    cublasLtMatrixLayout_t mCDesc = nullptr;
+    cublasLtMatmulPreference_t mPreference = nullptr;
+    cublasLtMatmulHeuristicResult_t mHeuristic{};
+    bool mReady = false;
+};
+#endif
+
 static bool measureCudaBool(const std::function<bool()>& run, int warmup, int repeat, float* avgMs) {
     if (avgMs == nullptr || repeat <= 0) {
         return false;
@@ -417,6 +711,36 @@ static bool measureCudaBool(const std::function<bool()>& run, int warmup, int re
     *avgMs = totalMs / static_cast<float>(repeat);
     return true;
 }
+
+#if MNN_BENCH_HAS_CUBLASLT
+static bool runGemmLtFloorCase(cublasLtHandle_t handle, const GemmFloorCase& c, float* avgMs) {
+    constexpr size_t elemBytes = 2;
+    constexpr size_t workspaceBytes = 4ull * 1024ull * 1024ull;
+    CudaDeviceBuffer weight;
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer output;
+    CudaDeviceBuffer workspace;
+    if (!weight.alloc(static_cast<size_t>(c.oc) * static_cast<size_t>(c.ic) * elemBytes) ||
+        !input.alloc(static_cast<size_t>(c.ic) * static_cast<size_t>(c.rows) * elemBytes) ||
+        !output.alloc(static_cast<size_t>(c.oc) * static_cast<size_t>(c.rows) * elemBytes) ||
+        !workspace.alloc(workspaceBytes)) {
+        return false;
+    }
+    CublasLtMatmulPlan plan;
+    if (!plan.init(handle, c.rows, c.ic, c.oc, workspaceBytes)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return plan.run(handle, weight.get(), input.get(), output.get(), workspace.get(), workspaceBytes);
+        }, c.warmup, c.repeat, avgMs)) {
+        return false;
+    }
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor] %-18s rows=%d ic=%d oc=%d avg=%.4f ms\n",
+              c.name, c.rows, c.ic, c.oc, *avgMs);
+    ::fflush(stdout);
+    return true;
+}
+#endif
 
 static bool runFp16Gemm(cublasHandle_t handle, const void* weight, const void* input, void* output,
                         int rows, int ic, int oc) {
@@ -470,6 +794,91 @@ static bool runFp16GemmRowsByOc(cublasHandle_t handle, const void* weight, const
                        "cublasGemmEx(fp16 rows_by_oc floor)");
 }
 
+static bool runFp16GemmProductionLayout(cublasHandle_t handle, const void* weight, const void* input, void* output,
+                                        int rows, int ic, int icp, int oc, int ocp) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+#if CUDART_VERSION >= 11000
+    const auto computeType = CUBLAS_COMPUTE_32F;
+#else
+    const auto computeType = CUDA_R_32F;
+#endif
+#if CUDART_VERSION >= 9000
+    const auto algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+#else
+    const auto algo = CUBLAS_GEMM_DEFAULT;
+#endif
+    return checkCublas(cublasGemmEx(handle,
+                                    CUBLAS_OP_T, CUBLAS_OP_N,
+                                    oc, rows, ic,
+                                    &alpha,
+                                    weight, CUDA_R_16F, icp,
+                                    input, CUDA_R_16F, icp,
+                                    &beta,
+                                    output, CUDA_R_16F, ocp,
+                                    computeType, algo),
+                       "cublasGemmEx(fp16 production layout floor)");
+}
+
+static bool runFp16GemmBatchedProductionLayout(cublasHandle_t handle, const void* const* deviceA,
+                                               const void* const* deviceB, void* const* deviceC,
+                                               int rows, int ic, int icp, int oc, int ocp, int batchCount) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+#if CUDART_VERSION >= 11000
+    const auto computeType = CUBLAS_COMPUTE_32F;
+#else
+    const auto computeType = CUDA_R_32F;
+#endif
+#if CUDART_VERSION >= 9000
+    const auto algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+#else
+    const auto algo = CUBLAS_GEMM_DEFAULT;
+#endif
+    return checkCublas(cublasGemmBatchedEx(handle,
+                                           CUBLAS_OP_T, CUBLAS_OP_N,
+                                           oc, rows, ic,
+                                           &alpha,
+                                           deviceA, CUDA_R_16F, icp,
+                                           deviceB, CUDA_R_16F, icp,
+                                           &beta,
+                                           deviceC, CUDA_R_16F, ocp,
+                                           batchCount,
+                                           computeType, algo),
+                       "cublasGemmBatchedEx(fp16 production layout floor)");
+}
+
+static bool runFp16GemmStridedBatchedProductionLayout(cublasHandle_t handle, const void* weight, const void* input,
+                                                      void* output, int rows, int ic, int icp, int oc, int ocp,
+                                                      int batchCount) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+#if CUDART_VERSION >= 11000
+    const auto computeType = CUBLAS_COMPUTE_32F;
+#else
+    const auto computeType = CUDA_R_32F;
+#endif
+#if CUDART_VERSION >= 9000
+    const auto algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+#else
+    const auto algo = CUBLAS_GEMM_DEFAULT;
+#endif
+    const long long strideA = static_cast<long long>(ocp) * static_cast<long long>(icp);
+    const long long strideB = 0;
+    const long long strideC = static_cast<long long>(ocp) * static_cast<long long>(rows);
+    return checkCublas(cublasGemmStridedBatchedEx(handle,
+                                                  CUBLAS_OP_T, CUBLAS_OP_N,
+                                                  oc, rows, ic,
+                                                  &alpha,
+                                                  weight, CUDA_R_16F, icp, strideA,
+                                                  input, CUDA_R_16F, icp, strideB,
+                                                  &beta,
+                                                  output, CUDA_R_16F, ocp, strideC,
+                                                  batchCount,
+                                                  computeType, algo),
+                       "cublasGemmStridedBatchedEx(fp16 production layout floor)");
+}
+
 static bool runGemmFloorCase(cublasHandle_t handle, const GemmFloorCase& c, float* avgMs) {
     CudaDeviceBuffer weight;
     CudaDeviceBuffer input;
@@ -507,6 +916,660 @@ static bool runGemmFloorCaseRowsByOc(cublasHandle_t handle, const GemmFloorCase&
     }
     MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmFloor] %-18s rows=%d ic=%d oc=%d layout=rows_by_oc avg=%.4f ms\n",
               c.name, c.rows, c.ic, c.oc, *avgMs);
+    ::fflush(stdout);
+    return true;
+}
+
+static bool runGateUpBatchedGemmFloorCase(cublasHandle_t handle, int rows, int hidden, int inter,
+                                          int warmup, int repeat) {
+    constexpr size_t elemBytes = 2;
+    const int ic = hidden;
+    const int oc = inter;
+    const int icp = upDivInt(ic, 8) * 8;
+    const int ocp = upDivInt(oc, 8) * 8;
+    const size_t weightBytes = static_cast<size_t>(ocp) * static_cast<size_t>(icp) * elemBytes;
+    const size_t inputBytes = static_cast<size_t>(rows) * static_cast<size_t>(icp) * elemBytes;
+    const size_t outputBytes = static_cast<size_t>(rows) * static_cast<size_t>(ocp) * elemBytes;
+
+    CudaDeviceBuffer gateWeight;
+    CudaDeviceBuffer upWeight;
+    CudaDeviceBuffer packedWeight;
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer gateOutput;
+    CudaDeviceBuffer upOutput;
+    CudaDeviceBuffer packedOutput;
+    CudaDeviceBuffer pointerArrays;
+    if (!gateWeight.alloc(weightBytes) ||
+        !upWeight.alloc(weightBytes) ||
+        !packedWeight.alloc(weightBytes * 2) ||
+        !input.alloc(inputBytes) ||
+        !gateOutput.alloc(outputBytes) ||
+        !upOutput.alloc(outputBytes) ||
+        !packedOutput.alloc(outputBytes * 2) ||
+        !pointerArrays.alloc(sizeof(void*) * 6)) {
+        return false;
+    }
+
+    const void* hostA[2] = {gateWeight.get(), upWeight.get()};
+    const void* hostB[2] = {input.get(), input.get()};
+    void* hostC[2] = {gateOutput.get(), upOutput.get()};
+    if (!checkCuda(cudaMemcpy(pointerArrays.get(), hostA, sizeof(hostA), cudaMemcpyHostToDevice),
+                   "cudaMemcpy(gateup A pointer array)") ||
+        !checkCuda(cudaMemcpy(static_cast<uint8_t*>(pointerArrays.get()) + sizeof(hostA),
+                              hostB, sizeof(hostB), cudaMemcpyHostToDevice),
+                   "cudaMemcpy(gateup B pointer array)") ||
+        !checkCuda(cudaMemcpy(static_cast<uint8_t*>(pointerArrays.get()) + sizeof(hostA) + sizeof(hostB),
+                              hostC, sizeof(hostC), cudaMemcpyHostToDevice),
+                   "cudaMemcpy(gateup C pointer array)")) {
+        return false;
+    }
+    const void* const* deviceA = reinterpret_cast<const void* const*>(pointerArrays.get());
+    const void* const* deviceB = reinterpret_cast<const void* const*>(
+        static_cast<uint8_t*>(pointerArrays.get()) + sizeof(hostA));
+    void* const* deviceC = reinterpret_cast<void* const*>(
+        static_cast<uint8_t*>(pointerArrays.get()) + sizeof(hostA) + sizeof(hostB));
+
+    float gateMs = 0.0f;
+    float upMs = 0.0f;
+    float batchedPtrMs = 0.0f;
+    float batchedStridedMs = 0.0f;
+    if (!measureCudaBool([&]() {
+            return runFp16GemmProductionLayout(
+                handle, gateWeight.get(), input.get(), gateOutput.get(), rows, ic, icp, oc, ocp);
+        }, warmup, repeat, &gateMs)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return runFp16GemmProductionLayout(
+                handle, upWeight.get(), input.get(), upOutput.get(), rows, ic, icp, oc, ocp);
+        }, warmup, repeat, &upMs)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return runFp16GemmBatchedProductionLayout(
+                handle, deviceA, deviceB, deviceC, rows, ic, icp, oc, ocp, 2);
+        }, warmup, repeat, &batchedPtrMs)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return runFp16GemmStridedBatchedProductionLayout(
+                handle, packedWeight.get(), input.get(), packedOutput.get(), rows, ic, icp, oc, ocp, 2);
+        }, warmup, repeat, &batchedStridedMs)) {
+        return false;
+    }
+
+    const float separateMs = gateMs + upMs;
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairGateUpBatchedGemmFloor] rows=%d hidden=%d inter=%d "
+              "gate=%.4f ms up=%.4f ms separate_sum=%.4f ms "
+              "batched_ptr=%.4f ms ptr_delta=%.4f ms "
+              "batched_strided=%.4f ms strided_delta=%.4f ms\n",
+              rows, hidden, inter, gateMs, upMs, separateMs,
+              batchedPtrMs, batchedPtrMs - separateMs,
+              batchedStridedMs, batchedStridedMs - separateMs);
+    ::fflush(stdout);
+    return true;
+}
+
+static bool createTensorOpCublasHandle(cublasHandle_t* handle, cudaStream_t stream, const char* where) {
+    if (handle == nullptr || !checkCublas(cublasCreate(handle), where)) {
+        return false;
+    }
+#if CUDART_VERSION >= 9000
+    if (!checkCublas(cublasSetMathMode(*handle, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode(TENSOR_OP)")) {
+        return false;
+    }
+#endif
+    return checkCublas(cublasSetStream(*handle, stream), "cublasSetStream");
+}
+
+static bool measureGateUpSequentialPair(cublasHandle_t handle, cudaStream_t stream,
+                                        const void* gateWeight, const void* upWeight,
+                                        const void* input, void* gateOutput, void* upOutput,
+                                        int rows, int ic, int icp, int oc, int ocp,
+                                        int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0) {
+        return false;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate(seq start)") ||
+        !checkCuda(cudaEventCreate(&stop), "cudaEventCreate(seq stop)")) {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        return false;
+    }
+    auto destroyEvents = [&]() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+    };
+    auto runPair = [&]() -> bool {
+        return runFp16GemmProductionLayout(handle, gateWeight, input, gateOutput, rows, ic, icp, oc, ocp) &&
+               runFp16GemmProductionLayout(handle, upWeight, input, upOutput, rows, ic, icp, oc, ocp);
+    };
+    for (int i = 0; i < warmup; ++i) {
+        if (!runPair()) {
+            destroyEvents();
+            return false;
+        }
+    }
+    if (!checkCuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize(seq warmup)")) {
+        destroyEvents();
+        return false;
+    }
+    float totalMs = 0.0f;
+    for (int i = 0; i < repeat; ++i) {
+        if (!checkCuda(cudaEventRecord(start, stream), "cudaEventRecord(seq start)")) {
+            destroyEvents();
+            return false;
+        }
+        if (!runPair()) {
+            destroyEvents();
+            return false;
+        }
+        if (!checkCuda(cudaEventRecord(stop, stream), "cudaEventRecord(seq stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(seq stop)")) {
+            destroyEvents();
+            return false;
+        }
+        float iterMs = 0.0f;
+        if (!checkCuda(cudaEventElapsedTime(&iterMs, start, stop), "cudaEventElapsedTime(seq)")) {
+            destroyEvents();
+            return false;
+        }
+        totalMs += iterMs;
+    }
+    destroyEvents();
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool measureGateUpParallelPair(cublasHandle_t gateHandle, cublasHandle_t upHandle,
+                                      cudaStream_t gateStream, cudaStream_t upStream, cudaStream_t timingStream,
+                                      const void* gateWeight, const void* upWeight,
+                                      const void* input, void* gateOutput, void* upOutput,
+                                      int rows, int ic, int icp, int oc, int ocp,
+                                      int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0) {
+        return false;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t gateDone = nullptr;
+    cudaEvent_t upDone = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate(par start)") ||
+        !checkCuda(cudaEventCreate(&gateDone), "cudaEventCreate(par gateDone)") ||
+        !checkCuda(cudaEventCreate(&upDone), "cudaEventCreate(par upDone)") ||
+        !checkCuda(cudaEventCreate(&stop), "cudaEventCreate(par stop)")) {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (gateDone != nullptr) {
+            cudaEventDestroy(gateDone);
+        }
+        if (upDone != nullptr) {
+            cudaEventDestroy(upDone);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        return false;
+    }
+    auto destroyEvents = [&]() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(gateDone);
+        cudaEventDestroy(upDone);
+        cudaEventDestroy(stop);
+    };
+    auto runPair = [&]() -> bool {
+        if (!checkCuda(cudaEventRecord(start, timingStream), "cudaEventRecord(par start)") ||
+            !checkCuda(cudaStreamWaitEvent(gateStream, start, 0), "cudaStreamWaitEvent(gate start)") ||
+            !checkCuda(cudaStreamWaitEvent(upStream, start, 0), "cudaStreamWaitEvent(up start)")) {
+            return false;
+        }
+        if (!runFp16GemmProductionLayout(gateHandle, gateWeight, input, gateOutput, rows, ic, icp, oc, ocp) ||
+            !runFp16GemmProductionLayout(upHandle, upWeight, input, upOutput, rows, ic, icp, oc, ocp)) {
+            return false;
+        }
+        return checkCuda(cudaEventRecord(gateDone, gateStream), "cudaEventRecord(gate done)") &&
+               checkCuda(cudaEventRecord(upDone, upStream), "cudaEventRecord(up done)") &&
+               checkCuda(cudaStreamWaitEvent(timingStream, gateDone, 0), "cudaStreamWaitEvent(timing gate done)") &&
+               checkCuda(cudaStreamWaitEvent(timingStream, upDone, 0), "cudaStreamWaitEvent(timing up done)");
+    };
+    for (int i = 0; i < warmup; ++i) {
+        if (!runPair() ||
+            !checkCuda(cudaEventRecord(stop, timingStream), "cudaEventRecord(par warm stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(par warm stop)")) {
+            destroyEvents();
+            return false;
+        }
+    }
+    float totalMs = 0.0f;
+    for (int i = 0; i < repeat; ++i) {
+        if (!runPair() ||
+            !checkCuda(cudaEventRecord(stop, timingStream), "cudaEventRecord(par stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(par stop)")) {
+            destroyEvents();
+            return false;
+        }
+        float iterMs = 0.0f;
+        if (!checkCuda(cudaEventElapsedTime(&iterMs, start, stop), "cudaEventElapsedTime(par)")) {
+            destroyEvents();
+            return false;
+        }
+        totalMs += iterMs;
+    }
+    destroyEvents();
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool runGateUpParallelGemmFloorCase(int rows, int hidden, int inter, int warmup, int repeat) {
+    constexpr size_t elemBytes = 2;
+    const int ic = hidden;
+    const int oc = inter;
+    const int icp = upDivInt(ic, 8) * 8;
+    const int ocp = upDivInt(oc, 8) * 8;
+    const size_t weightBytes = static_cast<size_t>(ocp) * static_cast<size_t>(icp) * elemBytes;
+    const size_t inputBytes = static_cast<size_t>(rows) * static_cast<size_t>(icp) * elemBytes;
+    const size_t outputBytes = static_cast<size_t>(rows) * static_cast<size_t>(ocp) * elemBytes;
+
+    CudaDeviceBuffer gateWeight;
+    CudaDeviceBuffer upWeight;
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer gateOutput;
+    CudaDeviceBuffer upOutput;
+    if (!gateWeight.alloc(weightBytes) ||
+        !upWeight.alloc(weightBytes) ||
+        !input.alloc(inputBytes) ||
+        !gateOutput.alloc(outputBytes) ||
+        !upOutput.alloc(outputBytes)) {
+        return false;
+    }
+
+    cudaStream_t seqStream = nullptr;
+    cudaStream_t gateStream = nullptr;
+    cudaStream_t upStream = nullptr;
+    cudaStream_t timingStream = nullptr;
+    cublasHandle_t seqHandle = nullptr;
+    cublasHandle_t gateHandle = nullptr;
+    cublasHandle_t upHandle = nullptr;
+    auto cleanup = [&]() {
+        if (seqHandle != nullptr) {
+            cublasDestroy(seqHandle);
+        }
+        if (gateHandle != nullptr) {
+            cublasDestroy(gateHandle);
+        }
+        if (upHandle != nullptr) {
+            cublasDestroy(upHandle);
+        }
+        if (seqStream != nullptr) {
+            cudaStreamDestroy(seqStream);
+        }
+        if (gateStream != nullptr) {
+            cudaStreamDestroy(gateStream);
+        }
+        if (upStream != nullptr) {
+            cudaStreamDestroy(upStream);
+        }
+        if (timingStream != nullptr) {
+            cudaStreamDestroy(timingStream);
+        }
+    };
+    if (!checkCuda(cudaStreamCreateWithFlags(&seqStream, cudaStreamNonBlocking), "cudaStreamCreate(seq)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&gateStream, cudaStreamNonBlocking), "cudaStreamCreate(gate)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&upStream, cudaStreamNonBlocking), "cudaStreamCreate(up)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&timingStream, cudaStreamNonBlocking), "cudaStreamCreate(timing)") ||
+        !createTensorOpCublasHandle(&seqHandle, seqStream, "cublasCreate(seq)") ||
+        !createTensorOpCublasHandle(&gateHandle, gateStream, "cublasCreate(gate)") ||
+        !createTensorOpCublasHandle(&upHandle, upStream, "cublasCreate(up)")) {
+        cleanup();
+        return false;
+    }
+
+    float sequentialMs = 0.0f;
+    float parallelMs = 0.0f;
+    if (!measureGateUpSequentialPair(seqHandle, seqStream,
+                                     gateWeight.get(), upWeight.get(), input.get(),
+                                     gateOutput.get(), upOutput.get(),
+                                     rows, ic, icp, oc, ocp, warmup, repeat, &sequentialMs) ||
+        !measureGateUpParallelPair(gateHandle, upHandle, gateStream, upStream, timingStream,
+                                   gateWeight.get(), upWeight.get(), input.get(),
+                                   gateOutput.get(), upOutput.get(),
+                                   rows, ic, icp, oc, ocp, warmup, repeat, &parallelMs)) {
+        cleanup();
+        return false;
+    }
+    cleanup();
+    const float delta = parallelMs - sequentialMs;
+    const float speedup = parallelMs > 0.0f ? sequentialMs / parallelMs : 0.0f;
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairGateUpParallelGemmFloor] rows=%d hidden=%d inter=%d "
+              "sequential_pair=%.4f ms parallel_pair=%.4f ms delta=%.4f ms speedup=%.3f\n",
+              rows, hidden, inter, sequentialMs, parallelMs, delta, speedup);
+    ::fflush(stdout);
+    return true;
+}
+
+static bool measureGemmProductionLayoutOnStream(cublasHandle_t handle, cudaStream_t stream,
+                                                const void* weight, const void* input, void* output,
+                                                int rows, int ic, int icp, int oc, int ocp,
+                                                int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0) {
+        return false;
+    }
+    for (int i = 0; i < warmup; ++i) {
+        if (!runFp16GemmProductionLayout(handle, weight, input, output, rows, ic, icp, oc, ocp)) {
+            return false;
+        }
+    }
+    if (!checkCuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize(gemm stream warmup)")) {
+        return false;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate(gemm stream start)") ||
+        !checkCuda(cudaEventCreate(&stop), "cudaEventCreate(gemm stream stop)")) {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        return false;
+    }
+    bool ok = checkCuda(cudaEventRecord(start, stream), "cudaEventRecord(gemm stream start)");
+    for (int i = 0; ok && i < repeat; ++i) {
+        ok = runFp16GemmProductionLayout(handle, weight, input, output, rows, ic, icp, oc, ocp);
+    }
+    ok = ok && checkCuda(cudaEventRecord(stop, stream), "cudaEventRecord(gemm stream stop)");
+    ok = ok && checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(gemm stream stop)");
+    float totalMs = 0.0f;
+    ok = ok && checkCuda(cudaEventElapsedTime(&totalMs, start, stop), "cudaEventElapsedTime(gemm stream)");
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    if (!ok) {
+        return false;
+    }
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool measureQkvSequentialTriple(cublasHandle_t handle, cudaStream_t stream,
+                                       const void* qWeight, const void* kWeight, const void* vWeight,
+                                       const void* input, void* qOutput, void* kOutput, void* vOutput,
+                                       int rows, int hidden, int hiddenPadded, int kv, int kvPadded,
+                                       int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0) {
+        return false;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate(qkv seq start)") ||
+        !checkCuda(cudaEventCreate(&stop), "cudaEventCreate(qkv seq stop)")) {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        return false;
+    }
+    auto destroyEvents = [&]() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+    };
+    auto runTriple = [&]() -> bool {
+        return runFp16GemmProductionLayout(handle, qWeight, input, qOutput,
+                                           rows, hidden, hiddenPadded, hidden, hiddenPadded) &&
+               runFp16GemmProductionLayout(handle, kWeight, input, kOutput,
+                                           rows, hidden, hiddenPadded, kv, kvPadded) &&
+               runFp16GemmProductionLayout(handle, vWeight, input, vOutput,
+                                           rows, hidden, hiddenPadded, kv, kvPadded);
+    };
+    for (int i = 0; i < warmup; ++i) {
+        if (!runTriple()) {
+            destroyEvents();
+            return false;
+        }
+    }
+    if (!checkCuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize(qkv seq warmup)")) {
+        destroyEvents();
+        return false;
+    }
+    float totalMs = 0.0f;
+    for (int i = 0; i < repeat; ++i) {
+        if (!checkCuda(cudaEventRecord(start, stream), "cudaEventRecord(qkv seq start)") ||
+            !runTriple() ||
+            !checkCuda(cudaEventRecord(stop, stream), "cudaEventRecord(qkv seq stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(qkv seq stop)")) {
+            destroyEvents();
+            return false;
+        }
+        float iterMs = 0.0f;
+        if (!checkCuda(cudaEventElapsedTime(&iterMs, start, stop), "cudaEventElapsedTime(qkv seq)")) {
+            destroyEvents();
+            return false;
+        }
+        totalMs += iterMs;
+    }
+    destroyEvents();
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool measureQkvParallelTriple(cublasHandle_t qHandle, cublasHandle_t kHandle, cublasHandle_t vHandle,
+                                     cudaStream_t qStream, cudaStream_t kStream, cudaStream_t vStream,
+                                     cudaStream_t timingStream,
+                                     const void* qWeight, const void* kWeight, const void* vWeight,
+                                     const void* input, void* qOutput, void* kOutput, void* vOutput,
+                                     int rows, int hidden, int hiddenPadded, int kv, int kvPadded,
+                                     int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0) {
+        return false;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t qDone = nullptr;
+    cudaEvent_t kDone = nullptr;
+    cudaEvent_t vDone = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate(qkv par start)") ||
+        !checkCuda(cudaEventCreate(&qDone), "cudaEventCreate(qkv qDone)") ||
+        !checkCuda(cudaEventCreate(&kDone), "cudaEventCreate(qkv kDone)") ||
+        !checkCuda(cudaEventCreate(&vDone), "cudaEventCreate(qkv vDone)") ||
+        !checkCuda(cudaEventCreate(&stop), "cudaEventCreate(qkv par stop)")) {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (qDone != nullptr) {
+            cudaEventDestroy(qDone);
+        }
+        if (kDone != nullptr) {
+            cudaEventDestroy(kDone);
+        }
+        if (vDone != nullptr) {
+            cudaEventDestroy(vDone);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        return false;
+    }
+    auto destroyEvents = [&]() {
+        cudaEventDestroy(start);
+        cudaEventDestroy(qDone);
+        cudaEventDestroy(kDone);
+        cudaEventDestroy(vDone);
+        cudaEventDestroy(stop);
+    };
+    auto runTriple = [&]() -> bool {
+        if (!checkCuda(cudaEventRecord(start, timingStream), "cudaEventRecord(qkv par start)") ||
+            !checkCuda(cudaStreamWaitEvent(qStream, start, 0), "cudaStreamWaitEvent(q start)") ||
+            !checkCuda(cudaStreamWaitEvent(kStream, start, 0), "cudaStreamWaitEvent(k start)") ||
+            !checkCuda(cudaStreamWaitEvent(vStream, start, 0), "cudaStreamWaitEvent(v start)")) {
+            return false;
+        }
+        if (!runFp16GemmProductionLayout(qHandle, qWeight, input, qOutput,
+                                         rows, hidden, hiddenPadded, hidden, hiddenPadded) ||
+            !runFp16GemmProductionLayout(kHandle, kWeight, input, kOutput,
+                                         rows, hidden, hiddenPadded, kv, kvPadded) ||
+            !runFp16GemmProductionLayout(vHandle, vWeight, input, vOutput,
+                                         rows, hidden, hiddenPadded, kv, kvPadded)) {
+            return false;
+        }
+        return checkCuda(cudaEventRecord(qDone, qStream), "cudaEventRecord(q done)") &&
+               checkCuda(cudaEventRecord(kDone, kStream), "cudaEventRecord(k done)") &&
+               checkCuda(cudaEventRecord(vDone, vStream), "cudaEventRecord(v done)") &&
+               checkCuda(cudaStreamWaitEvent(timingStream, qDone, 0), "cudaStreamWaitEvent(timing q done)") &&
+               checkCuda(cudaStreamWaitEvent(timingStream, kDone, 0), "cudaStreamWaitEvent(timing k done)") &&
+               checkCuda(cudaStreamWaitEvent(timingStream, vDone, 0), "cudaStreamWaitEvent(timing v done)");
+    };
+    for (int i = 0; i < warmup; ++i) {
+        if (!runTriple() ||
+            !checkCuda(cudaEventRecord(stop, timingStream), "cudaEventRecord(qkv warm stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(qkv warm stop)")) {
+            destroyEvents();
+            return false;
+        }
+    }
+    float totalMs = 0.0f;
+    for (int i = 0; i < repeat; ++i) {
+        if (!runTriple() ||
+            !checkCuda(cudaEventRecord(stop, timingStream), "cudaEventRecord(qkv par stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(qkv par stop)")) {
+            destroyEvents();
+            return false;
+        }
+        float iterMs = 0.0f;
+        if (!checkCuda(cudaEventElapsedTime(&iterMs, start, stop), "cudaEventElapsedTime(qkv par)")) {
+            destroyEvents();
+            return false;
+        }
+        totalMs += iterMs;
+    }
+    destroyEvents();
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool runQkvParallelGemmFloorCase(int rows, int hidden, int kv, int warmup, int repeat) {
+    constexpr size_t elemBytes = 2;
+    const int hiddenPadded = upDivInt(hidden, 8) * 8;
+    const int kvPadded = upDivInt(kv, 8) * 8;
+    const size_t qWeightBytes = static_cast<size_t>(hiddenPadded) * static_cast<size_t>(hiddenPadded) * elemBytes;
+    const size_t kvWeightBytes = static_cast<size_t>(kvPadded) * static_cast<size_t>(hiddenPadded) * elemBytes;
+    const size_t inputBytes = static_cast<size_t>(rows) * static_cast<size_t>(hiddenPadded) * elemBytes;
+    const size_t qOutputBytes = static_cast<size_t>(rows) * static_cast<size_t>(hiddenPadded) * elemBytes;
+    const size_t kvOutputBytes = static_cast<size_t>(rows) * static_cast<size_t>(kvPadded) * elemBytes;
+
+    CudaDeviceBuffer qWeight;
+    CudaDeviceBuffer kWeight;
+    CudaDeviceBuffer vWeight;
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer qOutput;
+    CudaDeviceBuffer kOutput;
+    CudaDeviceBuffer vOutput;
+    if (!qWeight.alloc(qWeightBytes) ||
+        !kWeight.alloc(kvWeightBytes) ||
+        !vWeight.alloc(kvWeightBytes) ||
+        !input.alloc(inputBytes) ||
+        !qOutput.alloc(qOutputBytes) ||
+        !kOutput.alloc(kvOutputBytes) ||
+        !vOutput.alloc(kvOutputBytes)) {
+        return false;
+    }
+
+    cudaStream_t seqStream = nullptr;
+    cudaStream_t qStream = nullptr;
+    cudaStream_t kStream = nullptr;
+    cudaStream_t vStream = nullptr;
+    cudaStream_t timingStream = nullptr;
+    cublasHandle_t seqHandle = nullptr;
+    cublasHandle_t qHandle = nullptr;
+    cublasHandle_t kHandle = nullptr;
+    cublasHandle_t vHandle = nullptr;
+    auto cleanup = [&]() {
+        if (seqHandle != nullptr) {
+            cublasDestroy(seqHandle);
+        }
+        if (qHandle != nullptr) {
+            cublasDestroy(qHandle);
+        }
+        if (kHandle != nullptr) {
+            cublasDestroy(kHandle);
+        }
+        if (vHandle != nullptr) {
+            cublasDestroy(vHandle);
+        }
+        if (seqStream != nullptr) {
+            cudaStreamDestroy(seqStream);
+        }
+        if (qStream != nullptr) {
+            cudaStreamDestroy(qStream);
+        }
+        if (kStream != nullptr) {
+            cudaStreamDestroy(kStream);
+        }
+        if (vStream != nullptr) {
+            cudaStreamDestroy(vStream);
+        }
+        if (timingStream != nullptr) {
+            cudaStreamDestroy(timingStream);
+        }
+    };
+    if (!checkCuda(cudaStreamCreateWithFlags(&seqStream, cudaStreamNonBlocking), "cudaStreamCreate(qkv seq)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&qStream, cudaStreamNonBlocking), "cudaStreamCreate(q)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&kStream, cudaStreamNonBlocking), "cudaStreamCreate(k)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&vStream, cudaStreamNonBlocking), "cudaStreamCreate(v)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&timingStream, cudaStreamNonBlocking), "cudaStreamCreate(qkv timing)") ||
+        !createTensorOpCublasHandle(&seqHandle, seqStream, "cublasCreate(qkv seq)") ||
+        !createTensorOpCublasHandle(&qHandle, qStream, "cublasCreate(q)") ||
+        !createTensorOpCublasHandle(&kHandle, kStream, "cublasCreate(k)") ||
+        !createTensorOpCublasHandle(&vHandle, vStream, "cublasCreate(v)")) {
+        cleanup();
+        return false;
+    }
+
+    float qMs = 0.0f;
+    float kMs = 0.0f;
+    float vMs = 0.0f;
+    float sequentialMs = 0.0f;
+    float parallelMs = 0.0f;
+    if (!measureGemmProductionLayoutOnStream(seqHandle, seqStream,
+                                             qWeight.get(), input.get(), qOutput.get(),
+                                             rows, hidden, hiddenPadded, hidden, hiddenPadded,
+                                             warmup, repeat, &qMs) ||
+        !measureGemmProductionLayoutOnStream(seqHandle, seqStream,
+                                             kWeight.get(), input.get(), kOutput.get(),
+                                             rows, hidden, hiddenPadded, kv, kvPadded,
+                                             warmup, repeat, &kMs) ||
+        !measureGemmProductionLayoutOnStream(seqHandle, seqStream,
+                                             vWeight.get(), input.get(), vOutput.get(),
+                                             rows, hidden, hiddenPadded, kv, kvPadded,
+                                             warmup, repeat, &vMs) ||
+        !measureQkvSequentialTriple(seqHandle, seqStream,
+                                    qWeight.get(), kWeight.get(), vWeight.get(), input.get(),
+                                    qOutput.get(), kOutput.get(), vOutput.get(),
+                                    rows, hidden, hiddenPadded, kv, kvPadded, warmup, repeat, &sequentialMs) ||
+        !measureQkvParallelTriple(qHandle, kHandle, vHandle, qStream, kStream, vStream, timingStream,
+                                  qWeight.get(), kWeight.get(), vWeight.get(), input.get(),
+                                  qOutput.get(), kOutput.get(), vOutput.get(),
+                                  rows, hidden, hiddenPadded, kv, kvPadded, warmup, repeat, &parallelMs)) {
+        cleanup();
+        return false;
+    }
+    cleanup();
+    const float individualSumMs = qMs + kMs + vMs;
+    const float delta = parallelMs - sequentialMs;
+    const float speedup = parallelMs > 0.0f ? sequentialMs / parallelMs : 0.0f;
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairQkvParallelGemmFloor] rows=%d hidden=%d kv=%d "
+              "q=%.4f ms k=%.4f ms v=%.4f ms individual_sum=%.4f ms "
+              "sequential_triple=%.4f ms parallel_triple=%.4f ms delta=%.4f ms speedup=%.3f\n",
+              rows, hidden, kv, qMs, kMs, vMs, individualSumMs,
+              sequentialMs, parallelMs, delta, speedup);
     ::fflush(stdout);
     return true;
 }
@@ -734,6 +1797,121 @@ public:
     }
 };
 
+class CudaDecodeRepairGateUpBatchedGemmFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairGateUpBatchedGemmFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        cublasHandle_t handle = nullptr;
+        if (!checkCublas(cublasCreate(&handle), "cublasCreate")) {
+            return false;
+        }
+#if CUDART_VERSION >= 9000
+        checkCublas(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode(TENSOR_OP)");
+#endif
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", envInt("MNN_BENCH_WEIGHT_ONLY_HIDDEN", 2048));
+        const int inter = envInt("MNN_BENCH_MLP_INTER", envInt("MNN_BENCH_WEIGHT_ONLY_INTER", 8192));
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runGateUpBatchedGemmFloorCase(handle, rows, hidden, inter, warmup, repeat) && ok;
+            }
+        }
+        cublasDestroy(handle);
+        return ok;
+    }
+};
+
+class CudaDecodeRepairGateUpParallelGemmFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairGateUpParallelGemmFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", envInt("MNN_BENCH_WEIGHT_ONLY_HIDDEN", 2048));
+        const int inter = envInt("MNN_BENCH_MLP_INTER", envInt("MNN_BENCH_WEIGHT_ONLY_INTER", 8192));
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runGateUpParallelGemmFloorCase(rows, hidden, inter, warmup, repeat) && ok;
+            }
+        }
+        return ok;
+    }
+};
+
+class CudaDecodeRepairQkvParallelGemmFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairQkvParallelGemmFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", envInt("MNN_BENCH_WEIGHT_ONLY_HIDDEN", 3072));
+        const int kv = envInt("MNN_BENCH_ATTN_KV", envInt("MNN_BENCH_WEIGHT_ONLY_KV", hidden == 3072 ? 1024 : 512));
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runQkvParallelGemmFloorCase(rows, hidden, kv, warmup, repeat) && ok;
+            }
+        }
+        return ok;
+    }
+};
+
+#if MNN_BENCH_HAS_CUBLASLT
+class CudaDecodeRepairMlpGemmLtFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        cublasLtHandle_t handle = nullptr;
+        if (!checkCublasLt(cublasLtCreate(&handle), "cublasLtCreate")) {
+            return false;
+        }
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_MLP_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_MLP_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 2048);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (!enabledRow(rows)) {
+                continue;
+            }
+            float gateMs = 0.0f;
+            float upMs = 0.0f;
+            float downMs = 0.0f;
+            GemmFloorCase gateCase = {"gate_cublaslt", rows, hidden, inter, warmup, repeat};
+            GemmFloorCase upCase = {"up_cublaslt", rows, hidden, inter, warmup, repeat};
+            GemmFloorCase downCase = {"down_cublaslt", rows, inter, hidden, warmup, repeat};
+            ok = runGemmLtFloorCase(handle, gateCase, &gateMs) && ok;
+            ok = runGemmLtFloorCase(handle, upCase, &upMs) && ok;
+            ok = runGemmLtFloorCase(handle, downCase, &downMs) && ok;
+            MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor] rows=%d hidden=%d inter=%d "
+                      "gate=%.4f ms up=%.4f ms down=%.4f ms projection_sum=%.4f ms\n",
+                      rows, hidden, inter, gateMs, upMs, downMs, gateMs + upMs + downMs);
+        }
+        cublasLtDestroy(handle);
+        return ok;
+    }
+};
+#endif
+
 static ErrorCode executeChain(DirectOpBench& bench,
                               const std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>>& chain) {
     for (const auto& item : chain) {
@@ -743,6 +1921,113 @@ static ErrorCode executeChain(DirectOpBench& bench,
         }
     }
     return NO_ERROR;
+}
+
+static void configureFullCopyRaster(Tensor* src, Tensor* dst) {
+    auto des = TensorUtils::getDescribe(dst);
+    des->regions.resize(1);
+    auto& region = des->regions[0];
+    region.origin = src;
+    region.src.offset = 0;
+    region.dst.offset = 0;
+    region.size[0] = src->batch();
+    region.size[1] = src->channel();
+    region.size[2] = src->height() * src->width();
+    region.src.stride[0] = region.size[1] * region.size[2];
+    region.src.stride[1] = region.size[2];
+    region.src.stride[2] = 1;
+    region.dst.stride[0] = region.size[1] * region.size[2];
+    region.dst.stride[1] = region.size[2];
+    region.dst.stride[2] = 1;
+}
+
+static bool runLinearConvertChainCase(const LinearConvertChainCase& c) {
+    KVMeta meta;
+    meta.pic_decode_repair_sparse_active = true;
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    auto inputNchw = bench.tensor({c.rows, c.ic, 1, 1}, Tensor::CAFFE, false);
+    auto inputC4 = bench.tensor({c.rows, c.ic, 1, 1}, Tensor::CAFFE_C4, false);
+    auto convOutC4 = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE_C4, false);
+    auto outputNchw = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE, false);
+    auto noConvertOutput = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE, false);
+    if (!inputNchw || !inputC4 || !convOutC4 || !outputNchw || !noConvertOutput) {
+        return false;
+    }
+
+    configureFullCopyRaster(inputNchw, inputC4);
+    configureFullCopyRaster(convOutC4, outputNchw);
+
+    auto preRasterOp = makeRasterOp("bench_linear_pre_convert_raster");
+    auto postRasterOp = makeRasterOp("bench_linear_post_convert_raster");
+    auto c4ConvOp = makeWeightOnlyLinearConvOp(c.ic, c.oc, c.quantBlock);
+    auto nchwConvOp = makeWeightOnlyLinearConvOp(c.ic, c.oc, c.quantBlock);
+
+    std::vector<Tensor*> preInputs = {inputNchw};
+    std::vector<Tensor*> preOutputs = {inputC4};
+    std::vector<Tensor*> c4ConvInputs = {inputC4};
+    std::vector<Tensor*> c4ConvOutputs = {convOutC4};
+    std::vector<Tensor*> postInputs = {convOutC4};
+    std::vector<Tensor*> postOutputs = {outputNchw};
+    std::vector<Tensor*> nchwConvInputs = {inputNchw};
+    std::vector<Tensor*> nchwConvOutputs = {noConvertOutput};
+
+    auto preExe = bench.create(preInputs, preOutputs, preRasterOp->get());
+    auto c4ConvExe = bench.create(c4ConvInputs, c4ConvOutputs, c4ConvOp->get());
+    auto postExe = bench.create(postInputs, postOutputs, postRasterOp->get());
+    auto nchwConvExe = bench.create(nchwConvInputs, nchwConvOutputs, nchwConvOp->get());
+    if (!preExe || !c4ConvExe || !postExe || !nchwConvExe) {
+        MNN_ERROR("failed to create LinearConvertChain execution for %s rows=%d ic=%d oc=%d\n",
+                  c.name, c.rows, c.ic, c.oc);
+        return false;
+    }
+    if (bench.resize(preExe.get(), preInputs, preOutputs) != NO_ERROR ||
+        bench.resize(c4ConvExe.get(), c4ConvInputs, c4ConvOutputs) != NO_ERROR ||
+        bench.resize(postExe.get(), postInputs, postOutputs) != NO_ERROR ||
+        bench.resize(nchwConvExe.get(), nchwConvInputs, nchwConvOutputs) != NO_ERROR) {
+        MNN_ERROR("LinearConvertChain onResize failed for %s rows=%d ic=%d oc=%d\n",
+                  c.name, c.rows, c.ic, c.oc);
+        return false;
+    }
+
+    using ChainItem = std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>;
+    const std::vector<ChainItem> withConvertChain = {
+        {preExe.get(), {preInputs, preOutputs}},
+        {c4ConvExe.get(), {c4ConvInputs, c4ConvOutputs}},
+        {postExe.get(), {postInputs, postOutputs}},
+    };
+    const std::vector<ChainItem> noConvertChain = {
+        {nchwConvExe.get(), {nchwConvInputs, nchwConvOutputs}},
+    };
+
+    CudaEventPair timer;
+    float preMs = 0.0f;
+    float c4ConvMs = 0.0f;
+    float postMs = 0.0f;
+    float nchwConvMs = 0.0f;
+    float withConvertMs = 0.0f;
+    float noConvertMs = 0.0f;
+    if (!timer.measure([&]() { return bench.execute(preExe.get(), preInputs, preOutputs); }, c.warmup, c.repeat, &preMs) ||
+        !timer.measure([&]() { return bench.execute(c4ConvExe.get(), c4ConvInputs, c4ConvOutputs); }, c.warmup, c.repeat, &c4ConvMs) ||
+        !timer.measure([&]() { return bench.execute(postExe.get(), postInputs, postOutputs); }, c.warmup, c.repeat, &postMs) ||
+        !timer.measure([&]() { return bench.execute(nchwConvExe.get(), nchwConvInputs, nchwConvOutputs); }, c.warmup, c.repeat, &nchwConvMs) ||
+        !timer.measure([&]() { return executeChain(bench, withConvertChain); }, c.warmup, c.repeat, &withConvertMs) ||
+        !timer.measure([&]() { return executeChain(bench, noConvertChain); }, c.warmup, c.repeat, &noConvertMs)) {
+        return false;
+    }
+
+    MNN_PRINT("[bench_ops/cuda/perf/LinearConvertChain] %-18s rows=%d ic=%d oc=%d qblock=%d "
+              "pre_raster=%.4f ms c4_conv=%.4f ms post_raster=%.4f ms nchw_conv=%.4f ms "
+              "with_convert_chain=%.4f ms no_convert_chain=%.4f ms delta=%.4f ms ratio=%.3f\n",
+              c.name, c.rows, c.ic, c.oc, c.quantBlock,
+              preMs, c4ConvMs, postMs, nchwConvMs,
+              withConvertMs, noConvertMs, withConvertMs - noConvertMs,
+              noConvertMs > 0.0f ? withConvertMs / noConvertMs : 0.0f);
+    ::fflush(stdout);
+    return true;
 }
 
 static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int repeat) {
@@ -763,7 +2048,21 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
     auto packedSwiglu = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
     auto output = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
     auto packedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
-    if (!input || !gate || !up || !swiglu || !packedGateUp || !packedSwiglu || !output || !packedOutput) {
+    auto fusedGate = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto fusedUp = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto fusedSwiglu = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto fusedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto directSilu = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto directOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    if (!input || !gate || !up || !swiglu || !packedGateUp || !packedSwiglu || !output || !packedOutput ||
+        !fusedGate || !fusedUp || !fusedSwiglu || !fusedOutput || !directSilu || !directOutput) {
+        return false;
+    }
+
+    PicExternalPlan gatePlan;
+    PicExternalPlan upPlan;
+    const std::string externalPath = gateUpExternalWeightPath(hidden, inter, quantBlock);
+    if (!buildGateUpExternalWeights(externalPath, hidden, inter, quantBlock, &gatePlan, &upPlan)) {
         return false;
     }
 
@@ -774,6 +2073,14 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
     auto concatOp = makeWeightOnlyLinearConvOp(hidden, inter * 2, quantBlock);
     auto packedSiluOp = makePicPackedSiluMulOp("bench_pic_decode_mlp_packed_silu");
     auto packedDownOp = makeWeightOnlyLinearConvOp(inter, hidden, quantBlock);
+    auto gateUpOp = makePicGateUpWeightOnlyExtraOp("PicGateUpWeightOnly", "bench_pic_decode_mlp_gateup_weight_only",
+                                                   externalPath, hidden, inter, gatePlan, upPlan);
+    auto fusedSiluOp = makePicSiluMulOp("bench_pic_decode_mlp_gateup_silu");
+    auto fusedDownOp = makeWeightOnlyLinearConvOp(inter, hidden, quantBlock);
+    auto directGateUpSiluOp = makePicGateUpWeightOnlyExtraOp("PicGateUpSiluWeightOnly",
+                                                            "bench_pic_decode_mlp_gateup_silu_weight_only",
+                                                            externalPath, hidden, inter, gatePlan, upPlan);
+    auto directDownOp = makeWeightOnlyLinearConvOp(inter, hidden, quantBlock);
 
     std::vector<Tensor*> gateInputs = {input};
     std::vector<Tensor*> gateOutputs = {gate};
@@ -789,6 +2096,16 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
     std::vector<Tensor*> packedSiluOutputs = {packedSwiglu};
     std::vector<Tensor*> packedDownInputs = {packedSwiglu};
     std::vector<Tensor*> packedDownOutputs = {packedOutput};
+    std::vector<Tensor*> gateUpInputs = {input};
+    std::vector<Tensor*> gateUpOutputs = {fusedGate, fusedUp};
+    std::vector<Tensor*> fusedSiluInputs = {fusedGate, fusedUp};
+    std::vector<Tensor*> fusedSiluOutputs = {fusedSwiglu};
+    std::vector<Tensor*> fusedDownInputs = {fusedSwiglu};
+    std::vector<Tensor*> fusedDownOutputs = {fusedOutput};
+    std::vector<Tensor*> directGateUpSiluInputs = {input};
+    std::vector<Tensor*> directGateUpSiluOutputs = {directSilu};
+    std::vector<Tensor*> directDownInputs = {directSilu};
+    std::vector<Tensor*> directDownOutputs = {directOutput};
 
     auto gateExe = bench.create(gateInputs, gateOutputs, gateOp->get());
     auto upExe = bench.create(upInputs, upOutputs, upOp->get());
@@ -797,7 +2114,13 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
     auto concatExe = bench.create(concatInputs, concatOutputs, concatOp->get());
     auto packedSiluExe = bench.create(packedSiluInputs, packedSiluOutputs, packedSiluOp->get());
     auto packedDownExe = bench.create(packedDownInputs, packedDownOutputs, packedDownOp->get());
-    if (!gateExe || !upExe || !siluExe || !downExe || !concatExe || !packedSiluExe || !packedDownExe) {
+    auto gateUpExe = bench.create(gateUpInputs, gateUpOutputs, gateUpOp->get());
+    auto fusedSiluExe = bench.create(fusedSiluInputs, fusedSiluOutputs, fusedSiluOp->get());
+    auto fusedDownExe = bench.create(fusedDownInputs, fusedDownOutputs, fusedDownOp->get());
+    auto directGateUpSiluExe = bench.create(directGateUpSiluInputs, directGateUpSiluOutputs, directGateUpSiluOp->get());
+    auto directDownExe = bench.create(directDownInputs, directDownOutputs, directDownOp->get());
+    if (!gateExe || !upExe || !siluExe || !downExe || !concatExe || !packedSiluExe || !packedDownExe ||
+        !gateUpExe || !fusedSiluExe || !fusedDownExe || !directGateUpSiluExe || !directDownExe) {
         MNN_ERROR("failed to create PicDecodeMlp execution rows=%d\n", rows);
         return false;
     }
@@ -807,7 +2130,12 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
         bench.resize(downExe.get(), downInputs, downOutputs) != NO_ERROR ||
         bench.resize(concatExe.get(), concatInputs, concatOutputs) != NO_ERROR ||
         bench.resize(packedSiluExe.get(), packedSiluInputs, packedSiluOutputs) != NO_ERROR ||
-        bench.resize(packedDownExe.get(), packedDownInputs, packedDownOutputs) != NO_ERROR) {
+        bench.resize(packedDownExe.get(), packedDownInputs, packedDownOutputs) != NO_ERROR ||
+        bench.resize(gateUpExe.get(), gateUpInputs, gateUpOutputs) != NO_ERROR ||
+        bench.resize(fusedSiluExe.get(), fusedSiluInputs, fusedSiluOutputs) != NO_ERROR ||
+        bench.resize(fusedDownExe.get(), fusedDownInputs, fusedDownOutputs) != NO_ERROR ||
+        bench.resize(directGateUpSiluExe.get(), directGateUpSiluInputs, directGateUpSiluOutputs) != NO_ERROR ||
+        bench.resize(directDownExe.get(), directDownInputs, directDownOutputs) != NO_ERROR) {
         MNN_ERROR("PicDecodeMlp onResize failed rows=%d\n", rows);
         return false;
     }
@@ -824,6 +2152,12 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
         MNN_ERROR("PicDecodeMlp packed dependency warm execute failed rows=%d\n", rows);
         return false;
     }
+    if (bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs) != NO_ERROR ||
+        bench.execute(fusedSiluExe.get(), fusedSiluInputs, fusedSiluOutputs) != NO_ERROR ||
+        bench.execute(directGateUpSiluExe.get(), directGateUpSiluInputs, directGateUpSiluOutputs) != NO_ERROR) {
+        MNN_ERROR("PicDecodeMlp gateup fused dependency warm execute failed rows=%d\n", rows);
+        return false;
+    }
 
     float gateMs = 0.0f;
     float upMs = 0.0f;
@@ -836,6 +2170,14 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
     float packedDownMs = 0.0f;
     float packedSiluDownMs = 0.0f;
     float packedTotalMs = 0.0f;
+    float gateUpWeightOnlyMs = 0.0f;
+    float fusedSiluMs = 0.0f;
+    float fusedDownMs = 0.0f;
+    float fusedSiluDownMs = 0.0f;
+    float fusedTotalMs = 0.0f;
+    float directGateUpSiluMs = 0.0f;
+    float directDownMs = 0.0f;
+    float directTotalMs = 0.0f;
     CudaEventPair timer;
     if (!timer.measure([&]() { return bench.execute(gateExe.get(), gateInputs, gateOutputs); }, warmup, repeat, &gateMs)) {
         return false;
@@ -856,6 +2198,21 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
         return false;
     }
     if (!timer.measure([&]() { return bench.execute(packedDownExe.get(), packedDownInputs, packedDownOutputs); }, warmup, repeat, &packedDownMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs); }, warmup, repeat, &gateUpWeightOnlyMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(fusedSiluExe.get(), fusedSiluInputs, fusedSiluOutputs); }, warmup, repeat, &fusedSiluMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(fusedDownExe.get(), fusedDownInputs, fusedDownOutputs); }, warmup, repeat, &fusedDownMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(directGateUpSiluExe.get(), directGateUpSiluInputs, directGateUpSiluOutputs); }, warmup, repeat, &directGateUpSiluMs)) {
+        return false;
+    }
+    if (!timer.measure([&]() { return bench.execute(directDownExe.get(), directDownInputs, directDownOutputs); }, warmup, repeat, &directDownMs)) {
         return false;
     }
     std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> siluDownChain = {
@@ -889,6 +2246,28 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
     if (!timer.measure([&]() { return executeChain(bench, packedChain); }, warmup, repeat, &packedTotalMs)) {
         return false;
     }
+    std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> fusedSiluDownChain = {
+        {fusedSiluExe.get(), {fusedSiluInputs, fusedSiluOutputs}},
+        {fusedDownExe.get(), {fusedDownInputs, fusedDownOutputs}},
+    };
+    if (!timer.measure([&]() { return executeChain(bench, fusedSiluDownChain); }, warmup, repeat, &fusedSiluDownMs)) {
+        return false;
+    }
+    std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> fusedChain = {
+        {gateUpExe.get(), {gateUpInputs, gateUpOutputs}},
+        {fusedSiluExe.get(), {fusedSiluInputs, fusedSiluOutputs}},
+        {fusedDownExe.get(), {fusedDownInputs, fusedDownOutputs}},
+    };
+    if (!timer.measure([&]() { return executeChain(bench, fusedChain); }, warmup, repeat, &fusedTotalMs)) {
+        return false;
+    }
+    std::vector<std::pair<Execution*, std::pair<std::vector<Tensor*>, std::vector<Tensor*>>>> directChain = {
+        {directGateUpSiluExe.get(), {directGateUpSiluInputs, directGateUpSiluOutputs}},
+        {directDownExe.get(), {directDownInputs, directDownOutputs}},
+    };
+    if (!timer.measure([&]() { return executeChain(bench, directChain); }, warmup, repeat, &directTotalMs)) {
+        return false;
+    }
     MNN_PRINT("[bench_ops/cuda/perf/PicDecodeMlp] rows=%d hidden=%d inter=%d qblock=%d "
               "gate=%.4f ms up=%.4f ms silu=%.4f ms down=%.4f ms silu_down=%.4f ms "
               "silu_down_over_down=%.4f ms sum=%.4f ms chain=%.4f ms\n",
@@ -900,6 +2279,17 @@ static bool runPicDecodeMlpCase(int rows, int hidden, int inter, int warmup, int
               rows, hidden, inter, quantBlock, concatMs, packedSiluMs, packedDownMs,
               packedSiluDownMs, concatMs + packedSiluMs + packedDownMs,
               packedTotalMs, packedTotalMs - totalMs);
+    MNN_PRINT("[bench_ops/cuda/perf/PicDecodeMlpGateUpWeightOnly] rows=%d hidden=%d inter=%d qblock=%d "
+              "gateup=%.4f ms silu=%.4f ms down=%.4f ms silu_down=%.4f ms "
+              "sum=%.4f ms chain=%.4f ms delta_vs_split_chain=%.4f ms external=%s\n",
+              rows, hidden, inter, quantBlock, gateUpWeightOnlyMs, fusedSiluMs, fusedDownMs,
+              fusedSiluDownMs, gateUpWeightOnlyMs + fusedSiluMs + fusedDownMs,
+              fusedTotalMs, fusedTotalMs - totalMs, externalPath.c_str());
+    MNN_PRINT("[bench_ops/cuda/perf/PicDecodeMlpGateUpSiluWeightOnly] rows=%d hidden=%d inter=%d qblock=%d "
+              "gateup_silu=%.4f ms down=%.4f ms sum=%.4f ms chain=%.4f ms "
+              "delta_vs_split_chain=%.4f ms\n",
+              rows, hidden, inter, quantBlock, directGateUpSiluMs, directDownMs,
+              directGateUpSiluMs + directDownMs, directTotalMs, directTotalMs - totalMs);
     ::fflush(stdout);
     return true;
 }
@@ -929,11 +2319,56 @@ public:
     }
 };
 
+class CudaLinearConvertChainPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/LinearConvertChain expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        if (!requireMemoryLow("bench_ops/cuda/perf/LinearConvertChain")) {
+            return false;
+        }
+        const int warmup = envInt("MNN_BENCH_LINEAR_CHAIN_WARMUP", envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_LINEAR_CHAIN_REPEAT", envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", envInt("MNN_BENCH_WEIGHT_ONLY_HIDDEN", 3072));
+        const int inter = envInt("MNN_BENCH_MLP_INTER", envInt("MNN_BENCH_WEIGHT_ONLY_INTER", 8192));
+        const int kv = envInt("MNN_BENCH_ATTN_KV", 1024);
+        constexpr int quantBlock = 64;
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (!enabledRow(rows)) {
+                continue;
+            }
+            const LinearConvertChainCase cases[] = {
+                {"mlp_gate_up", rows, hidden, inter, quantBlock, warmup, repeat},
+                {"mlp_down", rows, inter, hidden, quantBlock, warmup, repeat},
+                {"attn_q_o", rows, hidden, hidden, quantBlock, warmup, repeat},
+                {"attn_k_v", rows, hidden, kv, quantBlock, warmup, repeat},
+            };
+            for (const auto& c : cases) {
+                if (enabledByFilter(c.name)) {
+                    ok = runLinearConvertChainCase(c) && ok;
+                }
+            }
+        }
+        return ok;
+    }
+};
+
 } // namespace
 
 MNNTestSuiteRegister(CudaRows45CublasAccuracy, "bench_ops/cuda/accuracy/Rows45Cublas");
 MNNTestSuiteRegister(CudaWeightOnlyConvPerf, "bench_ops/cuda/perf/WeightOnlyConv");
 MNNTestSuiteRegister(CudaDecodeRepairMlpGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairMlpGemmFloor");
+MNNTestSuiteRegister(CudaDecodeRepairGateUpBatchedGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairGateUpBatchedGemmFloor");
+MNNTestSuiteRegister(CudaDecodeRepairGateUpParallelGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairGateUpParallelGemmFloor");
+MNNTestSuiteRegister(CudaDecodeRepairQkvParallelGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairQkvParallelGemmFloor");
+#if MNN_BENCH_HAS_CUBLASLT
+MNNTestSuiteRegister(CudaDecodeRepairMlpGemmLtFloorPerf, "bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor");
+#endif
 MNNTestSuiteRegister(CudaPicDecodeMlpPerf, "bench_ops/cuda/perf/PicDecodeMlp");
+MNNTestSuiteRegister(CudaLinearConvertChainPerf, "bench_ops/cuda/perf/LinearConvertChain");
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

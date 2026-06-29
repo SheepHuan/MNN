@@ -201,15 +201,14 @@ def build_pic_spec(
         "pic_token_start": 0,
         "token_count": len(token_ids),
     }
-    if repair_tokens > 0:
-        spec["decode_refine"] = {
-            "enabled": True,
-            "tokens_per_decode_step": int(repair_tokens),
-            "top_m": int(top_m),
-            "selector": selector,
-            "attention_layer_idx": int(attention_layer_idx),
-            "attention_head_ids": attention_head_ids,
-        }
+    spec["decode_refine"] = {
+        "enabled": True,
+        "tokens_per_decode_step": int(repair_tokens),
+        "top_m": int(top_m),
+        "selector": selector,
+        "attention_layer_idx": int(attention_layer_idx),
+        "attention_head_ids": attention_head_ids,
+    }
     return spec
 
 
@@ -612,7 +611,7 @@ def main() -> int:
                         "context_tokens": actual_context or target_context,
                         "mode": args.mode,
                         "budget": fmt_budget(budget),
-                        "decode_selector": selector if repair > 0 else "none",
+                        "decode_selector": selector,
                         "repair_tokens": repair,
                         "generated_tokens": int(args.max_tokens),
                         "decode_latency_s": metrics.get("decode_latency_s", ""),

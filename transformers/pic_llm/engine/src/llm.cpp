@@ -1138,7 +1138,7 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
         MNN_ERROR("PIC decode repair token-id sparse decode currently supports only float full-attention masks\n");
         return false;
     }
-    if (pic_start < 0 || picTokenCount <= 0 || tokens_per_decode_step <= 0) {
+    if (pic_start < 0 || picTokenCount <= 0 || tokens_per_decode_step < 0) {
         return false;
     }
     std::vector<uint8_t> seen(static_cast<size_t>(picTokenCount), 0);
@@ -1163,8 +1163,9 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
     mPicDecodeRepair.tokensPerDecodeStep = tokens_per_decode_step;
     mPicDecodeRepair.selector = selector == "lagged_attention_hkvd" ? selector : "top_hkvd";
     mPicDecodeRepair.attentionLayerIdx = attention_layer_idx;
-    mPicDecodeRepair.attentionCandidatePoolSize =
-        std::max(tokens_per_decode_step, attention_candidate_pool_size);
+    mPicDecodeRepair.attentionCandidatePoolSize = tokens_per_decode_step > 0
+        ? std::max(tokens_per_decode_step, attention_candidate_pool_size)
+        : 0;
     mPicDecodeRepair.cursor = 0;
     mPicDecodeRepair.stepIdx = 0;
     mPicDecodeRepair.picTokenIds = pic_token_ids;
@@ -1189,7 +1190,7 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
     mPicDecodeRepair.scratchLogicalIndices.reserve(decodeRepairRows);
     mPicDecodeRepair.scratchSparseTokenIds.reserve(decodeRepairRows);
     const int hiddenSize = mConfig->hidden_size();
-    if (hiddenSize > 0 && !mPicDecodeRepair.picTokenIds.empty()) {
+    if (tokens_per_decode_step > 0 && hiddenSize > 0 && !mPicDecodeRepair.picTokenIds.empty()) {
         mPicDecodeRepair.picTokenEmbeddings.resize(
             static_cast<size_t>(mPicDecodeRepair.picTokenIds.size()) * static_cast<size_t>(hiddenSize));
         mDiskEmbedding->embedding(mPicDecodeRepair.picTokenIds, mPicDecodeRepair.picTokenEmbeddings.data());

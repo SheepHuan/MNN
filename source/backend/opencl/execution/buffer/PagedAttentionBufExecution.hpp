@@ -48,11 +48,13 @@ private:
     ErrorCode ensureAdrenoGemmPrefillTemps(int seqLen, int kvLen, int qSplitNum);
     ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureDecodeCausalKernel();
+    ErrorCode ensureDecodeRepairKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount, int stageCandidateCount = 0);
     ErrorCode ensureAdrenoCacheBlendValueImage(int tokenCapacity);
     ErrorCode ensureAdrenoSparseFlashPackedKeyImage(int kvPack);
     ErrorCode ensureAdrenoSparseFlashPackedKVImages(int kvPack);
+    ErrorCode syncDecodeAttentionHeadIds();
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
     ErrorCode runCacheBlendScoring(int layerIndex, int kvLen);
     bool canUseFastPrefill(const Tensor* mask, int baseLogical, int attnLen, int kvLen, bool sparseQuery,
@@ -72,6 +74,11 @@ private:
     ErrorCode runDecodeCausalAttention(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                                        int kvLen, int attnLen, int baseLogical, bool sparseQuery,
                                        bool queryRowsAreFull);
+    ErrorCode runDecodeRepairCausalAttentionHD128(const std::vector<Tensor*>& inputs,
+                                                  const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+                                                  int baseLogical, bool queryRowsAreFull, int layerIndex);
+    ErrorCode runDecodeAttentionRankCaptureOpenCL(const Tensor* query, int layerIndex, int kvLen, int attnLen,
+                                                  bool queryRowsAreFull);
 
     OpenCLBackend* mOpenCLBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -112,6 +119,9 @@ private:
     std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q8K16KVImage;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel64;
+    std::shared_ptr<KernelWrap> mDecodeRepairCausalKernelHD128Row32;
+    std::shared_ptr<KernelWrap> mDecodeRepairCausalKernelHD128Row64;
+    std::shared_ptr<KernelWrap> mDecodeAttentionRankScoreKernelHD128;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
     std::shared_ptr<Tensor> mTempK;
@@ -126,6 +136,7 @@ private:
     std::shared_ptr<Tensor> mCacheBlendIndices;
     std::shared_ptr<Tensor> mCacheBlendStageValues;
     std::shared_ptr<Tensor> mCacheBlendStageIndices;
+    std::shared_ptr<Tensor> mDecodeAttentionHeadIds;
     std::shared_ptr<ImagePool> mAdrenoImagePool;
     cl::Image* mCacheBlendSourceValueImage = nullptr;
     cl::Image* mSparseFlashPackedKeyImage = nullptr;
@@ -135,6 +146,7 @@ private:
     int mCacheBlendScoreCount = 0;
     int mCacheBlendIndexCount = 0;
     int mCacheBlendStageCandidateCount = 0;
+    int mDecodeAttentionHeadIdCapacity = 0;
     int mCacheBlendSourceValueTokenCapacity = 0;
     int mCacheBlendSourceValueImageWidth = 0;
     int mCacheBlendSourceValueImageHeight = 0;
@@ -165,6 +177,7 @@ private:
     int mAdrenoGemmQKVElements = 0;
     int mSparseFlashKernelGroupSize = 0;
     int mDecodeCausalKernelGroupSize = 0;
+    int mDecodeRepairKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;
@@ -174,6 +187,7 @@ private:
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmSoftmaxKernels;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmTransKernels;
     std::vector<std::shared_ptr<KernelWrap>> mAdrenoGemmQKVKernels;
+    std::vector<int> mDecodeAttentionHeadIdsHost;
     float mScale = 1.0f;
 };
 

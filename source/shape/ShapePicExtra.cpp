@@ -31,7 +31,7 @@ public:
         }
         auto extra = op->main_as_Extra();
         const std::string type = (extra != nullptr && extra->type() != nullptr) ? extra->type()->str() : "";
-        if (type == "PicGateUpWeightOnly") {
+        if (type == "PicGateUpWeightOnly" || type == "PicGateUpSiluWeightOnly") {
             if (std::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr) {
                 MNN_PRINT("PicExtra shape type=%s input_dims=%d output_size=%zu input0=%d input1=%d input2=%d input3=%d\n",
                           type.c_str(), inputs[0]->dimensions(), outputs.size(),
@@ -40,7 +40,8 @@ public:
                           inputs[0]->dimensions() > 2 ? inputs[0]->length(2) : -1,
                           inputs[0]->dimensions() > 3 ? inputs[0]->length(3) : -1);
             }
-            if (outputs.size() != 2) {
+            const bool fusedSiluOutput = type == "PicGateUpSiluWeightOnly";
+            if (outputs.size() != (fusedSiluOutput ? 1 : 2)) {
                 return false;
             }
             const int oc = extraAttrInt(extra, "out_features", 0);
@@ -89,6 +90,20 @@ public:
                 TensorUtils::getDescribe(outputs[0])->dimensionFormat = TensorUtils::getDescribe(inputs[0])->dimensionFormat;
             }
             outputs[0]->buffer().type = inputs[0]->getType();
+            return true;
+        }
+        if (type == "PicLinearNhwcWeightOnly") {
+            if (outputs.size() != 1) {
+                return false;
+            }
+            const int oc = extraAttrInt(extra, "out_features", 0);
+            if (oc <= 0 || inputs[0]->dimensions() <= 0) {
+                return false;
+            }
+            TensorUtils::copyShape(inputs[0], outputs[0], true);
+            outputs[0]->setLength(outputs[0]->dimensions() - 1, oc);
+            outputs[0]->buffer().type = inputs[0]->getType();
+            TensorUtils::getDescribe(outputs[0])->dimensionFormat = TensorUtils::getDescribe(inputs[0])->dimensionFormat;
             return true;
         }
         if (outputs.size() == 1) {

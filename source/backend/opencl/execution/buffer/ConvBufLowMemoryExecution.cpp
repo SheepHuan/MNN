@@ -66,6 +66,8 @@ enum CompactKernelMode : uint32_t {
     kCompactKernelPicWG8X16 = 8,
     kCompactKernelPicInputCache32 = 9,
     kCompactKernelPicInputCache64 = 10,
+    kCompactKernelAdrenoDirectC4Gemv = 11,
+    kCompactKernelAdrenoBatchGemvC4Out = 12,
 };
 
 enum CompactDenseFamily : uint32_t {
@@ -81,6 +83,8 @@ enum CompactDenseFamily : uint32_t {
     kCompactDenseFamilyPicQuantWG8X16 = 9,
     kCompactDenseFamilyPicQuantInputCache32 = 10,
     kCompactDenseFamilyPicQuantInputCache64 = 11,
+    kCompactDenseFamilyAdrenoDirectC4Gemv = 12,
+    kCompactDenseFamilyAdrenoBatchGemvC4Out = 13,
 };
 
 static const char* _compactDenseFamilyName(uint32_t family) {
@@ -109,6 +113,10 @@ static const char* _compactDenseFamilyName(uint32_t family) {
             return "pic_quant_incache32";
         case kCompactDenseFamilyPicQuantInputCache64:
             return "pic_quant_incache64";
+        case kCompactDenseFamilyAdrenoDirectC4Gemv:
+            return "adreno_direct_c4_gemv";
+        case kCompactDenseFamilyAdrenoBatchGemvC4Out:
+            return "adreno_batch_gemv_c4out";
         default:
             return "unknown";
     }
@@ -131,6 +139,8 @@ static bool _parseCompactDenseFamilyOverride(const char* value, uint32_t* family
         {"pic_quant_wg8x16", kCompactDenseFamilyPicQuantWG8X16},
         {"pic_quant_incache32", kCompactDenseFamilyPicQuantInputCache32},
         {"pic_quant_incache64", kCompactDenseFamilyPicQuantInputCache64},
+        {"adreno_direct_c4_gemv", kCompactDenseFamilyAdrenoDirectC4Gemv},
+        {"adreno_batch_gemv_c4out", kCompactDenseFamilyAdrenoBatchGemvC4Out},
     };
     for (const auto& item : families) {
         if (::strcmp(value, item.first) == 0) {
@@ -143,6 +153,90 @@ static bool _parseCompactDenseFamilyOverride(const char* value, uint32_t* family
 
 static bool _getCompactDenseFamilyOverride(uint32_t* family) {
     return _parseCompactDenseFamilyOverride(::getenv("MNN_BENCH_OPENCL_COMPACT_DENSE_FORCE_FAMILY"), family);
+}
+
+static bool _isAdrenoTinyDenseFamilyShape(OpenCLRuntime* runtime, int quantBit, int rows, int inputChannels,
+                                          int outputChannels) {
+    return runtime != nullptr &&
+           runtime->getGpuType() == ADRENO &&
+           quantBit == 4 &&
+           rows > 1 && rows <= 16 &&
+           inputChannels >= 1024 && outputChannels >= 256;
+}
+
+static bool _pickAdrenoTinyDenseFamilyHeuristic(OpenCLRuntime* runtime, int quantBit, int rows, int inputChannels,
+                                                int outputChannels, uint32_t* family) {
+    if (family == nullptr ||
+        !_isAdrenoTinyDenseFamilyShape(runtime, quantBit, rows, inputChannels, outputChannels)) {
+        return false;
+    }
+    if (rows <= 2) {
+        *family = kCompactDenseFamilyPicQuantC4;
+    } else if (rows <= 4) {
+        *family = kCompactDenseFamilyPicQuantInputCache64;
+    } else {
+        *family = kCompactDenseFamilyAdrenoBatchGemvC4Out;
+    }
+    return true;
+}
+
+static std::string _adrenoTinyDenseFamilyTuneKey(int quantBit, int rows, int inputChannels, int outputChannels) {
+    return "adreno_tiny_dense_family_v1_q" + std::to_string(quantBit) +
+           "_m" + std::to_string(rows) +
+           "_ic" + std::to_string(inputChannels) +
+           "_oc" + std::to_string(outputChannels);
+}
+
+static std::vector<uint32_t> _adrenoTinyDenseFamilyCandidates(int rows, int outputChannels) {
+    std::vector<uint32_t> families;
+    if (rows <= 2) {
+        families = {
+            kCompactDenseFamilyPicQuantB2,
+            kCompactDenseFamilyPicQuantC4,
+            kCompactDenseFamilyAdrenoDirectC4Gemv,
+            kCompactDenseFamilyAdrenoBatchGemvC4Out,
+            kCompactDenseFamilyPicQuantInputCache32,
+            kCompactDenseFamilyPicQuantInputCache64,
+            kCompactDenseFamilyPicQuant,
+            kCompactDenseFamilyGenericQuant,
+        };
+    } else if (rows <= 4) {
+        families = {
+            kCompactDenseFamilyPicQuantC4,
+            kCompactDenseFamilyPicQuantB2,
+            kCompactDenseFamilyAdrenoDirectC4Gemv,
+            kCompactDenseFamilyAdrenoBatchGemvC4Out,
+            kCompactDenseFamilyPicQuantInputCache64,
+            kCompactDenseFamilyPicQuantInputCache32,
+            kCompactDenseFamilyPicQuant,
+            kCompactDenseFamilyGenericQuant,
+        };
+    } else {
+        families = {
+            kCompactDenseFamilyAdrenoBatchGemvC4Out,
+            kCompactDenseFamilyAdrenoDirectC4Gemv,
+            kCompactDenseFamilyAdrenoBatchGemv,
+            kCompactDenseFamilyPicQuantInputCache64,
+            kCompactDenseFamilyPicQuantInputCache32,
+            kCompactDenseFamilyPicQuantC4,
+            kCompactDenseFamilyPicQuant,
+            kCompactDenseFamilyGenericQuant,
+        };
+    }
+    // K/V projections have only 256 output channels on MiniCPM5-1B. Keep the
+    // narrower C4-output candidate early because it avoids launching twice as
+    // many tiny output-channel work items when C8 occupancy is poor.
+    if (outputChannels <= 256 && rows <= 4) {
+        families.insert(families.begin(), kCompactDenseFamilyPicQuantC4);
+    }
+    std::vector<uint32_t> uniqueFamilies;
+    uniqueFamilies.reserve(families.size());
+    for (uint32_t family : families) {
+        if (std::find(uniqueFamilies.begin(), uniqueFamilies.end(), family) == uniqueFamilies.end()) {
+            uniqueFamilies.emplace_back(family);
+        }
+    }
+    return uniqueFamilies;
 }
 
 static int _benchWeightStorageOverride() {
@@ -196,6 +290,10 @@ static const char* _compactKernelModeName(uint32_t mode) {
             return "pic_b4c8_incache32";
         case kCompactKernelPicInputCache64:
             return "pic_b4c8_incache64";
+        case kCompactKernelAdrenoDirectC4Gemv:
+            return "adreno_direct_c4_gemv";
+        case kCompactKernelAdrenoBatchGemvC4Out:
+            return "adreno_batch_gemv_c4out";
         default:
             return "unknown";
     }
@@ -223,6 +321,10 @@ static int _compactKernelModeForFamily(uint32_t family) {
             return static_cast<int>(kCompactKernelPicInputCache32);
         case kCompactDenseFamilyPicQuantInputCache64:
             return static_cast<int>(kCompactKernelPicInputCache64);
+        case kCompactDenseFamilyAdrenoDirectC4Gemv:
+            return static_cast<int>(kCompactKernelAdrenoDirectC4Gemv);
+        case kCompactDenseFamilyAdrenoBatchGemvC4Out:
+            return static_cast<int>(kCompactKernelAdrenoBatchGemvC4Out);
         case kCompactDenseFamilyGenericQuant:
         default:
             return static_cast<int>(kCompactKernelGeneric);
@@ -254,6 +356,10 @@ static uint32_t _compactDenseFamilyForSelection(bool useFPWeight, int compactKer
             return kCompactDenseFamilyPicQuantInputCache32;
         case kCompactKernelPicInputCache64:
             return kCompactDenseFamilyPicQuantInputCache64;
+        case kCompactKernelAdrenoDirectC4Gemv:
+            return kCompactDenseFamilyAdrenoDirectC4Gemv;
+        case kCompactKernelAdrenoBatchGemvC4Out:
+            return kCompactDenseFamilyAdrenoBatchGemvC4Out;
         case kCompactKernelGeneric:
         default:
             return kCompactDenseFamilyGenericQuant;
@@ -1163,8 +1269,14 @@ bool ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
                                    : static_cast<uint32_t>(kCompactKernelGeneric))
         : static_cast<uint32_t>(compactKernelMode);
     const bool usePicCompactKernel = resolvedCompactKernelMode != kCompactKernelGeneric;
+    const bool useDirectC4GemvCompactPath =
+        resolvedCompactKernelMode == kCompactKernelAdrenoDirectC4Gemv;
+    const bool useBatchGemvC4OutputPath =
+        resolvedCompactKernelMode == kCompactKernelAdrenoBatchGemvC4Out;
     const bool useBatchGemvCompactPath =
-        global_y <= 16 || resolvedCompactKernelMode == kCompactKernelAdrenoBatchGemv;
+        !useDirectC4GemvCompactPath &&
+        (global_y <= 16 || resolvedCompactKernelMode == kCompactKernelAdrenoBatchGemv ||
+         useBatchGemvC4OutputPath);
     const int compactBatchTile = resolvedCompactKernelMode == kCompactKernelPicB2 ? 2 : 4;
     const int compactChannelTile = resolvedCompactKernelMode == kCompactKernelPicC4 ? 4 : 8;
     std::string kernelName;
@@ -1251,19 +1363,139 @@ bool ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
             info += "_picic32_m" + std::to_string(global_y);
         } else if (resolvedCompactKernelMode == kCompactKernelPicInputCache64) {
             info += "_picic64_m" + std::to_string(global_y);
+        } else if (resolvedCompactKernelMode == kCompactKernelAdrenoDirectC4Gemv) {
+            info += "_adc4gemv_m" + std::to_string(global_y);
+        } else if (resolvedCompactKernelMode == kCompactKernelAdrenoBatchGemvC4Out) {
+            info += "_adbgvc4out_m" + std::to_string(global_y);
         } else {
             info += "_pic_m" + std::to_string(global_y);
         }
     }
+    if (useDirectC4GemvCompactPath) {
+        if (mResource->mNumQuantBit != 4 || global_y <= 1 || global_y > 16) {
+            return false;
+        }
+        mUnits.resize(1);
+        const int outputChannelBlocks = UP_DIV(outChannel, 4);
+        const int inputChannelBlocks = UP_DIV(inputChannels, 4);
+        std::set<std::string> directBuildOption = mResource->mBuildOptions;
+        if (mResource->mUseImage) {
+            directBuildOption.emplace("-DUSE_IMAGE");
+        }
+        directBuildOption.emplace("-DINPUT_CHANNEL_LEAVES_NUM=" + std::to_string(inputChannelLeaves));
+        directBuildOption.emplace("-DINPUT_BATCH_LEAVES_NUM=" + std::to_string(inputBatchLeaves));
+
+        int local_size = 64;
+        if (mOpenCLBackend->getCLTuneLevel() != None && mOpenCLBackend->getCLTuneLevel() != Fast) {
+            int min_time = INT_MAX;
+            for (int ksize = 16; ksize <= 256; ksize *= 2) {
+                auto option = directBuildOption;
+                option.emplace("-DWGS=" + std::to_string(ksize));
+                auto kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel(
+                    "gemv_conv1x1_buf", "gemv_conv_c8_c4nhw4_buf", option, mOpenCLBackend->getPrecision());
+                uint32_t maxWorkGroupSize =
+                    static_cast<uint32_t>(mOpenCLBackend->getOpenCLRuntime()->getMaxWorkGroupSize(kernel));
+                if (maxWorkGroupSize < static_cast<uint32_t>(ksize)) {
+                    continue;
+                }
+                std::vector<uint32_t> gws = {
+                    static_cast<uint32_t>(ksize),
+                    static_cast<uint32_t>(UP_DIV(outChannel, 8)),
+                    static_cast<uint32_t>(UP_DIV(global_y, 4)),
+                };
+                std::vector<uint32_t> lws = {static_cast<uint32_t>(ksize), 1, 1};
+                uint32_t idx = 0;
+                cl_int ret = CL_SUCCESS;
+                ret |= kernel->get().setArg(idx++, static_cast<int>(gws[0]));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(gws[1]));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(gws[2]));
+                ret |= kernel->get().setArg(idx++, openCLBuffer(input));
+                if (mResource->mUseImage) {
+                    ret |= kernel->get().setArg(idx++, *mResource->mKernelImage.get());
+                } else {
+                    ret |= kernel->get().setArg(idx++, *mResource->mKernelBuffer.get());
+                }
+                ret |= kernel->get().setArg(idx++, *mResource->mDequantScaleOffsetBuffer.get());
+                ret |= kernel->get().setArg(idx++, openCLBuffer(mResource->mBias.get()));
+                ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(global_y));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(outputChannelAlign));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(outputChannelBlocks));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(inputChannelBlocks));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(inputChannels));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(blockNum));
+                ret |= kernel->get().setArg(idx++, static_cast<int>(blockDim));
+                ret |= kernel->get().setArg(idx++, static_cast<float>(mResource->mCoef));
+                MNN_CHECK_CL_SUCCESS(ret, "setArg gemv_conv_c8_c4nhw4_buf Kernel Select");
+                int cost_time = get2DUseLocalMemTime(
+                    gws, lws, mOpenCLBackend->getOpenCLRuntime(),
+                    "gemv_conv_c8_c4nhw4_buf" + info, kernel, "gemv_conv1x1_buf");
+                if (min_time > cost_time) {
+                    local_size = ksize;
+                    min_time = cost_time;
+                }
+            }
+        }
+
+        directBuildOption.emplace("-DWGS=" + std::to_string(local_size));
+        auto &unit = mUnits[0];
+        mGlobalWorkSize = {
+            static_cast<uint32_t>(local_size),
+            static_cast<uint32_t>(UP_DIV(outChannel, 8)),
+            static_cast<uint32_t>(UP_DIV(global_y, 4)),
+        };
+        unit.kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel(
+            "gemv_conv1x1_buf", "gemv_conv_c8_c4nhw4_buf", directBuildOption, mOpenCLBackend->getPrecision());
+        if (nullptr == unit.kernel.get()) {
+            return false;
+        }
+        uint32_t maxWorkGroupSize =
+            static_cast<uint32_t>(mOpenCLBackend->getOpenCLRuntime()->getMaxWorkGroupSize(unit.kernel));
+        if (maxWorkGroupSize < static_cast<uint32_t>(local_size)) {
+            return false;
+        }
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mGlobalWorkSize[0]));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mGlobalWorkSize[1]));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mGlobalWorkSize[2]));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(input));
+        if (mResource->mUseImage) {
+            ret |= unit.kernel->get().setArg(idx++, *mResource->mKernelImage.get());
+        } else {
+            ret |= unit.kernel->get().setArg(idx++, *mResource->mKernelBuffer.get());
+        }
+        ret |= unit.kernel->get().setArg(idx++, *mResource->mDequantScaleOffsetBuffer.get());
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mResource->mBias.get()));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(global_y));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(outputChannelAlign));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(outputChannelBlocks));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(inputChannelBlocks));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(inputChannels));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(blockNum));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(blockDim));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<float>(mResource->mCoef));
+        MNN_CHECK_CL_SUCCESS(ret, "setArg gemv_conv_c8_c4nhw4_buf");
+        mLocalWorkSize = {static_cast<uint32_t>(local_size), 1, 1};
+        mOpenCLBackend->recordKernel3d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
+        unit.globalWorkSize = {mGlobalWorkSize[0], mGlobalWorkSize[1], mGlobalWorkSize[2]};
+        unit.localWorkSize = {mLocalWorkSize[0], mLocalWorkSize[1], mLocalWorkSize[2]};
+        return true;
+    }
     if(useBatchGemvCompactPath) {
-        mUnits.resize(3);
+        mUnits.resize(useBatchGemvC4OutputPath ? 2 : 3);
         int outputChannelAlign8 = ROUND_UP(outChannel, 8);
         mConvGemmInpTensor.reset(Tensor::createDevice<float>({inputChannelAlign * ROUND_UP(global_y, 4)}));
-        mConvGemmOutTensor.reset(Tensor::createDevice<float>({outputChannelAlign8 * ROUND_UP(global_y, 4)}));
         mOpenCLBackend->onAcquireBuffer(mConvGemmInpTensor.get(), Backend::DYNAMIC);
-        mOpenCLBackend->onAcquireBuffer(mConvGemmOutTensor.get(), Backend::DYNAMIC);
+        if (!useBatchGemvC4OutputPath) {
+            mConvGemmOutTensor.reset(Tensor::createDevice<float>({outputChannelAlign8 * ROUND_UP(global_y, 4)}));
+            mOpenCLBackend->onAcquireBuffer(mConvGemmOutTensor.get(), Backend::DYNAMIC);
+        }
         mOpenCLBackend->onReleaseBuffer(mConvGemmInpTensor.get(), Backend::DYNAMIC);
-        mOpenCLBackend->onReleaseBuffer(mConvGemmOutTensor.get(), Backend::DYNAMIC);
+        if (!useBatchGemvC4OutputPath) {
+            mOpenCLBackend->onReleaseBuffer(mConvGemmOutTensor.get(), Backend::DYNAMIC);
+        }
         
         {
             //c4nhw4 -> nhwc
@@ -1296,6 +1528,10 @@ bool ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
                 buildOption.emplace("-DUSE_IMAGE");
             }
             buildOption.emplace("-DCOMPUTE_BATCH");
+            if (useBatchGemvC4OutputPath) {
+                buildOption.emplace("-DOUTPUT_C4NHW4");
+                buildOption.emplace("-DOUTPUT_BHW=" + std::to_string(global_y));
+            }
             
             int local_size = 64;
             if(mOpenCLBackend->getCLTuneLevel() != None && mOpenCLBackend->getCLTuneLevel() != Fast){
@@ -1320,7 +1556,9 @@ bool ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
                     }
                     ret |= kernel->get().setArg(idx++, *mResource->mDequantScaleOffsetBuffer.get());
                     ret |= kernel->get().setArg(idx++, openCLBuffer(mResource->mBias.get()));
-                    ret |= kernel->get().setArg(idx++, openCLBuffer(mConvGemmOutTensor.get()));
+                    ret |= kernel->get().setArg(
+                        idx++, useBatchGemvC4OutputPath ? openCLBuffer(output)
+                                                         : openCLBuffer(mConvGemmOutTensor.get()));
                     ret |= kernel->get().setArg(idx++, static_cast<int>(outputChannelAlign8));
                     ret |= kernel->get().setArg(idx++, static_cast<int>(inputChannelAlign));
                     ret |= kernel->get().setArg(idx++, static_cast<int>(outputChannelBlocks));
@@ -1355,7 +1593,9 @@ bool ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
             }
             ret |= unit.kernel->get().setArg(idx++, *mResource->mDequantScaleOffsetBuffer.get());
             ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mResource->mBias.get()));
-            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mConvGemmOutTensor.get()));
+            ret |= unit.kernel->get().setArg(
+                idx++, useBatchGemvC4OutputPath ? openCLBuffer(output)
+                                                 : openCLBuffer(mConvGemmOutTensor.get()));
             ret |= unit.kernel->get().setArg(idx++, static_cast<int>(outputChannelAlign8));
             ret |= unit.kernel->get().setArg(idx++, static_cast<int>(inputChannelAlign));
             ret |= unit.kernel->get().setArg(idx++, static_cast<int>(outputChannelBlocks));
@@ -1369,6 +1609,9 @@ bool ConvBufLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * outpu
             mOpenCLBackend->recordKernel3d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
             unit.globalWorkSize = {mGlobalWorkSize[0], mGlobalWorkSize[1], mGlobalWorkSize[2]};
             unit.localWorkSize = {mLocalWorkSize[0], mLocalWorkSize[1], mLocalWorkSize[2]};
+        }
+        if (useBatchGemvC4OutputPath) {
+            return true;
         }
         {
             auto &unit = mUnits[2];
@@ -1557,6 +1800,99 @@ ErrorCode ConvBufLowMemoryExecution::onResize(const std::vector<Tensor *> &input
         if(batch == 1){
             tuneGemvLowMemory(input, output);
         } else {
+            if (batch <= 16) {
+                bool familyResolved = false;
+                uint32_t forcedFamily = 0;
+                const bool hasForcedFamily = _getCompactDenseFamilyOverride(&forcedFamily);
+                if (hasForcedFamily) {
+                    compactDecisionSource = "env_force_family";
+                    mUseFPWeight = forcedFamily == kCompactDenseFamilyFPWeight;
+                    if (!mUseFPWeight) {
+                        compactKernelMode = _compactKernelModeForFamily(forcedFamily);
+                    }
+                    familyResolved = true;
+                }
+                const bool adrenoTinyFamilyShape = _isAdrenoTinyDenseFamilyShape(
+                    runTime, mResource->mNumQuantBit, batch,
+                    mResource->mInputChannel, mResource->mOutputChannel);
+                if (!familyResolved && adrenoTinyFamilyShape) {
+                    const std::string familyInfo = _adrenoTinyDenseFamilyTuneKey(
+                        mResource->mNumQuantBit, batch, mResource->mInputChannel, mResource->mOutputChannel);
+                    const std::vector<uint32_t> familyShape = {
+                        static_cast<uint32_t>(batch),
+                        static_cast<uint32_t>(mResource->mOutputChannel),
+                        static_cast<uint32_t>(mResource->mInputChannel),
+                    };
+                    std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
+                    if (_getExactTunedInfo(familyInfo, familyShape, tuneInfo, runTime) &&
+                        !tuneInfo.first.empty()) {
+                        const uint32_t family = tuneInfo.first[0];
+                        mUseFPWeight = false;
+                        compactKernelMode = _compactKernelModeForFamily(family);
+                        compactDecisionSource = "adreno_tiny_family_cache";
+                        familyResolved = true;
+                        if (_convProfileSelectionEnabled()) {
+                            MNN_PRINT("OpenCLConvBufLowMemory tiny-family-cache batch=%d ic=%d oc=%d "
+                                      "family=%s time=%u exact=1\n",
+                                      batch, mResource->mInputChannel, mResource->mOutputChannel,
+                                      _compactDenseFamilyName(family), tuneInfo.second);
+                        }
+                    } else if (mOpenCLBackend->getCLTuneLevel() == Heavy ||
+                               mOpenCLBackend->getCLTuneLevel() == Wide) {
+                        bool tuned = false;
+                        int bestTime = std::numeric_limits<int>::max();
+                        uint32_t bestFamily = kCompactDenseFamilyPicQuantC4;
+                        setRecordClose closeRecord(mOpenCLBackend);
+                        for (uint32_t family : _adrenoTinyDenseFamilyCandidates(batch, mResource->mOutputChannel)) {
+                            mUseFPWeight = false;
+                            const int mode = _compactKernelModeForFamily(family);
+                            if (!tuneGemmLowMemory(input, output, mode)) {
+                                if (_convProfileSelectionEnabled()) {
+                                    MNN_PRINT("OpenCLConvBufLowMemory tiny-family-candidate unavailable "
+                                              "batch=%d ic=%d oc=%d family=%s\n",
+                                              batch, mResource->mInputChannel, mResource->mOutputChannel,
+                                              _compactDenseFamilyName(family));
+                                }
+                                continue;
+                            }
+                            const int candidateTime = getExecuteTime();
+                            if (_convProfileSelectionEnabled()) {
+                                MNN_PRINT("OpenCLConvBufLowMemory tiny-family-candidate batch=%d ic=%d oc=%d "
+                                          "family=%s time=%d\n",
+                                          batch, mResource->mInputChannel, mResource->mOutputChannel,
+                                          _compactDenseFamilyName(family), candidateTime);
+                            }
+                            if (!tuned || candidateTime < bestTime) {
+                                tuned = true;
+                                bestTime = candidateTime;
+                                bestFamily = family;
+                            }
+                        }
+                        if (tuned) {
+                            mUseFPWeight = false;
+                            compactKernelMode = _compactKernelModeForFamily(bestFamily);
+                            std::pair<std::vector<uint32_t>, uint32_t> bestInfo =
+                                std::make_pair(std::vector<uint32_t>{bestFamily},
+                                               static_cast<uint32_t>(std::max(0, bestTime)));
+                            setTunedInfo(familyInfo, familyShape, bestInfo, runTime, "gemm_conv1x1_buf");
+                            compactDecisionSource = "adreno_tiny_family_online_tuned";
+                            familyResolved = true;
+                        }
+                    }
+                }
+                if (!familyResolved && adrenoTinyFamilyShape) {
+                    uint32_t heuristicFamily = kCompactDenseFamilyGenericQuant;
+                    if (_pickAdrenoTinyDenseFamilyHeuristic(
+                            runTime, mResource->mNumQuantBit, batch,
+                            mResource->mInputChannel, mResource->mOutputChannel,
+                            &heuristicFamily)) {
+                        mUseFPWeight = false;
+                        compactKernelMode = _compactKernelModeForFamily(heuristicFamily);
+                        compactDecisionSource = "adreno_tiny_family_row_heuristic";
+                        familyResolved = true;
+                    }
+                }
+            }
             if(batch > 16){
                 const bool tuneAdrenoCompactFamily = ConvAdreno::shouldTuneCompactDenseFamily(
                     runTime, mResource->mNumQuantBit, batch,
@@ -1751,8 +2087,11 @@ ErrorCode ConvBufLowMemoryExecution::onResize(const std::vector<Tensor *> &input
     } else {
         tuneGeneralCaseLowMemory(input, output);
     }
-    if (_convProfileSelectionEnabled() && mResource->mConv1x1Opt && batch >= 96 &&
-        mResource->mInputChannel >= 1024 && mResource->mOutputChannel >= 1024) {
+    const bool profileCompactRows =
+        batch >= 96 && mResource->mInputChannel >= 1024 && mResource->mOutputChannel >= 1024;
+    const bool profileTinyRows =
+        batch > 1 && batch <= 16 && mResource->mInputChannel >= 1024 && mResource->mOutputChannel >= 256;
+    if (_convProfileSelectionEnabled() && mResource->mConv1x1Opt && (profileCompactRows || profileTinyRows)) {
         const uint32_t family = _compactDenseFamilyForSelection(mUseFPWeight, compactKernelMode);
         MNN_PRINT("OpenCLConvBufLowMemory profile batch=%d ic=%d oc=%d int4=%d use_fp_weight=%d "
                   "weight_image=%d selected_pic_kernel=%d compact_mode=%s auto_pic_compact=%d family=%s "

@@ -523,6 +523,37 @@ class MNNConverter:
             'header_len': header_len,
         }
 
+    def _linear_quan_parameter_from_plan(self, ic, oc, plan):
+        quant_bit = plan['quant_bit']
+        if quant_bit == 16:
+            return { "type": 3 }
+        return {
+            "quantScale": 1.0, "scaleIn": 0.0, "scaleOut": 0.0,
+            "useInt32": False, "has_scaleInt": False, "shapeInt32": plan['shape_int32'],
+            "type": 1, "aMaxOrBits": quant_bit, "aMin": plan['a_min'],
+            "readType": plan['read_type'], "weightSize": 0
+        }
+
+    def _linear_conv_op_from_plan(self, name, input_indexes, output_indexes, ic, oc, plan):
+        return {
+            "name": name,
+            "inputIndexes": input_indexes,
+            "outputIndexes": output_indexes,
+            "type": "Convolution",
+            "main_type": "Convolution2D",
+            "main": {
+                'common': {
+                    'dilateX': 1, 'dilateY': 1, 'strideX': 1, 'strideY': 1,
+                    'kernelX': 1, 'kernelY': 1, 'padX': 0, 'padY': 0, 'group': 1,
+                    'outputCount': oc, 'relu': False, 'padMode': 'CAFFE',
+                    'relu6': False, 'inputCount': ic, 'hasOutputShape': False
+                },
+                "quanParameter": self._linear_quan_parameter_from_plan(ic, oc, plan),
+                "external": plan['external']
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+
     @staticmethod
     def _external_to_string(external):
         return ','.join(str(int(v)) for v in external)
@@ -541,6 +572,46 @@ class MNNConverter:
             {"key": f"{prefix}_has_bias", "i": int(bool(plan['has_bias']))},
         ]
         return attrs
+
+    def _pic_linear_conv_attrs(self, name, ic, oc, plan):
+        return [
+            {"key": "linear_name", "s": name},
+            {"key": "external", "s": self._external_to_string(plan['external'])},
+            {"key": "in_features", "i": int(ic)},
+            {"key": "out_features", "i": int(oc)},
+            {"key": "quant_bit", "i": int(plan['quant_bit'])},
+            {"key": "quant_block", "i": int(plan['quant_block'])},
+            {"key": "a_min", "i": int(plan['a_min'])},
+            {"key": "read_type", "i": int(plan['read_type'])},
+            {"key": "shape_int32", "i": int(bool(plan['shape_int32']))},
+            {"key": "has_bias", "i": int(bool(plan['has_bias']))},
+        ]
+
+    def _use_pic_nhwc_linear_fusion(self, name, is_lm, ic, oc, plan):
+        if not bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)):
+            return False
+        if is_lm or plan['quant_bit'] != 4:
+            return False
+        if ic % 4 != 0 or oc % 8 != 0:
+            return False
+        if not name.startswith('/layers.'):
+            return False
+        scope = getattr(self.args, 'pic_decode_nhwc_linear_scope', 'all')
+        if scope == 'all':
+            return '/self_attn/' in name or '/mlp/' in name
+        if scope == 'attn':
+            return '/self_attn/' in name
+        if scope == 'mlp':
+            return '/mlp/' in name
+        if scope == 'qkv':
+            return any(part in name for part in ('/self_attn/q_proj/', '/self_attn/k_proj/', '/self_attn/v_proj/'))
+        if scope == 'o':
+            return '/self_attn/o_proj/' in name
+        if scope == 'mlp_gateup':
+            return any(part in name for part in ('/mlp/gate_proj/', '/mlp/up_proj/'))
+        if scope == 'mlp_down':
+            return '/mlp/down_proj/' in name
+        return False
 
     def _pic_gate_up_concat_plan(self, gate_name, up_name, ic, oc):
         gate = self.weight_ops[gate_name]
@@ -609,7 +680,9 @@ class MNNConverter:
         if len(origin_outputs) != 2:
             raise RuntimeError(f'PicGateUpWeightOnly expects two outputs, got {len(origin_outputs)}')
 
-        concat_plan = self._pic_gate_up_concat_plan(gate_name, up_name, ic, oc)
+        direct_fusion = bool(int(self._attr_value(op, 'direct_fusion', 0))) or \
+            bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False))
+        concat_plan = None if direct_fusion else self._pic_gate_up_concat_plan(gate_name, up_name, ic, oc)
         if concat_plan is not None:
             pre_reshape_name = f'{name}/pre_reshape'
             pre_convert_name = f'{name}/pre_convert'
@@ -870,6 +943,219 @@ class MNNConverter:
         origin_outputs = op['outputIndexes']
         if len(origin_outputs) != 1:
             raise RuntimeError(f'PicGateUpSiluWeightOnly expects one output, got {len(origin_outputs)}')
+
+        split_fusion = bool(int(self._attr_value(op, 'split_fusion', 0))) or \
+            bool(getattr(self.args, 'pic_decode_gateup_split_fusion', False))
+        direct_fusion = bool(int(self._attr_value(op, 'direct_fusion', 0))) or \
+            bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False))
+        if direct_fusion:
+            gate_plan = self._linear_quant_plan(gate_name, ic, oc)
+            up_plan = self._linear_quant_plan(up_name, ic, oc)
+
+            pre_reshape_name = f'{name}/pre_reshape'
+            pre_convert_name = f'{name}/pre_convert'
+            fused_name = f'{name}/direct_fused'
+            post_convert_name = f'{name}/post_convert'
+            post_reshape_name = f'{name}/post_reshape'
+
+            pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+            pre_convert_output = self.build_tensor(graph, pre_convert_name)
+            fused_output = self.build_tensor(graph, fused_name)
+            post_convert_output = self.build_tensor(graph, post_convert_name)
+
+            pre_reshape = {
+                "name": pre_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": origin_input,
+                "outputIndexes": pre_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [-1, ic, 1, 1],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            pre_convert = {
+                "name": pre_convert_name,
+                "inputIndexes": pre_reshape_output,
+                "outputIndexes": pre_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NCHW",
+                    "dest": "NC4HW4"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            attrs = [
+                {"key": "name", "s": fused_name},
+                {"key": "in_features", "i": ic},
+                {"key": "out_features", "i": oc},
+            ]
+            attrs += self._pic_gate_up_conv_attrs('gate', gate_name, ic, oc, gate_plan)
+            attrs += self._pic_gate_up_conv_attrs('up', up_name, ic, oc, up_plan)
+            fused = {
+                "inputIndexes": pre_convert_output,
+                "main_type": "Extra",
+                "main": {
+                    "type": "PicGateUpSiluWeightOnly",
+                    "engine": "MNN",
+                    "attr": attrs
+                },
+                "name": fused_name,
+                "outputIndexes": fused_output,
+                "type": "Extra",
+                "defaultDimentionFormat": "NHWC"
+            }
+            post_convert = {
+                "name": post_convert_name,
+                "inputIndexes": fused_output,
+                "outputIndexes": post_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NC4HW4",
+                    "dest": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            post_reshape = {
+                "name": post_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": post_convert_output,
+                "outputIndexes": origin_outputs,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            return [
+                pre_reshape, pre_convert,
+                fused, post_convert, post_reshape
+            ]
+        if split_fusion:
+            gate_plan = self._linear_quant_plan(gate_name, ic, oc)
+            up_plan = self._linear_quant_plan(up_name, ic, oc)
+
+            pre_reshape_name = f'{name}/pre_reshape'
+            pre_convert_name = f'{name}/pre_convert'
+            gate_conv_name = f'{name}/gate_conv'
+            up_conv_name = f'{name}/up_conv'
+            gate_post_convert_name = f'{name}/gate_post_convert'
+            up_post_convert_name = f'{name}/up_post_convert'
+            gate_post_reshape_name = f'{name}/gate_post_reshape'
+            up_post_reshape_name = f'{name}/up_post_reshape'
+            silu_name = f'{name}/split_silu'
+
+            pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+            pre_convert_output = self.build_tensor(graph, pre_convert_name)
+            gate_conv_output = self.build_tensor(graph, gate_conv_name)
+            up_conv_output = self.build_tensor(graph, up_conv_name)
+            gate_post_convert_output = self.build_tensor(graph, gate_post_convert_name)
+            up_post_convert_output = self.build_tensor(graph, up_post_convert_name)
+            gate_post_reshape_output = self.build_tensor(graph, gate_post_reshape_name)
+            up_post_reshape_output = self.build_tensor(graph, up_post_reshape_name)
+
+            pre_reshape = {
+                "name": pre_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": origin_input,
+                "outputIndexes": pre_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [-1, ic, 1, 1],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            pre_convert = {
+                "name": pre_convert_name,
+                "inputIndexes": pre_reshape_output,
+                "outputIndexes": pre_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NCHW",
+                    "dest": "NC4HW4"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            gate_conv = self._linear_conv_op_from_plan(gate_conv_name, pre_convert_output,
+                                                       gate_conv_output, ic, oc, gate_plan)
+            up_conv = self._linear_conv_op_from_plan(up_conv_name, pre_convert_output,
+                                                     up_conv_output, ic, oc, up_plan)
+            gate_post_convert = {
+                "name": gate_post_convert_name,
+                "inputIndexes": gate_conv_output,
+                "outputIndexes": gate_post_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NC4HW4",
+                    "dest": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            up_post_convert = {
+                "name": up_post_convert_name,
+                "inputIndexes": up_conv_output,
+                "outputIndexes": up_post_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NC4HW4",
+                    "dest": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            gate_post_reshape = {
+                "name": gate_post_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": gate_post_convert_output,
+                "outputIndexes": gate_post_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            up_post_reshape = {
+                "name": up_post_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": up_post_convert_output,
+                "outputIndexes": up_post_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            silu_op = {
+                "inputIndexes": gate_post_reshape_output + up_post_reshape_output,
+                "main_type": "Extra",
+                "main": {
+                    "type": "PicSiluMul",
+                    "engine": "MNN",
+                    "attr": [
+                        {"key": "name", "s": silu_name}
+                    ]
+                },
+                "name": silu_name,
+                "outputIndexes": origin_outputs,
+                "type": "Extra",
+                "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
+            }
+            return [
+                pre_reshape, pre_convert,
+                gate_conv, up_conv,
+                gate_post_convert, gate_post_reshape,
+                up_post_convert, up_post_reshape,
+                silu_op
+            ]
 
         concat_plan = self._pic_gate_up_concat_plan(gate_name, up_name, ic, oc)
         if concat_plan is None:
@@ -1179,6 +1465,60 @@ class MNNConverter:
 
         origin_input = op['inputIndexes']
         origin_output = op['outputIndexes']
+        linear_plan = {
+            'external': external,
+            'q_min': q_min,
+            'shape_int32': shape_int32,
+            'quant_bit': quant_bit,
+            'quant_block': quant_block,
+            'read_type': 0 if quant_bit == 16 or self.args.sym else oc * (ic // block_size),
+            'a_min': 0 if quant_bit == 16 or self.args.sym else q_min,
+            'has_bias': linear.bias is not None,
+            'header_len': header_len,
+        }
+        if self._use_pic_nhwc_linear_fusion(name, is_lm, ic, oc, linear_plan):
+            pre_reshape_name = f'{name}/pre_reshape'
+            post_reshape_name = f'{name}/post_reshape'
+            pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+            linear_output = self.build_tensor(graph, f'{name}/nhwc_linear_output')
+            pre_reshape = {
+                "name": pre_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": origin_input,
+                "outputIndexes": pre_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [-1, 1, 1, ic],
+                    "dimType": "NHWC"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            linear_op = {
+                "name": name,
+                "inputIndexes": pre_reshape_output,
+                "outputIndexes": linear_output,
+                "type": "Extra",
+                "main_type": "Extra",
+                "main": {
+                    "type": "PicLinearNhwcWeightOnly",
+                    "engine": "MNN",
+                    "attr": self._pic_linear_conv_attrs(name, ic, oc, linear_plan)
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            post_reshape = {
+                "name": post_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": linear_output,
+                "outputIndexes": origin_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            return [pre_reshape, linear_op, post_reshape]
         # build new tensor
         pre_reshape_name = f'{name}/pre_reshape'
         pre_convert_name = f'{name}/pre_convert'

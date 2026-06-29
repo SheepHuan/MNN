@@ -1120,6 +1120,7 @@ class Mlp(torch.nn.Module):
         ModelMapper.do_map(self, mlp, mapper.get('mlp', dense_mlp_map))
         self.pic_tiny_fusion = bool(getattr(config, 'pic_decode_tiny_fusion', False)) and _is_silu_activation(getattr(self, 'act_fn', None))
         self.pic_gateup_fusion = self.pic_tiny_fusion and bool(getattr(config, 'pic_decode_gateup_fusion', False))
+        self.pic_gateup_split_fusion = self.pic_gateup_fusion and bool(getattr(config, 'pic_decode_gateup_split_fusion', False))
         self.is_moe = hasattr(self, 'experts')
         self.export_moe = False
         if not self.is_moe:
@@ -1130,7 +1131,8 @@ class Mlp(torch.nn.Module):
                     self.gate_proj.out_features,
                     f'/layers.{layer_id}/mlp/gate_proj/Linear',
                     f'/layers.{layer_id}/mlp/up_proj/Linear',
-                    f'/layers.{layer_id}/mlp/PicGateUpSiluWeightOnly')
+                    f'/layers.{layer_id}/mlp/PicGateUpSiluWeightOnly',
+                    split_fusion=self.pic_gateup_split_fusion)
             return
         self.custom_moe = MoE(self.num_experts, self.top_k, layer_id)
         if isinstance(self.experts, torch.nn.ModuleList):
