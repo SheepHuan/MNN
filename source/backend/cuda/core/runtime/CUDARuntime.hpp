@@ -20,6 +20,15 @@
 #include <cuda_runtime_api.h>
 #include <cusolverDn.h>
 #include <cublas_v2.h>
+#if defined(__has_include)
+#if __has_include(<cublasLt.h>)
+#include <cublasLt.h>
+#define MNN_CUDA_HAS_CUBLASLT 1
+#endif
+#endif
+#ifndef MNN_CUDA_HAS_CUBLASLT
+#define MNN_CUDA_HAS_CUBLASLT 0
+#endif
 #include <sstream>
 #include <string>
 #include <vector>
@@ -130,6 +139,10 @@ public:
     bool setCache(std::pair<const void*, size_t> cache);
 
     cublasHandle_t cublasHandle() const { return mCublasHandle; }
+#if MNN_CUDA_HAS_CUBLASLT
+    cublasLtHandle_t cublasLtHandle() const { return mCublasLtHandle; }
+    void* cublasLtWorkspace(size_t bytes);
+#endif
 
     int selectDeviceMaxFreeMemory();
 
@@ -146,6 +159,11 @@ private:
     size_t mThreadPerBlock = 128;
 
     cublasHandle_t mCublasHandle = nullptr;
+#if MNN_CUDA_HAS_CUBLASLT
+    cublasLtHandle_t mCublasLtHandle = nullptr;
+    void* mCublasLtWorkspace = nullptr;
+    size_t mCublasLtWorkspaceBytes = 0;
+#endif
 
 private:
     std::map<std::pair<std::vector<int32_t>, std::vector<uint32_t>>, std::pair<std::string, uint32_t>> mTunedBlockWarpShape;

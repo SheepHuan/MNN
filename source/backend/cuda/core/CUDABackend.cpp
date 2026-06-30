@@ -296,7 +296,9 @@ Execution* CUDABackend::onCreate(const std::vector<Tensor*>& inputs, const std::
         auto extra = op->main_as_Extra();
         const bool backendNativeExtra = extra != nullptr && extra->type() != nullptr &&
             (extra->type()->str() == "PicSiluMul" || extra->type()->str() == "PicPackedSiluMul" ||
-             extra->type()->str() == "PicGateUpWeightOnly");
+             extra->type()->str() == "PicGateUpWeightOnly" ||
+             extra->type()->str() == "PicGateUpSiluWeightOnly" ||
+             extra->type()->str() == "PicLinearNhwcWeightOnly");
         if (!backendNativeExtra && !FuseExecutionV2::check(op)) {
             if (extra == nullptr || extra->type() == nullptr || extra->info() == nullptr) {
                 return NULL;

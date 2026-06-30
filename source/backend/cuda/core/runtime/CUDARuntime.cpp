@@ -52,11 +52,29 @@ CUDARuntime::CUDARuntime(int device_id) {
         MNN_ERROR("cublasCreate failed: %d\n", (int)cublasStatus);
         mCublasHandle = nullptr;
     }
+#if MNN_CUDA_HAS_CUBLASLT
+    auto cublasLtStatus = cublasLtCreate(&mCublasLtHandle);
+    if (cublasLtStatus != CUBLAS_STATUS_SUCCESS) {
+        MNN_ERROR("cublasLtCreate failed: %d\n", (int)cublasLtStatus);
+        mCublasLtHandle = nullptr;
+    }
+#endif
 }
 
 CUDARuntime::~CUDARuntime() {
 #ifdef LOG_VERBOSE
     MNN_PRINT("start ~CUDARuntime !\n");
+#endif
+#if MNN_CUDA_HAS_CUBLASLT
+    if (mCublasLtWorkspace) {
+        cudaFree(mCublasLtWorkspace);
+        mCublasLtWorkspace = nullptr;
+        mCublasLtWorkspaceBytes = 0;
+    }
+    if (mCublasLtHandle) {
+        cublasLtDestroy(mCublasLtHandle);
+        mCublasLtHandle = nullptr;
+    }
 #endif
     if (mCublasHandle) {
         cublasDestroy(mCublasHandle);
@@ -66,6 +84,29 @@ CUDARuntime::~CUDARuntime() {
     MNN_PRINT("end ~CUDARuntime !\n");
 #endif
 }
+
+#if MNN_CUDA_HAS_CUBLASLT
+void* CUDARuntime::cublasLtWorkspace(size_t bytes) {
+    if (bytes == 0) {
+        return nullptr;
+    }
+    if (mCublasLtWorkspace != nullptr && mCublasLtWorkspaceBytes >= bytes) {
+        return mCublasLtWorkspace;
+    }
+    if (mCublasLtWorkspace != nullptr) {
+        cudaFree(mCublasLtWorkspace);
+        mCublasLtWorkspace = nullptr;
+        mCublasLtWorkspaceBytes = 0;
+    }
+    if (cudaMalloc(&mCublasLtWorkspace, bytes) != cudaSuccess) {
+        mCublasLtWorkspace = nullptr;
+        mCublasLtWorkspaceBytes = 0;
+        return nullptr;
+    }
+    mCublasLtWorkspaceBytes = bytes;
+    return mCublasLtWorkspace;
+}
+#endif
 
 int CUDARuntime::selectDeviceMaxFreeMemory() {
     cudaDeviceProp deviceProp;

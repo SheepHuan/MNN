@@ -954,10 +954,14 @@ def write_power_config(path: Path, metadata: dict[str, Any]) -> None:
         "frequency_profile",
         "frequency_note",
         "run_id",
+        "benchmark_csv",
+        "benchmark_csv_row_mode",
         "power_process_dir",
         "power_uuid",
         "power_rep_total",
         "power_rep_interval_sec",
+        "power_warmup_sec",
+        "power_cooldown_sec",
         "power_repetition_results",
         "model_key",
         "model",
@@ -1005,6 +1009,8 @@ def append_power_manifest(process_dir: Path, metadata: dict[str, Any]) -> None:
         "power_uuid",
         "power_rep_total",
         "power_rep_interval_sec",
+        "power_warmup_sec",
+        "power_cooldown_sec",
         "device",
         "device_display",
         "backend",
@@ -1147,10 +1153,14 @@ def run_one_power_capture(
         "frequency_profile": str(device.get("frequency_profile", "")),
         "frequency_note": str(device.get("frequency_note", DEFAULT_MAX_FREQUENCY_NOTES.get(device["device_key"], ""))),
         "run_id": str(args.run_id),
+        "benchmark_csv": str(getattr(args, "benchmark_csv", "") or ""),
+        "benchmark_csv_row_mode": "existing" if bool(getattr(args, "only_benchmark_csv_rows", False)) else "",
         "power_process_dir": str(process_dir),
         "power_uuid": case_uuid,
         "power_rep_total": int(rep_total),
         "power_rep_interval_sec": POWER_REP_INTERVAL_SEC,
+        "power_warmup_sec": float(args.power_warmup_sec or 0),
+        "power_cooldown_sec": float(args.power_cooldown_sec or 0),
         "model_key": str(args.model_key),
         "model": device["model_name"],
         "context_tokens": int(ctx),
@@ -1704,6 +1714,49 @@ def compute_missing_report(
                 }
                 for item in missing_keys
             ],
+        }
+    return report
+
+
+def compute_existing_rows_report(
+    benchmark_csv: Path,
+    target_model: str,
+    requested_devices: list[str],
+    requested_contexts: list[int],
+    selected_modes: list[str],
+    selected_ratios: list[float],
+) -> dict[str, Any]:
+    with benchmark_csv.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    requested_context_set = {str(int(context)) for context in requested_contexts}
+    report: dict[str, Any] = {
+        "benchmark_csv": str(benchmark_csv),
+        "template_model": TEMPLATE_MODEL,
+        "target_model": target_model,
+        "selected_modes": selected_modes,
+        "selected_ratios": selected_ratios,
+        "devices": {},
+    }
+    for device in requested_devices:
+        device_rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, ...]] = set()
+        for row in rows:
+            if row.get("model") != target_model or row.get("device") != device:
+                continue
+            if str(row.get("context_tokens", "")) not in requested_context_set:
+                continue
+            if not row_matches_filters(row, selected_modes, selected_ratios):
+                continue
+            key = csv_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            device_rows.append({name: row.get(name, "") for name in CSV_KEYS})
+        device_rows.sort(key=lambda item: (int(item["context_tokens"]), item["mode"], str(item["budget"])))
+        report["devices"][device] = {
+            "existing_count": len(device_rows),
+            "existing_contexts": sorted({int(row["context_tokens"]) for row in device_rows}),
+            "existing_rows": device_rows,
         }
     return report
 
@@ -2537,6 +2590,11 @@ def main() -> int:
     parser.add_argument("--output-dir", default=str(MNN_ROOT / ".cache/latency_budget_20260625"))
     parser.add_argument("--base-tokens", default=str(DEFAULT_BASE_TOKENS))
     parser.add_argument("--benchmark-csv", default="")
+    parser.add_argument(
+        "--only-benchmark-csv-rows",
+        action="store_true",
+        help="Run only rows already present in --benchmark-csv for the selected device/model/contexts/modes/ratios.",
+    )
     parser.add_argument("--only-missing-contexts", action="store_true")
     parser.add_argument("--print-gap-only", action="store_true")
     parser.add_argument("--no-warm", action="store_true")
@@ -2570,8 +2628,18 @@ def main() -> int:
     parser.add_argument("--power-voltage-mv", type=int, default=int(os.environ["MNN_POWER_VOLTAGE_MV"]) if os.environ.get("MNN_POWER_VOLTAGE_MV") else 0)
     parser.add_argument("--power-max-duration-sec", type=float, default=float(os.environ.get("MNN_POWER_MAX_DURATION_SEC", "1800")))
     parser.add_argument("--power-stop-timeout-sec", type=float, default=float(os.environ.get("MNN_POWER_STOP_TIMEOUT_SEC", "30")))
-    parser.add_argument("--power-warmup-sec", type=float, default=float(os.environ.get("MNN_POWER_WARMUP_SEC", "0")))
-    parser.add_argument("--power-cooldown-sec", type=float, default=float(os.environ.get("MNN_POWER_COOLDOWN_SEC", "0")))
+    parser.add_argument(
+        "--power-warmup-sec",
+        type=float,
+        default=float(os.environ.get("MNN_POWER_WARMUP_SEC", "5")),
+        help="Idle seconds after Power API start and before the first measured rep. Defaults to 5.",
+    )
+    parser.add_argument(
+        "--power-cooldown-sec",
+        type=float,
+        default=float(os.environ.get("MNN_POWER_COOLDOWN_SEC", "5")),
+        help="Idle seconds after the last measured rep and before Power API stop. Defaults to 5.",
+    )
     parser.add_argument("--power-rep", type=int, default=int(os.environ.get("MNN_POWER_REP", "3")))
     parser.add_argument(
         "--remote-memory-limit-percent",
@@ -2656,19 +2724,19 @@ def main() -> int:
     device_contexts: dict[str, list[int]] = {device: list(base_contexts) for device in devices}
     device_missing_rows: dict[str, dict[int, list[dict[str, Any]]]] = {}
     if args.benchmark_csv:
-        gap_report = compute_missing_report(
-            Path(args.benchmark_csv),
-            target_model,
-            devices,
-            base_contexts,
-            args.selected_modes,
-            args.selected_ratios,
-        )
-        write_json(out_dir / "gap_report.json", gap_report)
-        if args.only_missing_contexts:
+        if args.only_benchmark_csv_rows:
+            existing_report = compute_existing_rows_report(
+                Path(args.benchmark_csv),
+                target_model,
+                devices,
+                base_contexts,
+                args.selected_modes,
+                args.selected_ratios,
+            )
+            write_json(out_dir / "benchmark_rows_report.json", existing_report)
             device_contexts = {}
             for device in devices:
-                rows = gap_report["devices"][device]["missing_rows"]
+                rows = existing_report["devices"][device]["existing_rows"]
                 grouped: dict[int, list[dict[str, Any]]] = {}
                 for row in rows:
                     ctx = int(row["context_tokens"])
@@ -2676,8 +2744,29 @@ def main() -> int:
                 if grouped:
                     device_contexts[device] = sorted(grouped)
                     device_missing_rows[device] = grouped
+        else:
+            gap_report = compute_missing_report(
+                Path(args.benchmark_csv),
+                target_model,
+                devices,
+                base_contexts,
+                args.selected_modes,
+                args.selected_ratios,
+            )
+            write_json(out_dir / "gap_report.json", gap_report)
+            if args.only_missing_contexts:
+                device_contexts = {}
+                for device in devices:
+                    rows = gap_report["devices"][device]["missing_rows"]
+                    grouped: dict[int, list[dict[str, Any]]] = {}
+                    for row in rows:
+                        ctx = int(row["context_tokens"])
+                        grouped.setdefault(ctx, []).append(row)
+                    if grouped:
+                        device_contexts[device] = sorted(grouped)
+                        device_missing_rows[device] = grouped
         if args.print_gap_only:
-            print_gap_report(gap_report)
+            print_gap_report(gap_report if gap_report is not None else existing_report)
             return 0
 
     write_json(
@@ -2709,6 +2798,7 @@ def main() -> int:
             "force_cache_build": bool(args.force_cache_build),
             "restart_server_each_spec": bool(args.restart_server_each_spec),
             "benchmark_csv": args.benchmark_csv,
+            "only_benchmark_csv_rows": bool(args.only_benchmark_csv_rows),
             "only_missing_contexts": bool(args.only_missing_contexts),
             "base_tokens": str(args.base_tokens),
             "server_env": list(args.server_env),

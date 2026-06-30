@@ -71,7 +71,14 @@ public:
             if (oc <= 0) {
                 return false;
             }
-            if (inputs[0]->dimensions() == 4 && extraAttrInt(extra, "packed_input_nc4", 0) != 0) {
+            if (inputs[0]->dimensions() == 4 && extraAttrInt(extra, "packed_input_nhwc", 0) != 0) {
+                const int rows = inputs[0]->length(0) * inputs[0]->length(1) * inputs[0]->length(2);
+                outputs[0]->buffer().dimensions = 3;
+                outputs[0]->setLength(0, 1);
+                outputs[0]->setLength(1, rows);
+                outputs[0]->setLength(2, oc);
+                TensorUtils::getDescribe(outputs[0])->dimensionFormat = MNN_DATA_FORMAT_NCHW;
+            } else if (inputs[0]->dimensions() == 4 && extraAttrInt(extra, "packed_input_nc4", 0) != 0) {
                 outputs[0]->buffer().dimensions = 3;
                 outputs[0]->setLength(0, 1);
                 outputs[0]->setLength(1, inputs[0]->length(0));
@@ -103,7 +110,7 @@ public:
             TensorUtils::copyShape(inputs[0], outputs[0], true);
             outputs[0]->setLength(outputs[0]->dimensions() - 1, oc);
             outputs[0]->buffer().type = inputs[0]->getType();
-            TensorUtils::getDescribe(outputs[0])->dimensionFormat = TensorUtils::getDescribe(inputs[0])->dimensionFormat;
+            TensorUtils::getDescribe(outputs[0])->dimensionFormat = MNN_DATA_FORMAT_NHWC;
             return true;
         }
         if (outputs.size() == 1) {

@@ -5,6 +5,10 @@
 ### AndroidStudio ###
 # Covers files to be ignored for android development using Android Studio.
 .cache/
+
+# MNN local benchmark outputs
+.codex/skills/mnn-pic-benchmark/power/
+
 # Built application files
 *.apk
 *.ap_

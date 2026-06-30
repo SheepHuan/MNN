@@ -890,7 +890,7 @@ def build_args(parser):
     parser.add_argument('--pic_recompute_score_layer_idx', type=int, default=1, help='Static score-layer boundary where PIC sparse recompute gathers compact active rows.')
     parser.add_argument('--pic_decode_repair_outputs', action='store_true', help='Expose score-layer hidden states needed by PIC decode repair.')
     parser.add_argument('--pic_decode_tiny_fusion', action='store_true', help='Export PIC decode tiny elementwise fusion ops such as PicSiluMul.')
-    parser.add_argument('--pic_decode_gateup_fusion', action='store_true', help='Opt in to experimental PicGateUpWeightOnly export; keep disabled for formal TPOT unless its fused/fallback paths are validated.')
+    parser.add_argument('--pic_decode_gateup_fusion', action='store_true', help='Opt in to experimental PicGateUpWeightOnly export; with --pic_decode_nhwc_linear_fusion this lowers gate/up to one packed NHWC weight-only projection plus PicPackedSiluMul.')
     parser.add_argument('--pic_decode_gateup_direct_fusion', action='store_true', help='Preserve PicGateUpWeightOnly Extra so OpenCL can fuse gate/up weight-only projections directly before PicSiluMul.')
     parser.add_argument('--pic_decode_gateup_split_fusion', action='store_true', help='Export gate/up with shared input layout but separate weight-only Conv nodes before PicSiluMul.')
     parser.add_argument('--pic_decode_nhwc_linear_fusion', action='store_true', help='Export experimental NHWC weight-only Linear Extra ops for PIC decode repair A/B.')

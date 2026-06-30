@@ -20,6 +20,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 //#define DEBUG
 
@@ -35,6 +38,8 @@ const int BLOCK_SIZE = 256; // Quant / SumBq / Bias
 const int DEQUANT_TILE_DIM = 32; // Dequant
 const int WARP_SIZE = 32;
 static std::atomic<size_t> gPicStaticDequantBytes{0};
+static std::mutex gPicStaticDequantCacheMutex;
+static std::unordered_map<std::string, std::weak_ptr<Tensor>> gPicStaticDequantCache;
 
 static bool profilePicWeightOnlyConv() {
     const char* paged = ::getenv("MNN_PAGED_ATTENTION_PROFILE");
@@ -144,6 +149,27 @@ static int picRows45CublasAlgoPolicy() {
     return policy;
 }
 
+static int picRows48CublasLtPolicy() {
+    const char* value = ::getenv("MNN_CUDA_PIC_INT4_ROWS48_CUBLASLT");
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
+    }
+    if (value[0] == '0' || ::strcmp(value, "off") == 0 || ::strcmp(value, "disable") == 0) {
+        return 0;
+    }
+    return std::atoi(value);
+}
+
+static bool picRows48CublasLtMatches(int batch, int ic, int oc) {
+    if (picRows48CublasLtPolicy() <= 0) {
+        return false;
+    }
+    if (!(batch == 4 || batch == 6 || batch == 8)) {
+        return false;
+    }
+    return (ic == 3072 && oc == 8192) || (ic == 8192 && oc == 3072);
+}
+
 static uint64_t convProfileNowUs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -178,6 +204,64 @@ static bool reservePicStaticDequantBytes(size_t bytes, size_t limit) {
         }
     }
     return false;
+}
+
+static std::string picStaticDequantCacheKey(Backend* backend, const Op* op, int hp, int icp, size_t bytes) {
+    if (backend == nullptr || op == nullptr || op->main_type() != OpParameter_Convolution2D) {
+        return "";
+    }
+    const auto conv = op->main_as_Convolution2D();
+    if (conv == nullptr || conv->external() == nullptr || op->externalPath() == nullptr) {
+        return "";
+    }
+    const auto external = conv->external();
+    if (external->size() < 3) {
+        return "";
+    }
+    std::string key;
+    key.reserve(160);
+    auto cudaBackend = static_cast<CUDABackend*>(backend);
+    key.append(std::to_string(reinterpret_cast<uintptr_t>(cudaBackend->getCUDARuntime())));
+    key.push_back('|');
+    key.append(op->externalPath()->str());
+    key.push_back('|');
+    for (flatbuffers::uoffset_t i = 0; i < external->size(); ++i) {
+        if (i > 0) {
+            key.push_back(',');
+        }
+        key.append(std::to_string(external->Get(i)));
+    }
+    key.push_back('|');
+    key.append(std::to_string(hp));
+    key.push_back('x');
+    key.append(std::to_string(icp));
+    key.push_back('|');
+    key.append(std::to_string(bytes));
+    return key;
+}
+
+static std::shared_ptr<Tensor> findPicStaticDequantCache(const std::string& key) {
+    if (key.empty()) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> guard(gPicStaticDequantCacheMutex);
+    auto iter = gPicStaticDequantCache.find(key);
+    if (iter == gPicStaticDequantCache.end()) {
+        return nullptr;
+    }
+    auto tensor = iter->second.lock();
+    if (tensor == nullptr) {
+        gPicStaticDequantCache.erase(iter);
+    }
+    return tensor;
+}
+
+static void insertPicStaticDequantCache(const std::string& key, const std::shared_ptr<Tensor>& tensor) {
+    if (key.empty() || tensor == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(gPicStaticDequantCacheMutex);
+    gPicStaticDequantCache[key] = tensor;
 }
 
 static bool runRows45CublasFp16(cublasHandle_t handle, const void* input, const void* weight, void* output,
@@ -243,6 +327,124 @@ static bool runRows45CublasFp16(cublasHandle_t handle, const void* input, const 
     }
     return true;
 }
+
+#if MNN_CUDA_HAS_CUBLASLT
+struct PicRowsCublasLtPlan {
+    ~PicRowsCublasLtPlan() {
+        if (preference != nullptr) {
+            cublasLtMatmulPreferenceDestroy(preference);
+        }
+        if (cDesc != nullptr) {
+            cublasLtMatrixLayoutDestroy(cDesc);
+        }
+        if (bDesc != nullptr) {
+            cublasLtMatrixLayoutDestroy(bDesc);
+        }
+        if (aDesc != nullptr) {
+            cublasLtMatrixLayoutDestroy(aDesc);
+        }
+        if (opDesc != nullptr) {
+            cublasLtMatmulDescDestroy(opDesc);
+        }
+    }
+
+    bool matches(int b, int i, int ip, int o, int op) const {
+        return ready && batch == b && ic == i && icp == ip && oc == o && ocp == op;
+    }
+
+    bool init(cublasLtHandle_t handle, int b, int i, int ip, int o, int op, size_t workspaceBytes) {
+        if (handle == nullptr) {
+            return false;
+        }
+        batch = b;
+        ic = i;
+        icp = ip;
+        oc = o;
+        ocp = op;
+        cublasOperation_t transA = CUBLAS_OP_T;
+        cublasOperation_t transB = CUBLAS_OP_N;
+        if (cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatrixLayoutCreate(&aDesc, CUDA_R_16F, ic, oc, icp) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatrixLayoutCreate(&bDesc, CUDA_R_16F, ic, batch, icp) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatrixLayoutCreate(&cDesc, CUDA_R_16F, oc, batch, ocp) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS ||
+            cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                &workspaceBytes, sizeof(workspaceBytes)) != CUBLAS_STATUS_SUCCESS) {
+            return false;
+        }
+        int returned = 0;
+        if (cublasLtMatmulAlgoGetHeuristic(handle, opDesc, aDesc, bDesc, cDesc, cDesc,
+                                           preference, 1, &heuristic, &returned) != CUBLAS_STATUS_SUCCESS ||
+            returned <= 0) {
+            return false;
+        }
+        ready = true;
+        return true;
+    }
+
+    bool run(cublasLtHandle_t handle, const void* input, const void* weight, void* output,
+             void* workspace, size_t workspaceBytes) const {
+        if (!ready || handle == nullptr) {
+            return false;
+        }
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        return cublasLtMatmul(handle, opDesc,
+                              &alpha,
+                              weight, aDesc,
+                              input, bDesc,
+                              &beta,
+                              output, cDesc,
+                              output, cDesc,
+                              &heuristic.algo,
+                              workspace, workspaceBytes,
+                              0) == CUBLAS_STATUS_SUCCESS;
+    }
+
+    int batch = 0;
+    int ic = 0;
+    int icp = 0;
+    int oc = 0;
+    int ocp = 0;
+    cublasLtMatmulDesc_t opDesc = nullptr;
+    cublasLtMatrixLayout_t aDesc = nullptr;
+    cublasLtMatrixLayout_t bDesc = nullptr;
+    cublasLtMatrixLayout_t cDesc = nullptr;
+    cublasLtMatmulPreference_t preference = nullptr;
+    cublasLtMatmulHeuristicResult_t heuristic{};
+    bool ready = false;
+};
+
+static void destroyPicRowsCublasLtPlan(void*& planPtr) {
+    if (planPtr != nullptr) {
+        delete reinterpret_cast<PicRowsCublasLtPlan*>(planPtr);
+        planPtr = nullptr;
+    }
+}
+
+static PicRowsCublasLtPlan* ensurePicRowsCublasLtPlan(void*& planPtr, cublasLtHandle_t handle,
+                                                       int batch, int ic, int icp, int oc, int ocp,
+                                                       size_t workspaceBytes) {
+    auto plan = reinterpret_cast<PicRowsCublasLtPlan*>(planPtr);
+    if (plan != nullptr && plan->matches(batch, ic, icp, oc, ocp)) {
+        return plan;
+    }
+    destroyPicRowsCublasLtPlan(planPtr);
+    plan = new PicRowsCublasLtPlan;
+    if (!plan->init(handle, batch, ic, icp, oc, ocp, workspaceBytes)) {
+        delete plan;
+        return nullptr;
+    }
+    planPtr = plan;
+    return plan;
+}
+#else
+static void destroyPicRowsCublasLtPlan(void*& planPtr) {
+    planPtr = nullptr;
+}
+#endif
 
 template<typename T, typename dT>
 __global__ void DequantizeInt8Weight(
@@ -1756,12 +1958,21 @@ ConvFpAIntBExecution::Resource::Resource(Backend* bn, const MNN::Op* op) {
                 const size_t cacheLimit = decodeHotLinear
                     ? picStaticDequantDecodeHotLimitBytes(runtime->prop())
                     : picStaticDequantBaseLimitBytes(runtime->prop());
-                if (reservePicStaticDequantBytes(dequantBytes, cacheLimit)) {
+                const std::string staticDequantCacheKey =
+                    picStaticDequantCacheKey(bn, op, hp, icp, dequantBytes);
+                auto cachedStaticDequantTensor = findPicStaticDequantCache(staticDequantCacheKey);
+                if (cachedStaticDequantTensor) {
+                    staticDequantWeightTensor = cachedStaticDequantTensor;
+                    mStaticDequantFilter = reinterpret_cast<void*>(staticDequantWeightTensor->buffer().device);
+                    mStaticDequantBytes = dequantBytes;
+                    mOwnsStaticDequantBytes = false;
+                } else if (reservePicStaticDequantBytes(dequantBytes, cacheLimit)) {
                     staticDequantWeightTensor.reset(Tensor::createDevice<int16_t>({hp, icp}));
                     if (staticDequantWeightTensor &&
                         bn->onAcquireBuffer(staticDequantWeightTensor.get(), Backend::STATIC)) {
                         mStaticDequantFilter = reinterpret_cast<void*>(staticDequantWeightTensor->buffer().device);
                         mStaticDequantBytes = dequantBytes;
+                        mOwnsStaticDequantBytes = true;
                         int threads_per_row = UP_DIV(icp, 16);
                         dim3 dq_block(std::min(threads_per_row, 256));
                         dim3 dq_grid(oc, UP_DIV(threads_per_row, static_cast<int>(dq_block.x)));
@@ -1781,9 +1992,11 @@ ConvFpAIntBExecution::Resource::Resource(Backend* bn, const MNN::Op* op) {
                                 oc, ic, icp, mQuanC);
                         }
                         checkKernelErrors;
+                        insertPicStaticDequantCache(staticDequantCacheKey, staticDequantWeightTensor);
                     } else {
                         staticDequantWeightTensor.reset();
                         gPicStaticDequantBytes.fetch_sub(dequantBytes, std::memory_order_relaxed);
+                        mOwnsStaticDequantBytes = false;
                     }
                 }
             }
@@ -1854,9 +2067,10 @@ ConvFpAIntBExecution::Resource::Resource(Backend* bn, const MNN::Op* op) {
 
 ConvFpAIntBExecution::Resource::~Resource() {
     if (mGemvParams) cudaFree(mGemvParams);
-    if (mStaticDequantBytes > 0) {
+    if (mOwnsStaticDequantBytes && mStaticDequantBytes > 0) {
         gPicStaticDequantBytes.fetch_sub(mStaticDequantBytes, std::memory_order_relaxed);
         mStaticDequantBytes = 0;
+        mOwnsStaticDequantBytes = false;
     }
 }
 ConvFpAIntBExecution::ConvFpAIntBExecution(Backend* backend, const MNN::Op* op, std::shared_ptr<Resource> res) : CutlassConvCommonExecution(backend) {
@@ -1876,6 +2090,7 @@ ConvFpAIntBExecution::~ConvFpAIntBExecution() {
     if (mDequantFilterTensor && mDequantIsStatic) {
         backend()->onReleaseBuffer(mDequantFilterTensor.get(), Backend::STATIC);
     }
+    destroyPicRowsCublasLtPlan(mPicRowsCublasLtPlan);
 }
 bool ConvFpAIntBExecution::onClone(Backend* bn, const Op* op, Execution** dst) {
     if (!mValid) {
@@ -2243,6 +2458,42 @@ ErrorCode ConvFpAIntBExecution::onExecute(const std::vector<Tensor*> &inputs, co
                     const bool useRows45Cublas = picDecodeRepairSparse && mFp16Infer &&
                         staticDequant && !mNeedRuntimeDequant &&
                         picRows45CublasMatches(rows45CublasPolicy, batch, ic, oc);
+#if MNN_CUDA_HAS_CUBLASLT
+                    const bool useRows48CublasLt = picDecodeRepairSparse && mFp16Infer &&
+                        staticDequant && !mNeedRuntimeDequant &&
+                        picRows48CublasLtMatches(batch, ic, oc) &&
+                        runtime->cublasLtHandle() != nullptr;
+                    bool rows48CublasLtDone = false;
+                    if (useRows48CublasLt) {
+                        constexpr size_t kRows48CublasLtWorkspaceBytes = 4ull * 1024ull * 1024ull;
+                        uint64_t cublasLtStartUs = 0;
+                        if (profileConv) {
+                            cudaDeviceSynchronize();
+                            cublasLtStartUs = convProfileNowUs();
+                        }
+                        void* workspace = runtime->cublasLtWorkspace(kRows48CublasLtWorkspaceBytes);
+                        auto plan = ensurePicRowsCublasLtPlan(mPicRowsCublasLtPlan, runtime->cublasLtHandle(),
+                                                              batch, ic, icp, oc, ocp,
+                                                              kRows48CublasLtWorkspaceBytes);
+                        rows48CublasLtDone = workspace != nullptr && plan != nullptr &&
+                            plan->run(runtime->cublasLtHandle(), input_addr, mDequantFilter, output_addr,
+                                      workspace, kRows48CublasLtWorkspaceBytes);
+                        if (!rows48CublasLtDone) {
+                            destroyPicRowsCublasLtPlan(mPicRowsCublasLtPlan);
+                        }
+                        if (profileConv) {
+                            cudaDeviceSynchronize();
+                            MNN_PRINT("CUDAWeightOnlyConv profile op=conv_fpa_intb_1x1_rows48_cublaslt "
+                                      "batch=%d ic=%d oc=%d icp=%d ocp=%d policy=%d "
+                                      "static_cache_bytes=%zu static_cache_total=%zu cublaslt_us=%llu\n",
+                                      batch, ic, oc, icp, ocp, picRows48CublasLtPolicy(),
+                                      mResource->mStaticDequantBytes,
+                                      gPicStaticDequantBytes.load(std::memory_order_relaxed),
+                                      static_cast<unsigned long long>(convProfileNowUs() - cublasLtStartUs));
+                        }
+                    }
+                    if (!rows48CublasLtDone) {
+#endif
                     if (useRows45Cublas) {
                         uint64_t cublasStartUs = 0;
                         if (profileConv) {
@@ -2361,6 +2612,9 @@ ErrorCode ConvFpAIntBExecution::onExecute(const std::vector<Tensor*> &inputs, co
                                       static_cast<unsigned long long>(convProfileNowUs() - totalStartUs));
                         }
                     }
+#if MNN_CUDA_HAS_CUBLASLT
+                    }
+#endif
                 }
             }
         } else {

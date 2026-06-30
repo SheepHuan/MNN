@@ -592,7 +592,7 @@ class MNNConverter:
             return False
         if is_lm or plan['quant_bit'] != 4:
             return False
-        if ic % 4 != 0 or oc % 8 != 0:
+        if ic % 8 != 0 or oc % 8 != 0:
             return False
         if not name.startswith('/layers.'):
             return False
@@ -612,6 +612,18 @@ class MNNConverter:
         if scope == 'mlp_down':
             return '/mlp/down_proj/' in name
         return False
+
+    def _use_pic_nhwc_gateup_packed_fusion(self, name, ic, oc, plan):
+        if not bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)):
+            return False
+        if plan is None or plan['quant_bit'] != 4:
+            return False
+        if ic % 8 != 0 or oc % 8 != 0:
+            return False
+        if not name.startswith('/layers.') or '/mlp/' not in name:
+            return False
+        scope = getattr(self.args, 'pic_decode_nhwc_linear_scope', 'all')
+        return scope in ('all', 'mlp', 'mlp_gateup')
 
     def _pic_gate_up_concat_plan(self, gate_name, up_name, ic, oc):
         gate = self.weight_ops[gate_name]
@@ -1180,6 +1192,58 @@ class MNNConverter:
                 "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
             }
             return self.rebuild_pic_gate_up_weight_only(gateup_op, graph) + [silu_op]
+
+        if self._use_pic_nhwc_gateup_packed_fusion(name, ic, oc, concat_plan):
+            pre_reshape_name = f'{name}/nhwc_pre_reshape'
+            concat_linear_name = f'{name}/nhwc_gate_up_linear'
+            packed_silu_name = f'{name}/nhwc_packed_silu'
+
+            pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+            concat_linear_output = self.build_tensor(graph, concat_linear_name)
+
+            pre_reshape = {
+                "name": pre_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": origin_input,
+                "outputIndexes": pre_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [-1, 1, 1, ic],
+                    "dimType": "NHWC"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            concat_linear = {
+                "name": concat_linear_name,
+                "inputIndexes": pre_reshape_output,
+                "outputIndexes": concat_linear_output,
+                "type": "Extra",
+                "main_type": "Extra",
+                "main": {
+                    "type": "PicLinearNhwcWeightOnly",
+                    "engine": "MNN",
+                    "attr": self._pic_linear_conv_attrs(concat_linear_name, ic, oc * 2, concat_plan)
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            packed_silu = {
+                "name": packed_silu_name,
+                "inputIndexes": concat_linear_output,
+                "outputIndexes": origin_outputs,
+                "type": "Extra",
+                "main_type": "Extra",
+                "main": {
+                    "type": "PicPackedSiluMul",
+                    "engine": "MNN",
+                    "attr": [
+                        {"key": "name", "s": packed_silu_name},
+                        {"key": "out_features", "i": oc},
+                        {"key": "packed_input_nhwc", "i": 1}
+                    ]
+                },
+                "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
+            }
+            return [pre_reshape, concat_linear, packed_silu]
 
         pre_reshape_name = f'{name}/pre_reshape'
         pre_convert_name = f'{name}/pre_convert'

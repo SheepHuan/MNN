@@ -172,6 +172,14 @@ else()
     else()
         target_link_libraries(MNN_Cuda_Main -lcublas)
     endif()
+    find_library(CUDA_CUBLASLT_LIBRARY cublasLt
+        HINTS
+          ${CUDA_TOOLKIT_ROOT_DIR}/lib64
+          ${CUDA_TOOLKIT_ROOT_DIR}/lib
+          ${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib)
+    if(CUDA_CUBLASLT_LIBRARY)
+        target_link_libraries(MNN_Cuda_Main ${CUDA_CUBLASLT_LIBRARY})
+    endif()
 
     if(MNN_CUDA_PROFILE)
       target_compile_options(MNN_Cuda_Main PRIVATE -DMNN_CUDA_PROFILE)

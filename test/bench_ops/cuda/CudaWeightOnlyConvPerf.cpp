@@ -175,6 +175,54 @@ static std::unique_ptr<OpHolder> makeWeightOnlyLinearConvOp(int ic, int oc, int 
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
+static std::unique_ptr<OpHolder> makeExternalWeightOnlyLinearConvOp(const char* name, const std::string& externalPath,
+                                                                    int ic, int oc, const PicExternalPlan& plan) {
+    OpT op;
+    op.name = name != nullptr ? name : "bench_external_weight_only_linear";
+    op.type = OpType_Convolution;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NCHW;
+    op.externalPath = externalPath;
+    op.main.type = OpParameter_Convolution2D;
+    op.main.value = new Convolution2DT;
+
+    auto* conv = op.main.AsConvolution2D();
+    conv->common.reset(new Convolution2DCommonT);
+    conv->common->padX = 0;
+    conv->common->padY = 0;
+    conv->common->kernelX = 1;
+    conv->common->kernelY = 1;
+    conv->common->strideX = 1;
+    conv->common->strideY = 1;
+    conv->common->dilateX = 1;
+    conv->common->dilateY = 1;
+    conv->common->padMode = PadMode_CAFFE;
+    conv->common->group = 1;
+    conv->common->outputCount = oc;
+    conv->common->inputCount = ic;
+    conv->common->relu = false;
+    conv->common->relu6 = false;
+    conv->common->hasOutputShape = false;
+    conv->quanParameter.reset(new IDSTQuanT);
+    if (plan.quantBit == 16) {
+        conv->quanParameter->type = 3;
+    } else {
+        conv->quanParameter->quantScale = 1.0f;
+        conv->quanParameter->scaleIn = 0.0f;
+        conv->quanParameter->scaleOut = 0.0f;
+        conv->quanParameter->useInt32 = false;
+        conv->quanParameter->has_scaleInt = false;
+        conv->quanParameter->shapeInt32 = plan.shapeInt32;
+        conv->quanParameter->type = 1;
+        conv->quanParameter->aMaxOrBits = plan.quantBit;
+        conv->quanParameter->aMin = plan.aMin;
+        conv->quanParameter->readType = plan.readType;
+        conv->quanParameter->weightSize = 0;
+    }
+    conv->external = plan.external;
+    conv->bias.resize(std::max(0, oc), 0.0f);
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
 static std::unique_ptr<OpHolder> makePicSiluMulOp(const char* name) {
     OpT op;
     op.name = name != nullptr ? name : "bench_pic_silu_mul";
@@ -269,6 +317,34 @@ static std::unique_ptr<OpHolder> makePicGateUpWeightOnlyExtraOp(const char* type
     addIntAttr(extra, "out_features", oc);
     addPicGateUpConvAttrs(extra, "gate", "bench_gate", ic, oc, gatePlan);
     addPicGateUpConvAttrs(extra, "up", "bench_up", ic, oc, upPlan);
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
+static std::unique_ptr<OpHolder> makePicLinearNhwcWeightOnlyExtraOp(const char* name,
+                                                                    const std::string& externalPath,
+                                                                    int ic, int oc,
+                                                                    const PicExternalPlan& plan) {
+    OpT op;
+    op.name = name != nullptr ? name : "bench_pic_linear_nhwc_weight_only";
+    op.type = OpType_Extra;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NHWC;
+    op.externalPath = externalPath;
+    op.main.type = OpParameter_Extra;
+    op.main.value = new ExtraT;
+    auto* extra = op.main.AsExtra();
+    extra->type = "PicLinearNhwcWeightOnly";
+    extra->engine = "MNN";
+    addStringAttr(extra, "name", op.name);
+    addStringAttr(extra, "linear_name", op.name);
+    addStringAttr(extra, "external", externalToString(plan.external));
+    addIntAttr(extra, "in_features", ic);
+    addIntAttr(extra, "out_features", oc);
+    addIntAttr(extra, "quant_bit", plan.quantBit);
+    addIntAttr(extra, "quant_block", plan.quantBlock);
+    addIntAttr(extra, "a_min", plan.aMin);
+    addIntAttr(extra, "read_type", plan.readType);
+    addIntAttr(extra, "shape_int32", plan.shapeInt32 ? 1 : 0);
+    addIntAttr(extra, "has_bias", plan.hasBias ? 1 : 0);
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
@@ -461,6 +537,28 @@ static std::string gateUpExternalWeightPath(int hidden, int inter, int quantBloc
     ::snprintf(path, sizeof(path), ".cache/bench_ops/decode_repair_gateup_%d_%d_q%d.weight",
                hidden, inter, quantBlock);
     return path;
+}
+
+static std::string linearExternalWeightPath(int ic, int oc, int quantBlock) {
+    ensureBenchCacheDirs();
+    char path[256];
+    ::snprintf(path, sizeof(path), ".cache/bench_ops/decode_repair_linear_%d_%d_q%d.weight",
+               ic, oc, quantBlock);
+    return path;
+}
+
+static bool buildLinearExternalWeight(const std::string& path, int ic, int oc, int quantBlock,
+                                      PicExternalPlan* plan) {
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!out.good()) {
+        MNN_ERROR("failed to open %s for PicLinearNhwc external weight\n", path.c_str());
+        return false;
+    }
+    if (!appendExternalInt4Linear(out, ic, oc, quantBlock, 9, plan)) {
+        return false;
+    }
+    out.close();
+    return out.good();
 }
 
 static bool buildGateUpExternalWeights(const std::string& path, int hidden, int inter, int quantBlock,
@@ -1619,6 +1717,7 @@ public:
 static bool runRows45CublasAccuracyCase(const char* name, int rows, int ic, int oc, const char* policy) {
     constexpr int quantBlock = 64;
     ScopedEnvVar restoreRows45Policy("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS");
+    ScopedEnvVar restoreRows48LtPolicy("MNN_CUDA_PIC_INT4_ROWS48_CUBLASLT");
     KVMeta meta;
     meta.pic_decode_repair_sparse_active = true;
     DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
@@ -1651,10 +1750,12 @@ static bool runRows45CublasAccuracyCase(const char* name, int rows, int ic, int 
     }
 
     ::setenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS", "0", 1);
+    ::setenv("MNN_CUDA_PIC_INT4_ROWS48_CUBLASLT", "0", 1);
     if (bench.execute(refExe.get(), refInputs, refOutputs) != NO_ERROR) {
         return false;
     }
     ::setenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS", policy, 1);
+    ::setenv("MNN_CUDA_PIC_INT4_ROWS48_CUBLASLT", "1", 1);
     if (bench.execute(optExe.get(), optInputs, optOutputs) != NO_ERROR) {
         return false;
     }
@@ -1666,6 +1767,64 @@ static bool runRows45CublasAccuracyCase(const char* name, int rows, int ic, int 
     }
     char caseName[128];
     ::snprintf(caseName, sizeof(caseName), "%s_rows%d_policy_%s", name, rows, policy);
+    return compareHalfOutputs(caseName, opt, ref, 0.08f, 0.08f);
+}
+
+static bool runPicLinearNhwcAccuracyCase(const char* name, int rows, int ic, int oc) {
+    constexpr int quantBlock = 64;
+    KVMeta meta;
+    meta.pic_decode_repair_sparse_active = true;
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    PicExternalPlan linearPlan;
+    const std::string externalPath = linearExternalWeightPath(ic, oc, quantBlock);
+    if (!buildLinearExternalWeight(externalPath, ic, oc, quantBlock, &linearPlan)) {
+        return false;
+    }
+
+    auto inputNchw = bench.tensor({rows, ic, 1, 1}, Tensor::CAFFE, false);
+    auto inputNhwc = bench.tensor({rows, 1, 1, ic}, Tensor::TENSORFLOW, false);
+    auto refOutput = bench.tensor({rows, oc, 1, 1}, Tensor::CAFFE, false);
+    auto optOutput = bench.tensor({rows, 1, 1, oc}, Tensor::TENSORFLOW, false);
+    if (!inputNchw || !inputNhwc || !refOutput || !optOutput ||
+        !writeHalfPattern(inputNchw) || !writeHalfPattern(inputNhwc)) {
+        return false;
+    }
+
+    auto refOp = makeExternalWeightOnlyLinearConvOp("bench_pic_linear_nhwc_ref",
+                                                    externalPath, ic, oc, linearPlan);
+    auto optOp = makePicLinearNhwcWeightOnlyExtraOp("bench_pic_linear_nhwc_opt",
+                                                    externalPath, ic, oc, linearPlan);
+    std::vector<Tensor*> refInputs = {inputNchw};
+    std::vector<Tensor*> refOutputs = {refOutput};
+    std::vector<Tensor*> optInputs = {inputNhwc};
+    std::vector<Tensor*> optOutputs = {optOutput};
+    auto refExe = bench.create(refInputs, refOutputs, refOp->get());
+    auto optExe = bench.create(optInputs, optOutputs, optOp->get());
+    if (!refExe || !optExe) {
+        MNN_ERROR("PicLinearNhwc failed to create execution for %s rows=%d\n", name, rows);
+        return false;
+    }
+    if (bench.resize(refExe.get(), refInputs, refOutputs) != NO_ERROR ||
+        bench.resize(optExe.get(), optInputs, optOutputs) != NO_ERROR) {
+        MNN_ERROR("PicLinearNhwc resize failed for %s rows=%d\n", name, rows);
+        return false;
+    }
+    if (bench.execute(refExe.get(), refInputs, refOutputs) != NO_ERROR ||
+        bench.execute(optExe.get(), optInputs, optOutputs) != NO_ERROR) {
+        return false;
+    }
+
+    std::vector<float> ref;
+    std::vector<float> opt;
+    if (!readHalfTensor(refOutput, &ref) || !readHalfTensor(optOutput, &opt)) {
+        return false;
+    }
+    char caseName[128];
+    ::snprintf(caseName, sizeof(caseName), "pic_linear_nhwc_%s_rows%d", name, rows);
     return compareHalfOutputs(caseName, opt, ref, 0.08f, 0.08f);
 }
 
@@ -1685,6 +1844,15 @@ public:
             ok = runRows45CublasAccuracyCase("up", rows, 2048, 8192, "all") && ok;
             ok = runRows45CublasAccuracyCase("down", rows, 8192, 2048, "down") && ok;
             ok = runRows45CublasAccuracyCase("down_all", rows, 8192, 2048, "all") && ok;
+        }
+        for (int rows : {4, 6, 8}) {
+            ok = runRows45CublasAccuracyCase("llama32_3b_gate", rows, 3072, 8192, "all") && ok;
+            ok = runRows45CublasAccuracyCase("llama32_3b_up", rows, 3072, 8192, "all") && ok;
+            ok = runRows45CublasAccuracyCase("llama32_3b_down", rows, 8192, 3072, "all") && ok;
+        }
+        for (int rows : {1, 2, 4, 6, 8}) {
+            ok = runPicLinearNhwcAccuracyCase("llama32_3b_gate", rows, 3072, 8192) && ok;
+            ok = runPicLinearNhwcAccuracyCase("llama32_3b_down", rows, 8192, 3072) && ok;
         }
         return ok;
     }
@@ -1954,17 +2122,27 @@ static bool runLinearConvertChainCase(const LinearConvertChainCase& c) {
     auto convOutC4 = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE_C4, false);
     auto outputNchw = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE, false);
     auto noConvertOutput = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE, false);
-    if (!inputNchw || !inputC4 || !convOutC4 || !outputNchw || !noConvertOutput) {
+    auto inputNhwc = bench.tensor({c.rows, 1, 1, c.ic}, Tensor::TENSORFLOW, false);
+    auto outputNhwc = bench.tensor({c.rows, 1, 1, c.oc}, Tensor::TENSORFLOW, false);
+    if (!inputNchw || !inputC4 || !convOutC4 || !outputNchw || !noConvertOutput || !inputNhwc || !outputNhwc) {
         return false;
     }
 
     configureFullCopyRaster(inputNchw, inputC4);
     configureFullCopyRaster(convOutC4, outputNchw);
 
+    PicExternalPlan linearPlan;
+    const std::string externalPath = linearExternalWeightPath(c.ic, c.oc, c.quantBlock);
+    if (!buildLinearExternalWeight(externalPath, c.ic, c.oc, c.quantBlock, &linearPlan)) {
+        return false;
+    }
+
     auto preRasterOp = makeRasterOp("bench_linear_pre_convert_raster");
     auto postRasterOp = makeRasterOp("bench_linear_post_convert_raster");
     auto c4ConvOp = makeWeightOnlyLinearConvOp(c.ic, c.oc, c.quantBlock);
     auto nchwConvOp = makeWeightOnlyLinearConvOp(c.ic, c.oc, c.quantBlock);
+    auto nhwcLinearOp = makePicLinearNhwcWeightOnlyExtraOp("bench_pic_linear_nhwc_weight_only",
+                                                           externalPath, c.ic, c.oc, linearPlan);
 
     std::vector<Tensor*> preInputs = {inputNchw};
     std::vector<Tensor*> preOutputs = {inputC4};
@@ -1974,12 +2152,15 @@ static bool runLinearConvertChainCase(const LinearConvertChainCase& c) {
     std::vector<Tensor*> postOutputs = {outputNchw};
     std::vector<Tensor*> nchwConvInputs = {inputNchw};
     std::vector<Tensor*> nchwConvOutputs = {noConvertOutput};
+    std::vector<Tensor*> nhwcLinearInputs = {inputNhwc};
+    std::vector<Tensor*> nhwcLinearOutputs = {outputNhwc};
 
     auto preExe = bench.create(preInputs, preOutputs, preRasterOp->get());
     auto c4ConvExe = bench.create(c4ConvInputs, c4ConvOutputs, c4ConvOp->get());
     auto postExe = bench.create(postInputs, postOutputs, postRasterOp->get());
     auto nchwConvExe = bench.create(nchwConvInputs, nchwConvOutputs, nchwConvOp->get());
-    if (!preExe || !c4ConvExe || !postExe || !nchwConvExe) {
+    auto nhwcLinearExe = bench.create(nhwcLinearInputs, nhwcLinearOutputs, nhwcLinearOp->get());
+    if (!preExe || !c4ConvExe || !postExe || !nchwConvExe || !nhwcLinearExe) {
         MNN_ERROR("failed to create LinearConvertChain execution for %s rows=%d ic=%d oc=%d\n",
                   c.name, c.rows, c.ic, c.oc);
         return false;
@@ -1987,7 +2168,8 @@ static bool runLinearConvertChainCase(const LinearConvertChainCase& c) {
     if (bench.resize(preExe.get(), preInputs, preOutputs) != NO_ERROR ||
         bench.resize(c4ConvExe.get(), c4ConvInputs, c4ConvOutputs) != NO_ERROR ||
         bench.resize(postExe.get(), postInputs, postOutputs) != NO_ERROR ||
-        bench.resize(nchwConvExe.get(), nchwConvInputs, nchwConvOutputs) != NO_ERROR) {
+        bench.resize(nchwConvExe.get(), nchwConvInputs, nchwConvOutputs) != NO_ERROR ||
+        bench.resize(nhwcLinearExe.get(), nhwcLinearInputs, nhwcLinearOutputs) != NO_ERROR) {
         MNN_ERROR("LinearConvertChain onResize failed for %s rows=%d ic=%d oc=%d\n",
                   c.name, c.rows, c.ic, c.oc);
         return false;
@@ -2008,12 +2190,14 @@ static bool runLinearConvertChainCase(const LinearConvertChainCase& c) {
     float c4ConvMs = 0.0f;
     float postMs = 0.0f;
     float nchwConvMs = 0.0f;
+    float nhwcLinearMs = 0.0f;
     float withConvertMs = 0.0f;
     float noConvertMs = 0.0f;
     if (!timer.measure([&]() { return bench.execute(preExe.get(), preInputs, preOutputs); }, c.warmup, c.repeat, &preMs) ||
         !timer.measure([&]() { return bench.execute(c4ConvExe.get(), c4ConvInputs, c4ConvOutputs); }, c.warmup, c.repeat, &c4ConvMs) ||
         !timer.measure([&]() { return bench.execute(postExe.get(), postInputs, postOutputs); }, c.warmup, c.repeat, &postMs) ||
         !timer.measure([&]() { return bench.execute(nchwConvExe.get(), nchwConvInputs, nchwConvOutputs); }, c.warmup, c.repeat, &nchwConvMs) ||
+        !timer.measure([&]() { return bench.execute(nhwcLinearExe.get(), nhwcLinearInputs, nhwcLinearOutputs); }, c.warmup, c.repeat, &nhwcLinearMs) ||
         !timer.measure([&]() { return executeChain(bench, withConvertChain); }, c.warmup, c.repeat, &withConvertMs) ||
         !timer.measure([&]() { return executeChain(bench, noConvertChain); }, c.warmup, c.repeat, &noConvertMs)) {
         return false;
@@ -2021,11 +2205,15 @@ static bool runLinearConvertChainCase(const LinearConvertChainCase& c) {
 
     MNN_PRINT("[bench_ops/cuda/perf/LinearConvertChain] %-18s rows=%d ic=%d oc=%d qblock=%d "
               "pre_raster=%.4f ms c4_conv=%.4f ms post_raster=%.4f ms nchw_conv=%.4f ms "
-              "with_convert_chain=%.4f ms no_convert_chain=%.4f ms delta=%.4f ms ratio=%.3f\n",
+              "nhwc_linear=%.4f ms with_convert_chain=%.4f ms no_convert_chain=%.4f ms "
+              "nhwc_delta=%.4f ms nhwc_ratio=%.3f convert_delta=%.4f ms convert_ratio=%.3f external=%s\n",
               c.name, c.rows, c.ic, c.oc, c.quantBlock,
-              preMs, c4ConvMs, postMs, nchwConvMs,
-              withConvertMs, noConvertMs, withConvertMs - noConvertMs,
-              noConvertMs > 0.0f ? withConvertMs / noConvertMs : 0.0f);
+              preMs, c4ConvMs, postMs, nchwConvMs, nhwcLinearMs,
+              withConvertMs, noConvertMs, nhwcLinearMs - withConvertMs,
+              withConvertMs > 0.0f ? nhwcLinearMs / withConvertMs : 0.0f,
+              withConvertMs - noConvertMs,
+              noConvertMs > 0.0f ? withConvertMs / noConvertMs : 0.0f,
+              externalPath.c_str());
     ::fflush(stdout);
     return true;
 }

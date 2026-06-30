@@ -36,6 +36,7 @@ public:
         bool mIsWeightInt4 = false;
         void* mStaticDequantFilter = nullptr;
         size_t mStaticDequantBytes = 0;
+        bool mOwnsStaticDequantBytes = false;
         
         std::shared_ptr<Tensor> mSumBQTensor;
         void* mSumBQ = nullptr;
@@ -58,6 +59,7 @@ private:
 
     std::shared_ptr<Tensor> mDequantFilterTensor;
     void* mDequantFilter = nullptr;
+    void* mPicRowsCublasLtPlan = nullptr;
 
     // Low-memory 1x1 GEMM uses Resource static dequant weights when the
     // memory cap admits them; remaining shapes refresh this DYNAMIC buffer.

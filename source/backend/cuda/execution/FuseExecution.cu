@@ -13,8 +13,10 @@
 #include "BinaryExecution.hpp"
 #include "MNNCUDADefine.hpp"
 #include "core/OpCommonUtils.hpp"
+#include "core/TensorUtils.hpp"
 #include "MNNCUDAFunction.cuh"
 #include "core/KVMeta.hpp"
+#include <chrono>
 #include <cuda_fp16.h>
 #include <float.h>
 #include <sstream>
@@ -315,6 +317,30 @@ static PicGateUpConvSpec parsePicGateUpConvSpec(const Extra* extra, const std::s
     spec.shapeInt32 = picGateUpAttrInt(extra, prefix + "_shape_int32", 0) != 0;
     spec.hasBias = picGateUpAttrInt(extra, prefix + "_has_bias", 0) != 0;
     return spec;
+}
+
+static PicGateUpConvSpec parsePicLinearNhwcSpec(const Extra* extra) {
+    PicGateUpConvSpec spec;
+    spec.name = picGateUpAttrString(extra, "linear_name");
+    spec.external = parsePicGateUpExternal(picGateUpAttrString(extra, "external"));
+    spec.ic = picGateUpAttrInt(extra, "in_features");
+    spec.oc = picGateUpAttrInt(extra, "out_features");
+    spec.quantBit = picGateUpAttrInt(extra, "quant_bit", 4);
+    spec.quantBlock = picGateUpAttrInt(extra, "quant_block", 64);
+    spec.aMin = picGateUpAttrInt(extra, "a_min", 1);
+    spec.readType = picGateUpAttrInt(extra, "read_type", 0);
+    spec.shapeInt32 = picGateUpAttrInt(extra, "shape_int32", 0) != 0;
+    spec.hasBias = picGateUpAttrInt(extra, "has_bias", 0) != 0;
+    return spec;
+}
+
+static bool profilePicLinearNhwc() {
+    const char* paged = ::getenv("MNN_PAGED_ATTENTION_PROFILE");
+    if (paged != nullptr && paged[0] != '\0' && paged[0] != '0') {
+        return true;
+    }
+    const char* graph = ::getenv("MNN_PIC_GRAPH_PROFILE");
+    return graph != nullptr && graph[0] != '\0' && graph[0] != '0';
 }
 
 static std::vector<uint8_t> buildPicGateUpChildConvOp(const PicGateUpConvSpec& spec, const char* externalPath) {
@@ -892,6 +918,110 @@ private:
     std::shared_ptr<Tensor> mGateTemp;
     std::shared_ptr<Tensor> mUpTemp;
 };
+
+class PicLinearNhwcWeightOnlyExecution : public Execution {
+public:
+    PicLinearNhwcWeightOnlyExecution(const Op* op, Backend* backend) : Execution(backend) {
+        auto extra = op->main_as_Extra();
+        mSpec = parsePicLinearNhwcSpec(extra);
+        const char* externalPath = op->externalPath() != nullptr ? op->externalPath()->c_str() : nullptr;
+        if (mSpec.ic <= 0 || mSpec.oc <= 0 || mSpec.external.size() < 3) {
+            mValid = false;
+            return;
+        }
+        mConvOpBuffer = buildPicGateUpChildConvOp(mSpec, externalPath);
+        mConvOp = flatbuffers::GetRoot<Op>(mConvOpBuffer.data());
+        mResource.reset(new ConvFpAIntBExecution::Resource(backend, mConvOp));
+        mConv.reset(new ConvFpAIntBExecution(backend, mConvOp, mResource));
+    }
+
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (!mValid || inputs.size() != 1 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        mRows = computeNhwcRows(inputs[0], mSpec.ic);
+        const int outputRows = computeNhwcRows(outputs[0], mSpec.oc);
+        if (!canUseNhwcCompact(inputs[0], outputs[0], mRows, outputRows)) {
+            return NOT_SUPPORT;
+        }
+        forceNhwcFormat(inputs[0]);
+        forceNhwcFormat(outputs[0]);
+        return mConv->onResize(inputs, outputs);
+    }
+
+    virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (!mValid || inputs.size() != 1 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        forceNhwcFormat(inputs[0]);
+        forceNhwcFormat(outputs[0]);
+        const bool profile = profilePicLinearNhwc();
+        uint64_t startUs = 0;
+        if (profile) {
+            cudaDeviceSynchronize();
+            startUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        }
+        auto code = mConv->onExecute(inputs, outputs);
+        if (profile) {
+            cudaDeviceSynchronize();
+            const auto endUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            auto meta = static_cast<KVMeta*>(static_cast<CUDABackend*>(backend())->getMetaPtr());
+            MNN_PRINT("CUDAWeightOnlyConv profile op=pic_linear_nhwc_weight_only "
+                      "name=%s batch=%d ic=%d oc=%d int4=%d static_dequant=%d "
+                      "pic_decode_repair=%d total_us=%llu\n",
+                      mSpec.name.c_str(), mRows, mSpec.ic, mSpec.oc,
+                      mResource && mResource->mIsWeightInt4 ? 1 : 0,
+                      mResource && mResource->mStaticDequantFilter != nullptr ? 1 : 0,
+                      meta != nullptr && meta->pic_decode_repair_sparse_active ? 1 : 0,
+                      static_cast<unsigned long long>(endUs - startUs));
+        }
+        return code;
+    }
+
+private:
+    int computeNhwcRows(const Tensor* tensor, int channels) const {
+        if (tensor == nullptr || tensor->dimensions() != 4 || channels <= 0 || tensor->length(3) != channels) {
+            return 0;
+        }
+        const int d0 = tensor->length(0);
+        const int d1 = tensor->length(1);
+        const int d2 = tensor->length(2);
+        if (d0 <= 0 || d1 <= 0 || d2 <= 0) {
+            return 0;
+        }
+        return d0 * d1 * d2;
+    }
+
+    bool canUseNhwcCompact(const Tensor* input, const Tensor* output, int inputRows, int outputRows) const {
+        if (input == nullptr || output == nullptr || input->dimensions() != 4 || output->dimensions() != 4) {
+            return false;
+        }
+        if (!static_cast<CUDABackend*>(backend())->useFp16()) {
+            return false;
+        }
+        if (mSpec.quantBit != 4 || mSpec.ic % 8 != 0 || mSpec.oc % 8 != 0) {
+            return false;
+        }
+        if (inputRows <= 0 || outputRows <= 0 || inputRows != outputRows) {
+            return false;
+        }
+        return input->length(3) == mSpec.ic && output->length(3) == mSpec.oc;
+    }
+
+    void forceNhwcFormat(Tensor* tensor) const {
+        TensorUtils::getDescribe(tensor)->dimensionFormat = MNN_DATA_FORMAT_NHWC;
+    }
+
+    bool mValid = true;
+    int mRows = 0;
+    PicGateUpConvSpec mSpec;
+    std::vector<uint8_t> mConvOpBuffer;
+    const Op* mConvOp = nullptr;
+    std::shared_ptr<ConvFpAIntBExecution::Resource> mResource;
+    std::shared_ptr<ConvFpAIntBExecution> mConv;
+};
 #endif
 
 #ifdef MNN_CODEGEN_CUDA
@@ -1037,6 +1167,13 @@ public:
         if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicGateUpSiluWeightOnly") {
 #ifdef MNN_LOW_MEMORY
             return new PicGateUpSiluWeightOnlyExecution(op, backend);
+#else
+            return nullptr;
+#endif
+        }
+        if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicLinearNhwcWeightOnly") {
+#ifdef MNN_LOW_MEMORY
+            return new PicLinearNhwcWeightOnlyExecution(op, backend);
 #else
             return nullptr;
 #endif

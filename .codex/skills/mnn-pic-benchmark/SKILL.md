@@ -29,7 +29,7 @@ description: 当用户要求把本 MNN 仓库本地构建或交叉编译出的 p
 
 ## Power 采集
 
-优先使用 `scripts/run_pic_prefill_latency_sweep.py --power-capture`，它会为每个实际测量 row 单独启动 `POST /v1/power/start`、连续执行 `--power-rep` 次正式 PIC/normal measure、再 `POST /v1/power/stop` 并下载一个 CSV。Power 模式默认 `--power-rep 3`，即每个 benchmark case 在同一个 power CSV 内连续执行 3 次；每次执行之间固定间隔 3 秒。
+优先使用 `scripts/run_pic_prefill_latency_sweep.py --power-capture`，它会为每个实际测量 row 单独启动 `POST /v1/power/start`、先 idle sleep 5 秒作为前置 base window、连续执行 `--power-rep` 次正式 PIC/normal measure、最后一次 rep 后再 idle sleep 5 秒作为尾部回落 window，然后 `POST /v1/power/stop` 并下载一个 CSV。Power 模式默认 `--power-rep 3`，即每个 benchmark case 在同一个 power CSV 内连续执行 3 次；每次执行之间固定间隔 3 秒。前后 idle 时长可用 `--power-warmup-sec` / `--power-cooldown-sec` 或 `MNN_POWER_WARMUP_SEC` / `MNN_POWER_COOLDOWN_SEC` 覆盖。
 
 默认 Power API：
 
@@ -61,7 +61,14 @@ Power CSV 渲染和能耗积分脚本也在本 skill 下：
 ```bash
 .codex/skills/mnn-pic-benchmark/scripts/render_power_csv.sh <power.csv>
 .codex/skills/mnn-pic-benchmark/scripts/summarize_power_energy.sh --trim-sec 0 <power-dir>
+.codex/skills/mnn-pic-benchmark/scripts/summarize_pic_power_reps.py \
+  .codex/skills/mnn-pic-benchmark/power/orangepi/<YYYY-MM-DD> \
+  .codex/skills/mnn-pic-benchmark/power/rhino/<YYYY-MM-DD> \
+  -o .codex/skills/mnn-pic-benchmark/power/middle_rep_energy_<YYYY-MM-DD>.csv \
+  --plot-output .codex/skills/mnn-pic-benchmark/power/middle_rep_energy_<YYYY-MM-DD>.png
 ```
+
+`summarize_pic_power_reps.py` 是最终批量汇总脚本，不挂到采集流程里，也不要每生成一个 CSV 就跑一次。它一次接收一个或多个 power 根目录 / 日期目录 / `manifest.tsv`，递归发现每个测量进程目录里的 `manifest.tsv`，最后生成一个汇总 CSV，每个 benchmark case 一行。它专门用于 `--power-rep` 连续多次采集后的正式能耗口径：默认丢掉第 1 次和最后 1 次 rep，只保留中间 rep；从 power CSV 曲线识别 active rep window；用 rep window 外的 idle 样本识别 base power；对选中 rep 的 `max(power - base_power, 0)` 积分，输出每次推理增量能耗和按 `context_tokens` 归一的 `mJ/token`。带 `--plot-output` 时还会输出一个总览 PNG：每个子图对应一个 case，显示完整 power 曲线，红色虚线/浅红区间标记被丢弃的首尾 rep，绿色虚线/浅绿区间标记用于能耗计算的中间 rep。如果 CSV 全 0 或 active window 数不足，会在 `analysis_status` / `error` 中标出，不生成伪有效能耗。
 
 独立包装任意命令时使用：
 
@@ -98,6 +105,7 @@ MNN_POWER_OUTPUT_CSV=.codex/skills/mnn-pic-benchmark/power/manual/rhino/power.cs
 - `scripts/pic_power_capture.sh`
 - `scripts/render_power_csv.sh`
 - `scripts/summarize_power_energy.sh`
+- `scripts/summarize_pic_power_reps.py`
 
 设备预设 wrapper：
 
