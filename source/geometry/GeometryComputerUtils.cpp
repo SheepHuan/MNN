@@ -12,6 +12,8 @@
 #include "shape/SizeComputer.hpp"
 #include "core/AutoStorage.h"
 #include "core/FileLoader.hpp"
+#include <cstdlib>
+#include <cstdio>
 #ifdef MNN_BUILD_CODEGEN
 #include "OpFuse.hpp"
 #endif
@@ -198,6 +200,37 @@ ErrorCode GeometryComputerUtils::shapeComputeAndGeometryTransform(
                     MNN_ERROR("Compute Shape Error for %s\n", info.op->name()->c_str());
                 } else {
                     MNN_ERROR("Compute Shape Error for %d\n", info.op->type());
+                }
+                if (::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr ||
+                    ::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                    const char* opName = info.op->name() != nullptr ? info.op->name()->c_str() : "";
+                    std::fprintf(stderr, "PIC shape failure op=%s type=%d inputs=%zu outputs=%zu\n",
+                                 opName, static_cast<int>(info.op->type()), info.inputs.size(), info.outputs.size());
+                    for (size_t i = 0; i < info.inputs.size(); ++i) {
+                        auto t = info.inputs[i];
+                        std::fprintf(stderr,
+                                     "PIC shape failure input%zu dims=%d shape=%d,%d,%d,%d format=%d type_code=%d\n",
+                                     i, t ? t->dimensions() : -1,
+                                     t && t->dimensions() > 0 ? t->length(0) : -1,
+                                     t && t->dimensions() > 1 ? t->length(1) : -1,
+                                     t && t->dimensions() > 2 ? t->length(2) : -1,
+                                     t && t->dimensions() > 3 ? t->length(3) : -1,
+                                     t ? static_cast<int>(TensorUtils::getDescribe(t)->dimensionFormat) : -1,
+                                     t ? static_cast<int>(t->getType().code) : -1);
+                    }
+                    for (size_t i = 0; i < info.outputs.size(); ++i) {
+                        auto t = info.outputs[i];
+                        std::fprintf(stderr,
+                                     "PIC shape failure output%zu dims=%d shape=%d,%d,%d,%d format=%d type_code=%d\n",
+                                     i, t ? t->dimensions() : -1,
+                                     t && t->dimensions() > 0 ? t->length(0) : -1,
+                                     t && t->dimensions() > 1 ? t->length(1) : -1,
+                                     t && t->dimensions() > 2 ? t->length(2) : -1,
+                                     t && t->dimensions() > 3 ? t->length(3) : -1,
+                                     t ? static_cast<int>(TensorUtils::getDescribe(t)->dimensionFormat) : -1,
+                                     t ? static_cast<int>(t->getType().code) : -1);
+                    }
+                    std::fflush(stderr);
                 }
                 return COMPUTE_SIZE_ERROR;
             }

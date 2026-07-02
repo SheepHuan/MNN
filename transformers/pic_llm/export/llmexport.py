@@ -1,8 +1,10 @@
 import os
 import json
 import glob
+import filecmp
 import warnings
 import argparse
+from contextlib import contextmanager
 
 warnings.filterwarnings("ignore")
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -17,10 +19,31 @@ from utils.spinner import spinner_run
 from utils.custom_op import FakeLinear
 from utils.onnx_rebuilder import OnnxRebuilder
 from utils.mnn_converter import MNNConverter
+from utils.pic_export_contract import (
+    PIC_GRAPH_ROLE_CONFIG_KEYS,
+    PIC_GRAPH_ROLE_DECODE,
+    PIC_GRAPH_ROLE_PREFILL,
+    normalize_pic_export_args,
+    pic_decode_config_values,
+    pic_graph_role_config_values,
+)
 from utils.awq_quantizer import AwqQuantizer
 from utils.smooth_quantizer import SmoothQuantizer
 from utils.omni_quantizer import OmniQuantizer
 from utils.torch_utils import onnx_export
+
+_PIC_DECODE_MODULE_ATTRS = (
+    'pic_decode_fusion_family',
+    'pic_adreno_decode_fusion',
+    'pic_native_decode_fusion',
+    'pic_tiny_fusion',
+    'pic_tiny_mlp_fusion',
+    'pic_gateup_fusion',
+    'pic_gateup_split_fusion',
+    'pic_silu_nhwc_down_fusion',
+)
+
+_MISSING = object()
 
 def _jsonable_config_value(value):
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -51,6 +74,7 @@ class LlmExporter(torch.nn.Module):
 
     def init_from_args(self, args):
         self.args = args
+        normalize_pic_export_args(self.args)
         self.max_new_tokens = 1024
         self.dst_name = 'llm'
         # load config from args
@@ -96,6 +120,12 @@ class LlmExporter(torch.nn.Module):
             "position_ids" : { 1: "seq_len" },
         }
 
+        pic_main_graph_role = (
+            PIC_GRAPH_ROLE_PREFILL
+            if bool(getattr(self.args, 'pic_export_decode_graph', False))
+            else PIC_GRAPH_ROLE_DECODE
+        )
+        pic_graph_config = pic_graph_role_config_values(self.args, pic_main_graph_role)
         self.llm_config = {
             'model_type': self.config.model_type,
             'hidden_size' : self.config.hidden_size,
@@ -106,14 +136,14 @@ class LlmExporter(torch.nn.Module):
             'pic_recompute_budget': bool(getattr(self.args, 'pic_recompute_budget', True)),
             'pic_recompute_score_layer_idx': max(0, getattr(self.args, 'pic_recompute_score_layer_idx', 1)),
             'pic_decode_repair_outputs': bool(getattr(self.args, 'pic_decode_repair_outputs', False)),
-            'pic_decode_tiny_fusion': bool(getattr(self.args, 'pic_decode_tiny_fusion', False)),
-            'pic_decode_gateup_fusion': bool(getattr(self.args, 'pic_decode_gateup_fusion', False)),
-            'pic_decode_gateup_direct_fusion': bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False)),
-            'pic_decode_gateup_split_fusion': bool(getattr(self.args, 'pic_decode_gateup_split_fusion', False)),
-            'pic_decode_nhwc_linear_fusion': bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)),
-            'pic_decode_nhwc_linear_scope': getattr(self.args, 'pic_decode_nhwc_linear_scope', 'all'),
+            **pic_graph_config,
             'is_mrope': self.model.rotary.is_mrope
         }
+        if bool(getattr(self.args, 'pic_export_decode_graph', False)):
+            decode_graph_config = pic_decode_config_values(self.args)
+            decode_graph_config['pic_recompute_budget'] = False
+            decode_graph_config['pic_decode_repair_outputs'] = False
+            self.llm_config['pic_decode_graph_config'] = decode_graph_config
         for key in [
             'num_attention_heads',
             'num_key_value_heads',
@@ -316,7 +346,14 @@ class LlmExporter(torch.nn.Module):
     @spinner_run(f'export config to ')
     def export_config(self, mnn_config = False):
         with open(f'{self.args.dst_path}/export_args.json', 'w', encoding='utf-8') as f:
-            json.dump(self.args.__dict__, f, ensure_ascii=False, indent=4)
+            export_args = dict(self.args.__dict__)
+            for key in ('pic_export_graph_role', 'pic_decode_rewrites_enabled',
+                        'pic_decode_fusion_family'):
+                if key in self.llm_config:
+                    export_args[key] = self.llm_config[key]
+            if 'pic_decode_graph_config' in self.llm_config:
+                export_args['pic_decode_graph_config'] = self.llm_config['pic_decode_graph_config']
+            json.dump(export_args, f, ensure_ascii=False, indent=4)
         config_json = f'{self.args.dst_path}/llm_config.json'
         with open(config_json, 'w', encoding='utf-8') as f:
             json.dump(self.llm_config, f, ensure_ascii=False, indent=4)
@@ -366,8 +403,104 @@ class LlmExporter(torch.nn.Module):
             if self.args.eagle_path is not None:
                 config['speculative_type'] = 'eagle'
                 config['hidden_states'] = True
+            if 'llm_decode_model' in self.llm_config:
+                config['llm_decode_model'] = self.llm_config['llm_decode_model']
+                config['llm_decode_weight'] = self.llm_config.get('llm_decode_weight', config['llm_weight'])
+                config['llm_decode_shared_weight'] = bool(self.llm_config.get('llm_decode_shared_weight', False))
             json.dump(config, f, ensure_ascii=False, indent=4)
         return config_json
+
+    def set_pic_recompute_budget_enabled(self, enabled):
+        enabled = bool(enabled)
+        self.args.pic_recompute_budget = enabled
+        self.llm_config['pic_recompute_budget'] = enabled
+        for obj in (getattr(self, 'config', None), getattr(self.model, 'config', None)):
+            if obj is not None:
+                setattr(obj, 'pic_recompute_budget', enabled)
+
+    def _capture_pic_graph_role_state(self):
+        state = {
+            'args': {},
+            'config': {},
+            'model_config': {},
+            'llm_config': {},
+            'modules': [],
+        }
+        config = getattr(self, 'config', None)
+        model_config = getattr(getattr(self, 'model', None), 'config', None)
+        for name in PIC_GRAPH_ROLE_CONFIG_KEYS:
+            state['args'][name] = getattr(self.args, name, _MISSING)
+            if config is not None:
+                state['config'][name] = getattr(config, name, _MISSING)
+            if model_config is not None:
+                state['model_config'][name] = getattr(model_config, name, _MISSING)
+            state['llm_config'][name] = self.llm_config.get(name, _MISSING)
+        for module in self.model.modules():
+            attrs = {
+                name: getattr(module, name)
+                for name in _PIC_DECODE_MODULE_ATTRS
+                if hasattr(module, name)
+            }
+            if attrs:
+                state['modules'].append((module, attrs))
+        return state
+
+    def _restore_pic_graph_role_state(self, state):
+        def restore_attr(obj, name, value):
+            if value is _MISSING:
+                if hasattr(obj, name):
+                    delattr(obj, name)
+            else:
+                setattr(obj, name, value)
+
+        config = getattr(self, 'config', None)
+        model_config = getattr(getattr(self, 'model', None), 'config', None)
+        for name, value in state['args'].items():
+            restore_attr(self.args, name, value)
+        for name, value in state['config'].items():
+            if config is not None:
+                restore_attr(config, name, value)
+        for name, value in state['model_config'].items():
+            if model_config is not None:
+                restore_attr(model_config, name, value)
+        for name, value in state['llm_config'].items():
+            if value is _MISSING:
+                self.llm_config.pop(name, None)
+            else:
+                self.llm_config[name] = value
+        for module, attrs in state['modules']:
+            for name, value in attrs.items():
+                setattr(module, name, value)
+
+    def _apply_pic_graph_role_config(self, graph_role):
+        role_config = pic_graph_role_config_values(self.args, graph_role)
+        config = getattr(self, 'config', None)
+        model_config = getattr(getattr(self, 'model', None), 'config', None)
+        for name in PIC_GRAPH_ROLE_CONFIG_KEYS:
+            value = role_config[name]
+            setattr(self.args, name, value)
+            if config is not None:
+                setattr(config, name, value)
+            if model_config is not None:
+                setattr(model_config, name, value)
+            self.llm_config[name] = value
+        return role_config
+
+    @contextmanager
+    def pic_export_graph_role_scope(self, graph_role):
+        state = self._capture_pic_graph_role_state()
+        try:
+            role_config = self._apply_pic_graph_role_config(graph_role)
+            if role_config['pic_export_graph_role'] == PIC_GRAPH_ROLE_PREFILL:
+                for module, attrs in state['modules']:
+                    for name in attrs:
+                        if isinstance(getattr(module, name), bool):
+                            setattr(module, name, False)
+                        elif name == 'pic_decode_fusion_family':
+                            setattr(module, name, 'generic')
+            yield
+        finally:
+            self._restore_pic_graph_role_state(state)
 
     def imitate_quant(self):
         def quant_dequant(linear, quant_bit = self.args.quant_bit, quant_block = self.args.quant_block):
@@ -476,7 +609,8 @@ class LlmExporter(torch.nn.Module):
     @spinner_run(f'export onnx model to ')
     def export_onnx(self):
         # unload linear weight to save export memory
-        self.unload_param()
+        if not hasattr(self, 'unloaded_ops') or len(self.unloaded_ops) == 0:
+            self.unload_param()
         # move entire model to CPU to free GPU memory for quantization
         self.model.cpu()
         if torch.cuda.is_available():
@@ -492,6 +626,7 @@ class LlmExporter(torch.nn.Module):
         input_ids = model.embedding(input_ids)
         logits_index = torch.tensor([-1], dtype=torch.int32)
         pic_recompute_budget = torch.tensor([seq_len], dtype=torch.int32)
+        use_pic_recompute_budget = bool(getattr(self.args, 'pic_recompute_budget', True))
         if hasattr(model, 'talker') and model.talker is not None:
             output_names = ['logits', 'hidden_states', 'talker_embeds']
         else:
@@ -504,14 +639,19 @@ class LlmExporter(torch.nn.Module):
         if self.model_type in ['qwen3_vl', 'qwen3_vl_moe']:
             # add deepstack_embeds input
             deepstack_embeds = torch.randn(3, 1, self.config.hidden_size)
+            inputs = [input_ids, attention_mask, position_ids, logits_index]
+            input_names = ['input_ids', 'attention_mask', 'position_ids', 'logits_index']
+            if use_pic_recompute_budget:
+                inputs.append(pic_recompute_budget)
+                input_names.append('pic_recompute_budget')
+            else:
+                inputs.append(None)
+            inputs.append(deepstack_embeds)
+            input_names.append('deepstack_embeds')
             onnx_export(
-                model, (input_ids, attention_mask, position_ids, logits_index,
-                        pic_recompute_budget, deepstack_embeds),
+                model, tuple(inputs),
                 onnx_model,
-                input_names=[
-                    'input_ids', 'attention_mask', 'position_ids', 'logits_index',
-                    'pic_recompute_budget', 'deepstack_embeds'
-                ],
+                input_names=input_names,
                 output_names=output_names,
                 dynamic_axes=self.model_dynamic_axes)
             return onnx_model
@@ -521,25 +661,33 @@ class LlmExporter(torch.nn.Module):
             raw_ids = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
             ple_embeddings = model.embed_tokens_per_layer(raw_ids)
             self.model_dynamic_axes['ple_embeddings'] = {1: 'seq_len'}
+            inputs = [input_ids, attention_mask, position_ids, logits_index]
+            input_names = ['input_ids', 'attention_mask', 'position_ids', 'logits_index']
+            if use_pic_recompute_budget:
+                inputs.append(pic_recompute_budget)
+                input_names.append('pic_recompute_budget')
+            else:
+                inputs.append(None)
+            inputs += [None, ple_embeddings]
+            input_names.append('ple_embeddings')
             onnx_export(
-                model, (input_ids, attention_mask, position_ids, logits_index,
-                        pic_recompute_budget, None, ple_embeddings),
+                model, tuple(inputs),
                 onnx_model,
-                input_names=[
-                    'input_ids', 'attention_mask', 'position_ids', 'logits_index',
-                    'pic_recompute_budget', 'ple_embeddings'
-                ],
+                input_names=input_names,
                 output_names=output_names,
                 dynamic_axes=self.model_dynamic_axes)
             return onnx_model
 
         # export to onnx
+        inputs = [input_ids, attention_mask, position_ids, logits_index]
+        input_names = ['input_ids', 'attention_mask', 'position_ids', 'logits_index']
+        if use_pic_recompute_budget:
+            inputs.append(pic_recompute_budget)
+            input_names.append('pic_recompute_budget')
         onnx_export(
-            model, (input_ids, attention_mask, position_ids, logits_index, pic_recompute_budget),
+            model, tuple(inputs),
             onnx_model,
-            input_names=[
-                'input_ids', 'attention_mask', 'position_ids', 'logits_index', 'pic_recompute_budget'
-            ],
+            input_names=input_names,
             output_names=output_names,
             dynamic_axes=self.model_dynamic_axes)
         return onnx_model
@@ -678,17 +826,77 @@ class LlmExporter(torch.nn.Module):
             self.export_embed()
         # export PLE embedding (gemma4)
         self.export_ple_embed()
-        # export transformer
-        onnx_model = self.export_onnx()
+        export_decode_graph = self.mnn_converter and bool(getattr(self.args, 'pic_export_decode_graph', False))
+        main_graph_role = PIC_GRAPH_ROLE_PREFILL if export_decode_graph else PIC_GRAPH_ROLE_DECODE
+        # Dualgraph exports are two role-specific graphs from one model:
+        # llm.mnn keeps the PIC prefill boundary, llm_decode.mnn gets the
+        # decode-only rewrites.
+        with self.pic_export_graph_role_scope(main_graph_role):
+            onnx_model = self.export_onnx()
 
-        if self.args.onnx_slim:
-            self.slim_onnx(onnx_model)
-        if self.mnn_converter:
-            tie_embeddings_info = MNNConverter(self, self.unloaded_ops).export(onnx_model)
-            if tie_embeddings_info is not None:
-                self.llm_config['tie_embeddings'] = tie_embeddings_info
-        else:
-            self.onnx_load_param(onnx_model)
+            if self.args.onnx_slim:
+                self.slim_onnx(onnx_model)
+            if self.mnn_converter:
+                tie_embeddings_info = MNNConverter(self, self.unloaded_ops).export(onnx_model)
+                if tie_embeddings_info is not None:
+                    self.llm_config['tie_embeddings'] = tie_embeddings_info
+            else:
+                self.onnx_load_param(onnx_model)
+        if export_decode_graph:
+            with self.pic_export_graph_role_scope(PIC_GRAPH_ROLE_DECODE):
+                self.export_decode_graph()
+
+    def export_decode_graph(self):
+        main_model = os.path.join(self.args.dst_path, 'llm.mnn')
+        if not os.path.exists(main_model):
+            raise RuntimeError('Decode graph export requires llm.mnn to be exported first.')
+        old_dst_name = self.dst_name
+        old_pic_budget = bool(getattr(self.args, 'pic_recompute_budget', True))
+        old_decode_repair_outputs = bool(getattr(self.args, 'pic_decode_repair_outputs', False))
+        old_repair_dynamic_axis = self.model_dynamic_axes.pop(
+            'pic_decode_repair_score_hidden_states', _MISSING)
+        try:
+            self.dst_name = 'llm_decode'
+            self.args.pic_decode_repair_outputs = False
+            if hasattr(self.config, 'pic_decode_repair_outputs'):
+                self.config.pic_decode_repair_outputs = False
+            if hasattr(self.model.config, 'pic_decode_repair_outputs'):
+                self.model.config.pic_decode_repair_outputs = False
+            self.set_pic_recompute_budget_enabled(False)
+            onnx_model = self.export_onnx()
+            if self.args.onnx_slim:
+                self.slim_onnx(onnx_model)
+            MNNConverter(self, self.unloaded_ops).export(onnx_model)
+            main_weight = os.path.join(self.args.dst_path, 'llm.mnn.weight')
+            decode_weight = os.path.join(self.args.dst_path, 'llm_decode.mnn.weight')
+            decode_shared_weight = False
+            decode_weight_name = 'llm_decode.mnn.weight'
+            if os.path.exists(main_weight) and os.path.exists(decode_weight):
+                if filecmp.cmp(main_weight, decode_weight, shallow=False):
+                    # Dualgraph keeps one external weight file in production;
+                    # prefill and decode modules point at the same weights.
+                    os.remove(decode_weight)
+                    decode_shared_weight = True
+                    decode_weight_name = 'llm.mnn.weight'
+                else:
+                    print('llm_decode.mnn.weight differs from llm.mnn.weight; keeping a separate decode weight file.')
+            self.llm_config['llm_decode_model'] = 'llm_decode.mnn'
+            self.llm_config['llm_decode_weight'] = decode_weight_name
+            self.llm_config['llm_decode_shared_weight'] = decode_shared_weight
+            decode_graph_config = pic_decode_config_values(self.args)
+            decode_graph_config['pic_recompute_budget'] = False
+            decode_graph_config['pic_decode_repair_outputs'] = False
+            self.llm_config['pic_decode_graph_config'] = decode_graph_config
+        finally:
+            self.dst_name = old_dst_name
+            self.args.pic_decode_repair_outputs = old_decode_repair_outputs
+            if hasattr(self.config, 'pic_decode_repair_outputs'):
+                self.config.pic_decode_repair_outputs = old_decode_repair_outputs
+            if hasattr(self.model.config, 'pic_decode_repair_outputs'):
+                self.model.config.pic_decode_repair_outputs = old_decode_repair_outputs
+            self.set_pic_recompute_budget_enabled(old_pic_budget)
+            if old_repair_dynamic_axis is not _MISSING:
+                self.model_dynamic_axes['pic_decode_repair_score_hidden_states'] = old_repair_dynamic_axis
 
     def export(self, export_type):
         if not self.args.skip_weight:
@@ -887,13 +1095,22 @@ def build_args(parser):
     parser.add_argument('--paged_kv_max_tokens', type=int, default=0, help='Preallocated paged KV slot count. 0 means use max_all_tokens at runtime.')
     parser.add_argument('--pic_recompute_budget', dest='pic_recompute_budget', action='store_true', default=True, help='Expose PIC sparse recompute budget as a scalar graph input, default is True.')
     parser.add_argument('--no_pic_recompute_budget', dest='pic_recompute_budget', action='store_false', help='Export without graph-level PIC recompute budget input.')
+    parser.add_argument('--pic_export_decode_graph', action='store_true', help='Also export llm_decode.mnn without PIC recompute budget inputs or sparse graph-boundary ops.')
     parser.add_argument('--pic_recompute_score_layer_idx', type=int, default=1, help='Static score-layer boundary where PIC sparse recompute gathers compact active rows.')
     parser.add_argument('--pic_decode_repair_outputs', action='store_true', help='Expose score-layer hidden states needed by PIC decode repair.')
-    parser.add_argument('--pic_decode_tiny_fusion', action='store_true', help='Export PIC decode tiny elementwise fusion ops such as PicSiluMul.')
-    parser.add_argument('--pic_decode_gateup_fusion', action='store_true', help='Opt in to experimental PicGateUpWeightOnly export; with --pic_decode_nhwc_linear_fusion this lowers gate/up to one packed NHWC weight-only projection plus PicPackedSiluMul.')
-    parser.add_argument('--pic_decode_gateup_direct_fusion', action='store_true', help='Preserve PicGateUpWeightOnly Extra so OpenCL can fuse gate/up weight-only projections directly before PicSiluMul.')
-    parser.add_argument('--pic_decode_gateup_split_fusion', action='store_true', help='Export gate/up with shared input layout but separate weight-only Conv nodes before PicSiluMul.')
-    parser.add_argument('--pic_decode_nhwc_linear_fusion', action='store_true', help='Export experimental NHWC weight-only Linear Extra ops for PIC decode repair A/B.')
+    parser.add_argument('--pic_export_device', type=str, default=None,
+                        choices=['jetson', 'rhinopi', 'orangepi'],
+                        help='Audit and canonicalize PIC export parameters for one device family. jetson enables CUDA-family exports, rhinopi enables Adreno-family exports, orangepi uses generic/Mali export with no backend-specific decode fusion.')
+    parser.add_argument('--pic_decode_tiny_fusion', action='store_true', help='Backend-specific: export PIC decode tiny elementwise fusion ops such as PicSiluMul; active with --pic_export_device jetson/rhinopi.')
+    parser.add_argument('--pic_decode_tiny_mlp_fusion', action='store_true', help='RhinoPi/Adreno only: export a guarded tiny-row MLP weight-only Extra op for PIC decode repair A/B.')
+    parser.add_argument('--pic_decode_gateup_fusion', action='store_true', help='Opt in to backend-specific gate/up projection rewrites; active with --pic_export_device jetson/rhinopi.')
+    parser.add_argument('--pic_decode_gateup_direct_fusion', action='store_true', help='Backend-specific: preserve a native gate/up+silu Extra op instead of lowering to generic Conv nodes.')
+    parser.add_argument('--pic_decode_gateup_split_fusion', action='store_true', help='Backend-specific: export gate/up with shared input layout but separate weight-only Conv nodes before PicSiluMul.')
+    parser.add_argument('--pic_decode_silu_nhwc_down_fusion', action='store_true', help='RhinoPi/Adreno only: export split gate/up then PicAdrenoSiluMulNhwc before the MLP down projection path.')
+    parser.add_argument('--pic_decode_fusion_backend', type=str, default=None,
+                        choices=['generic', 'rhinopi', 'jetson'],
+                        help='Select backend-specific PIC decode fusion export rewrites. Prefer --pic_export_device; this remains for explicit A/B overrides.')
+    parser.add_argument('--pic_decode_nhwc_linear_fusion', action='store_true', help='Backend-specific: export NHWC weight-only Linear Extra ops for PIC decode repair A/B.')
     parser.add_argument('--pic_decode_nhwc_linear_scope', type=str, default='all',
                         choices=['all', 'attn', 'mlp', 'qkv', 'o', 'mlp_gateup', 'mlp_down'],
                         help='Limit --pic_decode_nhwc_linear_fusion to a Linear subset for PIC decode repair A/B.')

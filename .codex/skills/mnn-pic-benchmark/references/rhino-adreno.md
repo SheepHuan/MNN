@@ -98,6 +98,14 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_mnn_pic_dataset_bench.sh \
 
 Rhino decode repair 只能作为额外 profile。正式表格仍以 Jetson + OrangePi 为准。
 
+Rhino / Adreno 的 Decode TPOT 也按双族组织：
+
+- `optimized-decode-repair`：Adreno/Rhino 专属优化导出，例如包含 `PicAdreno*` / guarded tiny-row MLP 的模型。
+- `normal/generic-decode-repair`：同一 PIC graph-boundary 模型语义，但导出时使用 `--pic_decode_fusion_backend generic`，不生成 `PicAdreno*` 后端专属 rewrite。
+- `normal-llm-x0`：普通 `.cache/mnn-llm-export/<model>/config.json` 的 MNN decode 绝对 baseline，只作为 `x0` 参考。
+
+两族都测 `x=0/1/3/5/7`，再按相同 `x` 计算 `normal_tpot[x] / optimized_tpot[x]`。若看到某个族的 `x0` 比 `x>0` 慢很多，先排查 cold OpenCL tuning、旧 runtime cache rebuild、模型路径选错或把另一族的 no-repair 行混入；不要直接报告 speedup。
+
 ## 构建入口
 
 构建 artifact 先读：

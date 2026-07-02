@@ -17,6 +17,7 @@ MNN 专属 Codex skills 由本目录维护：
 .codex/skills/mnn-pic-optimize/SKILL.md  MNN PIC/PagedAttention 跨设备优化、score layer/sparse 边界分析与日志维护
 .codex/skills/mnn-pic-benchmark/SKILL.md  本机交叉编译 MNN PIC server 产物、推到 Jetson/OrangePi/AidLux 启服务，并从本机跑数据集 benchmark
 .codex/skills/mnn-support-new-llm/SKILL.md  在 transformers/pic_llm 中适配新 LLM 模型
+.codex/skills/mnn-git-commit-message/SKILL.md  从当前工作区 diff 起草准确的 MNN commit message
 ```
 
 上游 MNN 原生 skills 仍保留在 `skills/`，不要和 Codex skills 混放。Codex 不打开、不阅读、不引用 `skills/` 下的内容；即使任务看起来匹配，也不要读取 `skills/*/SKILL.md` 或把其中内容作为依据。需要新增或调整工作流时，在 `.codex/skills/` 中维护对应 Codex skill。
@@ -49,6 +50,7 @@ git status --short
 - 运行 `llm_bench` / `llm_demo` / `pic_llm_bench` / `pic_llm_demo`、测试 CUDA/OpenCL/Vulkan/CPU LLM 推理、比较普通 MNN LLM 与 PIC/PagedAttention LLM 输出、确认 GPU 后端注册、检查 execution class 日志、排查后端回退，或围绕 LLM bench 采集 DF power / Jetson `tegrastats` 功耗：读 `.codex/skills/mnn-llm-bench/SKILL.md`。
 - 本机交叉编译 MNN `pic_server` / `libpic_llm` / CUDA/OpenCL artifact，推送到 Jetson、Orange Pi 5 Plus 或 AidLux/Adreno，远端启动 MNN PIC server，并从本机运行 `impl/pic_bench/cli.py` 数据集 benchmark 向目标设备发请求：读 `.codex/skills/mnn-pic-benchmark/SKILL.md`。
 - 新增、适配或诊断一个尚未支持的 Hugging Face/ModelScope LLM 或多模态 LLM 模型，并修改 `transformers/pic_llm` 的 mapper/config/model/vision/audio/export 流程：读 `.codex/skills/mnn-support-new-llm/SKILL.md`。
+- 从当前工作区 staged/unstaged diff 起草准确的 MNN commit message：读 `.codex/skills/mnn-git-commit-message/SKILL.md`。
 
 如果任务没有对应的 `.codex/skills/` 覆盖，按本文件、仓库源码和用户上下文处理，不要读取 `skills/` 下的内容。不要批量阅读无关文档；按当前任务打开需要的文件即可。
 
@@ -62,6 +64,8 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 ```
 
 不要把 `.cache/weight/` 下的 PIC 模型复制或改配置当作普通模型对比；普通模型以 `.cache/mnn-llm-export/` 下的正常导出为准。两边用同一个 prompt、相同 backend / precision / memory / sampler 配置，并分别从各自模型目录执行 demo。
+
+`dualgraph` 只属于 PIC/PagedAttention LLM：模型必须来自 `.cache/weight/<model>/`，运行入口必须是 `pic_llm_demo` / `pic_llm_bench` / `pic_server`。普通 `true normal` LLM baseline 必须来自 `.cache/mnn-llm-export/<model>/` 并走普通 normal 计算图；不要把 dualgraph 产物、日志或 PIC no-repair 行命名或解释成 normal LLM。
 
 `--skip_weight` 导出的模型只用于检查导出流程和图结构，不作为正确性或性能测试产物。尤其 GLM / GLM-Edge 这类 `tie_word_embeddings=false` 的模型，不能因为 skip-weight skeleton 里的空/meta tensor 看起来相等就把 `tie_word_embeddings` / `tie_embeddings` 写成 true；正确性测试必须使用真实 embedding 文件和完整 `llm.mnn.weight`。历史上 OrangePi GLM PIC skiptest 产物曾因为错误 tied embedding 和 EOF 后 lm_head offset 输出 NUL/`APP`，修复后的判据是普通/PIC demo 都能输出自然语言，再进入 PIC server full-compute/full-reuse/cacheblend/epic 测试。
 

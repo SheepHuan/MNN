@@ -1,0 +1,66 @@
+=== SmallMV15 accuracy (final V15 single-load) ===
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_gate_rows4 max_abs=0 max_rel=0 bad=0/32768
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_up_rows4 max_abs=0 max_rel=0 bad=0/32768
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_down_rows4 max_abs=0 max_rel=0 bad=0/12288
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_q_rows4 max_abs=0 max_rel=0 bad=0/12288
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_kv_rows4 max_abs=0 max_rel=0 bad=0/4096
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_gate_rows4 max_abs=0 max_rel=0 bad=0/38912
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_down_rows4 max_abs=0 max_rel=0 bad=0/10240
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_q_rows4 max_abs=0 max_rel=0 bad=0/16384
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_gate_rows6 max_abs=0 max_rel=0 bad=0/49152
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_up_rows6 max_abs=0 max_rel=0 bad=0/49152
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_down_rows6 max_abs=0 max_rel=0 bad=0/18432
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_q_rows6 max_abs=0 max_rel=0 bad=0/18432
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_kv_rows6 max_abs=0 max_rel=0 bad=0/6144
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_gate_rows6 max_abs=0 max_rel=0 bad=0/58368
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_down_rows6 max_abs=0 max_rel=0 bad=0/15360
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_q_rows6 max_abs=0 max_rel=0 bad=0/24576
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_gate_rows8 max_abs=0 max_rel=0 bad=0/65536
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_up_rows8 max_abs=0 max_rel=0 bad=0/65536
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_down_rows8 max_abs=0 max_rel=0 bad=0/24576
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_q_rows8 max_abs=0 max_rel=0 bad=0/24576
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_llama32_3b_kv_rows8 max_abs=0 max_rel=0 bad=0/8192
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_gate_rows8 max_abs=0 max_rel=0 bad=0/77824
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_down_rows8 max_abs=0 max_rel=0 bad=0/20480
+[bench_ops/cuda/accuracy/Rows45Cublas] v15_smallm_qwen3_4b_q_rows8 max_abs=0 max_rel=0 bad=0/32768
+√√√ all <bench_ops/cuda/accuracy/SmallMV15> tests passed.
+TEST_CASE_AMOUNT_UNITx: {"blocked":0,"failed":0,"passed":1,"skipped":0}
+TEST_CASE={"name":"单元测试x","failed":0,"passed":1}
+=== SmallMV15 perf rows4/6/8 ===
+[bench_ops/cuda/perf/SmallMV15] hidden_to_inter    rows=4 ic=2048 oc=8192 qblock=64 avg=1.4095 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_gateup_concat rows=4 ic=2048 oc=16384 qblock=64 avg=2.8123 ms
+[bench_ops/cuda/perf/SmallMV15] inter_to_hidden    rows=4 ic=8192 oc=2048 qblock=64 avg=1.1486 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_hidden   rows=4 ic=2048 oc=2048 qblock=64 avg=0.3744 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_kv       rows=4 ic=2048 oc=512 qblock=64 avg=0.0766 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_qkv_concat rows=4 ic=2048 oc=3072 qblock=64 avg=0.1431 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_inter    rows=6 ic=2048 oc=8192 qblock=64 avg=2.1914 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_gateup_concat rows=6 ic=2048 oc=16384 qblock=64 avg=4.2843 ms
+[bench_ops/cuda/perf/SmallMV15] inter_to_hidden    rows=6 ic=8192 oc=2048 qblock=64 avg=1.7370 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_hidden   rows=6 ic=2048 oc=2048 qblock=64 avg=0.5701 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_kv       rows=6 ic=2048 oc=512 qblock=64 avg=0.1129 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_qkv_concat rows=6 ic=2048 oc=3072 qblock=64 avg=0.1455 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_inter    rows=8 ic=2048 oc=8192 qblock=64 avg=3.0229 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_gateup_concat rows=8 ic=2048 oc=16384 qblock=64 avg=5.9443 ms
+[bench_ops/cuda/perf/SmallMV15] inter_to_hidden    rows=8 ic=8192 oc=2048 qblock=64 avg=2.3820 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_hidden   rows=8 ic=2048 oc=2048 qblock=64 avg=0.7625 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_kv       rows=8 ic=2048 oc=512 qblock=64 avg=0.1620 ms
+[bench_ops/cuda/perf/SmallMV15] hidden_to_qkv_concat rows=8 ic=2048 oc=3072 qblock=64 avg=0.1425 ms
+=== WeightOnlyConv baseline rows4/6/8 ===
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_inter    rows=4 ic=2048 oc=8192 qblock=64 avg=0.3270 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_gateup_concat rows=4 ic=2048 oc=16384 qblock=64 avg=0.6454 ms
+[bench_ops/cuda/perf/WeightOnlyConv] inter_to_hidden    rows=4 ic=8192 oc=2048 qblock=64 avg=0.3390 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_hidden   rows=4 ic=2048 oc=2048 qblock=64 avg=0.0916 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_kv       rows=4 ic=2048 oc=512 qblock=64 avg=0.0291 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_qkv_concat rows=4 ic=2048 oc=3072 qblock=64 avg=0.1386 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_inter    rows=6 ic=2048 oc=8192 qblock=64 avg=0.3220 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_gateup_concat rows=6 ic=2048 oc=16384 qblock=64 avg=0.6316 ms
+[bench_ops/cuda/perf/WeightOnlyConv] inter_to_hidden    rows=6 ic=8192 oc=2048 qblock=64 avg=0.3404 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_hidden   rows=6 ic=2048 oc=2048 qblock=64 avg=0.0923 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_kv       rows=6 ic=2048 oc=512 qblock=64 avg=0.0290 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_qkv_concat rows=6 ic=2048 oc=3072 qblock=64 avg=0.1367 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_inter    rows=8 ic=2048 oc=8192 qblock=64 avg=0.3218 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_gateup_concat rows=8 ic=2048 oc=16384 qblock=64 avg=0.6277 ms
+[bench_ops/cuda/perf/WeightOnlyConv] inter_to_hidden    rows=8 ic=8192 oc=2048 qblock=64 avg=0.3248 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_hidden   rows=8 ic=2048 oc=2048 qblock=64 avg=0.0912 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_kv       rows=8 ic=2048 oc=512 qblock=64 avg=0.0291 ms
+[bench_ops/cuda/perf/WeightOnlyConv] hidden_to_qkv_concat rows=8 ic=2048 oc=3072 qblock=64 avg=0.1367 ms

@@ -98,6 +98,16 @@ static void picDecodeRepairProfileLog(int step, const char* selector, int normal
     std::fflush(stderr);
 }
 
+static void clearGenerateForwardState(const std::shared_ptr<GenerationParams>& params) {
+    if (params == nullptr) {
+        return;
+    }
+    params->input_embeds = nullptr;
+    params->outputs.clear();
+    params->validLogitSize = 0;
+    params->validLogitStart = 0;
+}
+
 static MNNForwardType backend_type_convert(const std::string& type_str) {
     if (type_str == "cpu")
         return MNN_FORWARD_CPU;
@@ -433,9 +443,16 @@ bool Llm::load() {
     std::string tokenizer_path = mConfig->tokenizer_file();
     std::string model_path = mConfig->llm_model();
     std::string weight_path = mConfig->llm_weight();
+    std::string decode_model_path = mConfig->has_llm_decode_model() ? mConfig->llm_decode_model() : "";
+    std::string decode_weight_path = mConfig->has_llm_decode_model() ? mConfig->llm_decode_weight() : "";
     if (!checkFile(tokenizer_path, "tokenizer file") ||
         !checkFile(model_path, "LLM model file") ||
         !checkFile(weight_path, "LLM weight file")) {
+        return false;
+    }
+    if (mConfig->has_llm_decode_model() &&
+        (!checkFile(decode_model_path, "LLM decode model file") ||
+         !checkFile(decode_weight_path, "LLM decode weight file"))) {
         return false;
     }
     MNN::Express::ExecutorScope s(mExecutor);
@@ -522,6 +539,32 @@ bool Llm::load() {
         }
         return false;
     }
+    if (mConfig->has_llm_decode_model()) {
+        std::vector<std::string> decodeInputNames {"input_ids", "attention_mask", "position_ids", "logits_index"};
+        if (mConfig->has_deepstack()) {
+            decodeInputNames.emplace_back("deepstack_embeds");
+        }
+        if (mConfig->has_ple()) {
+            decodeInputNames.emplace_back("ple_embeddings");
+        }
+        mRuntimeManager->setExternalFile(decode_weight_path);
+        mDecodeModule.reset(Module::load(decodeInputNames, outputNames, decode_model_path.c_str(),
+                                         mRuntimeManager, &module_config));
+        mRuntimeManager->setExternalFile("");
+        if(nullptr == mDecodeModule) {
+            MNN_ERROR("[Error]: Load decode module failed, please check model: %s\n", decode_model_path.c_str());
+            return false;
+        }
+        if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+            std::fprintf(stderr,
+                         "PIC decode graph loaded model=%s weight=%s shared=%d inputs=%d outputs=%d\n",
+                         decode_model_path.c_str(), decode_weight_path.c_str(),
+                         mConfig->llm_decode_shared_weight() ? 1 : 0,
+                         static_cast<int>(decodeInputNames.size()),
+                         static_cast<int>(outputNames.size()));
+            std::fflush(stderr);
+        }
+    }
     // set speculative decoding params
     setSpeculativeConfig();
     // create generation strategy
@@ -539,6 +582,9 @@ bool Llm::load() {
 
     // autoregressive decode module
     mModulePool[std::make_pair(1, false)] = cloneModuleWithRuntime(mModule.get());
+    if (mDecodeModule != nullptr) {
+        mDecodeModulePool[std::make_pair(1, false)] = cloneModuleWithRuntime(mDecodeModule.get());
+    }
     // prefill module
     mModulePool[std::make_pair(mPrefillKey, mConfig->all_logits())] = mModule;
 
@@ -1562,19 +1608,38 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
 }
 
 void Llm::finishExternalPagedKVRequest() {
+    clearGenerateForwardState(mGenerateParam);
     clearPicDecodeRepair();
+    clearModuleForwardCaches();
     finishPagedRequestIfNeeded();
 }
 
-bool Llm::beginPagedRequestIfNeeded() {
+int Llm::pagedRequestCapacity(int pendingInputTokens, int maxNewTokens) const {
+    int capacity = mConfig->paged_kv_max_tokens();
+    int currentTokens = mContext != nullptr ? std::max(0, mContext->all_seq_len) : 0;
+    int pendingTokens = std::max(0, pendingInputTokens);
+    int decodeBudget = maxNewTokens < 0 ? mConfig->max_new_tokens() : maxNewTokens;
+    decodeBudget = std::max(0, decodeBudget);
+    return std::max(capacity, currentTokens + pendingTokens + decodeBudget);
+}
+
+bool Llm::beginPagedRequestIfNeeded(int pendingInputTokens, int maxNewTokens) {
     if (!mConfig->paged_attention()) {
         return false;
     }
     auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-    if (paged == nullptr || paged->request_active) {
+    if (paged == nullptr) {
         return false;
     }
-    paged->beginRequest(mConfig->paged_kv_max_tokens());
+    int capacity = pagedRequestCapacity(pendingInputTokens, maxNewTokens);
+    if (paged->request_active) {
+        if (!paged->reserveRequestCapacity(capacity)) {
+            MNN_ERROR("PagedAttention request failed to reserve capacity=%d current=%d\n",
+                      capacity, paged->request_capacity);
+        }
+        return false;
+    }
+    paged->beginRequest(capacity);
     return true;
 }
 
@@ -1585,6 +1650,37 @@ void Llm::finishPagedRequestIfNeeded() {
     auto paged = static_cast<PagedKVMeta*>(mMeta.get());
     if (paged != nullptr && paged->request_active) {
         paged->finishRequest();
+    }
+}
+
+void Llm::clearModuleForwardCaches() {
+    if (mModule != nullptr) {
+        mModule->clearCache();
+    }
+    if (mDecodeModule != nullptr) {
+        mDecodeModule->clearCache();
+    }
+    for (auto& item : mModulePool) {
+        if (item.second != nullptr && item.second != mModule) {
+            item.second->clearCache();
+        }
+    }
+    for (auto& item : mDecodeModulePool) {
+        if (item.second != nullptr && item.second != mDecodeModule) {
+            item.second->clearCache();
+        }
+    }
+    for (auto& item : mCacheBlendScoreModulePool) {
+        if (item.second != nullptr) {
+            item.second->clearCache();
+        }
+    }
+    for (auto iter = mModulePool.begin(); iter != mModulePool.end();) {
+        if (iter->first.first == mPrefillKey) {
+            iter = mModulePool.erase(iter);
+        } else {
+            ++iter;
+        }
     }
 }
 
@@ -1611,19 +1707,41 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     MNN::Express::ExecutorScope s(mExecutor);
     
     Express::VARP logitsIndex;
-    bool inDecode = mContext->gen_seq_len > 0;
+    bool inDecode = mDecodeForwardActive || mContext->gen_seq_len > 0;
     bool isAllLogists = mConfig->all_logits() ? true : (inDecode ? mInSpec : false);
     auto seqLen = hiddenState->getInfo()->dim[mSeqLenIndex];
     int seqLenKey = inDecode ? hiddenState->getInfo()->dim[mSeqLenIndex] : mPrefillKey;
     isAllLogists = seqLenKey == 1 ? false : isAllLogists;
+    const bool useDecodeGraph = mDecodeModule != nullptr &&
+                                inDecode &&
+                                seqLen == 1 &&
+                                seqLenKey == 1 &&
+                                !isAllLogists &&
+                                !mPicDecodeRepair.enabled;
     auto moduleKey = std::make_pair(seqLenKey, isAllLogists);
     std::shared_ptr<Module> selectModule = mModule;
-    if (mValidBlockSize.empty()) {
+    if (useDecodeGraph) {
+        auto iter = mDecodeModulePool.find(moduleKey);
+        if(iter == mDecodeModulePool.end()) {
+            MNN_PRINT("Warning: module need new clone, cloning now.\n");
+            mDecodeModulePool[moduleKey] = cloneModuleWithRuntime(mDecodeModule.get());
+            iter = mDecodeModulePool.find(moduleKey);
+        }
+        if (iter != mDecodeModulePool.end()) {
+            selectModule = iter->second;
+        }
+    } else if (mValidBlockSize.empty()) {
         if(mModulePool.find(moduleKey) == mModulePool.end()) {
             MNN_PRINT("Warning: module need new clone, cloning now.\n");
             mModulePool[moduleKey] = cloneModuleWithRuntime(mModule.get());
         }
         selectModule = mModulePool[moduleKey];
+    }
+    if (selectModule == nullptr) {
+        mLastError = "LLM module clone failed";
+        MNN_ERROR("%s\n", mLastError.c_str());
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        return {};
     }
 
     if (isAllLogists) {
@@ -1642,12 +1760,19 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     mGenerateParam->validLogitStart = 0;
     std::vector<Express::VARP> inputs {hiddenState, mask, inputPos, logitsIndex};
     auto picBudget = _picRecomputeBudgetVar(mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get()) : nullptr, seqLen,
-                                            mConfig->has_pic_recompute_budget());
+                                            mConfig->has_pic_recompute_budget() && !useDecodeGraph);
     if (picBudget.get() != nullptr) {
         inputs.emplace_back(picBudget);
         mPicRecomputeBudget = picBudget;
     }
     inputs.insert(inputs.end(), extraArgs.begin(), extraArgs.end());
+    if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr && useDecodeGraph) {
+        std::fprintf(stderr,
+                     "PIC decode graph route seq_len=%d add=%d all_seq=%d gen_seq=%d inputs=%d\n",
+                     seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len,
+                     static_cast<int>(inputs.size()));
+        std::fflush(stderr);
+    }
     std::vector<Express::VARP> outputs = selectModule->onForward(inputs);
 
     if (outputs.empty()) {
@@ -1972,6 +2097,8 @@ int Llm::sample(VARP logits, int offset, int size) {
 }
 
 void Llm::reset() {
+    clearGenerateForwardState(mGenerateParam);
+    clearModuleForwardCaches();
     mContext->output_tokens.clear();
     mContext->history_tokens.clear();
     mContext->all_seq_len = 0;
@@ -1983,11 +2110,13 @@ void Llm::reset() {
     mMeta->remove = mMeta->previous;
     finishPagedRequestIfNeeded();
     mPicRecomputeBudget = nullptr;
+    mDecodeForwardActive = false;
     clearPicDecodeRepair();
     mCachedPromptText.clear();
 }
 
 void Llm::generate_init(std::ostream* os, const char* end_with) {
+    clearGenerateForwardState(mGenerateParam);
     // init status
     mLastError.clear();
     mContext->os = os;
@@ -2052,14 +2181,18 @@ bool Llm::stoped() {
 void Llm::generate(int max_token) {
     CHECK_LLM_RUNNING(mContext);
     MNN::Express::ExecutorScope s(mExecutor);
-    beginPagedRequestIfNeeded();
+    if (max_token < 0) {
+        max_token = mConfig->max_new_tokens();
+    }
+    beginPagedRequestIfNeeded(0, max_token);
     if (is_stop(mContext->current_token)) {
         finishPagedRequestIfNeeded();
         return;
     }
     mGenerateParam->max_new_tokens = max_token;
-    mGenerateParam->skipNextLogitsOnLimit = false;
+    const bool callerSkipNextLogitsOnLimit = mGenerateParam->skipNextLogitsOnLimit;
     mGenerationStrategy->generate(*mGenerateParam);
+    mGenerateParam->skipNextLogitsOnLimit = callerSkipNextLogitsOnLimit;
     // MAX_TOKENS_FINISHED only means this chunk ended; generate(1) callers may continue the same request.
     const bool interrupted = mContext->status == LlmStatus::INTERNAL_ERROR ||
                              mContext->status == LlmStatus::TIMEOUT ||
@@ -2223,6 +2356,13 @@ std::vector<int> Llm::decode(int max_tokens) {
             paged->finishSparseQuery();
             paged->finishCacheBlendScoring();
             paged->finishPicGraphActivePlan();
+            if (paged->detachHydratedExternalSegmentsForDecode(mConfig->layer_nums()) && decodeDebug) {
+                std::fprintf(stderr,
+                             "PIC decode debug detached hydrated external source segments before decode, "
+                             "logical=%d previous=%d\n",
+                             paged->logical_length, static_cast<int>(paged->previous));
+                std::fflush(stderr);
+            }
         }
     }
     if (max_tokens > 0 && mContext->output_tokens.empty() && mContext->current_token >= 0 &&
@@ -2230,7 +2370,20 @@ std::vector<int> Llm::decode(int max_tokens) {
         mContext->current_token = -1;
     }
     if (max_tokens > 0) {
+        struct ScopedDecodeForwardFlag {
+            bool& flag;
+            bool old;
+            explicit ScopedDecodeForwardFlag(bool& value) : flag(value), old(value) {
+                flag = true;
+            }
+            ~ScopedDecodeForwardFlag() {
+                flag = old;
+            }
+        } decodeForwardGuard(mDecodeForwardActive);
+        const bool oldSkipNextLogitsOnLimit = mGenerateParam->skipNextLogitsOnLimit;
+        mGenerateParam->skipNextLogitsOnLimit = true;
         generate(max_tokens);
+        mGenerateParam->skipNextLogitsOnLimit = oldSkipNextLogitsOnLimit;
         finishPagedRequestIfNeeded();
     }
     if (decodeDebug) {
@@ -2246,10 +2399,10 @@ std::vector<int> Llm::decode(int max_tokens) {
 std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens) {
     CHECK_LLM_RUNNING_RET(mContext, std::vector<int>());
     MNN::Express::ExecutorScope s(mExecutor);
-    bool startedPagedRequest = beginPagedRequestIfNeeded();
     if (max_tokens < 0) {
         max_tokens = mConfig->max_new_tokens();
     }
+    bool startedPagedRequest = beginPagedRequestIfNeeded(static_cast<int>(input_ids.size()), max_tokens);
 
     bool passExecute = false;
     if(mPrefixCacheMode) {
@@ -2360,12 +2513,11 @@ void Llm::response(const MultimodalPrompt& multimodal_input,
 std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) {
     CHECK_LLM_RUNNING_RET(mContext, std::vector<int>());
     MNN::Express::ExecutorScope s(mExecutor);
-    bool startedPagedRequest = beginPagedRequestIfNeeded();
-    
     if (max_tokens < 0) {
         max_tokens = mConfig->max_new_tokens();
     }
     int seqLen = input_embeds->getInfo()->dim[mSeqLenIndex];
+    bool startedPagedRequest = beginPagedRequestIfNeeded(seqLen, max_tokens);
     mContext->prompt_len = seqLen;
 
     Timer _t;
@@ -2646,6 +2798,8 @@ Llm::~Llm() {
 #endif
     mGenerateParam.reset();
     mModule.reset();
+    mDecodeModule.reset();
+    mDecodeModulePool.clear();
     mCacheBlendScoreRuntimeManager.reset();
     mRuntimeManager.reset();
     mProcessorRuntimeManager.reset();

@@ -8,6 +8,7 @@ from utils.config import LlmConfig
 from utils.tokenizer import LlmTokenizer
 from utils.model_mapper import ModelMapper
 from utils.transformers import Embedding, Rotary, Decoder, Lm, _pic_gather_rows
+from utils.pic_export_contract import normalize_pic_export_args, pic_decode_config_values
 
 class LlmModel(PreTrainedModel):
     config_class = LlmConfig
@@ -73,10 +74,9 @@ class LlmModel(PreTrainedModel):
             config.pic_recompute_budget = bool(getattr(args, 'pic_recompute_budget', True))
             config.pic_recompute_score_layer_idx = max(0, getattr(args, 'pic_recompute_score_layer_idx', 1))
             config.pic_decode_repair_outputs = bool(getattr(args, 'pic_decode_repair_outputs', False))
-            config.pic_decode_tiny_fusion = bool(getattr(args, 'pic_decode_tiny_fusion', False))
-            config.pic_decode_gateup_fusion = bool(getattr(args, 'pic_decode_gateup_fusion', False))
-            config.pic_decode_gateup_direct_fusion = bool(getattr(args, 'pic_decode_gateup_direct_fusion', False))
-            config.pic_decode_gateup_split_fusion = bool(getattr(args, 'pic_decode_gateup_split_fusion', False))
+            normalize_pic_export_args(args)
+            for key, value in pic_decode_config_values(args).items():
+                setattr(config, key, value)
         model_type = config.model_type
         model_class = cls.get_model_class(model_type)
 

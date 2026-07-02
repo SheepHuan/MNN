@@ -16,6 +16,8 @@
 #include "core/Macro.h"
 #include "core/FileLoader.hpp"
 #include "backend/opencl/core/OpenCLRunningUtils.hpp"
+#include <cstdlib>
+#include <cstdio>
 #include <sstream>
 
 namespace MNN {
@@ -239,6 +241,168 @@ private:
     std::vector<uint32_t> mLocalWorkSize{1, 1};
 };
 
+static const char* kPicSiluMulNhwcBufSource = R"(
+#ifdef MNN_SUPPORT_FP16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+
+inline FLOAT4 pic_silu_mul_nhwc4(FLOAT4 gate, FLOAT4 up) {
+    float4 gate_f = convert_float4(gate);
+    float4 up_f = convert_float4(up);
+    float4 fused = gate_f * native_recip((float4)1.0f + native_exp(-gate_f)) * up_f;
+#ifdef MNN_SUPPORT_FP16
+    return convert_half4(fused);
+#else
+    return fused;
+#endif
+}
+
+__kernel void pic_silu_mul_c4_to_nhwc_buf(__private const int global_dim0,
+                                          __private const int global_dim1,
+                                          __private const int global_dim2,
+                                          __global const FLOAT* gate,
+                                          __global const FLOAT* up,
+                                          __global FLOAT* output,
+                                          __private const int rows,
+                                          __private const int channels,
+                                          __private const int channel_align) {
+    const int c4 = get_global_id(0);
+    const int b4 = get_global_id(1);
+    const int z = get_global_id(2);
+    if (c4 >= global_dim0 || b4 >= global_dim1 || z >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int ch = c4 << 2;
+    if (ch >= channels) {
+        return;
+    }
+    const int bhw4 = rows << 2;
+    const int in_offset = c4 * bhw4 + row * 4;
+    FLOAT4 gate0 = vload4(0, gate + in_offset);
+    FLOAT4 up0 = vload4(0, up + in_offset);
+    vstore4(pic_silu_mul_nhwc4(gate0, up0), 0, output + row * channel_align + ch);
+    if (row + 1 < rows) {
+        FLOAT4 gate1 = vload4(0, gate + in_offset + 4);
+        FLOAT4 up1 = vload4(0, up + in_offset + 4);
+        vstore4(pic_silu_mul_nhwc4(gate1, up1), 0, output + (row + 1) * channel_align + ch);
+    }
+    if (row + 2 < rows) {
+        FLOAT4 gate2 = vload4(0, gate + in_offset + 8);
+        FLOAT4 up2 = vload4(0, up + in_offset + 8);
+        vstore4(pic_silu_mul_nhwc4(gate2, up2), 0, output + (row + 2) * channel_align + ch);
+    }
+    if (row + 3 < rows) {
+        FLOAT4 gate3 = vload4(0, gate + in_offset + 12);
+        FLOAT4 up3 = vload4(0, up + in_offset + 12);
+        vstore4(pic_silu_mul_nhwc4(gate3, up3), 0, output + (row + 3) * channel_align + ch);
+    }
+}
+)";
+
+class PicSiluMulNhwcBufExecution : public CommonExecution {
+public:
+    PicSiluMulNhwcBufExecution(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+        mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
+        auto runtime = mOpenCLBackend->getOpenCLRuntime();
+        mUnits.resize(1);
+        mUnits[0].kernel = runtime->buildKernelFromSource(kPicSiluMulNhwcBufSource,
+                                                           "pic_silu_mul_c4_to_nhwc_buf",
+                                                           {}, mOpenCLBackend->getPrecision());
+        OPENCL_CHECK_KERNEL_CTOR(mUnits[0].kernel);
+        mMaxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mUnits[0].kernel));
+    }
+    virtual ~PicSiluMulNhwcBufExecution() = default;
+
+    virtual ErrorCode onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (inputs.size() < 2 || outputs.size() != 1 || mUnits.empty() || mUnits[0].kernel == nullptr) {
+            debugPrint("invalid_io", inputs, outputs);
+            return INPUT_DATA_ERROR;
+        }
+        auto gate = inputs[0];
+        auto up = inputs[1];
+        auto output = outputs[0];
+        if (gate == nullptr || up == nullptr || output == nullptr ||
+            gate->dimensions() != 4 || up->dimensions() != 4 ||
+            (output->dimensions() != 3 && output->dimensions() != 4) ||
+            gate->getType().code != halide_type_float || up->getType().code != halide_type_float ||
+            output->getType().code != halide_type_float) {
+            debugPrint("unsupported_shape", inputs, outputs);
+            return NOT_SUPPORT;
+        }
+        mRows = gate->length(0);
+        mChannels = output->dimensions() == 3 ? output->length(2) : output->length(3);
+        if (mRows <= 0 || mChannels <= 0 || mChannels % 4 != 0 ||
+            gate->length(0) != up->length(0) || gate->length(1) != up->length(1) ||
+            gate->length(1) < mChannels) {
+            debugPrint("unsupported_dims", inputs, outputs);
+            return NOT_SUPPORT;
+        }
+        mChannelAlign = ROUND_UP(mChannels, 4);
+        mGlobalWorkSize = {
+            static_cast<uint32_t>(UP_DIV(mChannels, 4)),
+            static_cast<uint32_t>(UP_DIV(mRows, 4)),
+            1,
+        };
+        mLocalWorkSize = {16, 1, 1};
+        if (mMaxWorkGroupSize < mLocalWorkSize[0]) {
+            return NOT_SUPPORT;
+        }
+        auto& unit = mUnits[0];
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mGlobalWorkSize[0]));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mGlobalWorkSize[1]));
+        ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mGlobalWorkSize[2]));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(gate));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(up));
+        ret |= unit.kernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= unit.kernel->get().setArg(idx++, mRows);
+        ret |= unit.kernel->get().setArg(idx++, mChannels);
+        ret |= unit.kernel->get().setArg(idx++, mChannelAlign);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg PicSiluMulNhwcBufExecution");
+
+        mOpenCLBackend->recordKernel3d(unit.kernel, mGlobalWorkSize, mLocalWorkSize);
+        unit.globalWorkSize = {mGlobalWorkSize[0], mGlobalWorkSize[1], mGlobalWorkSize[2]};
+        unit.localWorkSize = {mLocalWorkSize[0], mLocalWorkSize[1], mLocalWorkSize[2]};
+        return NO_ERROR;
+    }
+
+private:
+    static void debugPrint(const char* reason, const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
+        if (std::getenv("MNN_PIC_GRAPH_PROFILE") == nullptr) {
+            return;
+        }
+        auto in0 = inputs.empty() ? nullptr : inputs[0];
+        auto in1 = inputs.size() < 2 ? nullptr : inputs[1];
+        auto out0 = outputs.empty() ? nullptr : outputs[0];
+        std::fprintf(stderr,
+                     "PicSiluMulNhwc encode %s in0=%d,%d,%d,%d in1=%d,%d,%d,%d out=%d,%d,%d,%d\n",
+                     reason,
+                     in0 && in0->dimensions() > 0 ? in0->length(0) : -1,
+                     in0 && in0->dimensions() > 1 ? in0->length(1) : -1,
+                     in0 && in0->dimensions() > 2 ? in0->length(2) : -1,
+                     in0 && in0->dimensions() > 3 ? in0->length(3) : -1,
+                     in1 && in1->dimensions() > 0 ? in1->length(0) : -1,
+                     in1 && in1->dimensions() > 1 ? in1->length(1) : -1,
+                     in1 && in1->dimensions() > 2 ? in1->length(2) : -1,
+                     in1 && in1->dimensions() > 3 ? in1->length(3) : -1,
+                     out0 && out0->dimensions() > 0 ? out0->length(0) : -1,
+                     out0 && out0->dimensions() > 1 ? out0->length(1) : -1,
+                     out0 && out0->dimensions() > 2 ? out0->length(2) : -1,
+                     out0 && out0->dimensions() > 3 ? out0->length(3) : -1);
+        std::fflush(stderr);
+    }
+
+    OpenCLBackend* mOpenCLBackend = nullptr;
+    uint32_t mMaxWorkGroupSize = 1;
+    int mRows = 0;
+    int mChannels = 0;
+    int mChannelAlign = 0;
+    std::vector<uint32_t> mGlobalWorkSize{1, 1, 1};
+    std::vector<uint32_t> mLocalWorkSize{1, 1, 1};
+};
+
 #ifdef MNN_LOW_MEMORY
 struct PicGateUpConvSpec {
     std::string name;
@@ -375,6 +539,24 @@ static std::vector<uint8_t> buildPicGateUpChildConvOp(const PicGateUpConvSpec& s
     opBuilder.add_defaultDimentionFormat(MNN_DATA_FORMAT_NHWC);
     opBuilder.add_externalPath(externalPathOffset);
     builder.Finish(opBuilder.Finish());
+    const uint8_t* ptr = builder.GetBufferPointer();
+    return std::vector<uint8_t>(ptr, ptr + builder.GetSize());
+}
+
+static std::vector<uint8_t> buildPicSimpleExtraOp(const std::string& type, const std::string& name) {
+    OpT op;
+    op.name = name;
+    op.type = OpType_Extra;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NCHW;
+    op.main.type = OpParameter_Extra;
+    op.main.value = new ExtraT;
+    auto extra = op.main.AsExtra();
+    extra->type = type;
+    extra->engine = "MNN";
+
+    flatbuffers::FlatBufferBuilder builder;
+    auto opOffset = Op::Pack(builder, &op);
+    builder.Finish(opOffset);
     const uint8_t* ptr = builder.GetBufferPointer();
     return std::vector<uint8_t>(ptr, ptr + builder.GetSize());
 }
@@ -842,6 +1024,433 @@ private:
     std::vector<uint32_t> mFusedLws{1, 1, 1};
 };
 
+class PicAdrenoTinyMlpWeightOnlyBufExecution : public CommonExecution {
+public:
+    PicAdrenoTinyMlpWeightOnlyBufExecution(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                                           const Op* op, Backend* backend)
+        : CommonExecution(backend, op), mOp(op) {
+        mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
+        auto extra = op->main_as_Extra();
+        mGateSpec = parsePicGateUpConvSpec(extra, "gate");
+        mUpSpec = parsePicGateUpConvSpec(extra, "up");
+        mDownSpec = parsePicGateUpConvSpec(extra, "down");
+        const char* externalPath = op->externalPath() != nullptr ? op->externalPath()->c_str() : nullptr;
+        if (mGateSpec.ic <= 0 || mGateSpec.oc <= 0 ||
+            mUpSpec.ic != mGateSpec.ic || mUpSpec.oc != mGateSpec.oc ||
+            mDownSpec.ic != mGateSpec.oc || mDownSpec.oc != mGateSpec.ic ||
+            mGateSpec.quantBit != 4 || mUpSpec.quantBit != 4 || mDownSpec.quantBit != 4) {
+            mValid = false;
+            return;
+        }
+        mGateOpBuffer = buildPicGateUpChildConvOp(mGateSpec, externalPath);
+        mUpOpBuffer = buildPicGateUpChildConvOp(mUpSpec, externalPath);
+        mDownOpBuffer = buildPicGateUpChildConvOp(mDownSpec, externalPath);
+        mSiluOpBuffer = buildPicSimpleExtraOp("PicSiluMul", "PicAdrenoTinyMlpWeightOnly/fallback_silu");
+        mGateOp = flatbuffers::GetRoot<Op>(mGateOpBuffer.data());
+        mUpOp = flatbuffers::GetRoot<Op>(mUpOpBuffer.data());
+        mDownOp = flatbuffers::GetRoot<Op>(mDownOpBuffer.data());
+        mSiluOp = flatbuffers::GetRoot<Op>(mSiluOpBuffer.data());
+
+        mGateResourceConv = makeResourceConv(mGateOp, mGateSpec, backend);
+        mUpResourceConv = makeResourceConv(mUpOp, mUpSpec, backend);
+        mDownResourceConv = makeResourceConv(mDownOp, mDownSpec, backend);
+        mGateResource = mGateResourceConv != nullptr ? mGateResourceConv->resource() : nullptr;
+        mUpResource = mUpResourceConv != nullptr ? mUpResourceConv->resource() : nullptr;
+        mDownResource = mDownResourceConv != nullptr ? mDownResourceConv->resource() : nullptr;
+        if (mGateResource == nullptr || mUpResource == nullptr || mDownResource == nullptr) {
+            mValid = false;
+            return;
+        }
+        mGateConv.reset(new ConvBufLowMemoryExecution(mGateResource, mGateOp, backend));
+        mUpConv.reset(new ConvBufLowMemoryExecution(mUpResource, mUpOp, backend));
+        mDownConv.reset(new ConvBufLowMemoryExecution(mDownResource, mDownOp, backend));
+        if (mGateConv == nullptr || mUpConv == nullptr || mDownConv == nullptr) {
+            mValid = false;
+            return;
+        }
+        auto runtime = mOpenCLBackend->getOpenCLRuntime();
+        mPreKernel = runtime->buildKernel("gemm_conv1x1_buf", "gemm_c4nhw4_to_nhwc",
+                                          {}, mOpenCLBackend->getPrecision());
+        mSiluNhwcKernel = runtime->buildKernelFromSource(kPicSiluMulNhwcBufSource,
+                                                         "pic_silu_mul_c4_to_nhwc_buf",
+                                                         {}, mOpenCLBackend->getPrecision());
+        if (mSiluNhwcKernel != nullptr) {
+            mSiluNhwcMaxWorkGroupSize = static_cast<uint32_t>(runtime->getMaxWorkGroupSize(mSiluNhwcKernel));
+        }
+    }
+
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (!mValid || inputs.size() != 1 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        mUseFast = canUseFast(inputs[0], outputs[0]);
+        mRows = outputs[0]->length(0);
+        mHidden = mGateSpec.ic;
+        mInter = mGateSpec.oc;
+        mGateC4.reset(Tensor::createDevice<float>({mRows, mInter, 1, 1}));
+        mUpC4.reset(Tensor::createDevice<float>({mRows, mInter, 1, 1}));
+        if (mGateC4 == nullptr || mUpC4 == nullptr) {
+            return OUT_OF_MEMORY;
+        }
+        TensorUtils::getDescribe(mGateC4.get())->dimensionFormat = MNN_DATA_FORMAT_NC4HW4;
+        TensorUtils::getDescribe(mUpC4.get())->dimensionFormat = MNN_DATA_FORMAT_NC4HW4;
+        if (!mOpenCLBackend->onAcquireBuffer(mGateC4.get(), Backend::DYNAMIC) ||
+            !mOpenCLBackend->onAcquireBuffer(mUpC4.get(), Backend::DYNAMIC)) {
+            return OUT_OF_MEMORY;
+        }
+
+        if (!mUseFast) {
+            if (mGateConv == nullptr || mUpConv == nullptr) {
+                releaseFastBuffers();
+                return OUT_OF_MEMORY;
+            }
+            auto code = mGateConv->onResize(inputs, {mGateC4.get()});
+            if (code == NO_ERROR) {
+                code = mUpConv->onResize(inputs, {mUpC4.get()});
+            }
+            if (code != NO_ERROR) {
+                releaseFastBuffers();
+                return code;
+            }
+            mActC4.reset(Tensor::createDevice<float>({mRows, mInter, 1, 1}));
+            if (mActC4 == nullptr) {
+                releaseFastBuffers();
+                return OUT_OF_MEMORY;
+            }
+            TensorUtils::getDescribe(mActC4.get())->dimensionFormat = MNN_DATA_FORMAT_NC4HW4;
+            if (!mOpenCLBackend->onAcquireBuffer(mActC4.get(), Backend::DYNAMIC)) {
+                releaseFastBuffers();
+                return OUT_OF_MEMORY;
+            }
+            mFallbackSilu.reset(new PicSiluMulBufExecution(mSiluOp, backend()));
+            if (mFallbackSilu == nullptr || mDownConv == nullptr) {
+                releaseAllBuffers();
+                return OUT_OF_MEMORY;
+            }
+            code = mFallbackSilu->onResize({mGateC4.get(), mUpC4.get()}, {mActC4.get()});
+            if (code == NO_ERROR) {
+                code = mDownConv->onResize({mActC4.get()}, outputs);
+            }
+            releaseAllBuffers();
+            return code;
+        }
+
+        mInputNhwc.reset(Tensor::createDevice<float>({ROUND_UP(mRows, 4) * ROUND_UP(mHidden, 4)}));
+        mActNhwc.reset(Tensor::createDevice<float>({ROUND_UP(mRows, 4) * ROUND_UP(mInter, 4)}));
+        if (mInputNhwc == nullptr || mActNhwc == nullptr ||
+            !mOpenCLBackend->onAcquireBuffer(mInputNhwc.get(), Backend::DYNAMIC) ||
+            !mOpenCLBackend->onAcquireBuffer(mActNhwc.get(), Backend::DYNAMIC)) {
+            releaseAllBuffers();
+            return OUT_OF_MEMORY;
+        }
+        auto code = CommonExecution::onResize(inputs, outputs);
+        releaseAllBuffers();
+        return code;
+    }
+
+    virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (mUseFast) {
+            return CommonExecution::onExecute(inputs, outputs);
+        }
+        auto code = mGateConv->onExecute(inputs, {mGateC4.get()});
+        if (code != NO_ERROR) {
+            return code;
+        }
+        code = mUpConv->onExecute(inputs, {mUpC4.get()});
+        if (code != NO_ERROR) {
+            return code;
+        }
+        code = mFallbackSilu->onExecute({mGateC4.get(), mUpC4.get()}, {mActC4.get()});
+        if (code != NO_ERROR) {
+            return code;
+        }
+        return mDownConv->onExecute({mActC4.get()}, outputs);
+    }
+
+    virtual ErrorCode onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (!mUseFast) {
+            return NO_ERROR;
+        }
+        if (mPreKernel == nullptr || mSiluNhwcKernel == nullptr ||
+            mGateResource == nullptr || mUpResource == nullptr || mDownResource == nullptr ||
+            !mGateResource->mUseImage || !mUpResource->mUseImage || !mDownResource->mUseImage ||
+            mGateResource->mKernelImage == nullptr || mUpResource->mKernelImage == nullptr ||
+            mDownResource->mKernelImage == nullptr ||
+            mGateResource->mDequantScaleOffsetBuffer == nullptr ||
+            mUpResource->mDequantScaleOffsetBuffer == nullptr ||
+            mDownResource->mDequantScaleOffsetBuffer == nullptr ||
+            mGateResource->mBias == nullptr || mUpResource->mBias == nullptr ||
+            mDownResource->mBias == nullptr || mSiluNhwcMaxWorkGroupSize < 16) {
+            return NOT_SUPPORT;
+        }
+        auto runtime = mOpenCLBackend->getOpenCLRuntime();
+        mUnits.resize(5);
+        const int inputChannelAlign = ROUND_UP(mHidden, 4);
+        const int actChannelAlign = ROUND_UP(mInter, 4);
+        const int interChannelAlign8 = ROUND_UP(mInter, 8);
+        const int interChannelBlocks = UP_DIV(mInter, 4);
+        const int hiddenChannelBlocks = UP_DIV(mHidden, 4);
+        mPreGws = {
+            static_cast<uint32_t>(UP_DIV(mRows, 4)),
+            static_cast<uint32_t>(UP_DIV(mHidden, 4)),
+        };
+        mPreLws = {1, 1};
+        {
+            auto& unit = mUnits[0];
+            unit.kernel = mPreKernel;
+            uint32_t idx = 0;
+            cl_int ret = CL_SUCCESS;
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mPreGws[0]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mPreGws[1]));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(inputs[0]));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mInputNhwc.get()));
+            ret |= unit.kernel->get().setArg(idx++, mRows);
+            ret |= unit.kernel->get().setArg(idx++, mHidden);
+            ret |= unit.kernel->get().setArg(idx++, inputChannelAlign);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg PicAdrenoTinyMlp pre_nhwc");
+            mOpenCLBackend->recordKernel2d(unit.kernel, mPreGws, mPreLws);
+            unit.globalWorkSize = {mPreGws[0], mPreGws[1]};
+            unit.localWorkSize = {mPreLws[0], mPreLws[1]};
+        }
+        auto setProjectionUnit = [&](int unitIndex,
+                                     const std::shared_ptr<ConvBufResource>& resource,
+                                     Tensor* output,
+                                     const char* tag) -> ErrorCode {
+            auto& unit = mUnits[unitIndex];
+            std::set<std::string> projBuildOptions = resource->mBuildOptions;
+            projBuildOptions.emplace("-DWGS=" + std::to_string(kLocalSize));
+            projBuildOptions.emplace("-DQUANT_BIT=4");
+            projBuildOptions.emplace("-DUSE_IMAGE");
+            projBuildOptions.emplace("-DCOMPUTE_BATCH");
+            projBuildOptions.emplace("-DOUTPUT_C4NHW4");
+            projBuildOptions.emplace("-DOUTPUT_BHW=" + std::to_string(mRows));
+            projBuildOptions.emplace("-DINPUT_CHANNEL_LEAVES_NUM=0");
+            unit.kernel = runtime->buildKernel("gemv_conv1x1_buf", "gemv_conv_c8_buf",
+                                               projBuildOptions, mOpenCLBackend->getPrecision());
+            OPENCL_CHECK_KERNEL(unit.kernel);
+            if (static_cast<uint32_t>(runtime->getMaxWorkGroupSize(unit.kernel)) < static_cast<uint32_t>(kLocalSize)) {
+                return NOT_SUPPORT;
+            }
+            mProjGws = {
+                static_cast<uint32_t>(kLocalSize),
+                static_cast<uint32_t>(UP_DIV(mInter, 8)),
+                static_cast<uint32_t>(UP_DIV(mRows, 4)),
+            };
+            mProjLws = {kLocalSize, 1, 1};
+            const int blockDim = resource->mInputChannel / resource->mBlockSize;
+            uint32_t idx = 0;
+            cl_int ret = CL_SUCCESS;
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mProjGws[0]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mProjGws[1]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mProjGws[2]));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mInputNhwc.get()));
+            ret |= unit.kernel->get().setArg(idx++, *resource->mKernelImage.get());
+            ret |= unit.kernel->get().setArg(idx++, *resource->mDequantScaleOffsetBuffer.get());
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(resource->mBias.get()));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(output));
+            ret |= unit.kernel->get().setArg(idx++, interChannelAlign8);
+            ret |= unit.kernel->get().setArg(idx++, inputChannelAlign);
+            ret |= unit.kernel->get().setArg(idx++, interChannelBlocks);
+            ret |= unit.kernel->get().setArg(idx++, hiddenChannelBlocks);
+            ret |= unit.kernel->get().setArg(idx++, mHidden);
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(resource->mBlockSize));
+            ret |= unit.kernel->get().setArg(idx++, blockDim);
+            ret |= unit.kernel->get().setArg(idx++, resource->mCoef);
+            MNN_CHECK_CL_SUCCESS(ret, tag);
+            mOpenCLBackend->recordKernel3d(unit.kernel, mProjGws, mProjLws);
+            unit.globalWorkSize = {mProjGws[0], mProjGws[1], mProjGws[2]};
+            unit.localWorkSize = {mProjLws[0], mProjLws[1], mProjLws[2]};
+            return NO_ERROR;
+        };
+        auto code = setProjectionUnit(1, mGateResource, mGateC4.get(), "setArg PicAdrenoTinyMlp gate");
+        if (code != NO_ERROR) {
+            return code;
+        }
+        code = setProjectionUnit(2, mUpResource, mUpC4.get(), "setArg PicAdrenoTinyMlp up");
+        if (code != NO_ERROR) {
+            return code;
+        }
+        mSiluGws = {
+            static_cast<uint32_t>(UP_DIV(mInter, 4)),
+            static_cast<uint32_t>(UP_DIV(mRows, 4)),
+            1,
+        };
+        mSiluLws = {16, 1, 1};
+        {
+            auto& unit = mUnits[3];
+            unit.kernel = mSiluNhwcKernel;
+            uint32_t idx = 0;
+            cl_int ret = CL_SUCCESS;
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mSiluGws[0]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mSiluGws[1]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mSiluGws[2]));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mGateC4.get()));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mUpC4.get()));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mActNhwc.get()));
+            ret |= unit.kernel->get().setArg(idx++, mRows);
+            ret |= unit.kernel->get().setArg(idx++, mInter);
+            ret |= unit.kernel->get().setArg(idx++, actChannelAlign);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg PicAdrenoTinyMlp silu_nhwc");
+            mOpenCLBackend->recordKernel3d(unit.kernel, mSiluGws, mSiluLws);
+            unit.globalWorkSize = {mSiluGws[0], mSiluGws[1], mSiluGws[2]};
+            unit.localWorkSize = {mSiluLws[0], mSiluLws[1], mSiluLws[2]};
+        }
+        std::set<std::string> downBuildOptions = mDownResource->mBuildOptions;
+        downBuildOptions.emplace("-DWGS=" + std::to_string(kLocalSize));
+        downBuildOptions.emplace("-DQUANT_BIT=4");
+        downBuildOptions.emplace("-DUSE_IMAGE");
+        downBuildOptions.emplace("-DCOMPUTE_BATCH");
+        downBuildOptions.emplace("-DOUTPUT_C4NHW4");
+        downBuildOptions.emplace("-DOUTPUT_BHW=" + std::to_string(mRows));
+        downBuildOptions.emplace("-DINPUT_CHANNEL_LEAVES_NUM=0");
+        auto downKernel = runtime->buildKernel("gemv_conv1x1_buf", "gemv_conv_c8_buf",
+                                               downBuildOptions, mOpenCLBackend->getPrecision());
+        OPENCL_CHECK_KERNEL(downKernel);
+        if (static_cast<uint32_t>(runtime->getMaxWorkGroupSize(downKernel)) < static_cast<uint32_t>(kLocalSize)) {
+            return NOT_SUPPORT;
+        }
+        mDownGws = {
+            static_cast<uint32_t>(kLocalSize),
+            static_cast<uint32_t>(UP_DIV(mHidden, 8)),
+            static_cast<uint32_t>(UP_DIV(mRows, 4)),
+        };
+        mDownLws = {kLocalSize, 1, 1};
+        {
+            auto& unit = mUnits[4];
+            unit.kernel = downKernel;
+            const int outputChannelAlign8 = ROUND_UP(mHidden, 8);
+            const int outputChannelBlocks = UP_DIV(mHidden, 4);
+            const int inputChannelBlocks = UP_DIV(mInter, 4);
+            const int blockDim = mDownResource->mInputChannel / mDownResource->mBlockSize;
+            uint32_t idx = 0;
+            cl_int ret = CL_SUCCESS;
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mDownGws[0]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mDownGws[1]));
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mDownGws[2]));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mActNhwc.get()));
+            ret |= unit.kernel->get().setArg(idx++, *mDownResource->mKernelImage.get());
+            ret |= unit.kernel->get().setArg(idx++, *mDownResource->mDequantScaleOffsetBuffer.get());
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(mDownResource->mBias.get()));
+            ret |= unit.kernel->get().setArg(idx++, openCLBuffer(outputs[0]));
+            ret |= unit.kernel->get().setArg(idx++, outputChannelAlign8);
+            ret |= unit.kernel->get().setArg(idx++, actChannelAlign);
+            ret |= unit.kernel->get().setArg(idx++, outputChannelBlocks);
+            ret |= unit.kernel->get().setArg(idx++, inputChannelBlocks);
+            ret |= unit.kernel->get().setArg(idx++, mInter);
+            ret |= unit.kernel->get().setArg(idx++, static_cast<int>(mDownResource->mBlockSize));
+            ret |= unit.kernel->get().setArg(idx++, blockDim);
+            ret |= unit.kernel->get().setArg(idx++, mDownResource->mCoef);
+            MNN_CHECK_CL_SUCCESS(ret, "setArg PicAdrenoTinyMlp down");
+            mOpenCLBackend->recordKernel3d(unit.kernel, mDownGws, mDownLws);
+            unit.globalWorkSize = {mDownGws[0], mDownGws[1], mDownGws[2]};
+            unit.localWorkSize = {mDownLws[0], mDownLws[1], mDownLws[2]};
+        }
+        return NO_ERROR;
+    }
+
+private:
+    std::shared_ptr<ConvBufLowMemoryExecution> makeResourceConv(const Op* op, const PicGateUpConvSpec& spec,
+                                                                Backend* backend) {
+        auto fakeInput = std::shared_ptr<Tensor>(Tensor::createDevice<float>({1, spec.ic, 1, 1}));
+        auto fakeOutput = std::shared_ptr<Tensor>(Tensor::createDevice<float>({1, spec.oc, 1, 1}));
+        if (fakeInput == nullptr || fakeOutput == nullptr) {
+            return nullptr;
+        }
+        TensorUtils::getDescribe(fakeInput.get())->dimensionFormat = MNN_DATA_FORMAT_NCHW;
+        TensorUtils::getDescribe(fakeOutput.get())->dimensionFormat = MNN_DATA_FORMAT_NCHW;
+        std::vector<Tensor*> fakeInputs{fakeInput.get()};
+        std::vector<Tensor*> fakeOutputs{fakeOutput.get()};
+        return std::make_shared<ConvBufLowMemoryExecution>(fakeInputs, fakeOutputs, op, backend);
+    }
+
+    bool canUseFast(const Tensor* input, const Tensor* output) const {
+        if (input == nullptr || output == nullptr || mOpenCLBackend == nullptr ||
+            mOpenCLBackend->getOpenCLRuntime()->getGpuType() != ADRENO ||
+            mPreKernel == nullptr || mSiluNhwcKernel == nullptr ||
+            mGateResource == nullptr || mUpResource == nullptr || mDownResource == nullptr) {
+            return false;
+        }
+        const int rows = output->length(0);
+        return rows >= 5 && rows <= 8 &&
+               mGateSpec.ic == 1536 && mGateSpec.oc == 4608 &&
+               mDownSpec.ic == 4608 && mDownSpec.oc == 1536 &&
+               input->dimensions() == 4 && output->dimensions() == 4 &&
+               input->length(0) == rows && input->length(1) == mGateSpec.ic &&
+               output->length(1) == mDownSpec.oc &&
+               mGateResource->mUseImage && mUpResource->mUseImage && mDownResource->mUseImage &&
+               mGateResource->mNumQuantBit == 4 && mUpResource->mNumQuantBit == 4 &&
+               mDownResource->mNumQuantBit == 4;
+    }
+
+    void releaseFastBuffers() {
+        if (mGateC4 != nullptr) {
+            mOpenCLBackend->onReleaseBuffer(mGateC4.get(), Backend::DYNAMIC);
+        }
+        if (mUpC4 != nullptr) {
+            mOpenCLBackend->onReleaseBuffer(mUpC4.get(), Backend::DYNAMIC);
+        }
+    }
+
+    void releaseAllBuffers() {
+        releaseFastBuffers();
+        if (mActC4 != nullptr) {
+            mOpenCLBackend->onReleaseBuffer(mActC4.get(), Backend::DYNAMIC);
+        }
+        if (mActNhwc != nullptr) {
+            mOpenCLBackend->onReleaseBuffer(mActNhwc.get(), Backend::DYNAMIC);
+        }
+        if (mInputNhwc != nullptr) {
+            mOpenCLBackend->onReleaseBuffer(mInputNhwc.get(), Backend::DYNAMIC);
+        }
+    }
+
+    const Op* mOp = nullptr;
+    bool mValid = true;
+    bool mUseFast = false;
+    OpenCLBackend* mOpenCLBackend = nullptr;
+    PicGateUpConvSpec mGateSpec;
+    PicGateUpConvSpec mUpSpec;
+    PicGateUpConvSpec mDownSpec;
+    std::vector<uint8_t> mGateOpBuffer;
+    std::vector<uint8_t> mUpOpBuffer;
+    std::vector<uint8_t> mDownOpBuffer;
+    std::vector<uint8_t> mSiluOpBuffer;
+    const Op* mGateOp = nullptr;
+    const Op* mUpOp = nullptr;
+    const Op* mDownOp = nullptr;
+    const Op* mSiluOp = nullptr;
+    std::shared_ptr<ConvBufLowMemoryExecution> mGateResourceConv;
+    std::shared_ptr<ConvBufLowMemoryExecution> mUpResourceConv;
+    std::shared_ptr<ConvBufLowMemoryExecution> mDownResourceConv;
+    std::shared_ptr<ConvBufResource> mGateResource;
+    std::shared_ptr<ConvBufResource> mUpResource;
+    std::shared_ptr<ConvBufResource> mDownResource;
+    std::shared_ptr<ConvBufLowMemoryExecution> mGateConv;
+    std::shared_ptr<ConvBufLowMemoryExecution> mUpConv;
+    std::shared_ptr<ConvBufLowMemoryExecution> mDownConv;
+    std::shared_ptr<Execution> mFallbackSilu;
+    std::shared_ptr<Tensor> mGateC4;
+    std::shared_ptr<Tensor> mUpC4;
+    std::shared_ptr<Tensor> mActC4;
+    std::shared_ptr<Tensor> mInputNhwc;
+    std::shared_ptr<Tensor> mActNhwc;
+    std::shared_ptr<KernelWrap> mPreKernel;
+    std::shared_ptr<KernelWrap> mSiluNhwcKernel;
+    uint32_t mSiluNhwcMaxWorkGroupSize = 1;
+    int mRows = 0;
+    int mHidden = 0;
+    int mInter = 0;
+    static constexpr int kLocalSize = 64;
+    std::vector<uint32_t> mPreGws{1, 1};
+    std::vector<uint32_t> mPreLws{1, 1};
+    std::vector<uint32_t> mProjGws{1, 1, 1};
+    std::vector<uint32_t> mProjLws{1, 1, 1};
+    std::vector<uint32_t> mSiluGws{1, 1, 1};
+    std::vector<uint32_t> mSiluLws{1, 1, 1};
+    std::vector<uint32_t> mDownGws{1, 1, 1};
+    std::vector<uint32_t> mDownLws{1, 1, 1};
+};
+
 class PicLinearNhwcWeightOnlyBufExecution : public CommonExecution {
 public:
     PicLinearNhwcWeightOnlyBufExecution(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
@@ -857,12 +1466,45 @@ public:
         }
         mOpBuffer = buildPicGateUpChildConvOp(mSpec, externalPath);
         mChildOp = flatbuffers::GetRoot<Op>(mOpBuffer.data());
-        mChildConv.reset(new ConvBufLowMemoryExecution(inputs, outputs, mChildOp, backend));
+        auto fakeInput = std::shared_ptr<Tensor>(Tensor::createDevice<float>({1, mSpec.ic, 1, 1}));
+        auto fakeOutput = std::shared_ptr<Tensor>(Tensor::createDevice<float>({1, mSpec.oc, 1, 1}));
+        TensorUtils::getDescribe(fakeInput.get())->dimensionFormat = MNN_DATA_FORMAT_NCHW;
+        TensorUtils::getDescribe(fakeOutput.get())->dimensionFormat = MNN_DATA_FORMAT_NCHW;
+        std::vector<Tensor*> fakeInputs{fakeInput.get()};
+        std::vector<Tensor*> fakeOutputs{fakeOutput.get()};
+        mChildConv.reset(new ConvBufLowMemoryExecution(fakeInputs, fakeOutputs, mChildOp, backend));
         if (mChildConv == nullptr) {
             mValid = false;
             return;
         }
         mResource = mChildConv->resource();
+    }
+
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        int rows = 0;
+        int inputChannels = 0;
+        int outChannel = 0;
+        auto code = resolveLinearRowsAndChannels(inputs, outputs, &rows, &inputChannels, &outChannel);
+        if (code != NO_ERROR) {
+            debugPrint("resize_resolve_failed", inputs, outputs, rows, inputChannels, outChannel, code);
+            return code;
+        }
+        // The child Conv path expects the normal Linear NC4 pipeline. This op's
+        // input is NHWC, so keep the NHWC kernel for large prefill rows too.
+        mUseChildConv = false;
+        debugPrint(mUseChildConv ? "resize_child_conv" : "resize_nhwc_kernel", inputs, outputs,
+                   rows, inputChannels, outChannel, NO_ERROR);
+        if (mUseChildConv) {
+            return mChildConv != nullptr ? mChildConv->onResize(inputs, outputs) : INPUT_DATA_ERROR;
+        }
+        return CommonExecution::onResize(inputs, outputs);
+    }
+
+    virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (mUseChildConv) {
+            return mChildConv != nullptr ? mChildConv->onExecute(inputs, outputs) : INPUT_DATA_ERROR;
+        }
+        return CommonExecution::onExecute(inputs, outputs);
     }
 
     virtual ErrorCode onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
@@ -874,6 +1516,7 @@ public:
         int outChannel = 0;
         auto code = resolveLinearRowsAndChannels(inputs, outputs, &rows, &inputChannels, &outChannel);
         if (code != NO_ERROR) {
+            debugPrint("encode_resolve_failed", inputs, outputs, rows, inputChannels, outChannel, code);
             return code;
         }
         auto input = inputs[0];
@@ -943,6 +1586,27 @@ public:
     }
 
 private:
+    static void debugPrint(const char* reason, const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
+                           int rows, int inputChannels, int outputChannels, ErrorCode code) {
+        if (std::getenv("MNN_PIC_GRAPH_PROFILE") == nullptr) {
+            return;
+        }
+        auto in0 = inputs.empty() ? nullptr : inputs[0];
+        auto out0 = outputs.empty() ? nullptr : outputs[0];
+        std::fprintf(stderr,
+                     "PicLinearNhwcWeightOnly %s code=%d rows=%d ic=%d oc=%d in=%d,%d,%d,%d out=%d,%d,%d,%d\n",
+                     reason, static_cast<int>(code), rows, inputChannels, outputChannels,
+                     in0 && in0->dimensions() > 0 ? in0->length(0) : -1,
+                     in0 && in0->dimensions() > 1 ? in0->length(1) : -1,
+                     in0 && in0->dimensions() > 2 ? in0->length(2) : -1,
+                     in0 && in0->dimensions() > 3 ? in0->length(3) : -1,
+                     out0 && out0->dimensions() > 0 ? out0->length(0) : -1,
+                     out0 && out0->dimensions() > 1 ? out0->length(1) : -1,
+                     out0 && out0->dimensions() > 2 ? out0->length(2) : -1,
+                     out0 && out0->dimensions() > 3 ? out0->length(3) : -1);
+        std::fflush(stderr);
+    }
+
     ErrorCode resolveLinearRowsAndChannels(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                                            int* rows, int* inputChannels, int* outputChannels) const {
         if (inputs.size() != 1 || outputs.size() != 1 || rows == nullptr) {
@@ -984,6 +1648,22 @@ private:
             *channels = tensor->length(3);
             return true;
         }
+        if (tensor->dimensions() == 4 && tensor->length(2) == 1 && tensor->length(3) == 1 &&
+            tensor->length(1) == expectedChannels) {
+            *rows = tensor->length(0);
+            *channels = tensor->length(1);
+            return true;
+        }
+        if (tensor->dimensions() == 3 && tensor->length(0) == 1 && tensor->length(2) == expectedChannels) {
+            *rows = tensor->length(1);
+            *channels = tensor->length(2);
+            return true;
+        }
+        if (tensor->dimensions() == 2 && tensor->length(1) == expectedChannels) {
+            *rows = tensor->length(0);
+            *channels = tensor->length(1);
+            return true;
+        }
         auto shape = tensorShapeFormat(tensor);
         *rows = shape.at(0) * shape.at(1) * shape.at(2);
         *channels = shape.at(3);
@@ -998,6 +1678,8 @@ private:
     std::shared_ptr<ConvBufLowMemoryExecution> mChildConv;
     std::shared_ptr<ConvBufResource> mResource;
     static constexpr int kLocalSize = 64;
+    static constexpr int kTinyRowsMax = 16;
+    bool mUseChildConv = false;
     std::vector<uint32_t> mGlobalWorkSize{1, 1, 1};
     std::vector<uint32_t> mLocalWorkSize{1, 1, 1};
 };
@@ -1074,21 +1756,45 @@ public:
         if (param == nullptr || param->type() == nullptr) {
             return nullptr;
         }
-        if(param->type()->str() == "ExtraConvolution2DPrelu")OPENCL_CREATOR_CHECK(new ConvBufExecution(inputs, outputs, op, backend, true));
-        if(param->type()->str() == "PicSiluMul") {
+        if (std::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr) {
+            std::fprintf(stderr, "OpenCL Extra creator type=%s inputs=%zu outputs=%zu\n",
+                         param->type()->c_str(), inputs.size(), outputs.size());
+            std::fflush(stderr);
+        }
+        const std::string extraType = param->type()->str();
+        const bool isPicAdrenoExtra = extraType == "PicAdrenoSiluMulNhwc" ||
+                                      extraType == "PicAdrenoGateUpSiluWeightOnly" ||
+                                      extraType == "PicAdrenoTinyMlpWeightOnly" ||
+                                      extraType == "PicAdrenoLinearNhwcWeightOnly" ||
+                                      extraType == "PicAdrenoPackedSiluMul";
+        if (isPicAdrenoExtra) {
+            auto openCLBackend = static_cast<OpenCLBackend*>(backend);
+            auto runtime = openCLBackend != nullptr ? openCLBackend->getOpenCLRuntime() : nullptr;
+            if (runtime == nullptr || runtime->getGpuType() != ADRENO) {
+                return nullptr;
+            }
+        }
+        if(extraType == "ExtraConvolution2DPrelu")OPENCL_CREATOR_CHECK(new ConvBufExecution(inputs, outputs, op, backend, true));
+        if(extraType == "PicSiluMul") {
             OPENCL_CREATOR_CHECK(new PicSiluMulBufExecution(op, backend));
         }
-        if(param->type()->str() == "PicPackedSiluMul") {
+        if(extraType == "PicPackedSiluMul" || extraType == "PicAdrenoPackedSiluMul") {
             OPENCL_CREATOR_CHECK(new PicPackedSiluMulBufExecution(op, backend));
         }
+        if(extraType == "PicSiluMulNhwc" || extraType == "PicAdrenoSiluMulNhwc") {
+            OPENCL_CREATOR_CHECK(new PicSiluMulNhwcBufExecution(op, backend));
+        }
 #ifdef MNN_LOW_MEMORY
-        if(param->type()->str() == "PicGateUpWeightOnly") {
+        if(extraType == "PicGateUpWeightOnly") {
             OPENCL_CREATOR_CHECK(new PicGateUpWeightOnlyBufExecution(inputs, outputs, op, backend));
         }
-        if(param->type()->str() == "PicGateUpSiluWeightOnly") {
+        if(extraType == "PicGateUpSiluWeightOnly" || extraType == "PicAdrenoGateUpSiluWeightOnly") {
             OPENCL_CREATOR_CHECK(new PicGateUpWeightOnlyBufExecution(inputs, outputs, op, backend, true));
         }
-        if(param->type()->str() == "PicLinearNhwcWeightOnly") {
+        if(extraType == "PicAdrenoTinyMlpWeightOnly") {
+            OPENCL_CREATOR_CHECK(new PicAdrenoTinyMlpWeightOnlyBufExecution(inputs, outputs, op, backend));
+        }
+        if(extraType == "PicLinearNhwcWeightOnly" || extraType == "PicAdrenoLinearNhwcWeightOnly") {
             OPENCL_CREATOR_CHECK(new PicLinearNhwcWeightOnlyBufExecution(inputs, outputs, op, backend));
         }
 #endif

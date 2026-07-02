@@ -26,6 +26,10 @@ description: 当用户要求把本 MNN 仓库本地构建或交叉编译出的 p
 9. 不再把 PIC full-compute / `pic-full-recompute` 作为补测目标；默认 prefill sweep 和缺口报告只覆盖 `normal-full-recompute`、`full-reuse`、`cacheblend`、`epic`。历史 CSV 中已有的 `pic-full-recompute` 行保留，但后续不要为了补齐它重跑。
 10. PIC 功耗采集走本 skill 下的 power 流程；只包正式 measure 请求，不把 artifact 同步、cache build、warm、OpenCL tune 写回或手动等待计入 power CSV。
 11. PIC 功耗测试不跑 `Llama3.2 1B` / `llama3.2-1b`；从 `benchmark.csv` 选 power 配置时直接排除它。
+12. 从本机访问 Jetson / OrangePi / Rhino 的 `pic_server` 时，显式设置 `NO_PROXY/no_proxy` 覆盖目标 IP、`127.0.0.1` 和 `localhost`；本机 HTTP proxy 返回的 `502 Bad Gateway` 不代表设备端 `pic_server` 失败。
+13. decode repair benchmark 中 `repair_tokens=0` / `tpd=0` 是 no-repair decode baseline，请求不得发送 `decode_refine`；只有 `repair_tokens>0` 才要求 `decode_refine.enabled=true` 并校验 `mnn_token_id_sparse_decode`。
+14. Decode TPOT 测试必须组织成双族对比，而不是只拿一个 `x0` 做分母：`optimized-decode-repair` 和 `normal/generic-decode-repair` 都要分别测 `x=0/1/3/5/7`。这里 `x` 是 `repair_tokens` / `tokens_per_decode_step`；`x=0` 是同一族内部的 no-repair 诊断行。普通 MNN LLM 的真实 baseline 仍使用 `.cache/mnn-llm-export/<model>/config.json` 的 normal export，只对应绝对参考 `normal-llm-x0`；若要给 normal 族也列 `x=1/3/5/7`，必须使用未启用后端专属 decode-repair 优化的 generic decode-repair 导出 / server，而不能把 optimized 模型或 PIC no-repair 行冒充 normal LLM。报告至少给出 `optimized_tpot[x]`、`normal_tpot[x]`、`optimized_extra_ms[x]=optimized_tpot[x]-optimized_tpot[0]`、`normal_extra_ms[x]=normal_tpot[x]-normal_tpot[0]`、`speedup_opt_vs_normal_same_x=normal_tpot[x]/optimized_tpot[x]`。
+15. `dualgraph` 只属于 PIC/PagedAttention LLM 的 `.cache/weight/<model>/` 导出和 `pic_llm` / `pic_server` 运行路径，用来把 PIC prefill 和 PIC decode 拆成两个 graph。`true normal` baseline 必须始终使用 `.cache/mnn-llm-export/<model>/` 的普通 MNN LLM 模型和普通 normal 计算图；不要把 dualgraph 描述为 normal LLM 模型，不要用 `llm_bench` / `llm_demo` 把 dualgraph 产物跑成 normal baseline，也不要把 dualgraph 结果命名为 `normal-llm-x0`。
 
 ## Power 采集
 

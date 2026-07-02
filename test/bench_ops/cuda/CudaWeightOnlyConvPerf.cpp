@@ -18,6 +18,7 @@
 #define MNN_BENCH_HAS_CUBLASLT 0
 #endif
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -257,6 +258,25 @@ static std::unique_ptr<OpHolder> makePicPackedSiluMulOp(const char* name) {
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
+static std::unique_ptr<OpHolder> makePicBenchPackedSiluDownOp(const char* type, const char* name) {
+    // PicBench* Extra names are direct-op probes only; CUDA backend registers
+    // them under MNN_CUDA_BENCH_OPS (MNN_BUILD_TEST=ON), not in production builds.
+    OpT op;
+    op.name = name != nullptr ? name : "bench_pic_fused_packed_silu_down";
+    op.type = OpType_Extra;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NCHW;
+    op.main.type = OpParameter_Extra;
+    op.main.value = new ExtraT;
+    auto* extra = op.main.AsExtra();
+    extra->type = type != nullptr ? type : "PicBenchFusedPackedSiluDown";
+    extra->engine = "MNN";
+    auto attr = std::unique_ptr<AttributeT>(new AttributeT);
+    attr->key = "name";
+    attr->s = op.name;
+    extra->attr.emplace_back(std::move(attr));
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
 static std::string externalToString(const std::vector<int64_t>& external) {
     std::ostringstream os;
     for (size_t i = 0; i < external.size(); ++i) {
@@ -358,9 +378,26 @@ static std::unique_ptr<OpHolder> makeRasterOp(const char* name) {
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
+static bool weightOnlyConvUsesPicRepairMeta() {
+    const char* value = ::getenv("MNN_BENCH_WEIGHT_ONLY_PIC_REPAIR");
+    if (value == nullptr || value[0] == '\0') {
+        return true;
+    }
+    return std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "False") != 0 &&
+           std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "OFF") != 0 &&
+           std::strcmp(value, "no") != 0 &&
+           std::strcmp(value, "NO") != 0;
+}
+
 static bool runWeightOnlyConvCase(const WeightOnlyConvCase& c) {
     KVMeta meta;
-    meta.pic_decode_repair_sparse_active = true;
+    // Test-only switch:
+    //   default / 1: preserve the existing decode-repair small-M tune path;
+    //   0: measure normal WeightOnlyConv routing without PIC decode repair meta.
+    meta.pic_decode_repair_sparse_active = weightOnlyConvUsesPicRepairMeta();
     DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
     if (!bench.valid()) {
         return false;
@@ -658,6 +695,41 @@ static bool compareHalfOutputs(const char* name, const std::vector<float>& got,
     return true;
 }
 
+static bool compareHalfOutputsForSuite(const char* suite, const char* name, const std::vector<float>& got,
+                                       const std::vector<float>& expected, float absTol, float relTol) {
+    if (got.size() != expected.size()) {
+        MNN_ERROR("%s/%s size mismatch: got %zu expected %zu\n", suite, name, got.size(), expected.size());
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int bad = 0;
+    int badIndex = -1;
+    for (size_t i = 0; i < got.size(); ++i) {
+        const float diff = std::fabs(got[i] - expected[i]);
+        const float denom = std::max(1.0f, std::fabs(expected[i]));
+        const float rel = diff / denom;
+        if (diff > maxAbs) {
+            maxAbs = diff;
+            maxRel = rel;
+        }
+        if (diff > absTol && rel > relTol) {
+            if (badIndex < 0) {
+                badIndex = static_cast<int>(i);
+            }
+            ++bad;
+        }
+    }
+    MNN_PRINT("[%s] %-24s max_abs=%.6g max_rel=%.6g bad=%d/%zu\n",
+              suite, name, maxAbs, maxRel, bad, got.size());
+    if (bad > 0) {
+        MNN_ERROR("%s/%s failed first_bad=%d got=%.8f expected=%.8f\n",
+                  suite, name, badIndex, got[badIndex], expected[badIndex]);
+        return false;
+    }
+    return true;
+}
+
 static bool checkCublas(cublasStatus_t status, const char* where) {
     if (status != CUBLAS_STATUS_SUCCESS) {
         MNN_ERROR("%s failed: %d\n", where, static_cast<int>(status));
@@ -699,7 +771,7 @@ public:
     CublasLtMatmulPlan(const CublasLtMatmulPlan&) = delete;
     CublasLtMatmulPlan& operator=(const CublasLtMatmulPlan&) = delete;
 
-    bool init(cublasLtHandle_t handle, int rows, int ic, int oc, size_t workspaceBytes) {
+    bool init(cublasLtHandle_t handle, int rows, int ic, int oc, size_t workspaceBytes, int maxHeuristics = 1) {
         cublasOperation_t transA = CUBLAS_OP_T;
         cublasOperation_t transB = CUBLAS_OP_N;
         if (!checkCublasLt(cublasLtMatmulDescCreate(&mOpDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F),
@@ -725,26 +797,38 @@ public:
             return false;
         }
 
+        maxHeuristics = std::max(1, maxHeuristics);
+        mHeuristics.resize(maxHeuristics);
         int returned = 0;
         if (!checkCublasLt(cublasLtMatmulAlgoGetHeuristic(
                                handle, mOpDesc, mADesc, mBDesc, mCDesc, mCDesc,
-                               mPreference, 1, &mHeuristic, &returned),
+                               mPreference, maxHeuristics, mHeuristics.data(), &returned),
                            "cublasLtMatmulAlgoGetHeuristic") ||
             returned <= 0) {
             MNN_ERROR("cublasLt did not return a heuristic for rows=%d ic=%d oc=%d\n", rows, ic, oc);
             return false;
         }
+        mHeuristics.resize(returned);
         mReady = true;
         return true;
     }
 
+    int heuristicCount() const {
+        return static_cast<int>(mHeuristics.size());
+    }
+
+    const cublasLtMatmulHeuristicResult_t& heuristic(int index) const {
+        return mHeuristics[index];
+    }
+
     bool run(cublasLtHandle_t handle, const void* weight, const void* input, void* output,
-             void* workspace, size_t workspaceBytes) const {
-        if (!mReady) {
+             void* workspace, size_t workspaceBytes, int heuristicIndex = 0) const {
+        if (!mReady || heuristicIndex < 0 || heuristicIndex >= heuristicCount()) {
             return false;
         }
         const float alpha = 1.0f;
         const float beta = 0.0f;
+        const auto& h = mHeuristics[heuristicIndex];
         return checkCublasLt(cublasLtMatmul(handle, mOpDesc,
                                             &alpha,
                                             weight, mADesc,
@@ -752,7 +836,7 @@ public:
                                             &beta,
                                             output, mCDesc,
                                             output, mCDesc,
-                                            &mHeuristic.algo,
+                                            &h.algo,
                                             workspace, workspaceBytes,
                                             0),
                              "cublasLtMatmul");
@@ -764,7 +848,7 @@ private:
     cublasLtMatrixLayout_t mBDesc = nullptr;
     cublasLtMatrixLayout_t mCDesc = nullptr;
     cublasLtMatmulPreference_t mPreference = nullptr;
-    cublasLtMatmulHeuristicResult_t mHeuristic{};
+    std::vector<cublasLtMatmulHeuristicResult_t> mHeuristics;
     bool mReady = false;
 };
 #endif
@@ -814,6 +898,8 @@ static bool measureCudaBool(const std::function<bool()>& run, int warmup, int re
 static bool runGemmLtFloorCase(cublasLtHandle_t handle, const GemmFloorCase& c, float* avgMs) {
     constexpr size_t elemBytes = 2;
     constexpr size_t workspaceBytes = 4ull * 1024ull * 1024ull;
+    const int heuristicLimit = std::max(1, envInt("MNN_BENCH_CUBLASLT_HEURISTICS", 1));
+    const bool sweep = envInt("MNN_BENCH_CUBLASLT_SWEEP", 0) != 0;
     CudaDeviceBuffer weight;
     CudaDeviceBuffer input;
     CudaDeviceBuffer output;
@@ -825,16 +911,40 @@ static bool runGemmLtFloorCase(cublasLtHandle_t handle, const GemmFloorCase& c, 
         return false;
     }
     CublasLtMatmulPlan plan;
-    if (!plan.init(handle, c.rows, c.ic, c.oc, workspaceBytes)) {
+    if (!plan.init(handle, c.rows, c.ic, c.oc, workspaceBytes, heuristicLimit)) {
         return false;
     }
-    if (!measureCudaBool([&]() {
-            return plan.run(handle, weight.get(), input.get(), output.get(), workspace.get(), workspaceBytes);
-        }, c.warmup, c.repeat, avgMs)) {
-        return false;
+    float bestMs = 0.0f;
+    int bestIndex = 0;
+    const int measureCount = sweep ? plan.heuristicCount() : 1;
+    for (int i = 0; i < measureCount; ++i) {
+        float ms = 0.0f;
+        if (!measureCudaBool([&]() {
+                return plan.run(handle, weight.get(), input.get(), output.get(), workspace.get(), workspaceBytes, i);
+            }, c.warmup, c.repeat, &ms)) {
+            return false;
+        }
+        const auto& h = plan.heuristic(i);
+        if (!sweep) {
+            MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor] %-18s rows=%d ic=%d oc=%d avg=%.4f ms\n",
+                      c.name, c.rows, c.ic, c.oc, ms);
+        } else {
+            MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor] %-18s rows=%d ic=%d oc=%d "
+                      "heuristic=%d/%d avg=%.4f ms workspace=%zu waves=%.3f state=%d\n",
+                      c.name, c.rows, c.ic, c.oc, i, plan.heuristicCount(), ms,
+                      static_cast<size_t>(h.workspaceSize), h.wavesCount, static_cast<int>(h.state));
+        }
+        if (i == 0 || ms < bestMs) {
+            bestMs = ms;
+            bestIndex = i;
+        }
     }
-    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor] %-18s rows=%d ic=%d oc=%d avg=%.4f ms\n",
-              c.name, c.rows, c.ic, c.oc, *avgMs);
+    *avgMs = bestMs;
+    if (sweep) {
+        MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor] %-18s rows=%d ic=%d oc=%d "
+                  "best_heuristic=%d best=%.4f ms returned=%d requested=%d\n",
+                  c.name, c.rows, c.ic, c.oc, bestIndex, bestMs, plan.heuristicCount(), heuristicLimit);
+    }
     ::fflush(stdout);
     return true;
 }
@@ -916,6 +1026,358 @@ static bool runFp16GemmProductionLayout(cublasHandle_t handle, const void* weigh
                                     output, CUDA_R_16F, ocp,
                                     computeType, algo),
                        "cublasGemmEx(fp16 production layout floor)");
+}
+
+static bool runFp16GemmProductionLayoutChunk(cublasHandle_t handle, const void* weightBase, const void* input,
+                                             void* outputBase, int rows, int ic, int icp, int ocChunk, int ocp,
+                                             int ocOffset) {
+    const auto* weight = static_cast<const uint8_t*>(weightBase) +
+        static_cast<size_t>(ocOffset) * static_cast<size_t>(icp) * sizeof(uint16_t);
+    auto* output = static_cast<uint8_t*>(outputBase) + static_cast<size_t>(ocOffset) * sizeof(uint16_t);
+    return runFp16GemmProductionLayout(handle, weight, input, output, rows, ic, icp, ocChunk, ocp);
+}
+
+static bool runFp16GemmTransposedWeightLayout(cublasHandle_t handle, const void* weight, const void* input, void* output,
+                                              int rows, int ic, int icp, int oc, int ocp, int computePolicy) {
+    const float alpha32 = 1.0f;
+    const float beta32 = 0.0f;
+    const __half alpha16 = __float2half(1.0f);
+    const __half beta16 = __float2half(0.0f);
+    const void* alpha = &alpha32;
+    const void* beta = &beta32;
+#if CUDART_VERSION >= 11000
+    cublasComputeType_t computeType = CUBLAS_COMPUTE_32F;
+    if (computePolicy == 1) {
+        computeType = CUBLAS_COMPUTE_32F_FAST_16F;
+    } else if (computePolicy == 2) {
+        computeType = CUBLAS_COMPUTE_16F;
+        alpha = &alpha16;
+        beta = &beta16;
+    }
+#else
+    const auto computeType = CUDA_R_32F;
+#endif
+#if CUDART_VERSION >= 9000
+    const auto algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+#else
+    const auto algo = CUBLAS_GEMM_DEFAULT;
+#endif
+    return checkCublas(cublasGemmEx(handle,
+                                    CUBLAS_OP_N, CUBLAS_OP_N,
+                                    oc, rows, ic,
+                                    alpha,
+                                    weight, CUDA_R_16F, ocp,
+                                    input, CUDA_R_16F, icp,
+                                    beta,
+                                    output, CUDA_R_16F, ocp,
+                                    computeType, algo),
+                       "cublasGemmEx(fp16 transposed weight layout floor)");
+}
+
+static bool runFp16GemmProductionLayoutBeta(cublasHandle_t handle, const void* weight, const void* input, void* output,
+                                            int rows, int ic, int icp, int oc, int ocp, float betaValue) {
+    const float alpha = 1.0f;
+    const float beta = betaValue;
+#if CUDART_VERSION >= 11000
+    const auto computeType = CUBLAS_COMPUTE_32F;
+#else
+    const auto computeType = CUDA_R_32F;
+#endif
+#if CUDART_VERSION >= 9000
+    const auto algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+#else
+    const auto algo = CUBLAS_GEMM_DEFAULT;
+#endif
+    return checkCublas(cublasGemmEx(handle,
+                                    CUBLAS_OP_T, CUBLAS_OP_N,
+                                    oc, rows, ic,
+                                    &alpha,
+                                    weight, CUDA_R_16F, icp,
+                                    input, CUDA_R_16F, icp,
+                                    &beta,
+                                    output, CUDA_R_16F, ocp,
+                                    computeType, algo),
+                       "cublasGemmEx(fp16 production layout beta floor)");
+}
+
+static ErrorCode cublasDownError(cublasHandle_t handle, const Tensor* weight, const Tensor* input, Tensor* output,
+                                 int rows, int inter, int hidden) {
+    const int interP = upDivInt(inter, 8) * 8;
+    const int hiddenP = upDivInt(hidden, 8) * 8;
+    if (!runFp16GemmProductionLayout(handle,
+                                     reinterpret_cast<const void*>(weight->deviceId()),
+                                     reinterpret_cast<const void*>(input->deviceId()),
+                                     reinterpret_cast<void*>(output->deviceId()),
+                                     rows, inter, interP, hidden, hiddenP)) {
+        return INVALID_VALUE;
+    }
+    return NO_ERROR;
+}
+
+static bool runPicFusedSiluDownAccuracyCase(int rows, int hidden, int inter) {
+    KVMeta meta;
+    meta.pic_decode_repair_sparse_active = true;
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    auto packedGateUp = bench.tensor({rows, inter * 2, 1, 1}, Tensor::CAFFE, false);
+    auto downWeight = bench.tensor({hidden, inter, 1, 1}, Tensor::CAFFE, false);
+    auto refActivation = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto refOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto materializedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto streamedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto wmmaOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    if (!packedGateUp || !downWeight || !refActivation || !refOutput || !materializedOutput || !streamedOutput ||
+        !wmmaOutput || !writeHalfPattern(packedGateUp) || !writeHalfPattern(downWeight)) {
+        return false;
+    }
+
+    auto packedSiluOp = makePicPackedSiluMulOp("bench_pic_fused_silu_down_ref_silu");
+    auto materializedOp = makePicBenchPackedSiluDownOp("PicBenchFusedPackedSiluDown",
+                                                       "bench_pic_fused_silu_down_materialized");
+    auto streamedOp = makePicBenchPackedSiluDownOp("PicBenchStreamedPackedSiluDown",
+                                                   "bench_pic_fused_silu_down_streamed");
+    auto wmmaOp = makePicBenchPackedSiluDownOp("PicBenchWmmaPackedSiluDown",
+                                               "bench_pic_fused_silu_down_wmma");
+    std::vector<Tensor*> siluInputs = {packedGateUp};
+    std::vector<Tensor*> siluOutputs = {refActivation};
+    std::vector<Tensor*> materializedInputs = {packedGateUp, downWeight};
+    std::vector<Tensor*> materializedOutputs = {materializedOutput};
+    std::vector<Tensor*> streamedInputs = {packedGateUp, downWeight};
+    std::vector<Tensor*> streamedOutputs = {streamedOutput};
+    std::vector<Tensor*> wmmaInputs = {packedGateUp, downWeight};
+    std::vector<Tensor*> wmmaOutputs = {wmmaOutput};
+    auto siluExe = bench.create(siluInputs, siluOutputs, packedSiluOp->get());
+    auto materializedExe = bench.create(materializedInputs, materializedOutputs, materializedOp->get());
+    auto streamedExe = bench.create(streamedInputs, streamedOutputs, streamedOp->get());
+    auto wmmaExe = bench.create(wmmaInputs, wmmaOutputs, wmmaOp->get());
+    if (!siluExe || !materializedExe || !streamedExe || !wmmaExe) {
+        MNN_ERROR("PicFusedSiluDown failed to create execution rows=%d\n", rows);
+        return false;
+    }
+    if (bench.resize(siluExe.get(), siluInputs, siluOutputs) != NO_ERROR ||
+        bench.resize(materializedExe.get(), materializedInputs, materializedOutputs) != NO_ERROR ||
+        bench.resize(streamedExe.get(), streamedInputs, streamedOutputs) != NO_ERROR ||
+        bench.resize(wmmaExe.get(), wmmaInputs, wmmaOutputs) != NO_ERROR) {
+        MNN_ERROR("PicFusedSiluDown resize failed rows=%d\n", rows);
+        return false;
+    }
+
+    cublasHandle_t handle = nullptr;
+    if (!checkCublas(cublasCreate(&handle), "cublasCreate(PicFusedSiluDown accuracy)")) {
+        return false;
+    }
+#if CUDART_VERSION >= 9000
+    checkCublas(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode(PicFusedSiluDown accuracy)");
+#endif
+    bool ok = true;
+    if (bench.execute(siluExe.get(), siluInputs, siluOutputs) != NO_ERROR ||
+        cublasDownError(handle, downWeight, refActivation, refOutput, rows, inter, hidden) != NO_ERROR ||
+        bench.execute(materializedExe.get(), materializedInputs, materializedOutputs) != NO_ERROR ||
+        bench.execute(streamedExe.get(), streamedInputs, streamedOutputs) != NO_ERROR ||
+        bench.execute(wmmaExe.get(), wmmaInputs, wmmaOutputs) != NO_ERROR) {
+        ok = false;
+    }
+    cublasDestroy(handle);
+    if (!ok) {
+        return false;
+    }
+
+    std::vector<float> ref;
+    std::vector<float> materialized;
+    std::vector<float> streamed;
+    std::vector<float> wmma;
+    if (!readHalfTensor(refOutput, &ref) ||
+        !readHalfTensor(materializedOutput, &materialized) ||
+        !readHalfTensor(streamedOutput, &streamed) ||
+        !readHalfTensor(wmmaOutput, &wmma)) {
+        return false;
+    }
+    char name[128];
+    ::snprintf(name, sizeof(name), "rows%d_materialized", rows);
+    ok = compareHalfOutputsForSuite("bench_ops/cuda/accuracy/PicFusedSiluDown", name,
+                                    materialized, ref, 0.08f, 0.08f) && ok;
+    ::snprintf(name, sizeof(name), "rows%d_streamed", rows);
+    ok = compareHalfOutputsForSuite("bench_ops/cuda/accuracy/PicFusedSiluDown", name,
+                                    streamed, ref, 0.08f, 0.08f) && ok;
+    ::snprintf(name, sizeof(name), "rows%d_wmma", rows);
+    ok = compareHalfOutputsForSuite("bench_ops/cuda/accuracy/PicFusedSiluDown", name,
+                                    wmma, ref, 0.08f, 0.08f) && ok;
+    return ok;
+}
+
+static bool runPicFusedSiluDownPerfCase(int rows, int hidden, int inter, int warmup, int repeat) {
+    constexpr int quantBlock = 64;
+    KVMeta meta;
+    meta.pic_decode_repair_sparse_active = true;
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    auto input = bench.tensor({rows, 1, 1, hidden}, Tensor::TENSORFLOW, false);
+    auto packedGateUp = bench.tensor({rows, 1, 1, inter * 2}, Tensor::TENSORFLOW, false);
+    auto downWeight = bench.tensor({hidden, inter, 1, 1}, Tensor::CAFFE, false);
+    auto activation = bench.tensor({rows, inter, 1, 1}, Tensor::CAFFE, false);
+    auto refOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto materializedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto streamedOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    auto wmmaOutput = bench.tensor({rows, hidden, 1, 1}, Tensor::CAFFE, false);
+    if (!input || !packedGateUp || !downWeight || !activation || !refOutput ||
+        !materializedOutput || !streamedOutput || !wmmaOutput ||
+        !writeHalfPattern(input) || !writeHalfPattern(downWeight)) {
+        return false;
+    }
+
+    PicExternalPlan packedGateUpPlan;
+    const std::string externalPath = linearExternalWeightPath(hidden, inter * 2, quantBlock);
+    if (!buildLinearExternalWeight(externalPath, hidden, inter * 2, quantBlock, &packedGateUpPlan)) {
+        return false;
+    }
+
+    auto gateUpOp = makePicLinearNhwcWeightOnlyExtraOp("bench_pic_fused_silu_down_packed_gateup",
+                                                       externalPath, hidden, inter * 2, packedGateUpPlan);
+    auto packedSiluOp = makePicPackedSiluMulOp("bench_pic_fused_silu_down_ref_silu");
+    auto materializedOp = makePicBenchPackedSiluDownOp("PicBenchFusedPackedSiluDown",
+                                                       "bench_pic_fused_silu_down_materialized");
+    auto streamedOp = makePicBenchPackedSiluDownOp("PicBenchStreamedPackedSiluDown",
+                                                   "bench_pic_fused_silu_down_streamed");
+    auto wmmaOp = makePicBenchPackedSiluDownOp("PicBenchWmmaPackedSiluDown",
+                                               "bench_pic_fused_silu_down_wmma");
+    std::vector<Tensor*> gateUpInputs = {input};
+    std::vector<Tensor*> gateUpOutputs = {packedGateUp};
+    std::vector<Tensor*> siluInputs = {packedGateUp};
+    std::vector<Tensor*> siluOutputs = {activation};
+    std::vector<Tensor*> materializedInputs = {packedGateUp, downWeight};
+    std::vector<Tensor*> materializedOutputs = {materializedOutput};
+    std::vector<Tensor*> streamedInputs = {packedGateUp, downWeight};
+    std::vector<Tensor*> streamedOutputs = {streamedOutput};
+    std::vector<Tensor*> wmmaInputs = {packedGateUp, downWeight};
+    std::vector<Tensor*> wmmaOutputs = {wmmaOutput};
+    auto gateUpExe = bench.create(gateUpInputs, gateUpOutputs, gateUpOp->get());
+    auto siluExe = bench.create(siluInputs, siluOutputs, packedSiluOp->get());
+    auto materializedExe = bench.create(materializedInputs, materializedOutputs, materializedOp->get());
+    auto streamedExe = bench.create(streamedInputs, streamedOutputs, streamedOp->get());
+    auto wmmaExe = bench.create(wmmaInputs, wmmaOutputs, wmmaOp->get());
+    if (!gateUpExe || !siluExe || !materializedExe || !streamedExe || !wmmaExe) {
+        MNN_ERROR("PicFusedSiluDown perf failed to create execution rows=%d\n", rows);
+        return false;
+    }
+    if (bench.resize(gateUpExe.get(), gateUpInputs, gateUpOutputs) != NO_ERROR ||
+        bench.resize(siluExe.get(), siluInputs, siluOutputs) != NO_ERROR ||
+        bench.resize(materializedExe.get(), materializedInputs, materializedOutputs) != NO_ERROR ||
+        bench.resize(streamedExe.get(), streamedInputs, streamedOutputs) != NO_ERROR ||
+        bench.resize(wmmaExe.get(), wmmaInputs, wmmaOutputs) != NO_ERROR) {
+        MNN_ERROR("PicFusedSiluDown perf resize failed rows=%d\n", rows);
+        return false;
+    }
+
+    cublasHandle_t handle = nullptr;
+    if (!checkCublas(cublasCreate(&handle), "cublasCreate(PicFusedSiluDown perf)")) {
+        return false;
+    }
+#if CUDART_VERSION >= 9000
+    checkCublas(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode(PicFusedSiluDown perf)");
+#endif
+    if (bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs) != NO_ERROR ||
+        bench.execute(siluExe.get(), siluInputs, siluOutputs) != NO_ERROR ||
+        cublasDownError(handle, downWeight, activation, refOutput, rows, inter, hidden) != NO_ERROR ||
+        bench.execute(materializedExe.get(), materializedInputs, materializedOutputs) != NO_ERROR ||
+        bench.execute(streamedExe.get(), streamedInputs, streamedOutputs) != NO_ERROR ||
+        bench.execute(wmmaExe.get(), wmmaInputs, wmmaOutputs) != NO_ERROR) {
+        cublasDestroy(handle);
+        return false;
+    }
+
+    CudaEventPair timer;
+    float gateUpMs = 0.0f;
+    float packedSiluMs = 0.0f;
+    float downMs = 0.0f;
+    float packedSiluDownMs = 0.0f;
+    float materializedMs = 0.0f;
+    float streamedMs = 0.0f;
+    float wmmaMs = 0.0f;
+    float baselineChainMs = 0.0f;
+    float materializedChainMs = 0.0f;
+    float streamedChainMs = 0.0f;
+    float wmmaChainMs = 0.0f;
+    if (!timer.measure([&]() { return bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs); },
+                       warmup, repeat, &gateUpMs) ||
+        !timer.measure([&]() { return bench.execute(siluExe.get(), siluInputs, siluOutputs); },
+                       warmup, repeat, &packedSiluMs) ||
+        !timer.measure([&]() { return cublasDownError(handle, downWeight, activation, refOutput, rows, inter, hidden); },
+                       warmup, repeat, &downMs) ||
+        !timer.measure([&]() {
+            auto code = bench.execute(siluExe.get(), siluInputs, siluOutputs);
+            if (code != NO_ERROR) {
+                return code;
+            }
+            return cublasDownError(handle, downWeight, activation, refOutput, rows, inter, hidden);
+        }, warmup, repeat, &packedSiluDownMs) ||
+        !timer.measure([&]() { return bench.execute(materializedExe.get(), materializedInputs, materializedOutputs); },
+                       warmup, repeat, &materializedMs) ||
+        !timer.measure([&]() { return bench.execute(streamedExe.get(), streamedInputs, streamedOutputs); },
+                       warmup, repeat, &streamedMs) ||
+        !timer.measure([&]() { return bench.execute(wmmaExe.get(), wmmaInputs, wmmaOutputs); },
+                       warmup, repeat, &wmmaMs) ||
+        !timer.measure([&]() {
+            auto code = bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs);
+            if (code != NO_ERROR) {
+                return code;
+            }
+            code = bench.execute(siluExe.get(), siluInputs, siluOutputs);
+            if (code != NO_ERROR) {
+                return code;
+            }
+            return cublasDownError(handle, downWeight, activation, refOutput, rows, inter, hidden);
+        }, warmup, repeat, &baselineChainMs) ||
+        !timer.measure([&]() {
+            auto code = bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs);
+            if (code != NO_ERROR) {
+                return code;
+            }
+            return bench.execute(materializedExe.get(), materializedInputs, materializedOutputs);
+        }, warmup, repeat, &materializedChainMs) ||
+        !timer.measure([&]() {
+            auto code = bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs);
+            if (code != NO_ERROR) {
+                return code;
+            }
+            return bench.execute(streamedExe.get(), streamedInputs, streamedOutputs);
+        }, warmup, repeat, &streamedChainMs) ||
+        !timer.measure([&]() {
+            auto code = bench.execute(gateUpExe.get(), gateUpInputs, gateUpOutputs);
+            if (code != NO_ERROR) {
+                return code;
+            }
+            return bench.execute(wmmaExe.get(), wmmaInputs, wmmaOutputs);
+        }, warmup, repeat, &wmmaChainMs)) {
+        cublasDestroy(handle);
+        return false;
+    }
+    cublasDestroy(handle);
+
+    const float materializedDelta = materializedChainMs - baselineChainMs;
+    const float streamedDelta = streamedChainMs - baselineChainMs;
+    const float wmmaDelta = wmmaChainMs - baselineChainMs;
+    MNN_PRINT("[bench_ops/cuda/perf/PicFusedSiluDown] rows=%d hidden=%d inter=%d "
+              "gateup=%.4f ms packed_silu=%.4f ms down_cublas=%.4f ms "
+              "packed_silu_down=%.4f ms materialized_fused=%.4f ms streamed_fused=%.4f ms wmma_fused=%.4f ms "
+              "baseline_chain=%.4f ms materialized_chain=%.4f ms streamed_chain=%.4f ms wmma_chain=%.4f ms "
+              "materialized_delta=%.4f ms streamed_delta=%.4f ms wmma_delta=%.4f ms "
+              "materialized_gate=%s streamed_gate=%s wmma_gate=%s external=%s\n",
+              rows, hidden, inter,
+              gateUpMs, packedSiluMs, downMs, packedSiluDownMs, materializedMs, streamedMs, wmmaMs,
+              baselineChainMs, materializedChainMs, streamedChainMs, wmmaChainMs,
+              materializedDelta, streamedDelta, wmmaDelta,
+              materializedDelta <= -0.25f ? "pass" : "fail",
+              streamedDelta <= -0.25f ? "pass" : "fail",
+              wmmaDelta <= -0.25f ? "pass" : "fail",
+              externalPath.c_str());
+    ::fflush(stdout);
+    return true;
 }
 
 static bool runFp16GemmBatchedProductionLayout(cublasHandle_t handle, const void* const* deviceA,
@@ -1672,6 +2134,282 @@ static bool runQkvParallelGemmFloorCase(int rows, int hidden, int kv, int warmup
     return true;
 }
 
+static bool measureDownSplitNSequential(cublasHandle_t handle, cudaStream_t stream,
+                                        const void* weight, const void* input, void* output,
+                                        int rows, int ic, int icp, int oc, int ocp, int chunks,
+                                        int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0 || chunks <= 0 || oc % chunks != 0) {
+        return false;
+    }
+    const int ocChunk = oc / chunks;
+    auto runChunks = [&]() -> bool {
+        for (int c = 0; c < chunks; ++c) {
+            if (!runFp16GemmProductionLayoutChunk(handle, weight, input, output,
+                                                  rows, ic, icp, ocChunk, ocp, c * ocChunk)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (int i = 0; i < warmup; ++i) {
+        if (!runChunks()) {
+            return false;
+        }
+    }
+    if (!checkCuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize(down split seq warmup)")) {
+        return false;
+    }
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (!checkCuda(cudaEventCreate(&start), "cudaEventCreate(down split seq start)") ||
+        !checkCuda(cudaEventCreate(&stop), "cudaEventCreate(down split seq stop)")) {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        return false;
+    }
+    bool ok = checkCuda(cudaEventRecord(start, stream), "cudaEventRecord(down split seq start)");
+    for (int i = 0; ok && i < repeat; ++i) {
+        ok = runChunks();
+    }
+    ok = ok && checkCuda(cudaEventRecord(stop, stream), "cudaEventRecord(down split seq stop)");
+    ok = ok && checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(down split seq stop)");
+    float totalMs = 0.0f;
+    ok = ok && checkCuda(cudaEventElapsedTime(&totalMs, start, stop), "cudaEventElapsedTime(down split seq)");
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    if (!ok) {
+        return false;
+    }
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool measureDownSplitNParallel(const std::vector<cublasHandle_t>& handles,
+                                      const std::vector<cudaStream_t>& streams,
+                                      cudaStream_t timingStream,
+                                      const void* weight, const void* input, void* output,
+                                      int rows, int ic, int icp, int oc, int ocp, int chunks,
+                                      int warmup, int repeat, float* avgMs) {
+    if (avgMs == nullptr || repeat <= 0 || chunks <= 0 ||
+        static_cast<int>(handles.size()) < chunks || static_cast<int>(streams.size()) < chunks ||
+        oc % chunks != 0) {
+        return false;
+    }
+    const int ocChunk = oc / chunks;
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    std::vector<cudaEvent_t> done(chunks, nullptr);
+    bool ok = checkCuda(cudaEventCreate(&start), "cudaEventCreate(down split par start)") &&
+        checkCuda(cudaEventCreate(&stop), "cudaEventCreate(down split par stop)");
+    for (int c = 0; ok && c < chunks; ++c) {
+        ok = checkCuda(cudaEventCreate(&done[c]), "cudaEventCreate(down split par done)");
+    }
+    auto cleanupEvents = [&]() {
+        if (start != nullptr) {
+            cudaEventDestroy(start);
+        }
+        if (stop != nullptr) {
+            cudaEventDestroy(stop);
+        }
+        for (auto event : done) {
+            if (event != nullptr) {
+                cudaEventDestroy(event);
+            }
+        }
+    };
+    if (!ok) {
+        cleanupEvents();
+        return false;
+    }
+
+    auto enqueueChunks = [&](int loopCount) -> bool {
+        if (!checkCuda(cudaEventRecord(start, timingStream), "cudaEventRecord(down split par start)")) {
+            return false;
+        }
+        for (int c = 0; c < chunks; ++c) {
+            if (!checkCuda(cudaStreamWaitEvent(streams[c], start, 0), "cudaStreamWaitEvent(down split par start)")) {
+                return false;
+            }
+        }
+        for (int i = 0; i < loopCount; ++i) {
+            for (int c = 0; c < chunks; ++c) {
+                if (!runFp16GemmProductionLayoutChunk(handles[c], weight, input, output,
+                                                      rows, ic, icp, ocChunk, ocp, c * ocChunk)) {
+                    return false;
+                }
+            }
+        }
+        for (int c = 0; c < chunks; ++c) {
+            if (!checkCuda(cudaEventRecord(done[c], streams[c]), "cudaEventRecord(down split par done)") ||
+                !checkCuda(cudaStreamWaitEvent(timingStream, done[c], 0), "cudaStreamWaitEvent(down split par done)")) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    for (int i = 0; i < warmup; ++i) {
+        if (!enqueueChunks(1) ||
+            !checkCuda(cudaEventRecord(stop, timingStream), "cudaEventRecord(down split par warm stop)") ||
+            !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(down split par warm stop)")) {
+            cleanupEvents();
+            return false;
+        }
+    }
+    if (!enqueueChunks(repeat) ||
+        !checkCuda(cudaEventRecord(stop, timingStream), "cudaEventRecord(down split par stop)") ||
+        !checkCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(down split par stop)")) {
+        cleanupEvents();
+        return false;
+    }
+    float totalMs = 0.0f;
+    ok = checkCuda(cudaEventElapsedTime(&totalMs, start, stop), "cudaEventElapsedTime(down split par)");
+    cleanupEvents();
+    if (!ok) {
+        return false;
+    }
+    *avgMs = totalMs / static_cast<float>(repeat);
+    return true;
+}
+
+static bool runDownSplitNGemmFloorCase(int rows, int hidden, int inter, int chunks, int warmup, int repeat) {
+    constexpr size_t elemBytes = 2;
+    const int ic = inter;
+    const int oc = hidden;
+    const int icp = upDivInt(ic, 8) * 8;
+    const int ocp = upDivInt(oc, 8) * 8;
+    if (chunks <= 1 || oc % chunks != 0 || ((oc / chunks) % 8) != 0) {
+        MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairDownSplitNGemmFloor] rows=%d hidden=%d inter=%d "
+                  "chunks=%d skipped invalid chunking\n", rows, hidden, inter, chunks);
+        return true;
+    }
+    CudaDeviceBuffer weight;
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer output;
+    if (!weight.alloc(static_cast<size_t>(ocp) * static_cast<size_t>(icp) * elemBytes) ||
+        !input.alloc(static_cast<size_t>(rows) * static_cast<size_t>(icp) * elemBytes) ||
+        !output.alloc(static_cast<size_t>(rows) * static_cast<size_t>(ocp) * elemBytes)) {
+        return false;
+    }
+
+    cudaStream_t seqStream = nullptr;
+    cudaStream_t timingStream = nullptr;
+    cublasHandle_t seqHandle = nullptr;
+    std::vector<cudaStream_t> streams(chunks, nullptr);
+    std::vector<cublasHandle_t> handles(chunks, nullptr);
+    auto cleanup = [&]() {
+        if (seqHandle != nullptr) {
+            cublasDestroy(seqHandle);
+        }
+        for (auto handle : handles) {
+            if (handle != nullptr) {
+                cublasDestroy(handle);
+            }
+        }
+        if (seqStream != nullptr) {
+            cudaStreamDestroy(seqStream);
+        }
+        if (timingStream != nullptr) {
+            cudaStreamDestroy(timingStream);
+        }
+        for (auto stream : streams) {
+            if (stream != nullptr) {
+                cudaStreamDestroy(stream);
+            }
+        }
+    };
+    if (!checkCuda(cudaStreamCreateWithFlags(&seqStream, cudaStreamNonBlocking), "cudaStreamCreate(down split seq)") ||
+        !checkCuda(cudaStreamCreateWithFlags(&timingStream, cudaStreamNonBlocking), "cudaStreamCreate(down split timing)") ||
+        !createTensorOpCublasHandle(&seqHandle, seqStream, "cublasCreate(down split seq)")) {
+        cleanup();
+        return false;
+    }
+    for (int c = 0; c < chunks; ++c) {
+        char label[64];
+        ::snprintf(label, sizeof(label), "cublasCreate(down split chunk %d)", c);
+        if (!checkCuda(cudaStreamCreateWithFlags(&streams[c], cudaStreamNonBlocking), "cudaStreamCreate(down split chunk)") ||
+            !createTensorOpCublasHandle(&handles[c], streams[c], label)) {
+            cleanup();
+            return false;
+        }
+    }
+
+    float singleMs = 0.0f;
+    float splitSeqMs = 0.0f;
+    float splitParMs = 0.0f;
+    if (!measureGemmProductionLayoutOnStream(seqHandle, seqStream,
+                                             weight.get(), input.get(), output.get(),
+                                             rows, ic, icp, oc, ocp, warmup, repeat, &singleMs) ||
+        !measureDownSplitNSequential(seqHandle, seqStream,
+                                     weight.get(), input.get(), output.get(),
+                                     rows, ic, icp, oc, ocp, chunks, warmup, repeat, &splitSeqMs) ||
+        !measureDownSplitNParallel(handles, streams, timingStream,
+                                   weight.get(), input.get(), output.get(),
+                                   rows, ic, icp, oc, ocp, chunks, warmup, repeat, &splitParMs)) {
+        cleanup();
+        return false;
+    }
+    cleanup();
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairDownSplitNGemmFloor] rows=%d hidden=%d inter=%d "
+              "chunks=%d chunk_oc=%d single=%.4f ms split_seq=%.4f ms split_parallel=%.4f ms "
+              "parallel_delta=%.4f ms speedup=%.3f seq_delta=%.4f ms\n",
+              rows, hidden, inter, chunks, oc / chunks,
+              singleMs, splitSeqMs, splitParMs,
+              splitParMs - singleMs, splitParMs > 0.0f ? singleMs / splitParMs : 0.0f,
+              splitSeqMs - singleMs);
+    ::fflush(stdout);
+    return true;
+}
+
+class CudaPicFusedSiluDownAccuracy : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/accuracy/PicFusedSiluDown expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 3072);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runPicFusedSiluDownAccuracyCase(rows, hidden, inter) && ok;
+            }
+        }
+        return ok;
+    }
+};
+
+class CudaPicFusedSiluDownPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/PicFusedSiluDown expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        if (!requireMemoryLow("bench_ops/cuda/perf/PicFusedSiluDown")) {
+            return false;
+        }
+        const int warmup = envInt("MNN_BENCH_FUSED_MLP_WARMUP", envInt("MNN_BENCH_MLP_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_FUSED_MLP_REPEAT", envInt("MNN_BENCH_MLP_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 3072);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runPicFusedSiluDownPerfCase(rows, hidden, inter, warmup, repeat) && ok;
+            }
+        }
+        return ok;
+    }
+};
+
 class CudaWeightOnlyConvPerf : public MNNTestCase {
 public:
     virtual bool run(int precision) override {
@@ -1961,6 +2699,262 @@ public:
             }
         }
         cublasDestroy(handle);
+        return ok;
+    }
+};
+
+static bool runDecodeRepairMlpTiledGemmFloorCase(cublasHandle_t handle, int rows, int hidden, int inter,
+                                                 int tile, int warmup, int repeat) {
+    constexpr size_t elemBytes = 2;
+    const int hiddenP = upDivInt(hidden, 8) * 8;
+    const int interP = upDivInt(inter, 8) * 8;
+    const int fullGateupOcp = upDivInt(inter * 2, 8) * 8;
+    tile = std::max(1, std::min(tile, inter));
+    if (inter % tile != 0) {
+        MNN_ERROR("DecodeRepairMlpTiledGemmFloor requires tile to divide inter; inter=%d tile=%d\n", inter, tile);
+        return false;
+    }
+    const int tileCount = inter / tile;
+    const int tileP = upDivInt(tile, 8) * 8;
+    const int gateupTileOcp = upDivInt(tile * 2, 8) * 8;
+
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer fullGateupWeight;
+    CudaDeviceBuffer fullGateupOutput;
+    CudaDeviceBuffer fullActivation;
+    CudaDeviceBuffer fullDownWeight;
+    CudaDeviceBuffer output;
+    CudaDeviceBuffer gateupTileWeight;
+    CudaDeviceBuffer gateupTileOutput;
+    CudaDeviceBuffer activationTile;
+    CudaDeviceBuffer downTileWeight;
+    if (!input.alloc(static_cast<size_t>(rows) * hiddenP * elemBytes) ||
+        !fullGateupWeight.alloc(static_cast<size_t>(fullGateupOcp) * hiddenP * elemBytes) ||
+        !fullGateupOutput.alloc(static_cast<size_t>(rows) * fullGateupOcp * elemBytes) ||
+        !fullActivation.alloc(static_cast<size_t>(rows) * interP * elemBytes) ||
+        !fullDownWeight.alloc(static_cast<size_t>(hiddenP) * interP * elemBytes) ||
+        !output.alloc(static_cast<size_t>(rows) * hiddenP * elemBytes) ||
+        !gateupTileWeight.alloc(static_cast<size_t>(gateupTileOcp) * hiddenP * elemBytes) ||
+        !gateupTileOutput.alloc(static_cast<size_t>(rows) * gateupTileOcp * elemBytes) ||
+        !activationTile.alloc(static_cast<size_t>(rows) * tileP * elemBytes) ||
+        !downTileWeight.alloc(static_cast<size_t>(hiddenP) * tileP * elemBytes)) {
+        return false;
+    }
+
+    auto runFullGateup = [&]() -> bool {
+        return runFp16GemmProductionLayout(handle, fullGateupWeight.get(), input.get(), fullGateupOutput.get(),
+                                           rows, hidden, hiddenP, inter * 2, fullGateupOcp);
+    };
+    auto runFullDown = [&]() -> bool {
+        return runFp16GemmProductionLayout(handle, fullDownWeight.get(), fullActivation.get(), output.get(),
+                                           rows, inter, interP, hidden, hiddenP);
+    };
+    auto runGateupTiles = [&]() -> bool {
+        for (int i = 0; i < tileCount; ++i) {
+            if (!runFp16GemmProductionLayout(handle, gateupTileWeight.get(), input.get(), gateupTileOutput.get(),
+                                             rows, hidden, hiddenP, tile * 2, gateupTileOcp)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto runDownTiles = [&]() -> bool {
+        for (int i = 0; i < tileCount; ++i) {
+            const float beta = i == 0 ? 0.0f : 1.0f;
+            if (!runFp16GemmProductionLayoutBeta(handle, downTileWeight.get(), activationTile.get(), output.get(),
+                                                 rows, tile, tileP, hidden, hiddenP, beta)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto runTiledChain = [&]() -> bool {
+        for (int i = 0; i < tileCount; ++i) {
+            if (!runFp16GemmProductionLayout(handle, gateupTileWeight.get(), input.get(), gateupTileOutput.get(),
+                                             rows, hidden, hiddenP, tile * 2, gateupTileOcp)) {
+                return false;
+            }
+            const float beta = i == 0 ? 0.0f : 1.0f;
+            if (!runFp16GemmProductionLayoutBeta(handle, downTileWeight.get(), activationTile.get(), output.get(),
+                                                 rows, tile, tileP, hidden, hiddenP, beta)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    float fullGateupMs = 0.0f;
+    float fullDownMs = 0.0f;
+    float fullChainMs = 0.0f;
+    float tiledGateupMs = 0.0f;
+    float tiledDownMs = 0.0f;
+    float tiledChainMs = 0.0f;
+    if (!measureCudaBool(runFullGateup, warmup, repeat, &fullGateupMs) ||
+        !measureCudaBool(runFullDown, warmup, repeat, &fullDownMs) ||
+        !measureCudaBool([&]() { return runFullGateup() && runFullDown(); }, warmup, repeat, &fullChainMs) ||
+        !measureCudaBool(runGateupTiles, warmup, repeat, &tiledGateupMs) ||
+        !measureCudaBool(runDownTiles, warmup, repeat, &tiledDownMs) ||
+        !measureCudaBool(runTiledChain, warmup, repeat, &tiledChainMs)) {
+        return false;
+    }
+
+    const float tiledVsFull = tiledChainMs - fullChainMs;
+    const float downVsFull = tiledDownMs - fullDownMs;
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairMlpTiledGemmFloor] rows=%d hidden=%d inter=%d tile=%d tiles=%d "
+              "full_gateup=%.4f ms full_down=%.4f ms full_chain_no_silu=%.4f ms "
+              "tiled_gateup=%.4f ms tiled_down_accum=%.4f ms tiled_chain_lower_bound=%.4f ms "
+              "tiled_vs_full=%.4f ms tiled_down_vs_full_down=%.4f ms\n",
+              rows, hidden, inter, tile, tileCount,
+              fullGateupMs, fullDownMs, fullChainMs,
+              tiledGateupMs, tiledDownMs, tiledChainMs,
+              tiledVsFull, downVsFull);
+    ::fflush(stdout);
+    return true;
+}
+
+class CudaDecodeRepairMlpTiledGemmFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairMlpTiledGemmFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        cublasHandle_t handle = nullptr;
+        if (!checkCublas(cublasCreate(&handle), "cublasCreate")) {
+            return false;
+        }
+#if CUDART_VERSION >= 9000
+        checkCublas(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode(TENSOR_OP)");
+#endif
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_MLP_WARMUP", 20));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_MLP_REPEAT", 80));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 2048);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
+        const int tile = envInt("MNN_BENCH_MLP_TILE", 1024);
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runDecodeRepairMlpTiledGemmFloorCase(handle, rows, hidden, inter, tile, warmup, repeat) && ok;
+            }
+        }
+        cublasDestroy(handle);
+        return ok;
+    }
+};
+
+static bool runDecodeRepairDownTransposedLayoutFloorCase(cublasHandle_t handle, int rows, int hidden, int inter,
+                                                         int warmup, int repeat) {
+    constexpr size_t elemBytes = 2;
+    const int ic = inter;
+    const int oc = hidden;
+    const int icp = upDivInt(ic, 8) * 8;
+    const int ocp = upDivInt(oc, 8) * 8;
+    CudaDeviceBuffer input;
+    CudaDeviceBuffer productionWeight;
+    CudaDeviceBuffer transposedWeight;
+    CudaDeviceBuffer output;
+    if (!input.alloc(static_cast<size_t>(rows) * icp * elemBytes) ||
+        !productionWeight.alloc(static_cast<size_t>(ocp) * icp * elemBytes) ||
+        !transposedWeight.alloc(static_cast<size_t>(icp) * ocp * elemBytes) ||
+        !output.alloc(static_cast<size_t>(rows) * ocp * elemBytes)) {
+        return false;
+    }
+
+    float productionMs = 0.0f;
+    float transposedMs = 0.0f;
+    float transposedFast16Ms = 0.0f;
+    float transposed16fMs = 0.0f;
+    if (!measureCudaBool([&]() {
+            return runFp16GemmProductionLayout(handle, productionWeight.get(), input.get(), output.get(),
+                                               rows, ic, icp, oc, ocp);
+        }, warmup, repeat, &productionMs)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return runFp16GemmTransposedWeightLayout(handle, transposedWeight.get(), input.get(), output.get(),
+                                                     rows, ic, icp, oc, ocp, 0);
+        }, warmup, repeat, &transposedMs)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return runFp16GemmTransposedWeightLayout(handle, transposedWeight.get(), input.get(), output.get(),
+                                                     rows, ic, icp, oc, ocp, 1);
+        }, warmup, repeat, &transposedFast16Ms)) {
+        return false;
+    }
+    if (!measureCudaBool([&]() {
+            return runFp16GemmTransposedWeightLayout(handle, transposedWeight.get(), input.get(), output.get(),
+                                                     rows, ic, icp, oc, ocp, 2);
+        }, warmup, repeat, &transposed16fMs)) {
+        return false;
+    }
+    MNN_PRINT("[bench_ops/cuda/perf/DecodeRepairDownTransposedLayoutFloor] rows=%d hidden=%d inter=%d "
+              "production_nt=%.4f ms transposed_nn=%.4f ms transposed_nn_fast16=%.4f ms transposed_nn_16f=%.4f ms "
+              "transpose_delta=%.4f ms transpose_fast16_delta=%.4f ms transpose16f_delta=%.4f ms\n",
+              rows, hidden, inter,
+              productionMs, transposedMs, transposedFast16Ms, transposed16fMs,
+              transposedMs - productionMs, transposedFast16Ms - productionMs, transposed16fMs - productionMs);
+    ::fflush(stdout);
+    return true;
+}
+
+class CudaDecodeRepairDownTransposedLayoutFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairDownTransposedLayoutFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        cublasHandle_t handle = nullptr;
+        if (!checkCublas(cublasCreate(&handle), "cublasCreate")) {
+            return false;
+        }
+#if CUDART_VERSION >= 9000
+        checkCublas(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode(TENSOR_OP)");
+#endif
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_MLP_WARMUP", 30));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_MLP_REPEAT", 120));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 3072);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (enabledRow(rows)) {
+                ok = runDecodeRepairDownTransposedLayoutFloorCase(handle, rows, hidden, inter, warmup, repeat) && ok;
+            }
+        }
+        cublasDestroy(handle);
+        return ok;
+    }
+};
+
+class CudaDecodeRepairDownSplitNGemmFloorPerf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/DecodeRepairDownSplitNGemmFloor expects precision=2(fp16) or 0(mix); got %d.\n",
+                      precision);
+            return false;
+        }
+        const int warmup = envInt("MNN_BENCH_MLP_GEMM_WARMUP", envInt("MNN_BENCH_MLP_WARMUP", 30));
+        const int repeat = envInt("MNN_BENCH_MLP_GEMM_REPEAT", envInt("MNN_BENCH_MLP_REPEAT", 120));
+        const int hidden = envInt("MNN_BENCH_MLP_HIDDEN", 3072);
+        const int inter = envInt("MNN_BENCH_MLP_INTER", 8192);
+        std::vector<int> chunks = {2, 3, 4, 6, 8};
+        const char* chunkEnv = ::getenv("MNN_BENCH_DOWN_NCHUNKS");
+        if (chunkEnv != nullptr && chunkEnv[0] != '\0') {
+            chunks.assign(1, envInt("MNN_BENCH_DOWN_NCHUNKS", 2));
+        }
+        bool ok = true;
+        for (int rows = 1; rows <= 8; ++rows) {
+            if (!enabledRow(rows)) {
+                continue;
+            }
+            for (int chunkCount : chunks) {
+                ok = runDownSplitNGemmFloorCase(rows, hidden, inter, chunkCount, warmup, repeat) && ok;
+            }
+        }
         return ok;
     }
 };
@@ -2545,11 +3539,177 @@ public:
     }
 };
 
+// V16 INT8 __dp4a small-M accuracy: ref = V16 off (generic route), candidate = V16 on.
+// Both use the same int4 weight-only op; only the env route differs.
+static bool runV16Dp4aAccuracyCase(const char* name, int rows, int ic, int oc) {
+    constexpr int quantBlock = 64;
+    ScopedEnvVar restoreV16("MNN_CUDA_PIC_INT4_SMALLM_DP4A");
+    ScopedEnvVar restoreV15("MNN_CUDA_PIC_INT4_SMALLM_V15");
+    ScopedEnvVar restoreRows45("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS");
+    ScopedEnvVar restoreRows48("MNN_CUDA_PIC_INT4_ROWS48_CUBLASLT");
+    KVMeta meta;
+    meta.pic_decode_repair_sparse_active = true;
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    auto input = bench.tensor({rows, ic, 1, 1}, Tensor::CAFFE, false);
+    auto refOutput = bench.tensor({rows, oc, 1, 1}, Tensor::CAFFE, false);
+    auto optOutput = bench.tensor({rows, oc, 1, 1}, Tensor::CAFFE, false);
+    if (!input || !refOutput || !optOutput || !writeHalfPattern(input)) {
+        return false;
+    }
+
+    auto op = makeWeightOnlyLinearConvOp(ic, oc, quantBlock);
+    std::vector<Tensor*> refInputs = {input};
+    std::vector<Tensor*> refOutputs = {refOutput};
+    std::vector<Tensor*> optInputs = {input};
+    std::vector<Tensor*> optOutputs = {optOutput};
+    auto refExe = bench.create(refInputs, refOutputs, op->get());
+    auto optExe = bench.create(optInputs, optOutputs, op->get());
+    if (!refExe || !optExe) {
+        MNN_ERROR("V16Dp4a failed to create execution for %s rows=%d\n", name, rows);
+        return false;
+    }
+    if (bench.resize(refExe.get(), refInputs, refOutputs) != NO_ERROR ||
+        bench.resize(optExe.get(), optInputs, optOutputs) != NO_ERROR) {
+        MNN_ERROR("V16Dp4a resize failed for %s rows=%d\n", name, rows);
+        return false;
+    }
+
+    ::setenv("MNN_CUDA_PIC_INT4_SMALLM_DP4A", "0", 1);
+    ::setenv("MNN_CUDA_PIC_INT4_SMALLM_V15", "0", 1);
+    ::setenv("MNN_CUDA_PIC_INT4_ROWS45_CUBLAS", "0", 1);
+    ::setenv("MNN_CUDA_PIC_INT4_ROWS48_CUBLASLT", "0", 1);
+    if (bench.execute(refExe.get(), refInputs, refOutputs) != NO_ERROR) {
+        return false;
+    }
+    ::setenv("MNN_CUDA_PIC_INT4_SMALLM_DP4A", "all", 1);
+    if (bench.execute(optExe.get(), optInputs, optOutputs) != NO_ERROR) {
+        return false;
+    }
+
+    std::vector<float> ref;
+    std::vector<float> opt;
+    if (!readHalfTensor(refOutput, &ref) || !readHalfTensor(optOutput, &opt)) {
+        return false;
+    }
+    char caseName[128];
+    ::snprintf(caseName, sizeof(caseName), "v16_dp4a_%s_rows%d", name, rows);
+    return compareHalfOutputs(caseName, opt, ref, 0.08f, 0.08f);
+}
+
+class CudaSmallMV16Accuracy : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low) {
+            MNN_PRINT("bench_ops/cuda/accuracy/SmallMV16 expects precision=2(fp16); got %d.\n", precision);
+            return false;
+        }
+        if (!requireMemoryLow("bench_ops/cuda/accuracy/SmallMV16")) {
+            return false;
+        }
+        bool ok = true;
+        for (int rows : {4, 6, 8}) {
+            ok = runV16Dp4aAccuracyCase("llama32_3b_gate", rows, 3072, 8192) && ok;
+            ok = runV16Dp4aAccuracyCase("llama32_3b_down", rows, 8192, 3072) && ok;
+            ok = runV16Dp4aAccuracyCase("llama32_3b_q", rows, 3072, 3072) && ok;
+            ok = runV16Dp4aAccuracyCase("qwen3_4b_gate", rows, 2560, 9728) && ok;
+        }
+        return ok;
+    }
+};
+
+// V16 perf: same weight-only op, V16 dp4a route on.
+static bool runV16Dp4aPerfCase(const WeightOnlyConvCase& c) {
+    ScopedEnvVar restoreV16("MNN_CUDA_PIC_INT4_SMALLM_DP4A");
+    KVMeta meta;
+    meta.pic_decode_repair_sparse_active = true;
+    DirectOpBench bench(MNN_FORWARD_CUDA, &meta);
+    if (!bench.valid()) {
+        return false;
+    }
+
+    auto input = bench.tensor({c.rows, c.ic, 1, 1}, Tensor::CAFFE, false);
+    auto output = bench.tensor({c.rows, c.oc, 1, 1}, Tensor::CAFFE, false);
+    if (!input || !output) {
+        return false;
+    }
+
+    auto op = makeWeightOnlyLinearConvOp(c.ic, c.oc, c.quantBlock);
+    std::vector<Tensor*> inputs = {input};
+    std::vector<Tensor*> outputs = {output};
+    auto exe = bench.create(inputs, outputs, op->get());
+    if (!exe) {
+        MNN_ERROR("failed to create V16Dp4a execution for %s rows=%d ic=%d oc=%d\n",
+                  c.name, c.rows, c.ic, c.oc);
+        return false;
+    }
+    if (bench.resize(exe.get(), inputs, outputs) != NO_ERROR) {
+        MNN_ERROR("V16Dp4a onResize failed for %s rows=%d ic=%d oc=%d\n",
+                  c.name, c.rows, c.ic, c.oc);
+        return false;
+    }
+
+    ::setenv("MNN_CUDA_PIC_INT4_SMALLM_DP4A", "all", 1);
+    CudaEventPair timer;
+    float avgMs = 0.0f;
+    auto run = [&]() { return bench.execute(exe.get(), inputs, outputs); };
+    if (!timer.measure(run, c.warmup, c.repeat, &avgMs)) {
+        return false;
+    }
+    MNN_PRINT("[bench_ops/cuda/perf/SmallMV16] %-18s rows=%d ic=%d oc=%d qblock=%d avg=%.4f ms\n",
+              c.name, c.rows, c.ic, c.oc, c.quantBlock, avgMs);
+    ::fflush(stdout);
+    return true;
+}
+
+class CudaSmallMV16Perf : public MNNTestCase {
+public:
+    virtual bool run(int precision) override {
+        if (precision != BackendConfig::Precision_Low && precision != BackendConfig::Precision_Normal) {
+            MNN_PRINT("bench_ops/cuda/perf/SmallMV16 expects precision=2(fp16) or 0(mix); got %d.\n", precision);
+            return false;
+        }
+        if (!requireMemoryLow("bench_ops/cuda/perf/SmallMV16")) {
+            return false;
+        }
+        std::vector<WeightOnlyConvCase> cases;
+        const int warmup = envInt("MNN_BENCH_WEIGHT_ONLY_WARMUP", 20);
+        const int repeat = envInt("MNN_BENCH_WEIGHT_ONLY_REPEAT", 100);
+        const int hidden = envInt("MNN_BENCH_WEIGHT_ONLY_HIDDEN", 2048);
+        const int inter = envInt("MNN_BENCH_WEIGHT_ONLY_INTER", 8192);
+        const int kv = envInt("MNN_BENCH_WEIGHT_ONLY_KV", hidden == 3072 ? 1024 : 512);
+        for (int rows : {4, 6, 8}) {
+            cases.push_back({"hidden_to_inter", rows, hidden, inter, 64, warmup, repeat});
+            cases.push_back({"hidden_to_gateup_concat", rows, hidden, inter * 2, 64, warmup, repeat});
+            cases.push_back({"inter_to_hidden", rows, inter, hidden, 64, warmup, repeat});
+            cases.push_back({"hidden_to_hidden", rows, hidden, hidden, 64, warmup, repeat});
+            cases.push_back({"hidden_to_kv", rows, hidden, kv, 64, warmup, repeat});
+            cases.push_back({"hidden_to_qkv_concat", rows, hidden, hidden + 2 * kv, 64, warmup, repeat});
+        }
+        bool ok = true;
+        for (const auto& c : cases) {
+            if (enabledByFilter(c.name) && enabledRow(c.rows)) {
+                ok = runV16Dp4aPerfCase(c) && ok;
+            }
+        }
+        return ok;
+    }
+};
+
 } // namespace
 
 MNNTestSuiteRegister(CudaRows45CublasAccuracy, "bench_ops/cuda/accuracy/Rows45Cublas");
+MNNTestSuiteRegister(CudaSmallMV16Accuracy, "bench_ops/cuda/accuracy/SmallMV16");
+MNNTestSuiteRegister(CudaPicFusedSiluDownAccuracy, "bench_ops/cuda/accuracy/PicFusedSiluDown");
 MNNTestSuiteRegister(CudaWeightOnlyConvPerf, "bench_ops/cuda/perf/WeightOnlyConv");
+MNNTestSuiteRegister(CudaSmallMV16Perf, "bench_ops/cuda/perf/SmallMV16");
 MNNTestSuiteRegister(CudaDecodeRepairMlpGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairMlpGemmFloor");
+MNNTestSuiteRegister(CudaDecodeRepairMlpTiledGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairMlpTiledGemmFloor");
+MNNTestSuiteRegister(CudaDecodeRepairDownTransposedLayoutFloorPerf, "bench_ops/cuda/perf/DecodeRepairDownTransposedLayoutFloor");
+MNNTestSuiteRegister(CudaDecodeRepairDownSplitNGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairDownSplitNGemmFloor");
 MNNTestSuiteRegister(CudaDecodeRepairGateUpBatchedGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairGateUpBatchedGemmFloor");
 MNNTestSuiteRegister(CudaDecodeRepairGateUpParallelGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairGateUpParallelGemmFloor");
 MNNTestSuiteRegister(CudaDecodeRepairQkvParallelGemmFloorPerf, "bench_ops/cuda/perf/DecodeRepairQkvParallelGemmFloor");
@@ -2557,6 +3717,7 @@ MNNTestSuiteRegister(CudaDecodeRepairQkvParallelGemmFloorPerf, "bench_ops/cuda/p
 MNNTestSuiteRegister(CudaDecodeRepairMlpGemmLtFloorPerf, "bench_ops/cuda/perf/DecodeRepairMlpGemmLtFloor");
 #endif
 MNNTestSuiteRegister(CudaPicDecodeMlpPerf, "bench_ops/cuda/perf/PicDecodeMlp");
+MNNTestSuiteRegister(CudaPicFusedSiluDownPerf, "bench_ops/cuda/perf/PicFusedSiluDown");
 MNNTestSuiteRegister(CudaLinearConvertChainPerf, "bench_ops/cuda/perf/LinearConvertChain");
 
 #endif // MNN_SUPPORT_TRANSFORMER_FUSE

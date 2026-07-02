@@ -596,7 +596,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         return INVALID_VALUE;
     }
     if (mMeta != nullptr && mMeta->request_capacity <= 0 && !mMeta->request_active) {
-        mMeta->beginRequest(std::max(newKvLen, queryLen));
+        mMeta->beginRequest(std::max(std::max(newKvLen, queryLen), mMeta->max_tokens));
     }
 
     int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);

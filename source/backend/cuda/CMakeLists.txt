@@ -110,6 +110,13 @@ IF (MNN_LOW_MEMORY)
     add_definitions(-DMNN_LOW_MEMORY)
 ENDIF()
 
+IF (MNN_BUILD_TEST)
+    # PicBench* Extra kernels are direct-op experiments for test/bench_ops/cuda.
+    # Keep them out of production/export builds unless tests are explicitly enabled.
+    add_definitions(-DMNN_CUDA_BENCH_OPS)
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -DMNN_CUDA_BENCH_OPS")
+ENDIF()
+
 
 include(FetchContent)
 

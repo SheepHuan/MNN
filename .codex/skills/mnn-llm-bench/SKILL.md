@@ -165,6 +165,7 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 - 普通导出目录来自 `.cache/mnn-llm-export/`，使用 `$MNN_ARTIFACT_ROOT/bin/llm_demo`。
 - PIC / PagedAttention 导出目录来自 `.cache/weight/`，使用 `$MNN_ARTIFACT_ROOT/bin/pic_llm_demo`。
 - 不要把 `.cache/weight/` 下的 PIC 模型复制成 normal view 来跑普通 `llm_demo`；这不能代表普通导出。
+- `dualgraph` 是 PIC/PagedAttention 专用运行模型，只能来自 `.cache/weight/<model>/` 并使用 `pic_llm_demo` / `pic_llm_bench` / `pic_server`。普通 `true normal` baseline 必须使用 `.cache/mnn-llm-export/<model>/` 的普通 normal 计算图；不要用 `llm_bench` / `llm_demo` 跑 dualgraph 后把结果写成 normal LLM。
 - 两边使用同一个 prompt 文件、相同 backend / precision / memory / sampler 配置，建议 greedy：`sampler_type=greedy`、`temperature=0.0`、`top_k=1`、`top_p=1.0`。
 - 从各自模型目录执行 demo，确保程序使用相对路径访问 `llm.mnn`、weight、tokenizer 和 `tmp/mnn_cachefile.bin`。
 - 日志至少保存生成文本、退出码、backend fallback 相关行，以及 `[CUDAExecution]` / `CUDAPagedAttention` / `CPUPagedAttention` 等 execution class 线索。

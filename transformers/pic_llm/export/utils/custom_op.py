@@ -93,7 +93,7 @@ class PicGateUpWeightOnly(torch.nn.Module):
 
 class PicGateUpSiluWeightOnlyOp(torch.autograd.Function):
     @staticmethod
-    def symbolic(g, input, in_features, out_features, gate_name, up_name, name, split_fusion):
+    def symbolic(g, input, in_features, out_features, gate_name, up_name, name, split_fusion, silu_nhwc_down_fusion):
         kwargs = {
             "in_features_i": in_features,
             "out_features_i": out_features,
@@ -101,6 +101,7 @@ class PicGateUpSiluWeightOnlyOp(torch.autograd.Function):
             "up_name_s": up_name,
             "name_s": name,
             "split_fusion_i": int(split_fusion),
+            "silu_nhwc_down_fusion_i": int(silu_nhwc_down_fusion),
         }
         from torch.onnx.symbolic_helper import _get_tensor_sizes
         out_sizes = _get_tensor_sizes(input)[:-1] + [out_features]
@@ -108,12 +109,13 @@ class PicGateUpSiluWeightOnlyOp(torch.autograd.Function):
         return g.op("LlmExporter::PicGateUpSiluWeightOnly", input, **kwargs).setType(output_type)
 
     @staticmethod
-    def forward(ctx, input, in_features, out_features, gate_name, up_name, name, split_fusion):
+    def forward(ctx, input, in_features, out_features, gate_name, up_name, name, split_fusion, silu_nhwc_down_fusion):
         out_shape = list(input.shape)[:-1] + [out_features]
         return input.new_zeros(out_shape)
 
 class PicGateUpSiluWeightOnly(torch.nn.Module):
-    def __init__(self, in_features, out_features, gate_name, up_name, name, split_fusion=False):
+    def __init__(self, in_features, out_features, gate_name, up_name, name, split_fusion=False,
+                 silu_nhwc_down_fusion=False):
         super(PicGateUpSiluWeightOnly, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -121,10 +123,87 @@ class PicGateUpSiluWeightOnly(torch.nn.Module):
         self.up_name = up_name
         self.name = name
         self.split_fusion = bool(split_fusion)
+        self.silu_nhwc_down_fusion = bool(silu_nhwc_down_fusion)
 
     def forward(self, x):
         return PicGateUpSiluWeightOnlyOp.apply(
-            x, self.in_features, self.out_features, self.gate_name, self.up_name, self.name, self.split_fusion)
+            x, self.in_features, self.out_features, self.gate_name, self.up_name, self.name,
+            self.split_fusion, self.silu_nhwc_down_fusion)
+
+class PicAdrenoGateUpSiluWeightOnlyOp(torch.autograd.Function):
+    @staticmethod
+    def symbolic(g, input, in_features, out_features, gate_name, up_name, name, split_fusion, silu_nhwc_down_fusion):
+        kwargs = {
+            "in_features_i": in_features,
+            "out_features_i": out_features,
+            "gate_name_s": gate_name,
+            "up_name_s": up_name,
+            "name_s": name,
+            "split_fusion_i": int(split_fusion),
+            "silu_nhwc_down_fusion_i": int(silu_nhwc_down_fusion),
+        }
+        from torch.onnx.symbolic_helper import _get_tensor_sizes
+        out_sizes = _get_tensor_sizes(input)[:-1] + [out_features]
+        output_type = input.type().with_sizes(out_sizes)
+        return g.op("LlmExporter::PicAdrenoGateUpSiluWeightOnly", input, **kwargs).setType(output_type)
+
+    @staticmethod
+    def forward(ctx, input, in_features, out_features, gate_name, up_name, name, split_fusion, silu_nhwc_down_fusion):
+        out_shape = list(input.shape)[:-1] + [out_features]
+        return input.new_zeros(out_shape)
+
+class PicAdrenoGateUpSiluWeightOnly(torch.nn.Module):
+    def __init__(self, in_features, out_features, gate_name, up_name, name, split_fusion=False,
+                 silu_nhwc_down_fusion=False):
+        super(PicAdrenoGateUpSiluWeightOnly, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.gate_name = gate_name
+        self.up_name = up_name
+        self.name = name
+        self.split_fusion = bool(split_fusion)
+        self.silu_nhwc_down_fusion = bool(silu_nhwc_down_fusion)
+
+    def forward(self, x):
+        return PicAdrenoGateUpSiluWeightOnlyOp.apply(
+            x, self.in_features, self.out_features, self.gate_name, self.up_name, self.name,
+            self.split_fusion, self.silu_nhwc_down_fusion)
+
+class PicAdrenoTinyMlpWeightOnlyOp(torch.autograd.Function):
+    @staticmethod
+    def symbolic(g, input, in_features, inter_features, gate_name, up_name, down_name, name):
+        kwargs = {
+            "in_features_i": in_features,
+            "inter_features_i": inter_features,
+            "gate_name_s": gate_name,
+            "up_name_s": up_name,
+            "down_name_s": down_name,
+            "name_s": name,
+        }
+        from torch.onnx.symbolic_helper import _get_tensor_sizes
+        out_sizes = _get_tensor_sizes(input)[:-1] + [in_features]
+        output_type = input.type().with_sizes(out_sizes)
+        return g.op("LlmExporter::PicAdrenoTinyMlpWeightOnly", input, **kwargs).setType(output_type)
+
+    @staticmethod
+    def forward(ctx, input, in_features, inter_features, gate_name, up_name, down_name, name):
+        out_shape = list(input.shape)[:-1] + [in_features]
+        return input.new_zeros(out_shape)
+
+class PicAdrenoTinyMlpWeightOnly(torch.nn.Module):
+    def __init__(self, in_features, inter_features, gate_name, up_name, down_name, name):
+        super(PicAdrenoTinyMlpWeightOnly, self).__init__()
+        self.in_features = in_features
+        self.inter_features = inter_features
+        self.gate_name = gate_name
+        self.up_name = up_name
+        self.down_name = down_name
+        self.name = name
+
+    def forward(self, x):
+        return PicAdrenoTinyMlpWeightOnlyOp.apply(
+            x, self.in_features, self.inter_features, self.gate_name, self.up_name,
+            self.down_name, self.name)
 
 class FusedAttentionOp(torch.autograd.Function):
     @staticmethod

@@ -82,6 +82,9 @@ extern const char* sparse_flash_row_bench;
 extern const char* cast;
 extern const char* layernorm;
 #ifndef MNN_OPENCL_BUFFER_CLOSED
+extern const char* paged_decode_attention_buf;
+#endif
+#ifndef MNN_OPENCL_BUFFER_CLOSED
 extern const char* paged_attention_buf;
 #endif
 extern const char* sparse_flash_bench;
@@ -264,6 +267,9 @@ const std::map<std::string, const char*> OpenCLProgramMap =
   { "cast", cast },
   { "layernorm", layernorm },
 #ifndef MNN_OPENCL_BUFFER_CLOSED
+  { "paged_decode_attention_buf", paged_decode_attention_buf },
+#endif
+#ifndef MNN_OPENCL_BUFFER_CLOSED
   { "paged_attention_buf", paged_attention_buf },
 #endif
   { "sparse_flash_bench", sparse_flash_bench },
@@ -401,6 +407,7 @@ const std::map<std::string, std::string> OpenCLProgramMd5Map =
   { "sparse_flash_row_bench", "31898a8dbc64ad238f390e229f89d4ed" },
   { "cast", "129055345fd1d576eb398635c81701ab" },
   { "layernorm", "bd457b4bd4f3c57818bc17e073b09e74" },
+  { "paged_decode_attention_buf", "2e605fafce9c225a51c732fc15b310b6" },
   { "paged_attention_buf", "51f1ebfc441fd2925e34d14d42344d87" },
   { "sparse_flash_bench", "ced1a2ede93774b1602ef63df6bf3f50" },
   { "gemm_conv1x1_buf", "fbac2b24184e50d39702f4fdb14e8320" },
@@ -414,7 +421,7 @@ const std::map<std::string, std::string> OpenCLProgramMd5Map =
   { "conv_2d_c1_subgroup_buf", "04a28a410c79fa6917827d16e189f322" },
   { "binary_buf", "6c5ee786c70aa485d9b49368517296e3" },
   { "copy_buffer_to_image2d", "a72ed287711f9bb78a2cfa9726a1fa92" },
-  { "gemv_conv1x1_buf", "6c6736be24aca0af918806890ecab058" },
+  { "gemv_conv1x1_buf", "ce922ff29177aa32791c8fc173867eab" },
   { "conv_2d", "0048eb0c6a571925e6f3e1bd1d314d09" },
   { "buffer_convert_quant", "ce4ac18b78e746f7ed338f35e5237dbd" },
   { "grid_sample", "0e08897ea35a57c04b834b2a83be8383" },
@@ -433,7 +440,7 @@ const std::map<std::string, std::string> OpenCLProgramMd5Map =
   { "linear_attention_buf", "c6121abc7fd73edace67153e5768845f" },
   { "topkv2_buf", "df1be3cf447e7cbf9a0754dc66e7847b" },
   { "unary_buf", "76131af4513fb2e40e62005048f4c4f3" },
-  { "attention_buf", "61c60fb9e1d80e61d0d62e6232980662" },
+  { "attention_buf", "fc9bef1ce67a3df8818d2b3bba58d13c" },
   { "winogradTransform_subgroup_buf", "904f2a0f1a062378418c6c90133ed5e0" },
   { "pooling", "900d1388836badea36a7e06ad7763b0d" },
   { "conv_2d_int", "985925b9f24d85fa38df2df9b01fafc5" },

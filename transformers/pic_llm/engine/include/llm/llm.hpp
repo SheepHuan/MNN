@@ -250,6 +250,7 @@ protected:
     std::shared_ptr<Express::Executor::RuntimeManager> mRuntimeManager, mProcessorRuntimeManager;
     std::shared_ptr<Express::Executor::RuntimeManager> mCacheBlendScoreRuntimeManager;
     std::shared_ptr<Express::Module> mModule;
+    std::shared_ptr<Express::Module> mDecodeModule;
     /**
      key: <seq_len, all_logists>
      value : module
@@ -257,6 +258,7 @@ protected:
      */
     const int mPrefillKey = 100;
     std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> mModulePool;
+    std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> mDecodeModulePool;
     std::map<int, std::shared_ptr<Express::Module>> mCacheBlendScoreModulePool;
     const Express::Module* mBaseModule = nullptr;
     Express::VARP inputsEmbeds, attentionMask, positionIds;
@@ -282,10 +284,13 @@ private:
     int mDraftLength = 4;
     std::shared_ptr<GenerationParams> mGenerateParam;
     bool mAsync = true;
+    bool mDecodeForwardActive = false;
     int mBlockSize = 0;
     std::vector<int> mValidBlockSize;
-    bool beginPagedRequestIfNeeded();
+    int pagedRequestCapacity(int pendingInputTokens = 0, int maxNewTokens = -1) const;
+    bool beginPagedRequestIfNeeded(int pendingInputTokens = 0, int maxNewTokens = -1);
     void finishPagedRequestIfNeeded();
+    void clearModuleForwardCaches();
     std::shared_ptr<Express::Executor::RuntimeManager> createRuntimeManagerForCurrentConfig();
     std::shared_ptr<Express::Module> cloneModuleWithRuntime(const Express::Module* module);
     std::shared_ptr<Express::Module> getCacheBlendScoreModule(int scoreLayerIdx);

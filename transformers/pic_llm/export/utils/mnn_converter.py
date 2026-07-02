@@ -11,6 +11,11 @@ from tqdm import tqdm
 from .spinner import spinner_run
 from .gptq import GPTQ
 from .lora import LoRA
+from .pic_export_contract import (
+    normalize_pic_export_args,
+    pic_decode_fusion_backend,
+    pic_decode_fusion_family,
+)
 
 EXPORT_LOG = '.export.log'
 
@@ -19,6 +24,7 @@ class MNNConverter:
         self.weight_ops = weight_ops
         self.exporter = exporter
         self.args = exporter.args
+        normalize_pic_export_args(self.args)
         self.mnn_weight_offset = 0
         if os.path.exists(self.args.mnnconvert):
             self.mnnconvert = self.args.mnnconvert
@@ -158,9 +164,7 @@ class MNNConverter:
             self.json2mnn(mnn_json, self.mnn_model_path)
             self.removeDupOps(self.mnn_model_path)
             self.mnn2json(self.mnn_model_path, mnn_json)
-            if self.rewrite_attention_param_fallbacks(mnn_json) > 0:
-                self.json2mnn(mnn_json, self.mnn_model_path)
-                self.mnn2json(self.mnn_model_path, mnn_json)
+            self.repair_attention_param_fallbacks(mnn_json)
             if self.args.gptq_path is not None:
                 self.apply_gptq(mnn_json)
             if self.args.lora_path is not None and self.args.lora_split:
@@ -436,6 +440,18 @@ class MNNConverter:
                 json.dump(graph, f, ensure_ascii=False, indent=4)
         return changed
 
+    def repair_attention_param_fallbacks(self, json_path, max_rounds=3):
+        for _ in range(max_rounds):
+            changed = self.rewrite_attention_param_fallbacks(json_path)
+            if changed <= 0:
+                return 0
+            self.json2mnn(json_path, self.mnn_model_path)
+            self.mnn2json(self.mnn_model_path, json_path)
+        changed = self.rewrite_attention_param_fallbacks(json_path)
+        if changed > 0:
+            self.json2mnn(json_path, self.mnn_model_path)
+        return changed
+
     def rebuild_op(self, op, graph):
         if self._is_attention_param_fallback(op):
             op_type = self._infer_attention_param_fallback_type(op)
@@ -453,8 +469,10 @@ class MNNConverter:
             return self.rebuild_linear_attnention(op, graph)
         if op_type == 'PicGateUpWeightOnly':
             return self.rebuild_pic_gate_up_weight_only(op, graph)
-        if op_type == 'PicGateUpSiluWeightOnly':
+        if op_type in ('PicGateUpSiluWeightOnly', 'PicAdrenoGateUpSiluWeightOnly'):
             return self.rebuild_pic_gate_up_silu_weight_only(op, graph)
+        if op_type == 'PicAdrenoTinyMlpWeightOnly':
+            return self.rebuild_pic_adreno_tiny_mlp_weight_only(op, graph)
         if op_type == 'PicSiluMul':
             return self.rebuild_pic_silu_mul(op, graph)
         if op_type == "LayerNorm":
@@ -476,6 +494,50 @@ class MNNConverter:
                 if 'f' in attr:
                     return attr.get('f')
         return default
+
+    def _pic_decode_fusion_backend(self):
+        return pic_decode_fusion_backend(self.args)
+
+    def _pic_decode_fusion_family(self):
+        return pic_decode_fusion_family(self.args)
+
+    def _is_pic_adreno_decode_backend(self):
+        return self._pic_decode_fusion_family() == 'adreno'
+
+    def _is_pic_cuda_decode_backend(self):
+        return self._pic_decode_fusion_family() == 'cuda'
+
+    def _is_pic_native_decode_backend(self):
+        return self._pic_decode_fusion_family() in ('adreno', 'cuda')
+
+    def _require_pic_adreno_decode_backend(self, op_type):
+        if not self._is_pic_adreno_decode_backend():
+            raise RuntimeError(
+                f'{op_type} is an Adreno/Rhino PIC decode fusion export op, '
+                f'but --pic_decode_fusion_backend={self._pic_decode_fusion_backend()}. '
+                'Re-export with --pic_export_device rhinopi or disable the Adreno gate/up fusion flags.')
+
+    def _pic_adreno_silu_nhwc_op_type(self):
+        return 'PicAdrenoSiluMulNhwc'
+
+    def _pic_adreno_gate_up_silu_op_type(self):
+        return 'PicAdrenoGateUpSiluWeightOnly'
+
+    def _pic_adreno_linear_nhwc_op_type(self):
+        return 'PicAdrenoLinearNhwcWeightOnly'
+
+    def _pic_linear_nhwc_op_type(self):
+        if self._is_pic_adreno_decode_backend():
+            return 'PicAdrenoLinearNhwcWeightOnly'
+        return 'PicLinearNhwcWeightOnly'
+
+    def _pic_adreno_tiny_mlp_op_type(self):
+        return 'PicAdrenoTinyMlpWeightOnly'
+
+    def _pic_packed_silu_op_type(self):
+        if self._is_pic_adreno_decode_backend():
+            return 'PicAdrenoPackedSiluMul'
+        return 'PicPackedSiluMul'
 
     def _linear_quant_settings(self, name, is_lm=False):
         quant_bit = self.args.quant_bit
@@ -587,14 +649,26 @@ class MNNConverter:
             {"key": "has_bias", "i": int(bool(plan['has_bias']))},
         ]
 
+    def _pic_tiny_mlp_conv_attrs(self, prefix, name, ic, oc, plan):
+        return self._pic_gate_up_conv_attrs(prefix, name, ic, oc, plan)
+
     def _use_pic_nhwc_linear_fusion(self, name, is_lm, ic, oc, plan):
-        if not bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)):
+        if not self._is_pic_native_decode_backend():
             return False
         if is_lm or plan['quant_bit'] != 4:
             return False
         if ic % 8 != 0 or oc % 8 != 0:
             return False
         if not name.startswith('/layers.'):
+            return False
+        force_silu_nhwc_down = (
+            self._is_pic_adreno_decode_backend() and
+            bool(getattr(self.args, 'pic_decode_silu_nhwc_down_fusion', False)) and
+            '/mlp/down_proj/' in name
+        )
+        if force_silu_nhwc_down:
+            return True
+        if not bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)):
             return False
         scope = getattr(self.args, 'pic_decode_nhwc_linear_scope', 'all')
         if scope == 'all':
@@ -614,6 +688,8 @@ class MNNConverter:
         return False
 
     def _use_pic_nhwc_gateup_packed_fusion(self, name, ic, oc, plan):
+        if not self._is_pic_native_decode_backend():
+            return False
         if not bool(getattr(self.args, 'pic_decode_nhwc_linear_fusion', False)):
             return False
         if plan is None or plan['quant_bit'] != 4:
@@ -692,8 +768,9 @@ class MNNConverter:
         if len(origin_outputs) != 2:
             raise RuntimeError(f'PicGateUpWeightOnly expects two outputs, got {len(origin_outputs)}')
 
-        direct_fusion = bool(int(self._attr_value(op, 'direct_fusion', 0))) or \
-            bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False))
+        direct_fusion = self._is_pic_native_decode_backend() and (
+            bool(int(self._attr_value(op, 'direct_fusion', 0))) or
+            bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False)))
         concat_plan = None if direct_fusion else self._pic_gate_up_concat_plan(gate_name, up_name, ic, oc)
         if concat_plan is not None:
             pre_reshape_name = f'{name}/pre_reshape'
@@ -943,23 +1020,98 @@ class MNNConverter:
         ]
 
     def rebuild_pic_gate_up_silu_weight_only(self, op, graph):
-        name = self._attr_value(op, 'name', 'PicGateUpSiluWeightOnly')
+        op_type = op.get('main', {}).get('type', 'PicGateUpSiluWeightOnly')
+        name = self._attr_value(op, 'name', op_type)
         gate_name = self._attr_value(op, 'gate_name')
         up_name = self._attr_value(op, 'up_name')
         ic = int(self._attr_value(op, 'in_features', 0))
         oc = int(self._attr_value(op, 'out_features', 0))
         if not gate_name or not up_name or ic <= 0 or oc <= 0:
-            raise RuntimeError(f'Invalid PicGateUpSiluWeightOnly attrs: {op}')
+            raise RuntimeError(f'Invalid {op_type} attrs: {op}')
 
         origin_input = op['inputIndexes']
         origin_outputs = op['outputIndexes']
         if len(origin_outputs) != 1:
-            raise RuntimeError(f'PicGateUpSiluWeightOnly expects one output, got {len(origin_outputs)}')
+            raise RuntimeError(f'{op_type} expects one output, got {len(origin_outputs)}')
 
-        split_fusion = bool(int(self._attr_value(op, 'split_fusion', 0))) or \
-            bool(getattr(self.args, 'pic_decode_gateup_split_fusion', False))
-        direct_fusion = bool(int(self._attr_value(op, 'direct_fusion', 0))) or \
-            bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False))
+        is_adreno_op = op_type == 'PicAdrenoGateUpSiluWeightOnly'
+        if is_adreno_op:
+            self._require_pic_adreno_decode_backend(op_type)
+        split_fusion = self._is_pic_native_decode_backend() and (
+            bool(int(self._attr_value(op, 'split_fusion', 0))) or
+            bool(getattr(self.args, 'pic_decode_gateup_split_fusion', False)))
+        direct_fusion = self._is_pic_native_decode_backend() and (
+            bool(int(self._attr_value(op, 'direct_fusion', 0))) or
+            bool(getattr(self.args, 'pic_decode_gateup_direct_fusion', False)))
+        silu_nhwc_down_fusion = self._is_pic_adreno_decode_backend() and (
+            bool(int(self._attr_value(op, 'silu_nhwc_down_fusion', 0))) or
+            bool(getattr(self.args, 'pic_decode_silu_nhwc_down_fusion', False)))
+        silu_nhwc_op_type = self._pic_adreno_silu_nhwc_op_type() if is_adreno_op else 'PicSiluMulNhwc'
+        gate_up_silu_op_type = self._pic_adreno_gate_up_silu_op_type() if is_adreno_op else 'PicGateUpSiluWeightOnly'
+        if silu_nhwc_down_fusion:
+            gate_plan = self._linear_quant_plan(gate_name, ic, oc)
+            up_plan = self._linear_quant_plan(up_name, ic, oc)
+
+            pre_reshape_name = f'{name}/pre_reshape'
+            pre_convert_name = f'{name}/pre_convert'
+            gate_conv_name = f'{name}/gate_conv'
+            up_conv_name = f'{name}/up_conv'
+            silu_nhwc_name = f'{name}/silu_nhwc'
+
+            pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+            pre_convert_output = self.build_tensor(graph, pre_convert_name)
+            gate_conv_output = self.build_tensor(graph, gate_conv_name)
+            up_conv_output = self.build_tensor(graph, up_conv_name)
+
+            pre_reshape = {
+                "name": pre_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": origin_input,
+                "outputIndexes": pre_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [-1, ic, 1, 1],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            pre_convert = {
+                "name": pre_convert_name,
+                "inputIndexes": pre_reshape_output,
+                "outputIndexes": pre_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NCHW",
+                    "dest": "NC4HW4"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            gate_conv = self._linear_conv_op_from_plan(gate_conv_name, pre_convert_output,
+                                                       gate_conv_output, ic, oc, gate_plan)
+            up_conv = self._linear_conv_op_from_plan(up_conv_name, pre_convert_output,
+                                                     up_conv_output, ic, oc, up_plan)
+            silu_nhwc = {
+                "name": silu_nhwc_name,
+                "inputIndexes": gate_conv_output + up_conv_output,
+                "outputIndexes": origin_outputs,
+                "type": "Extra",
+                "main_type": "Extra",
+                "main": {
+                    "type": silu_nhwc_op_type,
+                    "engine": "MNN",
+                    "attr": [
+                        {"key": "name", "s": silu_nhwc_name},
+                        {"key": "out_features", "i": oc}
+                    ]
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            return [
+                pre_reshape, pre_convert,
+                gate_conv, up_conv,
+                silu_nhwc
+            ]
         if direct_fusion:
             gate_plan = self._linear_quant_plan(gate_name, ic, oc)
             up_plan = self._linear_quant_plan(up_name, ic, oc)
@@ -1010,7 +1162,7 @@ class MNNConverter:
                 "inputIndexes": pre_convert_output,
                 "main_type": "Extra",
                 "main": {
-                    "type": "PicGateUpSiluWeightOnly",
+                    "type": gate_up_silu_op_type,
                     "engine": "MNN",
                     "attr": attrs
                 },
@@ -1220,7 +1372,7 @@ class MNNConverter:
                 "type": "Extra",
                 "main_type": "Extra",
                 "main": {
-                    "type": "PicLinearNhwcWeightOnly",
+                    "type": self._pic_linear_nhwc_op_type(),
                     "engine": "MNN",
                     "attr": self._pic_linear_conv_attrs(concat_linear_name, ic, oc * 2, concat_plan)
                 },
@@ -1233,7 +1385,7 @@ class MNNConverter:
                 "type": "Extra",
                 "main_type": "Extra",
                 "main": {
-                    "type": "PicPackedSiluMul",
+                    "type": self._pic_packed_silu_op_type(),
                     "engine": "MNN",
                     "attr": [
                         {"key": "name", "s": packed_silu_name},
@@ -1248,11 +1400,15 @@ class MNNConverter:
         pre_reshape_name = f'{name}/pre_reshape'
         pre_convert_name = f'{name}/pre_convert'
         concat_conv_name = f'{name}/concat_conv'
+        packed_post_convert_name = f'{name}/packed_concat_post_convert'
+        packed_reshape_name = f'{name}/packed_reshape'
         packed_silu_name = f'{name}/packed_silu'
 
         pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
         pre_convert_output = self.build_tensor(graph, pre_convert_name)
         concat_conv_output = self.build_tensor(graph, concat_conv_name)
+        packed_post_convert_output = self.build_tensor(graph, packed_post_convert_name)
+        packed_reshape_output = self.build_tensor(graph, packed_reshape_name)
 
         pre_reshape = {
             "name": pre_reshape_name,
@@ -1314,26 +1470,165 @@ class MNNConverter:
             },
             "defaultDimentionFormat": "NHWC"
         }
+        packed_silu_input = concat_conv_output
+        packed_silu_extra_ops = []
+        packed_silu_attrs = [
+            {"key": "name", "s": packed_silu_name},
+            {"key": "out_features", "i": oc},
+        ]
+        if self._is_pic_adreno_decode_backend():
+            packed_silu_attrs.append({"key": "packed_input_nc4", "i": 1})
+        else:
+            packed_post_convert = {
+                "name": packed_post_convert_name,
+                "inputIndexes": concat_conv_output,
+                "outputIndexes": packed_post_convert_output,
+                "type": "ConvertTensor",
+                "main_type": "TensorConvertInfo",
+                "main": {
+                    "source": "NC4HW4",
+                    "dest": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            packed_reshape = {
+                "name": packed_reshape_name,
+                "type": "Reshape",
+                "inputIndexes": packed_post_convert_output,
+                "outputIndexes": packed_reshape_output,
+                "main_type": "Reshape",
+                "main": {
+                    "dims": [1, -1, oc * 2],
+                    "dimType": "NCHW"
+                },
+                "defaultDimentionFormat": "NHWC"
+            }
+            packed_silu_input = packed_reshape_output
+            packed_silu_extra_ops = [packed_post_convert, packed_reshape]
         packed_silu = {
             "name": packed_silu_name,
-            "inputIndexes": concat_conv_output,
+            "inputIndexes": packed_silu_input,
             "outputIndexes": origin_outputs,
             "type": "Extra",
             "main_type": "Extra",
             "main": {
-                "type": "PicPackedSiluMul",
+                "type": self._pic_packed_silu_op_type(),
                 "engine": "MNN",
-                "attr": [
-                    {"key": "name", "s": packed_silu_name},
-                    {"key": "out_features", "i": oc},
-                    {"key": "packed_input_nc4", "i": 1}
-                ]
+                "attr": packed_silu_attrs
             },
             "defaultDimentionFormat": op.get('defaultDimentionFormat', 'NHWC')
         }
         return [
-            pre_reshape, pre_convert, concat_conv, packed_silu
+            pre_reshape, pre_convert, concat_conv, *packed_silu_extra_ops, packed_silu
         ]
+
+    def rebuild_pic_adreno_tiny_mlp_weight_only(self, op, graph):
+        self._require_pic_adreno_decode_backend('PicAdrenoTinyMlpWeightOnly')
+        name = self._attr_value(op, 'name', 'PicAdrenoTinyMlpWeightOnly')
+        gate_name = self._attr_value(op, 'gate_name')
+        up_name = self._attr_value(op, 'up_name')
+        down_name = self._attr_value(op, 'down_name')
+        ic = int(self._attr_value(op, 'in_features', 0))
+        inter = int(self._attr_value(op, 'inter_features', 0))
+        if not gate_name or not up_name or not down_name or ic <= 0 or inter <= 0:
+            raise RuntimeError(f'Invalid PicAdrenoTinyMlpWeightOnly attrs: {op}')
+
+        gate_plan = self._linear_quant_plan(gate_name, ic, inter)
+        up_plan = self._linear_quant_plan(up_name, ic, inter)
+        down_plan = self._linear_quant_plan(down_name, inter, ic)
+        for plan_name, plan in (('gate', gate_plan), ('up', up_plan), ('down', down_plan)):
+            if plan['quant_bit'] != 4:
+                raise RuntimeError(
+                    f'PicAdrenoTinyMlpWeightOnly only supports int4 weight-only, '
+                    f'got {plan_name} quant_bit={plan["quant_bit"]}')
+
+        origin_input = op['inputIndexes']
+        origin_output = op['outputIndexes']
+        if len(origin_output) != 1:
+            raise RuntimeError(f'PicAdrenoTinyMlpWeightOnly expects one output, got {len(origin_output)}')
+
+        pre_reshape_name = f'{name}/pre_reshape'
+        pre_convert_name = f'{name}/pre_convert'
+        fused_name = f'{name}/fused'
+        post_convert_name = f'{name}/post_convert'
+        post_reshape_name = f'{name}/post_reshape'
+
+        pre_reshape_output = self.build_tensor(graph, pre_reshape_name)
+        pre_convert_output = self.build_tensor(graph, pre_convert_name)
+        fused_output = self.build_tensor(graph, fused_name)
+        post_convert_output = self.build_tensor(graph, post_convert_name)
+
+        pre_reshape = {
+            "name": pre_reshape_name,
+            "type": "Reshape",
+            "inputIndexes": origin_input,
+            "outputIndexes": pre_reshape_output,
+            "main_type": "Reshape",
+            "main": {
+                "dims": [-1, ic, 1, 1],
+                "dimType": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        pre_convert = {
+            "name": pre_convert_name,
+            "inputIndexes": pre_reshape_output,
+            "outputIndexes": pre_convert_output,
+            "type": "ConvertTensor",
+            "main_type": "TensorConvertInfo",
+            "main": {
+                "source": "NCHW",
+                "dest": "NC4HW4"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        attrs = [
+            {"key": "name", "s": fused_name},
+            {"key": "in_features", "i": int(ic)},
+            {"key": "inter_features", "i": int(inter)},
+            {"key": "out_features", "i": int(ic)},
+        ]
+        attrs += self._pic_tiny_mlp_conv_attrs('gate', gate_name, ic, inter, gate_plan)
+        attrs += self._pic_tiny_mlp_conv_attrs('up', up_name, ic, inter, up_plan)
+        attrs += self._pic_tiny_mlp_conv_attrs('down', down_name, inter, ic, down_plan)
+        fused = {
+            "name": fused_name,
+            "inputIndexes": pre_convert_output,
+            "outputIndexes": fused_output,
+            "type": "Extra",
+            "main_type": "Extra",
+            "main": {
+                "type": self._pic_adreno_tiny_mlp_op_type(),
+                "engine": "MNN",
+                "attr": attrs
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        post_convert = {
+            "name": post_convert_name,
+            "inputIndexes": fused_output,
+            "outputIndexes": post_convert_output,
+            "type": "ConvertTensor",
+            "main_type": "TensorConvertInfo",
+            "main": {
+                "source": "NC4HW4",
+                "dest": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        post_reshape = {
+            "name": post_reshape_name,
+            "type": "Reshape",
+            "inputIndexes": post_convert_output,
+            "outputIndexes": origin_output,
+            "main_type": "Reshape",
+            "main": {
+                "dims": [1, -1, ic],
+                "dimType": "NCHW"
+            },
+            "defaultDimentionFormat": "NHWC"
+        }
+        return [pre_reshape, pre_convert, fused, post_convert, post_reshape]
 
     def rebuild_pic_silu_mul(self, op, graph):
         name = op.get('name', 'PicSiluMul')
@@ -1564,7 +1859,7 @@ class MNNConverter:
                 "type": "Extra",
                 "main_type": "Extra",
                 "main": {
-                    "type": "PicLinearNhwcWeightOnly",
+                    "type": self._pic_linear_nhwc_op_type(),
                     "engine": "MNN",
                     "attr": self._pic_linear_conv_attrs(name, ic, oc, linear_plan)
                 },

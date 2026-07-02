@@ -112,6 +112,23 @@ public:
         return base_dir_ + config_.value("llm_weight", "llm.mnn.weight");
     }
 
+    bool has_llm_decode_model() const {
+        return config_.contains("llm_decode_model") &&
+               !config_.value("llm_decode_model", "").empty();
+    }
+
+    std::string llm_decode_model() const {
+        return base_dir_ + config_.value("llm_decode_model", "");
+    }
+
+    std::string llm_decode_weight() const {
+        return base_dir_ + config_.value("llm_decode_weight", config_.value("llm_weight", "llm.mnn.weight"));
+    }
+
+    bool llm_decode_shared_weight() const {
+        return config_.value("llm_decode_shared_weight", false);
+    }
+
     std::string block_model(int index) const {
         return base_dir_ + config_.value("block_model", "block_") + std::to_string(index) + ".mnn";
     }

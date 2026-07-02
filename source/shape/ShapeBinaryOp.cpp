@@ -8,6 +8,8 @@
 
 #include "shape/SizeComputer.hpp"
 #include "core/Macro.h"
+#include <cstdlib>
+#include <string>
 #include <vector>
 namespace MNN {
 class BinaryOpComputer : public SizeComputer {
@@ -64,7 +66,33 @@ public:
             input1 = temp;
         }
         TensorUtils::getDescribe(output)->dimensionFormat = TensorUtils::getDescribe(input0)->dimensionFormat;
-        return SizeComputer::computeBroadCastDims(inputs, outputs);
+        bool res = SizeComputer::computeBroadCastDims(inputs, outputs);
+        const char* opName = op->name() != nullptr ? op->name()->c_str() : "";
+        if (std::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr &&
+            (std::string(opName).find("/layers.0/Add") != std::string::npos ||
+             std::string(opName).find("/blocks.0/Add") != std::string::npos)) {
+            std::fprintf(stderr,
+                         "PicBinary shape name=%s res=%d in0_dims=%d in0=%d,%d,%d,%d in1_dims=%d in1=%d,%d,%d,%d out_dims=%d out=%d,%d,%d,%d format=%d\n",
+                         opName, res ? 1 : 0,
+                         inputs[0]->dimensions(),
+                         inputs[0]->dimensions() > 0 ? inputs[0]->length(0) : -1,
+                         inputs[0]->dimensions() > 1 ? inputs[0]->length(1) : -1,
+                         inputs[0]->dimensions() > 2 ? inputs[0]->length(2) : -1,
+                         inputs[0]->dimensions() > 3 ? inputs[0]->length(3) : -1,
+                         inputs[1]->dimensions(),
+                         inputs[1]->dimensions() > 0 ? inputs[1]->length(0) : -1,
+                         inputs[1]->dimensions() > 1 ? inputs[1]->length(1) : -1,
+                         inputs[1]->dimensions() > 2 ? inputs[1]->length(2) : -1,
+                         inputs[1]->dimensions() > 3 ? inputs[1]->length(3) : -1,
+                         output->dimensions(),
+                         output->dimensions() > 0 ? output->length(0) : -1,
+                         output->dimensions() > 1 ? output->length(1) : -1,
+                         output->dimensions() > 2 ? output->length(2) : -1,
+                         output->dimensions() > 3 ? output->length(3) : -1,
+                         static_cast<int>(TensorUtils::getDescribe(output)->dimensionFormat));
+            std::fflush(stderr);
+        }
+        return res;
     }
 };
 

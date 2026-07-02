@@ -17,8 +17,14 @@
 #include "MNNCUDAFunction.cuh"
 #include "core/KVMeta.hpp"
 #include <chrono>
+#ifdef MNN_CUDA_BENCH_OPS
+#include <cublas_v2.h>
+#endif
 #include <cuda_fp16.h>
 #include <float.h>
+#ifdef MNN_CUDA_BENCH_OPS
+#include <mma.h>
+#endif
 #include <sstream>
 #include <string>
 #include <vector>
@@ -245,6 +251,303 @@ private:
     int mRows = 0;
     int mChannels = 0;
 };
+
+#ifdef MNN_CUDA_BENCH_OPS
+// Test-only direct-op probes for fused MLP/down experiments. These Extra types are
+// compiled only for MNN_BUILD_TEST and must not be emitted by exporters or graph rewrites.
+static int picBenchFeatureDim(const Tensor* tensor) {
+    if (tensor == nullptr || tensor->dimensions() <= 0) {
+        return 0;
+    }
+    if (tensor->dimensions() == 4 && tensor->length(1) == 1 && tensor->length(2) == 1) {
+        return tensor->length(3);
+    }
+    return tensor->channel();
+}
+
+static bool runPicBenchDownFp16(cublasHandle_t handle, const void* weight, const void* input, void* output,
+                                int rows, int ic, int icp, int oc, int ocp) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+#if CUDART_VERSION >= 11000
+    const auto computeType = CUBLAS_COMPUTE_32F;
+#else
+    const auto computeType = CUDA_R_32F;
+#endif
+#if CUDART_VERSION >= 9000
+    const auto algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+#else
+    const auto algo = CUBLAS_GEMM_DEFAULT;
+#endif
+    return cublasGemmEx(handle,
+                        CUBLAS_OP_T, CUBLAS_OP_N,
+                        oc, rows, ic,
+                        &alpha,
+                        weight, CUDA_R_16F, icp,
+                        input, CUDA_R_16F, icp,
+                        &beta,
+                        output, CUDA_R_16F, ocp,
+                        computeType, algo) == CUBLAS_STATUS_SUCCESS;
+}
+
+template<int COLS, int GROUP, int KTILE>
+__global__ void __launch_bounds__(COLS * GROUP, 2) PicStreamedPackedSiluDownKernel(
+    const half* __restrict__ packed,
+    const half* __restrict__ weight,
+    half* __restrict__ output,
+    int rows, int inter, int interP, int hidden, int hiddenP
+) {
+    const int colBase = blockIdx.x * COLS;
+    const int row = blockIdx.y;
+    if (row >= rows) {
+        return;
+    }
+    const int tid = threadIdx.x;
+    const int colInTile = tid / GROUP;
+    const int lane = tid - colInTile * GROUP;
+    const int col = colBase + colInTile;
+    __shared__ half act[KTILE];
+
+    float acc = 0.0f;
+    const half* rowPacked = packed + static_cast<size_t>(row) * static_cast<size_t>(inter) * 2;
+    for (int kBase = 0; kBase < inter; kBase += KTILE) {
+        if (tid < KTILE) {
+            const int k = kBase + tid;
+            half v = __float2half(0.0f);
+            if (k < inter) {
+                const float g = __half2float(rowPacked[k]);
+                const float u = __half2float(rowPacked[inter + k]);
+                const float silu = g > 87.0f ? g : (g < -87.0f ? 0.0f : g / (1.0f + __expf(-g)));
+                v = __float2half_rn(silu * u);
+            }
+            act[tid] = v;
+        }
+        __syncthreads();
+        if (col < hidden) {
+            const half* w = weight + static_cast<size_t>(col) * static_cast<size_t>(interP) + kBase;
+            #pragma unroll
+            for (int kk = lane; kk < KTILE; kk += GROUP) {
+                const int k = kBase + kk;
+                if (k < inter) {
+                    acc = fmaf(__half2float(act[kk]), __half2float(w[kk]), acc);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int offset = GROUP / 2; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset, GROUP);
+    }
+    if (lane == 0 && col < hidden) {
+        output[static_cast<size_t>(row) * static_cast<size_t>(hiddenP) + col] = __float2half_rn(acc);
+    }
+}
+
+// Direct-op bench candidates only. Do not route exporter or production graphs to these PicBench* Extra types.
+class PicBenchFusedPackedSiluDownExecution : public Execution {
+public:
+    PicBenchFusedPackedSiluDownExecution(Backend* backend, bool streamed) : Execution(backend), mStreamed(streamed) {
+    }
+    virtual ~PicBenchFusedPackedSiluDownExecution() = default;
+
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (inputs.size() != 2 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        if (!static_cast<CUDABackend*>(backend())->useFp16()) {
+            return NOT_SUPPORT;
+        }
+        mRows = outputs[0]->length(0);
+        mHidden = picBenchFeatureDim(outputs[0]);
+        const size_t packedCount = CUDABackend::realSize(inputs[0]);
+        if (mRows <= 0 || mHidden <= 0 || packedCount == 0 ||
+            packedCount % static_cast<size_t>(mRows * 2) != 0) {
+            return NOT_SUPPORT;
+        }
+        mInter = static_cast<int>(packedCount / static_cast<size_t>(mRows * 2));
+        mInterP = UP_DIV(mInter, 8) * 8;
+        mHiddenP = UP_DIV(mHidden, 8) * 8;
+        if (mInter <= 0 || mInter != mInterP || mHidden != mHiddenP ||
+            CUDABackend::realSize(outputs[0]) < static_cast<size_t>(mRows) * static_cast<size_t>(mHiddenP) ||
+            CUDABackend::realSize(inputs[1]) < static_cast<size_t>(mHiddenP) * static_cast<size_t>(mInterP)) {
+            return NOT_SUPPORT;
+        }
+        if (!mStreamed) {
+            mActivation.reset(Tensor::createDevice<float>({mRows, mInter, 1, 1}, Tensor::CAFFE));
+            if (mActivation == nullptr || !backend()->onAcquireBuffer(mActivation.get(), Backend::DYNAMIC)) {
+                return OUT_OF_MEMORY;
+            }
+            backend()->onReleaseBuffer(mActivation.get(), Backend::DYNAMIC);
+        } else {
+            mActivation.reset();
+        }
+        return NO_ERROR;
+    }
+
+    virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (inputs.size() != 2 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        auto runtime = static_cast<CUDABackend*>(backend())->getCUDARuntime();
+        auto* packed = reinterpret_cast<const half*>(inputs[0]->deviceId());
+        auto* weight = reinterpret_cast<const half*>(inputs[1]->deviceId());
+        auto* output = reinterpret_cast<half*>(outputs[0]->deviceId());
+        if (mStreamed) {
+            constexpr int kCols = 32;
+            constexpr int kGroup = 8;
+            constexpr int kTile = 128;
+            dim3 grid(UP_DIV(mHidden, kCols), mRows);
+            dim3 block(kCols * kGroup);
+            PicStreamedPackedSiluDownKernel<kCols, kGroup, kTile><<<grid, block>>>(
+                packed, weight, output, mRows, mInter, mInterP, mHidden, mHiddenP);
+            checkKernelErrors;
+            return NO_ERROR;
+        }
+
+        const int channelsHalf2 = mInter / 2;
+        const int count = mRows * channelsHalf2;
+        if (count > 0) {
+            PicPackedSiluMulHalf2Kernel<<<runtime->blocks_num(count), runtime->threads_num()>>>(
+                reinterpret_cast<const half2*>(packed),
+                reinterpret_cast<half2*>(mActivation->deviceId()),
+                mRows, channelsHalf2);
+            checkKernelErrors;
+        }
+        if (!runPicBenchDownFp16(runtime->cublasHandle(), weight, reinterpret_cast<const void*>(mActivation->deviceId()),
+                                 output, mRows, mInter, mInterP, mHidden, mHiddenP)) {
+            return INVALID_VALUE;
+        }
+        return NO_ERROR;
+    }
+
+private:
+    bool mStreamed = false;
+    int mRows = 0;
+    int mInter = 0;
+    int mInterP = 0;
+    int mHidden = 0;
+    int mHiddenP = 0;
+    std::shared_ptr<Tensor> mActivation;
+};
+
+template<int WARPS>
+__global__ void __launch_bounds__(WARPS * 32, 2) PicWmmaPackedSiluDownKernel(
+    const half* __restrict__ packed,
+    const half* __restrict__ weight,
+    half* __restrict__ output,
+    int rows, int inter, int interP, int hidden, int hiddenP
+) {
+    constexpr int kM = 16;
+    constexpr int kN = 16;
+    constexpr int kK = 16;
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int nBase = blockIdx.x * WARPS * kN + warp * kN;
+    __shared__ half aTile[kM * kK];
+    __shared__ float cTile[WARPS * kM * kN];
+
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, kM, kN, kK, half, nvcuda::wmma::row_major> aFrag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, kM, kN, kK, half, nvcuda::wmma::col_major> bFrag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, kM, kN, kK, float> cFrag;
+    nvcuda::wmma::fill_fragment(cFrag, 0.0f);
+
+    for (int kBase = 0; kBase < inter; kBase += kK) {
+        for (int idx = threadIdx.x; idx < kM * kK; idx += blockDim.x) {
+            const int row = idx / kK;
+            const int kk = idx - row * kK;
+            half value = __float2half(0.0f);
+            if (row < rows && kBase + kk < inter) {
+                const half* rowPacked = packed + static_cast<size_t>(row) * static_cast<size_t>(inter) * 2;
+                const float gate = __half2float(rowPacked[kBase + kk]);
+                const float up = __half2float(rowPacked[inter + kBase + kk]);
+                const float silu = gate > 87.0f ? gate : (gate < -87.0f ? 0.0f : gate / (1.0f + __expf(-gate)));
+                value = __float2half_rn(silu * up);
+            }
+            aTile[idx] = value;
+        }
+        __syncthreads();
+
+        if (nBase < hidden) {
+            nvcuda::wmma::load_matrix_sync(aFrag, aTile, kK);
+            nvcuda::wmma::load_matrix_sync(bFrag,
+                                           weight + static_cast<size_t>(nBase) * static_cast<size_t>(interP) + kBase,
+                                           interP);
+            nvcuda::wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
+        }
+        __syncthreads();
+    }
+
+    if (nBase < hidden) {
+        float* cOut = cTile + warp * kM * kN;
+        nvcuda::wmma::store_matrix_sync(cOut, cFrag, kN, nvcuda::wmma::mem_row_major);
+        for (int idx = lane; idx < kM * kN; idx += 32) {
+            const int row = idx / kN;
+            const int col = idx - row * kN;
+            if (row < rows && nBase + col < hidden) {
+                output[static_cast<size_t>(row) * static_cast<size_t>(hiddenP) + nBase + col] =
+                    __float2half_rn(cOut[idx]);
+            }
+        }
+    }
+}
+
+class PicBenchWmmaPackedSiluDownExecution : public Execution {
+public:
+    explicit PicBenchWmmaPackedSiluDownExecution(Backend* backend) : Execution(backend) {
+    }
+    virtual ~PicBenchWmmaPackedSiluDownExecution() = default;
+
+    virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (inputs.size() != 2 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        if (!static_cast<CUDABackend*>(backend())->useFp16()) {
+            return NOT_SUPPORT;
+        }
+        mRows = outputs[0]->length(0);
+        mHidden = picBenchFeatureDim(outputs[0]);
+        const size_t packedCount = CUDABackend::realSize(inputs[0]);
+        if (mRows <= 0 || mRows > 16 || mHidden <= 0 || packedCount == 0 ||
+            packedCount % static_cast<size_t>(mRows * 2) != 0) {
+            return NOT_SUPPORT;
+        }
+        mInter = static_cast<int>(packedCount / static_cast<size_t>(mRows * 2));
+        mInterP = UP_DIV(mInter, 16) * 16;
+        mHiddenP = UP_DIV(mHidden, 16) * 16;
+        if (mInter <= 0 || mInter != mInterP || mHidden != mHiddenP ||
+            CUDABackend::realSize(outputs[0]) < static_cast<size_t>(mRows) * static_cast<size_t>(mHiddenP) ||
+            CUDABackend::realSize(inputs[1]) < static_cast<size_t>(mHiddenP) * static_cast<size_t>(mInterP)) {
+            return NOT_SUPPORT;
+        }
+        return NO_ERROR;
+    }
+
+    virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override {
+        if (inputs.size() != 2 || outputs.size() != 1) {
+            return INPUT_DATA_ERROR;
+        }
+        constexpr int kWarps = 8;
+        dim3 grid(UP_DIV(mHidden, 16 * kWarps));
+        dim3 block(32 * kWarps);
+        PicWmmaPackedSiluDownKernel<kWarps><<<grid, block>>>(
+            reinterpret_cast<const half*>(inputs[0]->deviceId()),
+            reinterpret_cast<const half*>(inputs[1]->deviceId()),
+            reinterpret_cast<half*>(outputs[0]->deviceId()),
+            mRows, mInter, mInterP, mHidden, mHiddenP);
+        checkKernelErrors;
+        return NO_ERROR;
+    }
+
+private:
+    int mRows = 0;
+    int mInter = 0;
+    int mInterP = 0;
+    int mHidden = 0;
+    int mHiddenP = 0;
+};
+#endif
 
 #ifdef MNN_LOW_MEMORY
 struct PicGateUpConvSpec {
@@ -1184,6 +1487,19 @@ public:
         if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicPackedSiluMul") {
             return new PicPackedSiluMulExecution(backend);
         }
+#ifdef MNN_CUDA_BENCH_OPS
+        // Bench-only fused MLP/down candidates. Non-test builds intentionally do
+        // not recognize these Extra types, so production/export graphs cannot select them.
+        if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicBenchFusedPackedSiluDown") {
+            return new PicBenchFusedPackedSiluDownExecution(backend, false);
+        }
+        if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicBenchStreamedPackedSiluDown") {
+            return new PicBenchFusedPackedSiluDownExecution(backend, true);
+        }
+        if (extra != nullptr && extra->type() != nullptr && extra->type()->str() == "PicBenchWmmaPackedSiluDown") {
+            return new PicBenchWmmaPackedSiluDownExecution(backend);
+        }
+#endif
 #ifdef MNN_CODEGEN_CUDA
         if (FuseExecutionV2::check(op)) {
             return FuseExecutionV2::create(op, backend, inputs.size(), outputs.size());

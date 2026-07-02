@@ -25,7 +25,10 @@ Common examples:
 - LLM export (MNN / PIC / PrefixLLM): read `.codex/skills/mnn-llm-export/SKILL.md`
 - LLM benchmark / demo / PIC comparison: read `.codex/skills/mnn-llm-bench/SKILL.md`
 - PIC server cross-compile / deploy / benchmark: read `.codex/skills/mnn-pic-benchmark/SKILL.md`
+- PIC/PagedAttention OpenCL/CUDA/Adreno sparse prefill optimization, score-layer boundary, kernel hot spots, cross-device regression / optimization logs: read `.codex/skills/mnn-pic-optimize/SKILL.md`
+- Jetson/OrangePi/AidLux storage (NVMe/SSD/UFS) and DRAM read bandwidth baselines (`fio`, `lmbench bw_mem rd`, STREAM): read `.codex/skills/mnn-device-io-bench/SKILL.md`
 - New LLM model adaptation in `transformers/pic_llm`: read `.codex/skills/mnn-support-new-llm/SKILL.md`
+- Drafting an MNN commit message from the current working-tree diff: read `.codex/skills/mnn-git-commit-message/SKILL.md`
 
 If any instruction in another document seems to conflict with `AGENTS.md`, treat
 `AGENTS.md` as authoritative for this repository and ask the user before taking

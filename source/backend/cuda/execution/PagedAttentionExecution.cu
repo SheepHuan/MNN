@@ -3632,7 +3632,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     const Tensor* mask = inputs.size() > 3 ? inputs[3] : nullptr;
 
     if (mMeta != nullptr && mMeta->request_capacity <= 0 && !mMeta->request_active) {
-        mMeta->beginRequest(std::max(mNewKvSeqLen, mQuerySeqLen));
+        mMeta->beginRequest(std::max(std::max(mNewKvSeqLen, mQuerySeqLen), mMeta->max_tokens));
     }
 
     int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : 0);

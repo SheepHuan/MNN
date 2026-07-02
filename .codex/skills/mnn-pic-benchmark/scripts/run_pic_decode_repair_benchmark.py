@@ -201,14 +201,15 @@ def build_pic_spec(
         "pic_token_start": 0,
         "token_count": len(token_ids),
     }
-    spec["decode_refine"] = {
-        "enabled": True,
-        "tokens_per_decode_step": int(repair_tokens),
-        "top_m": int(top_m),
-        "selector": selector,
-        "attention_layer_idx": int(attention_layer_idx),
-        "attention_head_ids": attention_head_ids,
-    }
+    if int(repair_tokens) > 0:
+        spec["decode_refine"] = {
+            "enabled": True,
+            "tokens_per_decode_step": int(repair_tokens),
+            "top_m": int(top_m),
+            "selector": selector,
+            "attention_layer_idx": int(attention_layer_idx),
+            "attention_head_ids": attention_head_ids,
+        }
     return spec
 
 

@@ -19,6 +19,7 @@
 #include "core/FileLoader.hpp"
 #include "core/OpCommonUtils.hpp"
 #include <cstdlib>
+#include <cstdio>
 
 namespace MNN {
 namespace Express {
@@ -602,6 +603,12 @@ ErrorCode StaticModule::_execute() {
 std::vector<Express::VARP> StaticModule::onForward(const std::vector<Express::VARP>& inputs) {
 
     AUTOTIME;
+    const bool moduleProfile = ::getenv("MNN_PIC_MODULE_PROFILE") != nullptr;
+    MNN::Timer moduleTimer;
+    MNN::Timer stageTimer;
+    uint64_t computeInputsUs = 0;
+    uint64_t resizeUs = 0;
+    uint64_t executeUs = 0;
     std::vector<Express::VARP> outputs;
     bool runResize = (!mShapeInferSeperate) || inputs.size() > 0;
     bool runCompute = (!mShapeInferSeperate) || inputs.size() == 0;
@@ -614,7 +621,13 @@ std::vector<Express::VARP> StaticModule::onForward(const std::vector<Express::VA
     if (mResource->mOutputFromTensor.empty()) {
         return outputs;
     }
+    if (moduleProfile) {
+        stageTimer.reset();
+    }
     Variable::compute(inputs);
+    if (moduleProfile) {
+        computeInputsUs = stageTimer.durationInUs();
+    }
 #ifdef MNN_DUMP_MEMORY
     auto rt = Executor::getRuntime();
     auto mem = rt.second->onGetMemoryInMB();
@@ -628,18 +641,44 @@ std::vector<Express::VARP> StaticModule::onForward(const std::vector<Express::VA
 
     ErrorCode code = NO_ERROR;
     if (runResize) {
+        if (moduleProfile) {
+            stageTimer.reset();
+        }
         code = _resize(inputs);
+        if (moduleProfile) {
+            resizeUs = stageTimer.durationInUs();
+        }
     }
     if (NO_ERROR == code && runCompute) {
+        if (moduleProfile) {
+            stageTimer.reset();
+        }
         code = _execute();
+        if (moduleProfile) {
+            executeUs = stageTimer.durationInUs();
+        }
+    }
+    if (moduleProfile) {
+        std::fprintf(stderr,
+                     "MNN_PIC_MODULE_PROFILE name=%s inputs=%d outputs=%d run_resize=%d run_compute=%d "
+                     "compute_inputs_ms=%.3f resize_ms=%.3f execute_ms=%.3f total_ms=%.3f code=%d\n",
+                     name().c_str(), static_cast<int>(inputs.size()), static_cast<int>(mResource->mOutputNumbers),
+                     runResize ? 1 : 0, runCompute ? 1 : 0,
+                     computeInputsUs / 1000.0, resizeUs / 1000.0, executeUs / 1000.0,
+                     moduleTimer.durationInUs() / 1000.0, static_cast<int>(code));
+        std::fflush(stderr);
     }
     if (NO_ERROR != code) {
         FUNC_PRINT(code);
-        if (::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-            MNN_PRINT("PIC module debug StaticModule forward failed code=%d inputs=%d outputs=%d run_resize=%d "
-                      "run_compute=%d\n",
-                      static_cast<int>(code), static_cast<int>(inputs.size()),
-                      static_cast<int>(mResource->mOutputNumbers), runResize ? 1 : 0, runCompute ? 1 : 0);
+        if (::getenv("MNN_PIC_DECODE_DEBUG") != nullptr ||
+            ::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr) {
+            std::fprintf(stderr,
+                         "PIC module debug StaticModule forward failed code=%d inputs=%d outputs=%d "
+                         "run_resize=%d run_compute=%d\n",
+                         static_cast<int>(code), static_cast<int>(inputs.size()),
+                         static_cast<int>(mResource->mOutputNumbers), runResize ? 1 : 0,
+                         runCompute ? 1 : 0);
+            std::fflush(stderr);
         }
         return {};
     }

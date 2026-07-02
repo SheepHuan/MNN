@@ -108,6 +108,17 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         COMPUTE_FLOAT2 in1 = (COMPUTE_FLOAT2)0;
         COMPUTE_FLOAT2 in2 = (COMPUTE_FLOAT2)0;
         COMPUTE_FLOAT2 in3 = (COMPUTE_FLOAT2)0;
+        #ifdef OUTPUT_BHW
+        if (out_b_idx + 1 < OUTPUT_BHW) {
+            in1 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign + k2));
+        }
+        if (out_b_idx + 2 < OUTPUT_BHW) {
+            in2 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 2 + k2));
+        }
+        if (out_b_idx + 3 < OUTPUT_BHW) {
+            in3 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 3 + k2));
+        }
+        #else
         #if PIC_BATCH_VALID_ROWS >= 2
         in1 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign + k2));
         #else
@@ -122,6 +133,7 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         in3 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + srcChannelAlign * 3 + k2));
         #else
         in3 = CONVERT_COMPUTE_FLOAT2(vload2(0, input + input_offset + k2));
+        #endif
         #endif
         #endif
         #ifdef USE_IMAGE
@@ -164,6 +176,17 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         COMPUTE_FLOAT4 in1 = (COMPUTE_FLOAT4)0;
         COMPUTE_FLOAT4 in2 = (COMPUTE_FLOAT4)0;
         COMPUTE_FLOAT4 in3 = (COMPUTE_FLOAT4)0;
+        #ifdef OUTPUT_BHW
+        if (out_b_idx + 1 < OUTPUT_BHW) {
+            in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign + k4));
+        }
+        if (out_b_idx + 2 < OUTPUT_BHW) {
+            in2 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 2 + k4));
+        }
+        if (out_b_idx + 3 < OUTPUT_BHW) {
+            in3 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 3 + k4));
+        }
+        #else
         #if PIC_BATCH_VALID_ROWS >= 2
         in1 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign + k4));
         #else
@@ -178,6 +201,7 @@ __kernel void gemv_conv_c8_buf(GLOBAL_SIZE_DIM_3
         in3 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + srcChannelAlign * 3 + k4));
         #else
         in3 = CONVERT_COMPUTE_FLOAT4(vload4(0, input + input_offset + k4));
+        #endif
         #endif
         #endif
         #ifdef USE_IMAGE

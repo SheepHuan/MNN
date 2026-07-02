@@ -138,6 +138,25 @@ struct PagedKVMeta : public KVMeta {
         ++slot_table_version;
     }
 
+    bool reserveRequestCapacity(int capacity) {
+        int target = std::max(0, capacity);
+        if (target <= request_capacity) {
+            return true;
+        }
+        request_capacity = target;
+        max_tokens = std::max(max_tokens, request_capacity);
+        if (!request_active) {
+            return true;
+        }
+        auto old = slot_table_host.size();
+        slot_table_host.resize(request_capacity);
+        for (size_t i = old; i < slot_table_host.size(); ++i) {
+            slot_table_host[i] = request_base + static_cast<int>(i);
+        }
+        ++slot_table_version;
+        return true;
+    }
+
     void finishRequest() {
         request_active = false;
         external_hydrate_start_layer_idx = 0;
@@ -226,6 +245,24 @@ struct PagedKVMeta : public KVMeta {
         if (!externalLayerLoaded(layerIndex)) {
             external_loaded_layers.emplace_back(layerIndex);
         }
+    }
+
+    bool externalLayersLoaded(int layerCount) const {
+        if (external_segments.empty() || layerCount <= 0) {
+            return false;
+        }
+        return static_cast<int>(external_loaded_layers.size()) >= layerCount;
+    }
+
+    bool detachHydratedExternalSegmentsForDecode(int layerCount) {
+        if (!externalLayersLoaded(layerCount)) {
+            return false;
+        }
+        external_segments.clear();
+        external_loaded_layers.clear();
+        external_source_slot_reserve = 0;
+        external_hydrate_start_layer_idx = 0;
+        return true;
     }
 
     bool beginSparseQuery(const std::vector<int>& logicalIndices, int sparseStartLayerIdx = 0) {

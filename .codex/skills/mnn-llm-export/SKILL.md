@@ -23,11 +23,61 @@ metadata:
 
 PIC/Prefix 特化导出用于验证 paged KV cache 或 prefix cache。PIC exporter 默认导出 `PagedAttention`，并在 `llm_config.json` 写入 `paged_attention: true`；Prefix exporter 用于 `PrefixAttention`/prefix cache 专用图。它们依赖本仓库同一份 schema 构建出的 `MNNConvert` 和 runtime，不要依赖 PyPI `MNN.tools.mnnconvert` fallback；产物不能当作普通 `transformers/llm` 基线模型来对比。
 
+`dualgraph` / `--pic_export_decode_graph` 只允许出现在 PIC/PagedAttention 导出路径中，输出目录必须是 `.cache/weight/<model>/`，运行侧只允许 `pic_llm_demo` / `pic_llm_bench` / `pic_server`。普通 MNN LLM 导出不能启用 dualgraph，也不能把 dualgraph 产物放进 `.cache/mnn-llm-export/` 或用于 `llm_bench` / `llm_demo` 的 normal baseline。
+
+PIC dualgraph 导出由两个独立轴组成：
+
+- 设备轴：只使用规范设备名 `jetson`、`rhinopi`、`orangepi`。
+- 图角色轴：`llm.mnn` 是 `prefill` 角色，必须按普通 PIC/PagedAttention prefill / graph-boundary 逻辑导出；`llm_decode.mnn` 是 `decode` 角色，才允许使用 decode-only rewrite。
+
+dualgraph 的 prefill 图和 decode 图必须隔离：`llm.mnn` 不能因为启用 dualgraph 或 decode-only fusion flag 而改写 gate/up、SiluMul、NHWC linear、PicScore/PicSparse 等 prefill 结构；只有 `llm_decode.mnn` 可以按 decode-only 逻辑去掉 `pic_recompute_budget`、`PicScoreAttention` / `PicSparseAttention` 和不需要的 decode 小算子。两个图必须共享同一个 `llm.mnn.weight`，配置中应写 `llm_decode_shared_weight=true`，运行时只维护一份权重内存和同一套当前请求 PagedCache。
+
 PIC 需要固定预分配 KV token 上限时追加：
 
 ```text
 --paged_kv_max_tokens <N>
 ```
+
+## PIC 导出两轴契约
+
+PIC 导出必须明确审定目标设备，避免 Jetson / RhinoPi / OrangePi 的实验参数互相污染。设备名只能使用：
+
+```text
+--pic_export_device jetson
+--pic_export_device rhinopi
+--pic_export_device orangepi
+```
+
+脚本入口也支持：
+
+```bash
+MNN_PIC_EXPORT_DEVICE=jetson  MNN_LLM_EXPORTER=pic bash .codex/skills/mnn-llm-export/scripts/export_modelscope_llm.sh <model> -- --paged_kv_max_tokens 4096
+MNN_PIC_EXPORT_DEVICE=rhinopi MNN_LLM_EXPORTER=pic bash .codex/skills/mnn-llm-export/scripts/export_modelscope_llm.sh <model> -- --paged_kv_max_tokens 4096
+MNN_PIC_EXPORT_DEVICE=orangepi MNN_LLM_EXPORTER=pic bash .codex/skills/mnn-llm-export/scripts/export_modelscope_llm.sh <model> -- --paged_kv_max_tokens 4096
+```
+
+设备契约规则：
+
+- `jetson`：CUDA family，只允许 CUDA/Jetson decode fusion；禁止 `pic_decode_tiny_mlp_fusion`、`pic_decode_silu_nhwc_down_fusion` 这类 RhinoPi/Adreno-only flag。
+- `rhinopi`：Adreno family，允许 `PicAdreno*` 导出；不要和 Jetson CUDA packed/gateup 实验参数共用同一个导出命令或产物目录。
+- `orangepi`：generic/Mali family，不启用 CUDA/Adreno 专属 decode fusion；传入 `pic_decode_tiny_fusion`、`pic_decode_gateup_fusion`、`pic_decode_nhwc_linear_fusion` 等 backend-specific flag 必须 fail-fast。
+- `pic_decode_gateup_direct_fusion`、`pic_decode_gateup_split_fusion`、`pic_decode_silu_nhwc_down_fusion` 必须和 `pic_decode_gateup_fusion` 一起使用，否则导出图结构不明确。
+
+导出后的 `export_args.json` 和 `llm_config.json` 必须记录：
+
+```text
+pic_export_contract_version
+pic_export_device
+pic_export_device_family
+pic_export_graph_role
+pic_decode_rewrites_enabled
+pic_decode_fusion_backend
+pic_decode_fusion_family
+```
+
+dualgraph 还必须记录 `pic_decode_graph_config`，用于描述 `llm_decode.mnn` 的 decode 角色配置；主层 `pic_export_graph_role` 应对应 `llm.mnn`，即 `prefill`。不要用 decode graph 的配置解释 prefill 图结构。
+
+同一个 `.cache/weight/<model>/` 目录不要在不同设备契约之间反复覆盖；需要 A/B 时把设备和实验名写进 `MNN_LLM_EXPORT_DST` 的目录名。
 
 `--skip_weight` 是导出流程/图结构 smoke，不是可用于正确性或性能的模型产物。skip-weight 模型可以缺少真实 embedding / lm_head 数值；测试输出、PIC server 精度、full-reuse/cacheblend/epic 延迟时必须使用真实权重导出，或者明确标注只是结构诊断。对 GLM / GLM-Edge 等 `tie_word_embeddings=false` 的模型，导出后必须确认 `export_args.json` 中 `tie_word_embeddings` 仍为 false，`llm_config.json` 不应出现错误的 `tie_embeddings`；否则输入 embedding 可能读到 lm_head 或 EOF 后占位数据，典型现象是 NUL、`APP` 或无意义重复 token。
 
@@ -253,6 +303,7 @@ conda run -n kvshare-edge python transformers/pic_llm/export/llmexport.py \
   --quant_block 64 \
   --embed_bit 16 \
   --mnnconvert "$MNN_ARTIFACT_ROOT/bin/MNNConvert" \
+  --pic_export_device jetson \
   --paged_kv_max_tokens 4096
 ```
 

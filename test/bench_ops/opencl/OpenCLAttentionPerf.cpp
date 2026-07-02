@@ -10,6 +10,7 @@
 #include "backend/opencl/core/OpenCLBackend.hpp"
 #include "backend/opencl/core/OpenCLRunningUtils.hpp"
 #include "backend/opencl/execution/buffer/ConvBufAdrenoUtils.hpp"
+#include "backend/opencl/execution/buffer/ConvBufLowMemoryExecution.hpp"
 #include "core/Backend.hpp"
 #include "core/Execution.hpp"
 #include "core/FileLoader.hpp"
@@ -475,6 +476,45 @@ static bool enabledRow(const char* envName, int row) {
     return false;
 }
 
+static std::vector<int> rowsFromEnvOrDefault(const char* envName, std::vector<int> defaults) {
+    const char* filter = ::getenv(envName);
+    if (filter == nullptr || filter[0] == '\0') {
+        return defaults;
+    }
+    std::vector<int> rows;
+    std::string spec(filter);
+    size_t start = 0;
+    while (start <= spec.size()) {
+        size_t end = spec.find(',', start);
+        std::string item = spec.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!item.empty()) {
+            size_t dash = item.find('-');
+            if (dash == std::string::npos) {
+                const int row = ::atoi(item.c_str());
+                if (row > 0) {
+                    rows.push_back(row);
+                }
+            } else {
+                int lo = ::atoi(item.substr(0, dash).c_str());
+                int hi = ::atoi(item.substr(dash + 1).c_str());
+                if (lo > hi) {
+                    std::swap(lo, hi);
+                }
+                for (int row = std::max(1, lo); row <= hi; ++row) {
+                    rows.push_back(row);
+                }
+            }
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    return rows.empty() ? defaults : rows;
+}
+
 static bool printPagedAttentionV1V2TimedResult(const char* impl, const BenchCase& c, float avgMs) {
     const int kvLen = c.pastLen + c.seqLen;
     const float ratio = kvLen > 0 ? static_cast<float>(c.seqLen) / static_cast<float>(kvLen) : 0.0f;
@@ -922,6 +962,8 @@ enum class WeightOnlyCompactDenseFamily : uint32_t {
     PicQuantWG8X16 = 9,
     PicQuantInputCache32 = 10,
     PicQuantInputCache64 = 11,
+    AdrenoDirectC4Gemv = 12,
+    AdrenoBatchGemvC4Out = 13,
 };
 
 static std::unique_ptr<OpHolder> makeWeightOnlyLinearConvOp(int ic, int oc, int quantBlock) {
@@ -961,6 +1003,19 @@ static std::unique_ptr<OpHolder> makeWeightOnlyLinearConvOp(int ic, int oc, int 
     conv->quanParameter->readType = 0;
     conv->quanParameter->has_scaleInt = false;
     conv->quanParameter->weightSize = 0;
+    return std::unique_ptr<OpHolder>(new OpHolder(op));
+}
+
+static std::unique_ptr<OpHolder> makePicSiluMulOp(const char* name) {
+    OpT op;
+    op.name = name != nullptr ? name : "bench_opencl_pic_silu_mul";
+    op.type = OpType_Extra;
+    op.defaultDimentionFormat = MNN_DATA_FORMAT_NCHW;
+    op.main.type = OpParameter_Extra;
+    op.main.value = new ExtraT;
+    auto* extra = op.main.AsExtra();
+    extra->type = "PicSiluMul";
+    extra->engine = "MNN";
     return std::unique_ptr<OpHolder>(new OpHolder(op));
 }
 
@@ -1050,12 +1105,86 @@ static const char* weightOnlyCompactDenseFamilyName(uint32_t family) {
             return "pic_quant_incache32";
         case WeightOnlyCompactDenseFamily::PicQuantInputCache64:
             return "pic_quant_incache64";
+        case WeightOnlyCompactDenseFamily::AdrenoDirectC4Gemv:
+            return "adreno_direct_c4_gemv";
+        case WeightOnlyCompactDenseFamily::AdrenoBatchGemvC4Out:
+            return "adreno_batch_gemv_c4out";
         default:
             return "unknown";
     }
 }
 
+static bool parseWeightOnlyCompactDenseFamilyName(const char* value, uint32_t* family) {
+    if (value == nullptr || value[0] == '\0' || family == nullptr) {
+        return false;
+    }
+    const std::pair<const char*, uint32_t> families[] = {
+        {"generic_quant", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::GenericQuant)},
+        {"pic_quant", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuant)},
+        {"fp_weight", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::FPWeight)},
+        {"pic_quant_b2", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantB2)},
+        {"pic_quant_c4", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantC4)},
+        {"pic_quant_wg64", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantWG64)},
+        {"pic_quant_wg128", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantWG128)},
+        {"adreno_batch_gemv", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::AdrenoBatchGemv)},
+        {"pic_quant_wg4x32", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantWG4X32)},
+        {"pic_quant_wg8x16", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantWG8X16)},
+        {"pic_quant_incache32", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantInputCache32)},
+        {"pic_quant_incache64", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::PicQuantInputCache64)},
+        {"adreno_direct_c4_gemv", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::AdrenoDirectC4Gemv)},
+        {"adreno_batch_gemv_c4out", static_cast<uint32_t>(WeightOnlyCompactDenseFamily::AdrenoBatchGemvC4Out)},
+    };
+    for (const auto& item : families) {
+        if (::strcmp(value, item.first) == 0) {
+            *family = item.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool isAdrenoTinyDenseFamilyShape(OpenCLRuntime* runtime, int rows, int ic, int oc, int quantBit) {
+    return runtime != nullptr &&
+           runtime->getGpuType() == ADRENO &&
+           quantBit == 4 &&
+           rows > 1 && rows <= 16 &&
+           ic >= 1024 && oc >= 256;
+}
+
+static std::string makeAdrenoTinyDenseFamilyTuneKey(int rows, int ic, int oc, int quantBit) {
+    return "adreno_tiny_dense_family_v1_q" + std::to_string(quantBit) +
+           "_m" + std::to_string(rows) +
+           "_ic" + std::to_string(ic) +
+           "_oc" + std::to_string(oc);
+}
+
+static int adrenoTinyDenseHeuristicFamily(int rows) {
+    if (rows <= 2) {
+        return static_cast<int>(WeightOnlyCompactDenseFamily::PicQuantC4);
+    }
+    if (rows <= 4) {
+        return static_cast<int>(WeightOnlyCompactDenseFamily::PicQuantInputCache64);
+    }
+    return static_cast<int>(WeightOnlyCompactDenseFamily::AdrenoBatchGemvC4Out);
+}
+
 static int readSelectedCompactDenseFamily(DirectOpBenchOpenCL& bench, int rows, int ic, int oc, int quantBit) {
+    uint32_t forcedFamily = 0;
+    if (parseWeightOnlyCompactDenseFamilyName(::getenv("MNN_BENCH_OPENCL_COMPACT_DENSE_FORCE_FAMILY"),
+                                              &forcedFamily)) {
+        return static_cast<int>(forcedFamily);
+    }
+    if (isAdrenoTinyDenseFamilyShape(bench.runtime(), rows, ic, oc, quantBit)) {
+        std::pair<std::vector<uint32_t>, uint32_t> tinyInfo;
+        if (MNN::OpenCL::getTunedInfo(makeAdrenoTinyDenseFamilyTuneKey(rows, ic, oc, quantBit),
+                                      {static_cast<uint32_t>(rows), static_cast<uint32_t>(oc),
+                                       static_cast<uint32_t>(ic)},
+                                      tinyInfo, bench.runtime()) &&
+            !tinyInfo.first.empty()) {
+            return static_cast<int>(tinyInfo.first[0]);
+        }
+        return adrenoTinyDenseHeuristicFamily(rows);
+    }
     std::pair<std::vector<uint32_t>, uint32_t> tuneInfo;
     if (!MNN::OpenCL::getTunedInfo(makeAdrenoCompactDenseFamilyTuneKey(rows, ic, oc, quantBit),
                                    {static_cast<uint32_t>(rows), static_cast<uint32_t>(oc), static_cast<uint32_t>(ic)},
@@ -1230,6 +1359,3232 @@ public:
 };
 
 MNNTestSuiteRegister(OpenCLWeightOnlyConvPerf, "bench_ops/opencl/perf/WeightOnlyConv");
+
+struct DecodeRepairMlpChainCase {
+    const char* name;
+    int rows;
+    int hidden;
+    int inter;
+    int quantBlock;
+    int warmup;
+    int repeat;
+};
+
+static bool measureExecution(DirectOpBenchOpenCL& bench, Execution* exe,
+                             const std::vector<Tensor*>& inputs,
+                             const std::vector<Tensor*>& outputs,
+                             Tensor* syncTensor, int warmup, int repeat,
+                             float* avgMs) {
+    std::vector<float> syncOutput;
+    OpenCLWallTimer timer;
+    return timer.measure([&]() { return bench.execute(exe, inputs, outputs); },
+                         [&]() {
+                             if (syncTensor != nullptr) {
+                                 return bench.readTensorTyped<float>(syncTensor, &syncOutput);
+                             }
+                             return bench.sync();
+                         },
+                         warmup, repeat, avgMs);
+}
+
+static bool runDecodeRepairMlpChainCase(const DecodeRepairMlpChainCase& c) {
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto act = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto out = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    if (hidden == nullptr || gate == nullptr || up == nullptr || act == nullptr || out == nullptr) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_mlp_silu_mul");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> actOutput = {act};
+    std::vector<Tensor*> downInput = {act};
+    std::vector<Tensor*> downOutput = {out};
+
+    auto gateExe = bench.create(hiddenInput, gateOutput, gateOp->get());
+    auto upExe = bench.create(hiddenInput, upOutput, upOp->get());
+    auto siluExe = bench.create(siluInputs, actOutput, siluOp->get());
+    auto downExe = bench.create(downInput, downOutput, downOp->get());
+    if (!gateExe || !upExe || !siluExe || !downExe) {
+        MNN_ERROR("failed to create OpenCL DecodeRepairMlpChain executions for %s rows=%d\n", c.name, c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, actOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(downExe.get(), downInput, downOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("OpenCL DecodeRepairMlpChain onResize failed for %s rows=%d: %d\n", c.name, c.rows, code);
+        return false;
+    }
+
+    const int gateFamily = readSelectedCompactDenseFamily(bench, c.rows, c.hidden, c.inter, 4);
+    const int upFamily = readSelectedCompactDenseFamily(bench, c.rows, c.hidden, c.inter, 4);
+    const int downFamily = readSelectedCompactDenseFamily(bench, c.rows, c.inter, c.hidden, 4);
+
+    float gateMs = 0.0f;
+    float upMs = 0.0f;
+    float siluMs = 0.0f;
+    float downMs = 0.0f;
+    float chainMs = 0.0f;
+    if (!measureExecution(bench, gateExe.get(), hiddenInput, gateOutput, gate, c.warmup, c.repeat, &gateMs)) {
+        return false;
+    }
+    if (!measureExecution(bench, upExe.get(), hiddenInput, upOutput, up, c.warmup, c.repeat, &upMs)) {
+        return false;
+    }
+    if (bench.execute(gateExe.get(), hiddenInput, gateOutput) != NO_ERROR ||
+        bench.execute(upExe.get(), hiddenInput, upOutput) != NO_ERROR ||
+        !bench.sync()) {
+        return false;
+    }
+    if (!measureExecution(bench, siluExe.get(), siluInputs, actOutput, act, c.warmup, c.repeat, &siluMs)) {
+        return false;
+    }
+    if (bench.execute(siluExe.get(), siluInputs, actOutput) != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    if (!measureExecution(bench, downExe.get(), downInput, downOutput, out, c.warmup, c.repeat, &downMs)) {
+        return false;
+    }
+
+    OpenCLWallTimer timer;
+    std::vector<float> syncOutput;
+    auto runChain = [&]() {
+        auto chainCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (chainCode != NO_ERROR) {
+            return chainCode;
+        }
+        chainCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (chainCode != NO_ERROR) {
+            return chainCode;
+        }
+        chainCode = bench.execute(siluExe.get(), siluInputs, actOutput);
+        if (chainCode != NO_ERROR) {
+            return chainCode;
+        }
+        return bench.execute(downExe.get(), downInput, downOutput);
+    };
+    if (!timer.measure(runChain, [&]() { return bench.readTensorTyped<float>(out, &syncOutput); },
+                       c.warmup, c.repeat, &chainMs)) {
+        return false;
+    }
+
+    const float splitSumMs = gateMs + upMs + siluMs + downMs;
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpChain] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "gate_family=%-22s up_family=%-22s down_family=%-22s "
+              "gate=%.4f up=%.4f silu=%.4f down=%.4f split_sum=%.4f chain=%.4f ms\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              gateFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(gateFamily)) : "-",
+              upFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(upFamily)) : "-",
+              downFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(downFamily)) : "-",
+              gateMs, upMs, siluMs, downMs, splitSumMs, chainMs);
+    ::fflush(stdout);
+    return true;
+}
+
+static const char* kDecodeRepairMlpFusedFloorSource = R"(
+#ifdef MNN_SUPPORT_FP16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+
+inline int raw_i4(__global const uchar* weight, int index) {
+    uchar packed = weight[index >> 1];
+    int v = ((index & 1) == 0) ? (int)(packed >> 4) : (int)(packed & (uchar)15);
+    return v - 8;
+}
+
+inline FLOAT8 raw_load_i4x8(__global const uchar* weight, int oc8, int k, int ic, FLOAT8 scale) {
+    return (FLOAT8)(
+        (FLOAT)raw_i4(weight, (oc8 + 0) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 1) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 2) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 3) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 4) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 5) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 6) * ic + k),
+        (FLOAT)raw_i4(weight, (oc8 + 7) * ic + k)) * scale;
+}
+
+inline FLOAT8 raw_load_scale8(__global const FLOAT* scale, int oc8, int group, int groups) {
+    return (FLOAT8)(
+        scale[(oc8 + 0) * groups + group],
+        scale[(oc8 + 1) * groups + group],
+        scale[(oc8 + 2) * groups + group],
+        scale[(oc8 + 3) * groups + group],
+        scale[(oc8 + 4) * groups + group],
+        scale[(oc8 + 5) * groups + group],
+        scale[(oc8 + 6) * groups + group],
+        scale[(oc8 + 7) * groups + group]);
+}
+
+inline FLOAT8 raw_silu_mul8(FLOAT8 gate, FLOAT8 up) {
+    float8 gate_f = convert_float8(gate);
+    float8 up_f = convert_float8(up);
+    float8 fused = gate_f * native_recip((float8)1.0f + native_exp(-gate_f)) * up_f;
+#ifdef MNN_SUPPORT_FP16
+    return convert_half8(fused);
+#else
+    return fused;
+#endif
+}
+
+__kernel void raw_gateup_silu_int4(__private int global_dim0,
+                                   __private int global_dim1,
+                                   __private int global_dim2,
+                                   __global const FLOAT* input,
+                                   __global const uchar* gate_weight,
+                                   __global const FLOAT* gate_scale,
+                                   __global const FLOAT* gate_bias,
+                                   __global const uchar* up_weight,
+                                   __global const FLOAT* up_scale,
+                                   __global const FLOAT* up_bias,
+                                   __global FLOAT* act,
+                                   __private int rows,
+                                   __private int hidden,
+                                   __private int inter,
+                                   __private int quant_block,
+                                   __private int groups) {
+    const int lid = get_local_id(0);
+    const int oc = get_global_id(1);
+    const int b4 = get_global_id(2);
+    if (lid >= global_dim0 || oc >= global_dim1 || b4 >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int oc8 = oc << 3;
+    FLOAT8 gate0 = 0;
+    FLOAT8 gate1 = 0;
+    FLOAT8 gate2 = 0;
+    FLOAT8 gate3 = 0;
+    FLOAT8 up0 = 0;
+    FLOAT8 up1 = 0;
+    FLOAT8 up2 = 0;
+    FLOAT8 up3 = 0;
+    __local FLOAT8 gate_sum0[WGS];
+    __local FLOAT8 gate_sum1[WGS];
+    __local FLOAT8 gate_sum2[WGS];
+    __local FLOAT8 gate_sum3[WGS];
+    __local FLOAT8 up_sum0[WGS];
+    __local FLOAT8 up_sum1[WGS];
+    __local FLOAT8 up_sum2[WGS];
+    __local FLOAT8 up_sum3[WGS];
+    for (int k = lid; k < hidden; k += WGS) {
+        const int group = k / quant_block;
+        FLOAT8 gate_w = raw_load_i4x8(gate_weight, oc8, k, hidden,
+                                      raw_load_scale8(gate_scale, oc8, group, groups));
+        FLOAT8 up_w = raw_load_i4x8(up_weight, oc8, k, hidden,
+                                    raw_load_scale8(up_scale, oc8, group, groups));
+        FLOAT in0 = input[row * hidden + k];
+        FLOAT in1 = row + 1 < rows ? input[(row + 1) * hidden + k] : (FLOAT)0;
+        FLOAT in2 = row + 2 < rows ? input[(row + 2) * hidden + k] : (FLOAT)0;
+        FLOAT in3 = row + 3 < rows ? input[(row + 3) * hidden + k] : (FLOAT)0;
+        gate0 = mad((FLOAT8)in0, gate_w, gate0);
+        gate1 = mad((FLOAT8)in1, gate_w, gate1);
+        gate2 = mad((FLOAT8)in2, gate_w, gate2);
+        gate3 = mad((FLOAT8)in3, gate_w, gate3);
+        up0 = mad((FLOAT8)in0, up_w, up0);
+        up1 = mad((FLOAT8)in1, up_w, up1);
+        up2 = mad((FLOAT8)in2, up_w, up2);
+        up3 = mad((FLOAT8)in3, up_w, up3);
+    }
+    gate_sum0[lid] = gate0;
+    gate_sum1[lid] = gate1;
+    gate_sum2[lid] = gate2;
+    gate_sum3[lid] = gate3;
+    up_sum0[lid] = up0;
+    up_sum1[lid] = up1;
+    up_sum2[lid] = up2;
+    up_sum3[lid] = up3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int offset = WGS >> 1; offset > 0; offset >>= 1) {
+        if (lid < offset) {
+            gate_sum0[lid] += gate_sum0[lid + offset];
+            gate_sum1[lid] += gate_sum1[lid + offset];
+            gate_sum2[lid] += gate_sum2[lid + offset];
+            gate_sum3[lid] += gate_sum3[lid + offset];
+            up_sum0[lid] += up_sum0[lid + offset];
+            up_sum1[lid] += up_sum1[lid + offset];
+            up_sum2[lid] += up_sum2[lid + offset];
+            up_sum3[lid] += up_sum3[lid + offset];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        FLOAT8 gate_bias_v = vload8(0, gate_bias + oc8);
+        FLOAT8 up_bias_v = vload8(0, up_bias + oc8);
+        FLOAT8 fused0 = raw_silu_mul8(gate_sum0[0] + gate_bias_v, up_sum0[0] + up_bias_v);
+        FLOAT8 fused1 = raw_silu_mul8(gate_sum1[0] + gate_bias_v, up_sum1[0] + up_bias_v);
+        FLOAT8 fused2 = raw_silu_mul8(gate_sum2[0] + gate_bias_v, up_sum2[0] + up_bias_v);
+        FLOAT8 fused3 = raw_silu_mul8(gate_sum3[0] + gate_bias_v, up_sum3[0] + up_bias_v);
+        vstore8(fused0, 0, act + row * inter + oc8);
+        if (row + 1 < rows) {
+            vstore8(fused1, 0, act + (row + 1) * inter + oc8);
+        }
+        if (row + 2 < rows) {
+            vstore8(fused2, 0, act + (row + 2) * inter + oc8);
+        }
+        if (row + 3 < rows) {
+            vstore8(fused3, 0, act + (row + 3) * inter + oc8);
+        }
+    }
+}
+
+__kernel void raw_linear_int4(__private int global_dim0,
+                              __private int global_dim1,
+                              __private int global_dim2,
+                              __global const FLOAT* input,
+                              __global const uchar* weight,
+                              __global const FLOAT* scale,
+                              __global const FLOAT* bias,
+                              __global FLOAT* output,
+                              __private int rows,
+                              __private int ic,
+                              __private int oc_total,
+                              __private int quant_block,
+                              __private int groups) {
+    const int lid = get_local_id(0);
+    const int oc = get_global_id(1);
+    const int b4 = get_global_id(2);
+    if (lid >= global_dim0 || oc >= global_dim1 || b4 >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int oc8 = oc << 3;
+    FLOAT8 sum0 = 0;
+    FLOAT8 sum1 = 0;
+    FLOAT8 sum2 = 0;
+    FLOAT8 sum3 = 0;
+    __local FLOAT8 local0[WGS];
+    __local FLOAT8 local1[WGS];
+    __local FLOAT8 local2[WGS];
+    __local FLOAT8 local3[WGS];
+    for (int k = lid; k < ic; k += WGS) {
+        const int group = k / quant_block;
+        FLOAT8 w = raw_load_i4x8(weight, oc8, k, ic, raw_load_scale8(scale, oc8, group, groups));
+        FLOAT in0 = input[row * ic + k];
+        FLOAT in1 = row + 1 < rows ? input[(row + 1) * ic + k] : (FLOAT)0;
+        FLOAT in2 = row + 2 < rows ? input[(row + 2) * ic + k] : (FLOAT)0;
+        FLOAT in3 = row + 3 < rows ? input[(row + 3) * ic + k] : (FLOAT)0;
+        sum0 = mad((FLOAT8)in0, w, sum0);
+        sum1 = mad((FLOAT8)in1, w, sum1);
+        sum2 = mad((FLOAT8)in2, w, sum2);
+        sum3 = mad((FLOAT8)in3, w, sum3);
+    }
+    local0[lid] = sum0;
+    local1[lid] = sum1;
+    local2[lid] = sum2;
+    local3[lid] = sum3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int offset = WGS >> 1; offset > 0; offset >>= 1) {
+        if (lid < offset) {
+            local0[lid] += local0[lid + offset];
+            local1[lid] += local1[lid + offset];
+            local2[lid] += local2[lid + offset];
+            local3[lid] += local3[lid + offset];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        FLOAT8 bias_v = vload8(0, bias + oc8);
+        vstore8(local0[0] + bias_v, 0, output + row * oc_total + oc8);
+        if (row + 1 < rows) {
+            vstore8(local1[0] + bias_v, 0, output + (row + 1) * oc_total + oc8);
+        }
+        if (row + 2 < rows) {
+            vstore8(local2[0] + bias_v, 0, output + (row + 2) * oc_total + oc8);
+        }
+        if (row + 3 < rows) {
+            vstore8(local3[0] + bias_v, 0, output + (row + 3) * oc_total + oc8);
+        }
+    }
+}
+)";
+
+static const char* kDecodeRepairMlpResourceGateUpSource = R"(
+#ifdef MNN_SUPPORT_FP16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+__constant sampler_t SAMPLER = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
+#define UCHAR4_TO_CHAR8_LOCAL(b, scale, offset, wei) \
+    wei.s0 = (FLOAT)((b.s0 >> 4) - 8); \
+    wei.s1 = (FLOAT)((b.s0 & 15) - 8); \
+    wei.s2 = (FLOAT)((b.s1 >> 4) - 8); \
+    wei.s3 = (FLOAT)((b.s1 & 15) - 8); \
+    wei.s4 = (FLOAT)((b.s2 >> 4) - 8); \
+    wei.s5 = (FLOAT)((b.s2 & 15) - 8); \
+    wei.s6 = (FLOAT)((b.s3 >> 4) - 8); \
+    wei.s7 = (FLOAT)((b.s3 & 15) - 8); \
+    wei = wei * scale + offset;
+
+inline FLOAT8 resource_silu_mul8(FLOAT8 gate, FLOAT8 up) {
+    float8 gate_f = convert_float8(gate);
+    float8 up_f = convert_float8(up);
+    float8 fused = gate_f * native_recip((float8)1.0f + native_exp(-gate_f)) * up_f;
+#ifdef MNN_SUPPORT_FP16
+    return convert_half8(fused);
+#else
+    return fused;
+#endif
+}
+
+__kernel void resource_gateup_silu_int4_image(__private int global_dim0,
+                                              __private int global_dim1,
+                                              __private int global_dim2,
+                                              __global const FLOAT* input,
+                                              __read_only image2d_t gate_weight,
+                                              __global const FLOAT* gate_scale_offset,
+                                              __global const FLOAT* gate_bias,
+#ifdef RESOURCE_GATEUP_PAIR_OUTPUT
+                                              __global FLOAT* gate_output,
+                                              __read_only image2d_t up_weight,
+                                              __global const FLOAT* up_scale_offset,
+                                              __global const FLOAT* up_bias,
+                                              __global FLOAT* up_output,
+#else
+                                              __read_only image2d_t up_weight,
+                                              __global const FLOAT* up_scale_offset,
+                                              __global const FLOAT* up_bias,
+                                              __global FLOAT* fused_output,
+#endif
+                                              __private int rows,
+                                              __private int dst_channel_align,
+                                              __private int dst_channel_c4,
+                                              __private int src_channel_align,
+                                              __private int src_channel,
+                                              __private int block_dim,
+                                              __private float gate_coef,
+                                              __private float up_coef) {
+    const int lid = get_local_id(0);
+    const int oc = get_global_id(1);
+    const int b4 = get_global_id(2);
+    if (lid >= global_dim0 || oc >= global_dim1 || b4 >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int oc8 = oc << 3;
+    const int loop = (src_channel + 4 - 1) / 4;
+    const int bhw4 = rows << 2;
+    FLOAT8 gate0 = 0;
+    FLOAT8 gate1 = 0;
+    FLOAT8 gate2 = 0;
+    FLOAT8 gate3 = 0;
+    FLOAT8 up0 = 0;
+    FLOAT8 up1 = 0;
+    FLOAT8 up2 = 0;
+    FLOAT8 up3 = 0;
+    __local FLOAT8 gate_sum0[WGS];
+    __local FLOAT8 gate_sum1[WGS];
+    __local FLOAT8 gate_sum2[WGS];
+    __local FLOAT8 gate_sum3[WGS];
+    __local FLOAT8 up_sum0[WGS];
+    __local FLOAT8 up_sum1[WGS];
+    __local FLOAT8 up_sum2[WGS];
+    __local FLOAT8 up_sum3[WGS];
+    for (int j = lid; j < loop; j += WGS) {
+        const int k4 = j << 2;
+#ifdef ASYMMETRIC
+        FLOAT8 gate_scale;
+        FLOAT8 gate_offset;
+        FLOAT8 up_scale;
+        FLOAT8 up_offset;
+        {
+            FLOAT16 so = vload16(0, gate_scale_offset + oc8 * 2 + (k4 / block_dim) * dst_channel_c4 * 8) / (FLOAT16)gate_coef;
+            gate_scale = so.s02468ace;
+            gate_offset = so.s13579bdf;
+            so = vload16(0, up_scale_offset + oc8 * 2 + (k4 / block_dim) * dst_channel_c4 * 8) / (FLOAT16)up_coef;
+            up_scale = so.s02468ace;
+            up_offset = so.s13579bdf;
+        }
+#else
+        FLOAT8 gate_scale = vload8(0, gate_scale_offset + oc8 + (k4 / block_dim) * dst_channel_c4 * 4) / (FLOAT8)gate_coef;
+        FLOAT8 up_scale = vload8(0, up_scale_offset + oc8 + (k4 / block_dim) * dst_channel_c4 * 4) / (FLOAT8)up_coef;
+        FLOAT8 gate_offset = 0;
+        FLOAT8 up_offset = 0;
+#endif
+        FLOAT4 in0 = vload4(0, input + row * src_channel_align + k4);
+        FLOAT4 in1 = row + 1 < rows ? vload4(0, input + (row + 1) * src_channel_align + k4) : (FLOAT4)0;
+        FLOAT4 in2 = row + 2 < rows ? vload4(0, input + (row + 2) * src_channel_align + k4) : (FLOAT4)0;
+        FLOAT4 in3 = row + 3 < rows ? vload4(0, input + (row + 3) * src_channel_align + k4) : (FLOAT4)0;
+        uchar16 gate_packed = as_uchar16(read_imagei(gate_weight, SAMPLER, (int2)(j, oc)));
+        uchar16 up_packed = as_uchar16(read_imagei(up_weight, SAMPLER, (int2)(j, oc)));
+        FLOAT8 gate_wei;
+        FLOAT8 up_wei;
+        UCHAR4_TO_CHAR8_LOCAL(gate_packed.s0123, gate_scale, gate_offset, gate_wei);
+        UCHAR4_TO_CHAR8_LOCAL(up_packed.s0123, up_scale, up_offset, up_wei);
+        gate0 = mad((FLOAT8)in0.s0, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s0, gate_wei, gate1);
+        gate2 = mad((FLOAT8)in2.s0, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s0, gate_wei, gate3);
+        up0 = mad((FLOAT8)in0.s0, up_wei, up0); up1 = mad((FLOAT8)in1.s0, up_wei, up1);
+        up2 = mad((FLOAT8)in2.s0, up_wei, up2); up3 = mad((FLOAT8)in3.s0, up_wei, up3);
+        UCHAR4_TO_CHAR8_LOCAL(gate_packed.s4567, gate_scale, gate_offset, gate_wei);
+        UCHAR4_TO_CHAR8_LOCAL(up_packed.s4567, up_scale, up_offset, up_wei);
+        gate0 = mad((FLOAT8)in0.s1, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s1, gate_wei, gate1);
+        gate2 = mad((FLOAT8)in2.s1, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s1, gate_wei, gate3);
+        up0 = mad((FLOAT8)in0.s1, up_wei, up0); up1 = mad((FLOAT8)in1.s1, up_wei, up1);
+        up2 = mad((FLOAT8)in2.s1, up_wei, up2); up3 = mad((FLOAT8)in3.s1, up_wei, up3);
+        UCHAR4_TO_CHAR8_LOCAL(gate_packed.s89ab, gate_scale, gate_offset, gate_wei);
+        UCHAR4_TO_CHAR8_LOCAL(up_packed.s89ab, up_scale, up_offset, up_wei);
+        gate0 = mad((FLOAT8)in0.s2, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s2, gate_wei, gate1);
+        gate2 = mad((FLOAT8)in2.s2, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s2, gate_wei, gate3);
+        up0 = mad((FLOAT8)in0.s2, up_wei, up0); up1 = mad((FLOAT8)in1.s2, up_wei, up1);
+        up2 = mad((FLOAT8)in2.s2, up_wei, up2); up3 = mad((FLOAT8)in3.s2, up_wei, up3);
+        UCHAR4_TO_CHAR8_LOCAL(gate_packed.scdef, gate_scale, gate_offset, gate_wei);
+        UCHAR4_TO_CHAR8_LOCAL(up_packed.scdef, up_scale, up_offset, up_wei);
+        gate0 = mad((FLOAT8)in0.s3, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s3, gate_wei, gate1);
+        gate2 = mad((FLOAT8)in2.s3, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s3, gate_wei, gate3);
+        up0 = mad((FLOAT8)in0.s3, up_wei, up0); up1 = mad((FLOAT8)in1.s3, up_wei, up1);
+        up2 = mad((FLOAT8)in2.s3, up_wei, up2); up3 = mad((FLOAT8)in3.s3, up_wei, up3);
+    }
+    gate_sum0[lid] = gate0; gate_sum1[lid] = gate1; gate_sum2[lid] = gate2; gate_sum3[lid] = gate3;
+    up_sum0[lid] = up0; up_sum1[lid] = up1; up_sum2[lid] = up2; up_sum3[lid] = up3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int i = WGS / 2; i > 0; i >>= 1) {
+        if (lid < i) {
+            gate_sum0[lid] += gate_sum0[lid + i]; gate_sum1[lid] += gate_sum1[lid + i];
+            gate_sum2[lid] += gate_sum2[lid + i]; gate_sum3[lid] += gate_sum3[lid + i];
+            up_sum0[lid] += up_sum0[lid + i]; up_sum1[lid] += up_sum1[lid + i];
+            up_sum2[lid] += up_sum2[lid + i]; up_sum3[lid] += up_sum3[lid + i];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        FLOAT8 gate_bias_v = vload8(0, gate_bias + oc8);
+        FLOAT8 up_bias_v = vload8(0, up_bias + oc8);
+        FLOAT8 gate_v0 = gate_sum0[0] + gate_bias_v;
+        FLOAT8 gate_v1 = gate_sum1[0] + gate_bias_v;
+        FLOAT8 gate_v2 = gate_sum2[0] + gate_bias_v;
+        FLOAT8 gate_v3 = gate_sum3[0] + gate_bias_v;
+        FLOAT8 up_v0 = up_sum0[0] + up_bias_v;
+        FLOAT8 up_v1 = up_sum1[0] + up_bias_v;
+        FLOAT8 up_v2 = up_sum2[0] + up_bias_v;
+        FLOAT8 up_v3 = up_sum3[0] + up_bias_v;
+#ifndef RESOURCE_GATEUP_PAIR_OUTPUT
+        FLOAT8 fused0 = resource_silu_mul8(gate_v0, up_v0);
+        FLOAT8 fused1 = resource_silu_mul8(gate_v1, up_v1);
+        FLOAT8 fused2 = resource_silu_mul8(gate_v2, up_v2);
+        FLOAT8 fused3 = resource_silu_mul8(gate_v3, up_v3);
+#endif
+        const int out_c = oc << 1;
+        const int out_offset = out_c * bhw4 + row * 4;
+        if (row + 3 < rows) {
+#ifdef RESOURCE_GATEUP_PAIR_OUTPUT
+            vstore16((FLOAT16)(gate_v0.s0123, gate_v1.s0123, gate_v2.s0123, gate_v3.s0123), 0, gate_output + out_offset);
+            vstore16((FLOAT16)(up_v0.s0123, up_v1.s0123, up_v2.s0123, up_v3.s0123), 0, up_output + out_offset);
+            if (oc8 + 4 < dst_channel_align) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore16((FLOAT16)(gate_v0.s4567, gate_v1.s4567, gate_v2.s4567, gate_v3.s4567), 0, gate_output + out_offset_hi);
+                vstore16((FLOAT16)(up_v0.s4567, up_v1.s4567, up_v2.s4567, up_v3.s4567), 0, up_output + out_offset_hi);
+            }
+#else
+            vstore16((FLOAT16)(fused0.s0123, fused1.s0123, fused2.s0123, fused3.s0123), 0, fused_output + out_offset);
+            if (oc8 + 4 < dst_channel_align) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore16((FLOAT16)(fused0.s4567, fused1.s4567, fused2.s4567, fused3.s4567), 0, fused_output + out_offset_hi);
+            }
+#endif
+        } else {
+#ifdef RESOURCE_GATEUP_PAIR_OUTPUT
+            vstore4(gate_v0.s0123, 0, gate_output + out_offset);
+            vstore4(up_v0.s0123, 0, up_output + out_offset);
+            if (row + 1 < rows) {
+                vstore4(gate_v1.s0123, 0, gate_output + out_offset + 4);
+                vstore4(up_v1.s0123, 0, up_output + out_offset + 4);
+            }
+            if (row + 2 < rows) {
+                vstore4(gate_v2.s0123, 0, gate_output + out_offset + 8);
+                vstore4(up_v2.s0123, 0, up_output + out_offset + 8);
+            }
+            if (oc8 + 4 < dst_channel_align) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore4(gate_v0.s4567, 0, gate_output + out_offset_hi);
+                vstore4(up_v0.s4567, 0, up_output + out_offset_hi);
+                if (row + 1 < rows) {
+                    vstore4(gate_v1.s4567, 0, gate_output + out_offset_hi + 4);
+                    vstore4(up_v1.s4567, 0, up_output + out_offset_hi + 4);
+                }
+                if (row + 2 < rows) {
+                    vstore4(gate_v2.s4567, 0, gate_output + out_offset_hi + 8);
+                    vstore4(up_v2.s4567, 0, up_output + out_offset_hi + 8);
+                }
+            }
+#else
+            vstore4(fused0.s0123, 0, fused_output + out_offset);
+            if (row + 1 < rows) {
+                vstore4(fused1.s0123, 0, fused_output + out_offset + 4);
+            }
+            if (row + 2 < rows) {
+                vstore4(fused2.s0123, 0, fused_output + out_offset + 8);
+            }
+            if (oc8 + 4 < dst_channel_align) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore4(fused0.s4567, 0, fused_output + out_offset_hi);
+                if (row + 1 < rows) {
+                    vstore4(fused1.s4567, 0, fused_output + out_offset_hi + 4);
+                }
+                if (row + 2 < rows) {
+                    vstore4(fused2.s4567, 0, fused_output + out_offset_hi + 8);
+                }
+            }
+#endif
+        }
+    }
+}
+)";
+
+static const char* kDecodeRepairMlpSiluDownC4Source = R"(
+#ifdef MNN_SUPPORT_FP16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+__constant sampler_t SAMPLER = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
+#define UCHAR4_TO_CHAR8_LOCAL(b, scale, offset, wei) \
+    wei.s0 = (FLOAT)((b.s0 >> 4) - 8); \
+    wei.s1 = (FLOAT)((b.s0 & 15) - 8); \
+    wei.s2 = (FLOAT)((b.s1 >> 4) - 8); \
+    wei.s3 = (FLOAT)((b.s1 & 15) - 8); \
+    wei.s4 = (FLOAT)((b.s2 >> 4) - 8); \
+    wei.s5 = (FLOAT)((b.s2 & 15) - 8); \
+    wei.s6 = (FLOAT)((b.s3 >> 4) - 8); \
+    wei.s7 = (FLOAT)((b.s3 & 15) - 8); \
+    wei = wei * scale + offset;
+
+inline FLOAT c4_silu_mul_scalar(FLOAT gate, FLOAT up) {
+    float gate_f = (float)gate;
+    float up_f = (float)up;
+    float fused = gate_f * native_recip(1.0f + native_exp(-gate_f)) * up_f;
+#ifdef MNN_SUPPORT_FP16
+    return (half)fused;
+#else
+    return fused;
+#endif
+}
+
+__kernel void resource_silu_down_c4_int4_image(__private int global_dim0,
+                                               __private int global_dim1,
+                                               __private int global_dim2,
+                                               __global const FLOAT* gate,
+                                               __global const FLOAT* up,
+                                               __read_only image2d_t down_weight,
+                                               __global const FLOAT* down_scale_offset,
+                                               __global const FLOAT* down_bias,
+                                               __global FLOAT* output,
+                                               __private int rows,
+                                               __private int dst_channel_align,
+                                               __private int dst_channel_c4,
+                                               __private int src_channel,
+                                               __private int block_dim,
+                                               __private float down_coef) {
+    const int lid = get_local_id(0);
+    const int oc = get_global_id(1);
+    const int b4 = get_global_id(2);
+    if (lid >= global_dim0 || oc >= global_dim1 || b4 >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int oc8 = oc << 3;
+    const int loop = (src_channel + 4 - 1) / 4;
+    const int bhw4 = rows << 2;
+    FLOAT8 out0 = 0;
+    FLOAT8 out1 = 0;
+    FLOAT8 out2 = 0;
+    FLOAT8 out3 = 0;
+    __local FLOAT8 local0[WGS];
+    __local FLOAT8 local1[WGS];
+    __local FLOAT8 local2[WGS];
+    __local FLOAT8 local3[WGS];
+    for (int j = lid; j < loop; j += WGS) {
+        const int k4 = j << 2;
+#ifdef ASYMMETRIC
+        FLOAT8 scale;
+        FLOAT8 offset;
+        {
+            FLOAT16 so = vload16(0, down_scale_offset + oc8 * 2 + (k4 / block_dim) * dst_channel_c4 * 8) / (FLOAT16)down_coef;
+            scale = so.s02468ace;
+            offset = so.s13579bdf;
+        }
+#else
+        FLOAT8 scale = vload8(0, down_scale_offset + oc8 + (k4 / block_dim) * dst_channel_c4 * 4) / (FLOAT8)down_coef;
+        FLOAT8 offset = 0;
+#endif
+        const int input_offset = j * bhw4 + row * 4;
+        FLOAT4 gate0 = vload4(0, gate + input_offset);
+        FLOAT4 up0 = vload4(0, up + input_offset);
+        FLOAT4 gate1 = row + 1 < rows ? vload4(0, gate + input_offset + 4) : (FLOAT4)0;
+        FLOAT4 up1 = row + 1 < rows ? vload4(0, up + input_offset + 4) : (FLOAT4)0;
+        FLOAT4 gate2 = row + 2 < rows ? vload4(0, gate + input_offset + 8) : (FLOAT4)0;
+        FLOAT4 up2 = row + 2 < rows ? vload4(0, up + input_offset + 8) : (FLOAT4)0;
+        FLOAT4 gate3 = row + 3 < rows ? vload4(0, gate + input_offset + 12) : (FLOAT4)0;
+        FLOAT4 up3 = row + 3 < rows ? vload4(0, up + input_offset + 12) : (FLOAT4)0;
+        uchar16 packed = as_uchar16(read_imagei(down_weight, SAMPLER, (int2)(j, oc)));
+        FLOAT8 wei;
+        UCHAR4_TO_CHAR8_LOCAL(packed.s0123, scale, offset, wei);
+        out0 = mad((FLOAT8)c4_silu_mul_scalar(gate0.s0, up0.s0), wei, out0);
+        out1 = mad((FLOAT8)c4_silu_mul_scalar(gate1.s0, up1.s0), wei, out1);
+        out2 = mad((FLOAT8)c4_silu_mul_scalar(gate2.s0, up2.s0), wei, out2);
+        out3 = mad((FLOAT8)c4_silu_mul_scalar(gate3.s0, up3.s0), wei, out3);
+        UCHAR4_TO_CHAR8_LOCAL(packed.s4567, scale, offset, wei);
+        out0 = mad((FLOAT8)c4_silu_mul_scalar(gate0.s1, up0.s1), wei, out0);
+        out1 = mad((FLOAT8)c4_silu_mul_scalar(gate1.s1, up1.s1), wei, out1);
+        out2 = mad((FLOAT8)c4_silu_mul_scalar(gate2.s1, up2.s1), wei, out2);
+        out3 = mad((FLOAT8)c4_silu_mul_scalar(gate3.s1, up3.s1), wei, out3);
+        UCHAR4_TO_CHAR8_LOCAL(packed.s89ab, scale, offset, wei);
+        out0 = mad((FLOAT8)c4_silu_mul_scalar(gate0.s2, up0.s2), wei, out0);
+        out1 = mad((FLOAT8)c4_silu_mul_scalar(gate1.s2, up1.s2), wei, out1);
+        out2 = mad((FLOAT8)c4_silu_mul_scalar(gate2.s2, up2.s2), wei, out2);
+        out3 = mad((FLOAT8)c4_silu_mul_scalar(gate3.s2, up3.s2), wei, out3);
+        UCHAR4_TO_CHAR8_LOCAL(packed.scdef, scale, offset, wei);
+        out0 = mad((FLOAT8)c4_silu_mul_scalar(gate0.s3, up0.s3), wei, out0);
+        out1 = mad((FLOAT8)c4_silu_mul_scalar(gate1.s3, up1.s3), wei, out1);
+        out2 = mad((FLOAT8)c4_silu_mul_scalar(gate2.s3, up2.s3), wei, out2);
+        out3 = mad((FLOAT8)c4_silu_mul_scalar(gate3.s3, up3.s3), wei, out3);
+    }
+    local0[lid] = out0;
+    local1[lid] = out1;
+    local2[lid] = out2;
+    local3[lid] = out3;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int i = WGS / 2; i > 0; i >>= 1) {
+        if (lid < i) {
+            local0[lid] += local0[lid + i];
+            local1[lid] += local1[lid + i];
+            local2[lid] += local2[lid + i];
+            local3[lid] += local3[lid + i];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        FLOAT8 bias_v = vload8(0, down_bias + oc8);
+        FLOAT8 out_v0 = local0[0] + bias_v;
+        FLOAT8 out_v1 = local1[0] + bias_v;
+        FLOAT8 out_v2 = local2[0] + bias_v;
+        FLOAT8 out_v3 = local3[0] + bias_v;
+        const int out_c = oc << 1;
+        const int out_offset = out_c * bhw4 + row * 4;
+        if (row + 3 < rows) {
+            vstore16((FLOAT16)(out_v0.s0123, out_v1.s0123, out_v2.s0123, out_v3.s0123), 0, output + out_offset);
+            if (oc8 + 4 < dst_channel_align) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore16((FLOAT16)(out_v0.s4567, out_v1.s4567, out_v2.s4567, out_v3.s4567), 0, output + out_offset_hi);
+            }
+        } else {
+            vstore4(out_v0.s0123, 0, output + out_offset);
+            if (row + 1 < rows) {
+                vstore4(out_v1.s0123, 0, output + out_offset + 4);
+            }
+            if (row + 2 < rows) {
+                vstore4(out_v2.s0123, 0, output + out_offset + 8);
+            }
+            if (oc8 + 4 < dst_channel_align) {
+                const int out_offset_hi = out_offset + bhw4;
+                vstore4(out_v0.s4567, 0, output + out_offset_hi);
+                if (row + 1 < rows) {
+                    vstore4(out_v1.s4567, 0, output + out_offset_hi + 4);
+                }
+                if (row + 2 < rows) {
+                    vstore4(out_v2.s4567, 0, output + out_offset_hi + 8);
+                }
+            }
+        }
+    }
+}
+)";
+
+static const char* kDecodeRepairMlpStreamedTileSource = R"(
+#ifdef MNN_SUPPORT_FP16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+__constant sampler_t SAMPLER = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;
+#ifndef OC_TILE
+#define OC_TILE 4
+#endif
+#define UCHAR4_TO_CHAR8_LOCAL(b, scale, offset, wei) \
+    wei.s0 = (FLOAT)((b.s0 >> 4) - 8); \
+    wei.s1 = (FLOAT)((b.s0 & 15) - 8); \
+    wei.s2 = (FLOAT)((b.s1 >> 4) - 8); \
+    wei.s3 = (FLOAT)((b.s1 & 15) - 8); \
+    wei.s4 = (FLOAT)((b.s2 >> 4) - 8); \
+    wei.s5 = (FLOAT)((b.s2 & 15) - 8); \
+    wei.s6 = (FLOAT)((b.s3 >> 4) - 8); \
+    wei.s7 = (FLOAT)((b.s3 & 15) - 8); \
+    wei = wei * scale + offset;
+
+inline FLOAT8 streamed_silu_mul8(FLOAT8 gate, FLOAT8 up) {
+    float8 gate_f = convert_float8(gate);
+    float8 up_f = convert_float8(up);
+    float8 fused = gate_f * native_recip((float8)1.0f + native_exp(-gate_f)) * up_f;
+#ifdef MNN_SUPPORT_FP16
+    return convert_half8(fused);
+#else
+    return fused;
+#endif
+}
+
+inline void streamed_accum_down4(FLOAT4 act0, FLOAT4 act1, FLOAT4 act2, FLOAT4 act3,
+                                 __read_only image2d_t down_weight,
+                                 __global const FLOAT* down_scale_offset,
+                                 int oc_index,
+                                 int k4,
+                                 int dst_channel_c4,
+                                 int down_block_dim,
+                                 float down_coef,
+                                 __private FLOAT8* out0,
+                                 __private FLOAT8* out1,
+                                 __private FLOAT8* out2,
+                                 __private FLOAT8* out3) {
+    const int oc8 = oc_index << 3;
+#ifdef ASYMMETRIC
+    FLOAT8 scale;
+    FLOAT8 offset;
+    {
+        FLOAT16 so = vload16(0, down_scale_offset + oc8 * 2 + (k4 / down_block_dim) * dst_channel_c4 * 8) / (FLOAT16)down_coef;
+        scale = so.s02468ace;
+        offset = so.s13579bdf;
+    }
+#else
+    FLOAT8 scale = vload8(0, down_scale_offset + oc8 + (k4 / down_block_dim) * dst_channel_c4 * 4) / (FLOAT8)down_coef;
+    FLOAT8 offset = 0;
+#endif
+    uchar16 packed = as_uchar16(read_imagei(down_weight, SAMPLER, (int2)(k4, oc_index)));
+    FLOAT8 wei;
+    UCHAR4_TO_CHAR8_LOCAL(packed.s0123, scale, offset, wei);
+    *out0 = mad((FLOAT8)act0.s0, wei, *out0);
+    *out1 = mad((FLOAT8)act1.s0, wei, *out1);
+    *out2 = mad((FLOAT8)act2.s0, wei, *out2);
+    *out3 = mad((FLOAT8)act3.s0, wei, *out3);
+    UCHAR4_TO_CHAR8_LOCAL(packed.s4567, scale, offset, wei);
+    *out0 = mad((FLOAT8)act0.s1, wei, *out0);
+    *out1 = mad((FLOAT8)act1.s1, wei, *out1);
+    *out2 = mad((FLOAT8)act2.s1, wei, *out2);
+    *out3 = mad((FLOAT8)act3.s1, wei, *out3);
+    UCHAR4_TO_CHAR8_LOCAL(packed.s89ab, scale, offset, wei);
+    *out0 = mad((FLOAT8)act0.s2, wei, *out0);
+    *out1 = mad((FLOAT8)act1.s2, wei, *out1);
+    *out2 = mad((FLOAT8)act2.s2, wei, *out2);
+    *out3 = mad((FLOAT8)act3.s2, wei, *out3);
+    UCHAR4_TO_CHAR8_LOCAL(packed.scdef, scale, offset, wei);
+    *out0 = mad((FLOAT8)act0.s3, wei, *out0);
+    *out1 = mad((FLOAT8)act1.s3, wei, *out1);
+    *out2 = mad((FLOAT8)act2.s3, wei, *out2);
+    *out3 = mad((FLOAT8)act3.s3, wei, *out3);
+}
+
+__kernel void resource_streamed_tile_mlp_int4_image(__private int global_dim0,
+                                                    __private int global_dim1,
+                                                    __private int global_dim2,
+                                                    __global const FLOAT* input,
+                                                    __read_only image2d_t gate_weight,
+                                                    __global const FLOAT* gate_scale_offset,
+                                                    __global const FLOAT* gate_bias,
+                                                    __read_only image2d_t up_weight,
+                                                    __global const FLOAT* up_scale_offset,
+                                                    __global const FLOAT* up_bias,
+                                                    __read_only image2d_t down_weight,
+                                                    __global const FLOAT* down_scale_offset,
+                                                    __global const FLOAT* down_bias,
+                                                    __global FLOAT* output,
+                                                    __private int rows,
+                                                    __private int hidden_channel_align,
+                                                    __private int hidden_channel_c4,
+                                                    __private int src_channel_align,
+                                                    __private int src_channel,
+                                                    __private int inter_channel,
+                                                    __private int inter_channel_c4,
+                                                    __private int gate_block_dim,
+                                                    __private int down_block_dim,
+                                                    __private float gate_coef,
+                                                    __private float up_coef,
+                                                    __private float down_coef) {
+    const int lid = get_local_id(0);
+    const int oc_tile = get_global_id(1);
+    const int b4 = get_global_id(2);
+    if (lid >= global_dim0 || oc_tile >= global_dim1 || b4 >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int bhw4 = rows << 2;
+    const int hidden_c8 = hidden_channel_align >> 3;
+    const int inter_c8 = (inter_channel + 7) >> 3;
+
+    FLOAT8 out0[OC_TILE];
+    FLOAT8 out1[OC_TILE];
+    FLOAT8 out2[OC_TILE];
+    FLOAT8 out3[OC_TILE];
+    for (int t = 0; t < OC_TILE; ++t) {
+        const int oc_index = oc_tile * OC_TILE + t;
+        FLOAT8 bias = oc_index < hidden_c8 ? vload8(0, down_bias + (oc_index << 3)) : (FLOAT8)0;
+        out0[t] = bias;
+        out1[t] = bias;
+        out2[t] = bias;
+        out3[t] = bias;
+    }
+
+    __local FLOAT8 gate_sum0[WGS];
+    __local FLOAT8 gate_sum1[WGS];
+    __local FLOAT8 gate_sum2[WGS];
+    __local FLOAT8 gate_sum3[WGS];
+    __local FLOAT8 up_sum0[WGS];
+    __local FLOAT8 up_sum1[WGS];
+    __local FLOAT8 up_sum2[WGS];
+    __local FLOAT8 up_sum3[WGS];
+
+    for (int ic8 = 0; ic8 < inter_c8; ++ic8) {
+        const int inter_oc8 = ic8 << 3;
+        FLOAT8 gate0 = 0;
+        FLOAT8 gate1 = 0;
+        FLOAT8 gate2 = 0;
+        FLOAT8 gate3 = 0;
+        FLOAT8 up0 = 0;
+        FLOAT8 up1 = 0;
+        FLOAT8 up2 = 0;
+        FLOAT8 up3 = 0;
+        for (int j = lid; j < (src_channel + 3) / 4; j += WGS) {
+            const int k4 = j << 2;
+#ifdef ASYMMETRIC
+            FLOAT8 gate_scale;
+            FLOAT8 gate_offset;
+            FLOAT8 up_scale;
+            FLOAT8 up_offset;
+            {
+                FLOAT16 so = vload16(0, gate_scale_offset + inter_oc8 * 2 + (k4 / gate_block_dim) * inter_channel_c4 * 8) / (FLOAT16)gate_coef;
+                gate_scale = so.s02468ace;
+                gate_offset = so.s13579bdf;
+                so = vload16(0, up_scale_offset + inter_oc8 * 2 + (k4 / gate_block_dim) * inter_channel_c4 * 8) / (FLOAT16)up_coef;
+                up_scale = so.s02468ace;
+                up_offset = so.s13579bdf;
+            }
+#else
+            FLOAT8 gate_scale = vload8(0, gate_scale_offset + inter_oc8 + (k4 / gate_block_dim) * inter_channel_c4 * 4) / (FLOAT8)gate_coef;
+            FLOAT8 up_scale = vload8(0, up_scale_offset + inter_oc8 + (k4 / gate_block_dim) * inter_channel_c4 * 4) / (FLOAT8)up_coef;
+            FLOAT8 gate_offset = 0;
+            FLOAT8 up_offset = 0;
+#endif
+            FLOAT4 in0 = vload4(0, input + row * src_channel_align + k4);
+            FLOAT4 in1 = row + 1 < rows ? vload4(0, input + (row + 1) * src_channel_align + k4) : (FLOAT4)0;
+            FLOAT4 in2 = row + 2 < rows ? vload4(0, input + (row + 2) * src_channel_align + k4) : (FLOAT4)0;
+            FLOAT4 in3 = row + 3 < rows ? vload4(0, input + (row + 3) * src_channel_align + k4) : (FLOAT4)0;
+            uchar16 gate_packed = as_uchar16(read_imagei(gate_weight, SAMPLER, (int2)(j, ic8)));
+            uchar16 up_packed = as_uchar16(read_imagei(up_weight, SAMPLER, (int2)(j, ic8)));
+            FLOAT8 gate_wei;
+            FLOAT8 up_wei;
+            UCHAR4_TO_CHAR8_LOCAL(gate_packed.s0123, gate_scale, gate_offset, gate_wei);
+            UCHAR4_TO_CHAR8_LOCAL(up_packed.s0123, up_scale, up_offset, up_wei);
+            gate0 = mad((FLOAT8)in0.s0, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s0, gate_wei, gate1);
+            gate2 = mad((FLOAT8)in2.s0, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s0, gate_wei, gate3);
+            up0 = mad((FLOAT8)in0.s0, up_wei, up0); up1 = mad((FLOAT8)in1.s0, up_wei, up1);
+            up2 = mad((FLOAT8)in2.s0, up_wei, up2); up3 = mad((FLOAT8)in3.s0, up_wei, up3);
+            UCHAR4_TO_CHAR8_LOCAL(gate_packed.s4567, gate_scale, gate_offset, gate_wei);
+            UCHAR4_TO_CHAR8_LOCAL(up_packed.s4567, up_scale, up_offset, up_wei);
+            gate0 = mad((FLOAT8)in0.s1, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s1, gate_wei, gate1);
+            gate2 = mad((FLOAT8)in2.s1, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s1, gate_wei, gate3);
+            up0 = mad((FLOAT8)in0.s1, up_wei, up0); up1 = mad((FLOAT8)in1.s1, up_wei, up1);
+            up2 = mad((FLOAT8)in2.s1, up_wei, up2); up3 = mad((FLOAT8)in3.s1, up_wei, up3);
+            UCHAR4_TO_CHAR8_LOCAL(gate_packed.s89ab, gate_scale, gate_offset, gate_wei);
+            UCHAR4_TO_CHAR8_LOCAL(up_packed.s89ab, up_scale, up_offset, up_wei);
+            gate0 = mad((FLOAT8)in0.s2, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s2, gate_wei, gate1);
+            gate2 = mad((FLOAT8)in2.s2, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s2, gate_wei, gate3);
+            up0 = mad((FLOAT8)in0.s2, up_wei, up0); up1 = mad((FLOAT8)in1.s2, up_wei, up1);
+            up2 = mad((FLOAT8)in2.s2, up_wei, up2); up3 = mad((FLOAT8)in3.s2, up_wei, up3);
+            UCHAR4_TO_CHAR8_LOCAL(gate_packed.scdef, gate_scale, gate_offset, gate_wei);
+            UCHAR4_TO_CHAR8_LOCAL(up_packed.scdef, up_scale, up_offset, up_wei);
+            gate0 = mad((FLOAT8)in0.s3, gate_wei, gate0); gate1 = mad((FLOAT8)in1.s3, gate_wei, gate1);
+            gate2 = mad((FLOAT8)in2.s3, gate_wei, gate2); gate3 = mad((FLOAT8)in3.s3, gate_wei, gate3);
+            up0 = mad((FLOAT8)in0.s3, up_wei, up0); up1 = mad((FLOAT8)in1.s3, up_wei, up1);
+            up2 = mad((FLOAT8)in2.s3, up_wei, up2); up3 = mad((FLOAT8)in3.s3, up_wei, up3);
+        }
+        gate_sum0[lid] = gate0; gate_sum1[lid] = gate1; gate_sum2[lid] = gate2; gate_sum3[lid] = gate3;
+        up_sum0[lid] = up0; up_sum1[lid] = up1; up_sum2[lid] = up2; up_sum3[lid] = up3;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int i = WGS / 2; i > 0; i >>= 1) {
+            if (lid < i) {
+                gate_sum0[lid] += gate_sum0[lid + i]; gate_sum1[lid] += gate_sum1[lid + i];
+                gate_sum2[lid] += gate_sum2[lid + i]; gate_sum3[lid] += gate_sum3[lid + i];
+                up_sum0[lid] += up_sum0[lid + i]; up_sum1[lid] += up_sum1[lid + i];
+                up_sum2[lid] += up_sum2[lid + i]; up_sum3[lid] += up_sum3[lid + i];
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        if (lid == 0) {
+            FLOAT8 gate_bias_v = vload8(0, gate_bias + inter_oc8);
+            FLOAT8 up_bias_v = vload8(0, up_bias + inter_oc8);
+            FLOAT8 act0 = streamed_silu_mul8(gate_sum0[0] + gate_bias_v, up_sum0[0] + up_bias_v);
+            FLOAT8 act1 = streamed_silu_mul8(gate_sum1[0] + gate_bias_v, up_sum1[0] + up_bias_v);
+            FLOAT8 act2 = streamed_silu_mul8(gate_sum2[0] + gate_bias_v, up_sum2[0] + up_bias_v);
+            FLOAT8 act3 = streamed_silu_mul8(gate_sum3[0] + gate_bias_v, up_sum3[0] + up_bias_v);
+            const int down_k4 = ic8 << 1;
+            for (int t = 0; t < OC_TILE; ++t) {
+                const int oc_index = oc_tile * OC_TILE + t;
+                if (oc_index < hidden_c8) {
+                    streamed_accum_down4(act0.s0123, act1.s0123, act2.s0123, act3.s0123,
+                                         down_weight, down_scale_offset, oc_index, down_k4,
+                                         hidden_channel_c4, down_block_dim, down_coef,
+                                         &out0[t], &out1[t], &out2[t], &out3[t]);
+                    streamed_accum_down4(act0.s4567, act1.s4567, act2.s4567, act3.s4567,
+                                         down_weight, down_scale_offset, oc_index, down_k4 + 1,
+                                         hidden_channel_c4, down_block_dim, down_coef,
+                                         &out0[t], &out1[t], &out2[t], &out3[t]);
+                }
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        for (int t = 0; t < OC_TILE; ++t) {
+            const int oc_index = oc_tile * OC_TILE + t;
+            if (oc_index >= hidden_c8) {
+                continue;
+            }
+            const int out_c = oc_index << 1;
+            const int out_offset = out_c * bhw4 + row * 4;
+            if (row + 3 < rows) {
+                vstore16((FLOAT16)(out0[t].s0123, out1[t].s0123, out2[t].s0123, out3[t].s0123), 0, output + out_offset);
+                if ((oc_index << 3) + 4 < hidden_channel_align) {
+                    const int out_offset_hi = out_offset + bhw4;
+                    vstore16((FLOAT16)(out0[t].s4567, out1[t].s4567, out2[t].s4567, out3[t].s4567), 0, output + out_offset_hi);
+                }
+            } else {
+                vstore4(out0[t].s0123, 0, output + out_offset);
+                if (row + 1 < rows) {
+                    vstore4(out1[t].s0123, 0, output + out_offset + 4);
+                }
+                if (row + 2 < rows) {
+                    vstore4(out2[t].s0123, 0, output + out_offset + 8);
+                }
+                if ((oc_index << 3) + 4 < hidden_channel_align) {
+                    const int out_offset_hi = out_offset + bhw4;
+                    vstore4(out0[t].s4567, 0, output + out_offset_hi);
+                    if (row + 1 < rows) {
+                        vstore4(out1[t].s4567, 0, output + out_offset_hi + 4);
+                    }
+                    if (row + 2 < rows) {
+                        vstore4(out2[t].s4567, 0, output + out_offset_hi + 8);
+                    }
+                }
+            }
+        }
+    }
+}
+)";
+
+static const char* kDecodeRepairMlpSiluNhwcSource = R"(
+#ifdef MNN_SUPPORT_FP16
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
+#endif
+
+inline FLOAT4 nhwc_silu_mul4(FLOAT4 gate, FLOAT4 up) {
+    float4 gate_f = convert_float4(gate);
+    float4 up_f = convert_float4(up);
+    float4 fused = gate_f * native_recip((float4)1.0f + native_exp(-gate_f)) * up_f;
+#ifdef MNN_SUPPORT_FP16
+    return convert_half4(fused);
+#else
+    return fused;
+#endif
+}
+
+__kernel void silu_c4_to_nhwc(__private int global_dim0,
+                              __private int global_dim1,
+                              __private int global_dim2,
+                              __global const FLOAT* gate,
+                              __global const FLOAT* up,
+                              __global FLOAT* output,
+                              __private int rows,
+                              __private int channels,
+                              __private int channel_align) {
+    const int c4 = get_global_id(0);
+    const int b4 = get_global_id(1);
+    const int z = get_global_id(2);
+    if (c4 >= global_dim0 || b4 >= global_dim1 || z >= global_dim2) {
+        return;
+    }
+    const int row = b4 << 2;
+    const int ch = c4 << 2;
+    if (ch >= channels) {
+        return;
+    }
+    const int bhw4 = rows << 2;
+    const int in_offset = c4 * bhw4 + row * 4;
+    FLOAT4 gate0 = vload4(0, gate + in_offset);
+    FLOAT4 up0 = vload4(0, up + in_offset);
+    vstore4(nhwc_silu_mul4(gate0, up0), 0, output + row * channel_align + ch);
+    if (row + 1 < rows) {
+        FLOAT4 gate1 = vload4(0, gate + in_offset + 4);
+        FLOAT4 up1 = vload4(0, up + in_offset + 4);
+        vstore4(nhwc_silu_mul4(gate1, up1), 0, output + (row + 1) * channel_align + ch);
+    }
+    if (row + 2 < rows) {
+        FLOAT4 gate2 = vload4(0, gate + in_offset + 8);
+        FLOAT4 up2 = vload4(0, up + in_offset + 8);
+        vstore4(nhwc_silu_mul4(gate2, up2), 0, output + (row + 2) * channel_align + ch);
+    }
+    if (row + 3 < rows) {
+        FLOAT4 gate3 = vload4(0, gate + in_offset + 12);
+        FLOAT4 up3 = vload4(0, up + in_offset + 12);
+        vstore4(nhwc_silu_mul4(gate3, up3), 0, output + (row + 3) * channel_align + ch);
+    }
+}
+)";
+
+static std::vector<uint8_t> makePackedI4Weights(int oc, int ic, int salt) {
+    std::vector<uint8_t> packed(UP_DIV(oc * ic, 2), 0);
+    for (int i = 0; i < oc * ic; ++i) {
+        uint8_t q = static_cast<uint8_t>((i * 13 + salt) & 15);
+        if ((i & 1) == 0) {
+            packed[i >> 1] = static_cast<uint8_t>(q << 4);
+        } else {
+            packed[i >> 1] = static_cast<uint8_t>(packed[i >> 1] | q);
+        }
+    }
+    return packed;
+}
+
+static int unpackI4Weight(const std::vector<uint8_t>& packed, int index) {
+    uint8_t value = packed[index >> 1];
+    int q = ((index & 1) == 0) ? static_cast<int>(value >> 4) : static_cast<int>(value & 15);
+    return q - 8;
+}
+
+static std::vector<float> makeRawScale(int oc, int groups, int salt) {
+    std::vector<float> scale(static_cast<size_t>(oc) * static_cast<size_t>(groups));
+    for (size_t i = 0; i < scale.size(); ++i) {
+        scale[i] = 0.00125f + static_cast<float>((static_cast<int>(i) * 7 + salt) % 11) * 0.000125f;
+    }
+    return scale;
+}
+
+static void computeRawMlpReference(const std::vector<float>& input,
+                                   const std::vector<uint8_t>& gateWeight,
+                                   const std::vector<float>& gateScale,
+                                   const std::vector<float>& gateBias,
+                                   const std::vector<uint8_t>& upWeight,
+                                   const std::vector<float>& upScale,
+                                   const std::vector<float>& upBias,
+                                   const std::vector<uint8_t>& downWeight,
+                                   const std::vector<float>& downScale,
+                                   const std::vector<float>& downBias,
+                                   int rows, int hidden, int inter, int quantBlock,
+                                   std::vector<float>* act,
+                                   std::vector<float>* output) {
+    const int gateGroups = UP_DIV(hidden, quantBlock);
+    const int downGroups = UP_DIV(inter, quantBlock);
+    act->assign(static_cast<size_t>(rows) * inter, 0.0f);
+    output->assign(static_cast<size_t>(rows) * hidden, 0.0f);
+    for (int r = 0; r < rows; ++r) {
+        for (int j = 0; j < inter; ++j) {
+            float gate = gateBias[j];
+            float up = upBias[j];
+            for (int k = 0; k < hidden; ++k) {
+                const float x = input[r * hidden + k];
+                const int group = k / quantBlock;
+                gate += x * static_cast<float>(unpackI4Weight(gateWeight, j * hidden + k)) *
+                        gateScale[j * gateGroups + group];
+                up += x * static_cast<float>(unpackI4Weight(upWeight, j * hidden + k)) *
+                      upScale[j * gateGroups + group];
+            }
+            (*act)[r * inter + j] = gate * (1.0f / (1.0f + std::exp(-gate))) * up;
+        }
+        for (int o = 0; o < hidden; ++o) {
+            float sum = downBias[o];
+            for (int j = 0; j < inter; ++j) {
+                const int group = j / quantBlock;
+                sum += (*act)[r * inter + j] *
+                       static_cast<float>(unpackI4Weight(downWeight, o * inter + j)) *
+                       downScale[o * downGroups + group];
+            }
+            (*output)[r * hidden + o] = sum;
+        }
+    }
+}
+
+static bool runRawKernel(OpenCLRuntime* runtime, const std::shared_ptr<KernelWrap>& kernel,
+                         const std::vector<uint32_t>& gws, const std::vector<uint32_t>& lws) {
+    if (runtime == nullptr || kernel == nullptr || gws.size() != 3 || lws.size() != 3) {
+        return false;
+    }
+    std::vector<uint32_t> roundUp(3);
+    for (int i = 0; i < 3; ++i) {
+        roundUp[i] = ROUND_UP(gws[i], lws[i]);
+    }
+    cl_int ret = runtime->commandQueue().enqueueNDRangeKernel(kernel->get(), cl::NullRange,
+                                                              cl::NDRange(roundUp[0], roundUp[1], roundUp[2]),
+                                                              cl::NDRange(lws[0], lws[1], lws[2]));
+    return checkCL(ret, "enqueue raw DecodeRepairMlpFusedFloor kernel");
+}
+
+static bool compareRawMlpOutput(const std::vector<float>& ref, const std::vector<float>& got,
+                                float absTol, float relTol, float* maxAbs, float* maxRel,
+                                int* badCount) {
+    if (ref.size() != got.size() || maxAbs == nullptr || maxRel == nullptr || badCount == nullptr) {
+        return false;
+    }
+    *maxAbs = 0.0f;
+    *maxRel = 0.0f;
+    *badCount = 0;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        const float absErr = std::fabs(ref[i] - got[i]);
+        const float relErr = absErr / std::max(1.0e-6f, std::fabs(ref[i]));
+        *maxAbs = std::max(*maxAbs, absErr);
+        *maxRel = std::max(*maxRel, relErr);
+        if (absErr > absTol && relErr > relTol) {
+            ++(*badCount);
+        }
+    }
+    return true;
+}
+
+static bool runDecodeRepairMlpFusedFloorCase(const DecodeRepairMlpChainCase& c) {
+    constexpr int kWgs = 64;
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    if (c.hidden % 8 != 0 || c.inter % 8 != 0 || c.hidden % c.quantBlock != 0 || c.inter % c.quantBlock != 0) {
+        MNN_ERROR("DecodeRepairMlpFusedFloor expects hidden/inter multiples of 8 and qblock; got hidden=%d inter=%d qblock=%d\n",
+                  c.hidden, c.inter, c.quantBlock);
+        return false;
+    }
+    const int gateGroups = UP_DIV(c.hidden, c.quantBlock);
+    const int downGroups = UP_DIV(c.inter, c.quantBlock);
+    const auto inputData = makePattern(c.rows * c.hidden, 0.005f, 0.001f);
+    const auto gateWeight = makePackedI4Weights(c.inter, c.hidden, 7);
+    const auto upWeight = makePackedI4Weights(c.inter, c.hidden, 11);
+    const auto downWeight = makePackedI4Weights(c.hidden, c.inter, 17);
+    const auto gateScale = makeRawScale(c.inter, gateGroups, 3);
+    const auto upScale = makeRawScale(c.inter, gateGroups, 5);
+    const auto downScale = makeRawScale(c.hidden, downGroups, 9);
+    const std::vector<float> gateBias(c.inter, 0.0f);
+    const std::vector<float> upBias(c.inter, 0.0f);
+    const std::vector<float> downBias(c.hidden, 0.0f);
+
+    auto input = bench.tensorTyped<float>({c.rows * c.hidden});
+    auto gateW = bench.tensorTyped<uint8_t>({static_cast<int>(gateWeight.size())});
+    auto upW = bench.tensorTyped<uint8_t>({static_cast<int>(upWeight.size())});
+    auto downW = bench.tensorTyped<uint8_t>({static_cast<int>(downWeight.size())});
+    auto gateS = bench.tensorTyped<float>({static_cast<int>(gateScale.size())});
+    auto upS = bench.tensorTyped<float>({static_cast<int>(upScale.size())});
+    auto downS = bench.tensorTyped<float>({static_cast<int>(downScale.size())});
+    auto gateB = bench.tensorTyped<float>({c.inter});
+    auto upB = bench.tensorTyped<float>({c.inter});
+    auto downB = bench.tensorTyped<float>({c.hidden});
+    auto act = bench.tensorTyped<float>({c.rows * c.inter});
+    auto output = bench.tensorTyped<float>({c.rows * c.hidden});
+    if (!input || !gateW || !upW || !downW || !gateS || !upS || !downS ||
+        !gateB || !upB || !downB || !act || !output) {
+        return false;
+    }
+    if (!bench.writeTensor(input, inputData) ||
+        !bench.writeTensorTyped<uint8_t>(gateW, gateWeight) ||
+        !bench.writeTensorTyped<uint8_t>(upW, upWeight) ||
+        !bench.writeTensorTyped<uint8_t>(downW, downWeight) ||
+        !bench.writeTensor(gateS, gateScale) ||
+        !bench.writeTensor(upS, upScale) ||
+        !bench.writeTensor(downS, downScale) ||
+        !bench.writeTensor(gateB, gateBias) ||
+        !bench.writeTensor(upB, upBias) ||
+        !bench.writeTensor(downB, downBias)) {
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    std::set<std::string> buildOptions;
+    buildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    auto gateupKernel = runtime->buildKernelFromSource(kDecodeRepairMlpFusedFloorSource, "raw_gateup_silu_int4",
+                                                       buildOptions, bench.openCLBackend()->getPrecision());
+    auto downKernel = runtime->buildKernelFromSource(kDecodeRepairMlpFusedFloorSource, "raw_linear_int4",
+                                                     buildOptions, bench.openCLBackend()->getPrecision());
+    if (gateupKernel == nullptr || downKernel == nullptr) {
+        MNN_ERROR("failed to build DecodeRepairMlpFusedFloor raw kernels\n");
+        return false;
+    }
+    std::vector<uint32_t> gateupGws = {
+        kWgs,
+        static_cast<uint32_t>(UP_DIV(c.inter, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> downGws = {
+        kWgs,
+        static_cast<uint32_t>(UP_DIV(c.hidden, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> lws = {kWgs, 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[0]));
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[1]));
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[2]));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(input));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gateW));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gateS));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gateB));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(upW));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(upS));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(upB));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(act));
+        ret |= gateupKernel->get().setArg(idx++, c.rows);
+        ret |= gateupKernel->get().setArg(idx++, c.hidden);
+        ret |= gateupKernel->get().setArg(idx++, c.inter);
+        ret |= gateupKernel->get().setArg(idx++, c.quantBlock);
+        ret |= gateupKernel->get().setArg(idx++, gateGroups);
+        if (!checkCL(ret, "setArg raw_gateup_silu_int4")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[0]));
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[1]));
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[2]));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(act));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downW));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downS));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downB));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(output));
+        ret |= downKernel->get().setArg(idx++, c.rows);
+        ret |= downKernel->get().setArg(idx++, c.inter);
+        ret |= downKernel->get().setArg(idx++, c.hidden);
+        ret |= downKernel->get().setArg(idx++, c.quantBlock);
+        ret |= downKernel->get().setArg(idx++, downGroups);
+        if (!checkCL(ret, "setArg raw_linear_int4")) {
+            return false;
+        }
+    }
+
+    auto runGateup = [&]() -> ErrorCode {
+        return runRawKernel(runtime, gateupKernel, gateupGws, lws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runDown = [&]() -> ErrorCode {
+        return runRawKernel(runtime, downKernel, downGws, lws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runChain = [&]() -> ErrorCode {
+        auto code = runGateup();
+        if (code != NO_ERROR) {
+            return code;
+        }
+        return runDown();
+    };
+
+    float gateupMs = 0.0f;
+    float downMs = 0.0f;
+    float chainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runGateup, [&]() { return bench.sync(); }, c.warmup, c.repeat, &gateupMs)) {
+        return false;
+    }
+    if (runGateup() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    if (!timer.measure(runDown, [&]() { return bench.sync(); }, c.warmup, c.repeat, &downMs)) {
+        return false;
+    }
+    if (!timer.measure(runChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &chainMs)) {
+        return false;
+    }
+    if (runChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+
+    std::vector<float> gpuOutput;
+    if (!bench.readTensorTyped<float>(output, &gpuOutput)) {
+        return false;
+    }
+    std::vector<float> refAct;
+    std::vector<float> refOutput;
+    computeRawMlpReference(inputData, gateWeight, gateScale, gateBias, upWeight, upScale, upBias,
+                           downWeight, downScale, downBias, c.rows, c.hidden, c.inter, c.quantBlock,
+                           &refAct, &refOutput);
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_FUSED_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_FUSED_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(refOutput, gpuOutput, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpFusedFloor] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "gateup_silu=%.4f down=%.4f chain=%.4f ms max_abs=%.6f max_rel=%.6f bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              gateupMs, downMs, chainMs, maxAbs, maxRel, badCount, gpuOutput.size());
+    ::fflush(stdout);
+    return badCount == 0;
+}
+
+static bool runDecodeRepairMlpResourceGateUpCase(const DecodeRepairMlpChainCase& c) {
+    constexpr int kWgs = 64;
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto fusedAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto fusedOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto inputNhwc = bench.tensorTyped<float>({ROUND_UP(c.hidden, 4) * ROUND_UP(c.rows, 4)});
+    if (!hidden || !gate || !up || !splitAct || !fusedAct || !splitOut || !fusedOut || !inputNhwc) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_resource_gateup_silu_ref");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> splitActOutput = {splitAct};
+    std::vector<Tensor*> splitDownInput = {splitAct};
+    std::vector<Tensor*> splitDownOutput = {splitOut};
+    std::vector<Tensor*> fusedDownInput = {fusedAct};
+    std::vector<Tensor*> fusedDownOutput = {fusedOut};
+
+    auto gateExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, gateOutput, gateOp->get(),
+                                                                       bench.openCLBackend());
+    auto upExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, upOutput, upOp->get(),
+                                                                     bench.openCLBackend());
+    auto siluExe = bench.create(siluInputs, splitActOutput, siluOp->get());
+    auto splitDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(splitDownInput, splitDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    auto fusedDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(fusedDownInput, fusedDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    if (!gateExe || !upExe || !siluExe || !splitDownExe || !fusedDownExe) {
+        MNN_ERROR("failed to create resource-backed DecodeRepairMlp executions rows=%d\n", c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, splitActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(splitDownExe.get(), splitDownInput, splitDownOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(fusedDownExe.get(), fusedDownInput, fusedDownOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("resource-backed DecodeRepairMlp onResize failed rows=%d code=%d\n", c.rows, code);
+        return false;
+    }
+    auto gateResource = gateExe->resource();
+    auto upResource = upExe->resource();
+    if (!gateResource || !upResource || !gateResource->mUseImage || !upResource->mUseImage ||
+        !gateResource->mKernelImage || !upResource->mKernelImage ||
+        !gateResource->mDequantScaleOffsetBuffer || !upResource->mDequantScaleOffsetBuffer ||
+        !gateResource->mBias || !upResource->mBias) {
+        MNN_ERROR("resource-backed DecodeRepairMlp requires image-backed gate/up resources rows=%d\n", c.rows);
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    auto preKernel = runtime->buildKernel("gemm_conv1x1_buf", "gemm_c4nhw4_to_nhwc", {},
+                                          bench.openCLBackend()->getPrecision());
+    std::set<std::string> buildOptions = gateResource->mBuildOptions;
+    buildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    buildOptions.emplace("-DQUANT_BIT=4");
+    buildOptions.emplace("-DUSE_IMAGE");
+    auto gateupKernel = runtime->buildKernelFromSource(kDecodeRepairMlpResourceGateUpSource,
+                                                       "resource_gateup_silu_int4_image",
+                                                       buildOptions, bench.openCLBackend()->getPrecision());
+    if (!preKernel || !gateupKernel) {
+        MNN_ERROR("failed to build resource-backed DecodeRepairMlp kernels rows=%d\n", c.rows);
+        return false;
+    }
+
+    const int inputChannelAlign = ROUND_UP(c.hidden, 4);
+    const int outputChannelAlign = ROUND_UP(c.inter, 4);
+    const int dstChannelC4 = UP_DIV(c.inter, 4);
+    const int blockDim = gateResource->mInputChannel / gateResource->mBlockSize;
+    std::vector<uint32_t> preGws = {
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+        static_cast<uint32_t>(UP_DIV(c.hidden, 4)),
+    };
+    std::vector<uint32_t> preLws = {1, 1};
+    std::vector<uint32_t> gateupGws = {
+        kWgs,
+        static_cast<uint32_t>(UP_DIV(c.inter, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> gateupLws = {kWgs, 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[0]));
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[1]));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(hidden));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= preKernel->get().setArg(idx++, c.rows);
+        ret |= preKernel->get().setArg(idx++, c.hidden);
+        ret |= preKernel->get().setArg(idx++, inputChannelAlign);
+        if (!checkCL(ret, "setArg resource gateup preconvert")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[0]));
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[1]));
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[2]));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= gateupKernel->get().setArg(idx++, *gateResource->mKernelImage.get());
+        ret |= gateupKernel->get().setArg(idx++, *gateResource->mDequantScaleOffsetBuffer.get());
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gateResource->mBias.get()));
+        ret |= gateupKernel->get().setArg(idx++, *upResource->mKernelImage.get());
+        ret |= gateupKernel->get().setArg(idx++, *upResource->mDequantScaleOffsetBuffer.get());
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(upResource->mBias.get()));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(fusedAct));
+        ret |= gateupKernel->get().setArg(idx++, c.rows);
+        ret |= gateupKernel->get().setArg(idx++, outputChannelAlign);
+        ret |= gateupKernel->get().setArg(idx++, dstChannelC4);
+        ret |= gateupKernel->get().setArg(idx++, inputChannelAlign);
+        ret |= gateupKernel->get().setArg(idx++, c.hidden);
+        ret |= gateupKernel->get().setArg(idx++, blockDim);
+        ret |= gateupKernel->get().setArg(idx++, gateResource->mCoef);
+        ret |= gateupKernel->get().setArg(idx++, upResource->mCoef);
+        if (!checkCL(ret, "setArg resource_gateup_silu_int4_image")) {
+            return false;
+        }
+    }
+
+    auto runPre = [&]() -> ErrorCode {
+        std::vector<uint32_t> roundUp = {ROUND_UP(preGws[0], preLws[0]), ROUND_UP(preGws[1], preLws[1])};
+        cl_int ret = runtime->commandQueue().enqueueNDRangeKernel(preKernel->get(), cl::NullRange,
+                                                                  cl::NDRange(roundUp[0], roundUp[1]),
+                                                                  cl::NDRange(preLws[0], preLws[1]));
+        return checkCL(ret, "enqueue resource gateup preconvert") ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runGateup = [&]() -> ErrorCode {
+        return runRawKernel(runtime, gateupKernel, gateupGws, gateupLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runFusedGateup = [&]() -> ErrorCode {
+        auto localCode = runPre();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runGateup();
+    };
+    auto runSplitChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(siluExe.get(), siluInputs, splitActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(splitDownExe.get(), splitDownInput, splitDownOutput);
+    };
+    auto runFusedChain = [&]() -> ErrorCode {
+        auto localCode = runFusedGateup();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(fusedDownExe.get(), fusedDownInput, fusedDownOutput);
+    };
+
+    float splitChainMs = 0.0f;
+    float gateupMs = 0.0f;
+    float fusedChainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runSplitChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &splitChainMs)) {
+        return false;
+    }
+    if (!timer.measure(runFusedGateup, [&]() { return bench.sync(); }, c.warmup, c.repeat, &gateupMs)) {
+        return false;
+    }
+    if (!timer.measure(runFusedChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &fusedChainMs)) {
+        return false;
+    }
+    if (runSplitChain() != NO_ERROR || runFusedChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    std::vector<float> splitData;
+    std::vector<float> fusedData;
+    if (!bench.readTensorTyped<float>(splitOut, &splitData) ||
+        !bench.readTensorTyped<float>(fusedOut, &fusedData)) {
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(splitData, fusedData, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpResourceGateUp] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "split_chain=%.4f gateup_silu=%.4f fused_chain=%.4f delta=%.4f ms max_abs=%.6f max_rel=%.6f bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              splitChainMs, gateupMs, fusedChainMs, fusedChainMs - splitChainMs,
+              maxAbs, maxRel, badCount, fusedData.size());
+    ::fflush(stdout);
+    return badCount == 0;
+}
+
+static bool runDecodeRepairMlpSiluDownC4Case(const DecodeRepairMlpChainCase& c) {
+    constexpr int kWgs = 64;
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto fusedOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    if (!hidden || !gate || !up || !splitAct || !splitOut || !fusedOut) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_silu_down_c4_ref");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> splitActOutput = {splitAct};
+    std::vector<Tensor*> splitDownInput = {splitAct};
+    std::vector<Tensor*> splitDownOutput = {splitOut};
+
+    auto gateExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, gateOutput, gateOp->get(),
+                                                                       bench.openCLBackend());
+    auto upExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, upOutput, upOp->get(),
+                                                                     bench.openCLBackend());
+    auto siluExe = bench.create(siluInputs, splitActOutput, siluOp->get());
+    auto splitDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(splitDownInput, splitDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    if (!gateExe || !upExe || !siluExe || !splitDownExe) {
+        MNN_ERROR("failed to create SiluDownC4 DecodeRepairMlp executions rows=%d\n", c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, splitActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(splitDownExe.get(), splitDownInput, splitDownOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("SiluDownC4 DecodeRepairMlp onResize failed rows=%d code=%d\n", c.rows, code);
+        return false;
+    }
+    auto downResource = splitDownExe->resource();
+    if (!downResource || !downResource->mUseImage || !downResource->mKernelImage ||
+        !downResource->mDequantScaleOffsetBuffer || !downResource->mBias) {
+        MNN_ERROR("SiluDownC4 DecodeRepairMlp requires image-backed down resource rows=%d\n", c.rows);
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    std::set<std::string> buildOptions = downResource->mBuildOptions;
+    buildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    buildOptions.emplace("-DQUANT_BIT=4");
+    buildOptions.emplace("-DUSE_IMAGE");
+    auto siluDownKernel = runtime->buildKernelFromSource(kDecodeRepairMlpSiluDownC4Source,
+                                                         "resource_silu_down_c4_int4_image",
+                                                         buildOptions, bench.openCLBackend()->getPrecision());
+    if (!siluDownKernel) {
+        MNN_ERROR("failed to build SiluDownC4 DecodeRepairMlp kernel rows=%d\n", c.rows);
+        return false;
+    }
+
+    const int outputChannelAlign = ROUND_UP(c.hidden, 4);
+    const int dstChannelC4 = UP_DIV(c.hidden, 4);
+    const int blockDim = downResource->mInputChannel / downResource->mBlockSize;
+    std::vector<uint32_t> siluDownGws = {
+        kWgs,
+        static_cast<uint32_t>(UP_DIV(c.hidden, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> siluDownLws = {kWgs, 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= siluDownKernel->get().setArg(idx++, static_cast<int>(siluDownGws[0]));
+        ret |= siluDownKernel->get().setArg(idx++, static_cast<int>(siluDownGws[1]));
+        ret |= siluDownKernel->get().setArg(idx++, static_cast<int>(siluDownGws[2]));
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gate));
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(up));
+        ret |= siluDownKernel->get().setArg(idx++, *downResource->mKernelImage.get());
+        ret |= siluDownKernel->get().setArg(idx++, *downResource->mDequantScaleOffsetBuffer.get());
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downResource->mBias.get()));
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(fusedOut));
+        ret |= siluDownKernel->get().setArg(idx++, c.rows);
+        ret |= siluDownKernel->get().setArg(idx++, outputChannelAlign);
+        ret |= siluDownKernel->get().setArg(idx++, dstChannelC4);
+        ret |= siluDownKernel->get().setArg(idx++, c.inter);
+        ret |= siluDownKernel->get().setArg(idx++, blockDim);
+        ret |= siluDownKernel->get().setArg(idx++, downResource->mCoef);
+        if (!checkCL(ret, "setArg resource_silu_down_c4_int4_image")) {
+            return false;
+        }
+    }
+
+    auto runSiluDown = [&]() -> ErrorCode {
+        return runRawKernel(runtime, siluDownKernel, siluDownGws, siluDownLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runSplitChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(siluExe.get(), siluInputs, splitActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(splitDownExe.get(), splitDownInput, splitDownOutput);
+    };
+    auto runFusedChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runSiluDown();
+    };
+
+    if (bench.execute(gateExe.get(), hiddenInput, gateOutput) != NO_ERROR ||
+        bench.execute(upExe.get(), hiddenInput, upOutput) != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    float splitChainMs = 0.0f;
+    float siluDownMs = 0.0f;
+    float fusedChainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runSplitChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &splitChainMs)) {
+        return false;
+    }
+    if (!timer.measure(runSiluDown, [&]() { return bench.sync(); }, c.warmup, c.repeat, &siluDownMs)) {
+        return false;
+    }
+    if (!timer.measure(runFusedChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &fusedChainMs)) {
+        return false;
+    }
+    if (runSplitChain() != NO_ERROR || runFusedChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    std::vector<float> splitData;
+    std::vector<float> fusedData;
+    if (!bench.readTensorTyped<float>(splitOut, &splitData) ||
+        !bench.readTensorTyped<float>(fusedOut, &fusedData)) {
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(splitData, fusedData, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpSiluDownC4] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "split_chain=%.4f silu_down=%.4f fused_chain=%.4f delta=%.4f ms "
+              "max_abs=%.6f max_rel=%.6f bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              splitChainMs, siluDownMs, fusedChainMs, fusedChainMs - splitChainMs,
+              maxAbs, maxRel, badCount, fusedData.size());
+    ::fflush(stdout);
+    return badCount == 0;
+}
+
+static bool runDecodeRepairMlpGateUpSiluDownC4Case(const DecodeRepairMlpChainCase& c) {
+    constexpr int kWgs = 64;
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto pairGate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto pairUp = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto fusedOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto inputNhwc = bench.tensorTyped<float>({ROUND_UP(c.hidden, 4) * ROUND_UP(c.rows, 4)});
+    if (!hidden || !gate || !up || !pairGate || !pairUp || !splitAct || !splitOut || !fusedOut || !inputNhwc) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_gateup_silu_down_c4_ref");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> splitActOutput = {splitAct};
+    std::vector<Tensor*> splitDownInput = {splitAct};
+    std::vector<Tensor*> splitDownOutput = {splitOut};
+
+    auto gateExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, gateOutput, gateOp->get(),
+                                                                       bench.openCLBackend());
+    auto upExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, upOutput, upOp->get(),
+                                                                     bench.openCLBackend());
+    auto siluExe = bench.create(siluInputs, splitActOutput, siluOp->get());
+    auto splitDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(splitDownInput, splitDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    if (!gateExe || !upExe || !siluExe || !splitDownExe) {
+        MNN_ERROR("failed to create GateUpSiluDownC4 DecodeRepairMlp executions rows=%d\n", c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, splitActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(splitDownExe.get(), splitDownInput, splitDownOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("GateUpSiluDownC4 DecodeRepairMlp onResize failed rows=%d code=%d\n", c.rows, code);
+        return false;
+    }
+
+    auto gateResource = gateExe->resource();
+    auto upResource = upExe->resource();
+    auto downResource = splitDownExe->resource();
+    if (!gateResource || !upResource || !gateResource->mUseImage || !upResource->mUseImage ||
+        !gateResource->mKernelImage || !upResource->mKernelImage ||
+        !gateResource->mDequantScaleOffsetBuffer || !upResource->mDequantScaleOffsetBuffer ||
+        !gateResource->mBias || !upResource->mBias) {
+        MNN_ERROR("GateUpSiluDownC4 requires image-backed gate/up resources rows=%d\n", c.rows);
+        return false;
+    }
+    if (!downResource || !downResource->mUseImage || !downResource->mKernelImage ||
+        !downResource->mDequantScaleOffsetBuffer || !downResource->mBias) {
+        MNN_ERROR("GateUpSiluDownC4 requires image-backed down resource rows=%d\n", c.rows);
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    auto preKernel = runtime->buildKernel("gemm_conv1x1_buf", "gemm_c4nhw4_to_nhwc", {},
+                                          bench.openCLBackend()->getPrecision());
+    std::set<std::string> gateupBuildOptions = gateResource->mBuildOptions;
+    gateupBuildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    gateupBuildOptions.emplace("-DQUANT_BIT=4");
+    gateupBuildOptions.emplace("-DUSE_IMAGE");
+    gateupBuildOptions.emplace("-DRESOURCE_GATEUP_PAIR_OUTPUT");
+    auto gateupKernel = runtime->buildKernelFromSource(kDecodeRepairMlpResourceGateUpSource,
+                                                       "resource_gateup_silu_int4_image",
+                                                       gateupBuildOptions, bench.openCLBackend()->getPrecision());
+    std::set<std::string> siluDownBuildOptions = downResource->mBuildOptions;
+    siluDownBuildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    siluDownBuildOptions.emplace("-DQUANT_BIT=4");
+    siluDownBuildOptions.emplace("-DUSE_IMAGE");
+    auto siluDownKernel = runtime->buildKernelFromSource(kDecodeRepairMlpSiluDownC4Source,
+                                                         "resource_silu_down_c4_int4_image",
+                                                         siluDownBuildOptions, bench.openCLBackend()->getPrecision());
+    if (!preKernel || !gateupKernel || !siluDownKernel) {
+        MNN_ERROR("failed to build GateUpSiluDownC4 DecodeRepairMlp kernels rows=%d\n", c.rows);
+        return false;
+    }
+
+    const int inputChannelAlign = ROUND_UP(c.hidden, 4);
+    const int interChannelAlign = ROUND_UP(c.inter, 4);
+    const int interChannelC4 = UP_DIV(c.inter, 4);
+    const int gateBlockDim = gateResource->mInputChannel / gateResource->mBlockSize;
+    const int hiddenChannelAlign = ROUND_UP(c.hidden, 4);
+    const int hiddenChannelC4 = UP_DIV(c.hidden, 4);
+    const int downBlockDim = downResource->mInputChannel / downResource->mBlockSize;
+    std::vector<uint32_t> preGws = {
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+        static_cast<uint32_t>(UP_DIV(c.hidden, 4)),
+    };
+    std::vector<uint32_t> preLws = {1, 1};
+    std::vector<uint32_t> gateupGws = {
+        kWgs,
+        static_cast<uint32_t>(UP_DIV(c.inter, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> gateupLws = {kWgs, 1, 1};
+    std::vector<uint32_t> siluDownGws = {
+        kWgs,
+        static_cast<uint32_t>(UP_DIV(c.hidden, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> siluDownLws = {kWgs, 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[0]));
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[1]));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(hidden));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= preKernel->get().setArg(idx++, c.rows);
+        ret |= preKernel->get().setArg(idx++, c.hidden);
+        ret |= preKernel->get().setArg(idx++, inputChannelAlign);
+        if (!checkCL(ret, "setArg gateup silu-down preconvert")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[0]));
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[1]));
+        ret |= gateupKernel->get().setArg(idx++, static_cast<int>(gateupGws[2]));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= gateupKernel->get().setArg(idx++, *gateResource->mKernelImage.get());
+        ret |= gateupKernel->get().setArg(idx++, *gateResource->mDequantScaleOffsetBuffer.get());
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gateResource->mBias.get()));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(pairGate));
+        ret |= gateupKernel->get().setArg(idx++, *upResource->mKernelImage.get());
+        ret |= gateupKernel->get().setArg(idx++, *upResource->mDequantScaleOffsetBuffer.get());
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(upResource->mBias.get()));
+        ret |= gateupKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(pairUp));
+        ret |= gateupKernel->get().setArg(idx++, c.rows);
+        ret |= gateupKernel->get().setArg(idx++, interChannelAlign);
+        ret |= gateupKernel->get().setArg(idx++, interChannelC4);
+        ret |= gateupKernel->get().setArg(idx++, inputChannelAlign);
+        ret |= gateupKernel->get().setArg(idx++, c.hidden);
+        ret |= gateupKernel->get().setArg(idx++, gateBlockDim);
+        ret |= gateupKernel->get().setArg(idx++, gateResource->mCoef);
+        ret |= gateupKernel->get().setArg(idx++, upResource->mCoef);
+        if (!checkCL(ret, "setArg resource_gateup_pair_int4_image")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= siluDownKernel->get().setArg(idx++, static_cast<int>(siluDownGws[0]));
+        ret |= siluDownKernel->get().setArg(idx++, static_cast<int>(siluDownGws[1]));
+        ret |= siluDownKernel->get().setArg(idx++, static_cast<int>(siluDownGws[2]));
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(pairGate));
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(pairUp));
+        ret |= siluDownKernel->get().setArg(idx++, *downResource->mKernelImage.get());
+        ret |= siluDownKernel->get().setArg(idx++, *downResource->mDequantScaleOffsetBuffer.get());
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downResource->mBias.get()));
+        ret |= siluDownKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(fusedOut));
+        ret |= siluDownKernel->get().setArg(idx++, c.rows);
+        ret |= siluDownKernel->get().setArg(idx++, hiddenChannelAlign);
+        ret |= siluDownKernel->get().setArg(idx++, hiddenChannelC4);
+        ret |= siluDownKernel->get().setArg(idx++, c.inter);
+        ret |= siluDownKernel->get().setArg(idx++, downBlockDim);
+        ret |= siluDownKernel->get().setArg(idx++, downResource->mCoef);
+        if (!checkCL(ret, "setArg gateup resource_silu_down_c4_int4_image")) {
+            return false;
+        }
+    }
+
+    auto runPre = [&]() -> ErrorCode {
+        std::vector<uint32_t> roundUp = {ROUND_UP(preGws[0], preLws[0]), ROUND_UP(preGws[1], preLws[1])};
+        cl_int ret = runtime->commandQueue().enqueueNDRangeKernel(preKernel->get(), cl::NullRange,
+                                                                  cl::NDRange(roundUp[0], roundUp[1]),
+                                                                  cl::NDRange(preLws[0], preLws[1]));
+        return checkCL(ret, "enqueue gateup silu-down preconvert") ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runGateupPair = [&]() -> ErrorCode {
+        return runRawKernel(runtime, gateupKernel, gateupGws, gateupLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runFusedGateupPair = [&]() -> ErrorCode {
+        auto localCode = runPre();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runGateupPair();
+    };
+    auto runSiluDown = [&]() -> ErrorCode {
+        return runRawKernel(runtime, siluDownKernel, siluDownGws, siluDownLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runSplitChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(siluExe.get(), siluInputs, splitActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(splitDownExe.get(), splitDownInput, splitDownOutput);
+    };
+    auto runFusedChain = [&]() -> ErrorCode {
+        auto localCode = runFusedGateupPair();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runSiluDown();
+    };
+
+    float splitChainMs = 0.0f;
+    float gateupPairMs = 0.0f;
+    float siluDownMs = 0.0f;
+    float fusedChainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runSplitChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &splitChainMs)) {
+        return false;
+    }
+    if (!timer.measure(runFusedGateupPair, [&]() { return bench.sync(); }, c.warmup, c.repeat, &gateupPairMs)) {
+        return false;
+    }
+    if (runFusedGateupPair() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    if (!timer.measure(runSiluDown, [&]() { return bench.sync(); }, c.warmup, c.repeat, &siluDownMs)) {
+        return false;
+    }
+    if (!timer.measure(runFusedChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &fusedChainMs)) {
+        return false;
+    }
+    if (runSplitChain() != NO_ERROR || runFusedChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    std::vector<float> splitData;
+    std::vector<float> fusedData;
+    if (!bench.readTensorTyped<float>(splitOut, &splitData) ||
+        !bench.readTensorTyped<float>(fusedOut, &fusedData)) {
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(splitData, fusedData, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    const int gateFamily = readSelectedCompactDenseFamily(bench, c.rows, c.hidden, c.inter, 4);
+    const int downFamily = readSelectedCompactDenseFamily(bench, c.rows, c.inter, c.hidden, 4);
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpGateUpSiluDownC4] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "gate_family=%-22s down_family=%-22s split_chain=%.4f gateup_pair=%.4f silu_down=%.4f "
+              "fused_chain=%.4f delta=%.4f ms max_abs=%.6f max_rel=%.6f bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              gateFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(gateFamily)) : "-",
+              downFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(downFamily)) : "-",
+              splitChainMs, gateupPairMs, siluDownMs, fusedChainMs, fusedChainMs - splitChainMs,
+              maxAbs, maxRel, badCount, fusedData.size());
+    ::fflush(stdout);
+    return badCount == 0;
+}
+
+static bool runDecodeRepairMlpStreamedTileCase(const DecodeRepairMlpChainCase& c) {
+    constexpr int kWgs = 64;
+    const int requestedOcTile = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_OC", 4);
+    const int ocTile = std::max(1, std::min(64, requestedOcTile));
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto streamedOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto inputNhwc = bench.tensorTyped<float>({ROUND_UP(c.hidden, 4) * ROUND_UP(c.rows, 4)});
+    if (!hidden || !gate || !up || !splitAct || !splitOut || !streamedOut || !inputNhwc) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_streamed_tile_ref");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> splitActOutput = {splitAct};
+    std::vector<Tensor*> splitDownInput = {splitAct};
+    std::vector<Tensor*> splitDownOutput = {splitOut};
+
+    auto gateExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, gateOutput, gateOp->get(),
+                                                                       bench.openCLBackend());
+    auto upExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, upOutput, upOp->get(),
+                                                                     bench.openCLBackend());
+    auto siluExe = bench.create(siluInputs, splitActOutput, siluOp->get());
+    auto splitDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(splitDownInput, splitDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    if (!gateExe || !upExe || !siluExe || !splitDownExe) {
+        MNN_ERROR("failed to create StreamedTile DecodeRepairMlp executions rows=%d\n", c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, splitActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(splitDownExe.get(), splitDownInput, splitDownOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("StreamedTile DecodeRepairMlp onResize failed rows=%d code=%d\n", c.rows, code);
+        return false;
+    }
+
+    auto gateResource = gateExe->resource();
+    auto upResource = upExe->resource();
+    auto downResource = splitDownExe->resource();
+    if (!gateResource || !upResource || !downResource ||
+        !gateResource->mUseImage || !upResource->mUseImage || !downResource->mUseImage ||
+        !gateResource->mKernelImage || !upResource->mKernelImage || !downResource->mKernelImage ||
+        !gateResource->mDequantScaleOffsetBuffer || !upResource->mDequantScaleOffsetBuffer ||
+        !downResource->mDequantScaleOffsetBuffer ||
+        !gateResource->mBias || !upResource->mBias || !downResource->mBias) {
+        MNN_ERROR("StreamedTile DecodeRepairMlp requires image-backed resources rows=%d\n", c.rows);
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    auto preKernel = runtime->buildKernel("gemm_conv1x1_buf", "gemm_c4nhw4_to_nhwc", {},
+                                          bench.openCLBackend()->getPrecision());
+    std::set<std::string> buildOptions = gateResource->mBuildOptions;
+    buildOptions.insert(upResource->mBuildOptions.begin(), upResource->mBuildOptions.end());
+    buildOptions.insert(downResource->mBuildOptions.begin(), downResource->mBuildOptions.end());
+    buildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    buildOptions.emplace("-DQUANT_BIT=4");
+    buildOptions.emplace("-DUSE_IMAGE");
+    buildOptions.emplace("-DOC_TILE=" + std::to_string(ocTile));
+    auto streamedKernel = runtime->buildKernelFromSource(kDecodeRepairMlpStreamedTileSource,
+                                                         "resource_streamed_tile_mlp_int4_image",
+                                                         buildOptions, bench.openCLBackend()->getPrecision());
+    if (!preKernel || !streamedKernel) {
+        MNN_ERROR("failed to build StreamedTile DecodeRepairMlp kernels rows=%d\n", c.rows);
+        return false;
+    }
+
+    const int inputChannelAlign = ROUND_UP(c.hidden, 4);
+    const int hiddenChannelAlign = ROUND_UP(c.hidden, 4);
+    const int hiddenChannelC4 = UP_DIV(c.hidden, 4);
+    const int hiddenChannelC8 = UP_DIV(c.hidden, 8);
+    const int interChannelC4 = UP_DIV(c.inter, 4);
+    const int gateBlockDim = gateResource->mInputChannel / gateResource->mBlockSize;
+    const int downBlockDim = downResource->mInputChannel / downResource->mBlockSize;
+    std::vector<uint32_t> preGws = {
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+        static_cast<uint32_t>(UP_DIV(c.hidden, 4)),
+    };
+    std::vector<uint32_t> preLws = {1, 1};
+    std::vector<uint32_t> streamedGws = {
+        static_cast<uint32_t>(kWgs),
+        static_cast<uint32_t>(UP_DIV(hiddenChannelC8, ocTile)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> streamedLws = {static_cast<uint32_t>(kWgs), 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[0]));
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[1]));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(hidden));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= preKernel->get().setArg(idx++, c.rows);
+        ret |= preKernel->get().setArg(idx++, c.hidden);
+        ret |= preKernel->get().setArg(idx++, inputChannelAlign);
+        if (!checkCL(ret, "setArg streamed tile preconvert")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= streamedKernel->get().setArg(idx++, static_cast<int>(streamedGws[0]));
+        ret |= streamedKernel->get().setArg(idx++, static_cast<int>(streamedGws[1]));
+        ret |= streamedKernel->get().setArg(idx++, static_cast<int>(streamedGws[2]));
+        ret |= streamedKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= streamedKernel->get().setArg(idx++, *gateResource->mKernelImage.get());
+        ret |= streamedKernel->get().setArg(idx++, *gateResource->mDequantScaleOffsetBuffer.get());
+        ret |= streamedKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gateResource->mBias.get()));
+        ret |= streamedKernel->get().setArg(idx++, *upResource->mKernelImage.get());
+        ret |= streamedKernel->get().setArg(idx++, *upResource->mDequantScaleOffsetBuffer.get());
+        ret |= streamedKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(upResource->mBias.get()));
+        ret |= streamedKernel->get().setArg(idx++, *downResource->mKernelImage.get());
+        ret |= streamedKernel->get().setArg(idx++, *downResource->mDequantScaleOffsetBuffer.get());
+        ret |= streamedKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downResource->mBias.get()));
+        ret |= streamedKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(streamedOut));
+        ret |= streamedKernel->get().setArg(idx++, c.rows);
+        ret |= streamedKernel->get().setArg(idx++, hiddenChannelAlign);
+        ret |= streamedKernel->get().setArg(idx++, hiddenChannelC4);
+        ret |= streamedKernel->get().setArg(idx++, inputChannelAlign);
+        ret |= streamedKernel->get().setArg(idx++, c.hidden);
+        ret |= streamedKernel->get().setArg(idx++, c.inter);
+        ret |= streamedKernel->get().setArg(idx++, interChannelC4);
+        ret |= streamedKernel->get().setArg(idx++, gateBlockDim);
+        ret |= streamedKernel->get().setArg(idx++, downBlockDim);
+        ret |= streamedKernel->get().setArg(idx++, gateResource->mCoef);
+        ret |= streamedKernel->get().setArg(idx++, upResource->mCoef);
+        ret |= streamedKernel->get().setArg(idx++, downResource->mCoef);
+        if (!checkCL(ret, "setArg resource_streamed_tile_mlp_int4_image")) {
+            return false;
+        }
+    }
+
+    auto runPre = [&]() -> ErrorCode {
+        std::vector<uint32_t> roundUp = {ROUND_UP(preGws[0], preLws[0]), ROUND_UP(preGws[1], preLws[1])};
+        cl_int ret = runtime->commandQueue().enqueueNDRangeKernel(preKernel->get(), cl::NullRange,
+                                                                  cl::NDRange(roundUp[0], roundUp[1]),
+                                                                  cl::NDRange(preLws[0], preLws[1]));
+        return checkCL(ret, "enqueue streamed tile preconvert") ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runStreamKernel = [&]() -> ErrorCode {
+        return runRawKernel(runtime, streamedKernel, streamedGws, streamedLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runStreamChain = [&]() -> ErrorCode {
+        auto localCode = runPre();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runStreamKernel();
+    };
+    auto runSplitChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(siluExe.get(), siluInputs, splitActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(splitDownExe.get(), splitDownInput, splitDownOutput);
+    };
+
+    if (runPre() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    float splitChainMs = 0.0f;
+    float streamKernelMs = 0.0f;
+    float streamChainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runSplitChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &splitChainMs)) {
+        return false;
+    }
+    if (!timer.measure(runStreamKernel, [&]() { return bench.sync(); }, c.warmup, c.repeat, &streamKernelMs)) {
+        return false;
+    }
+    if (!timer.measure(runStreamChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &streamChainMs)) {
+        return false;
+    }
+    if (runSplitChain() != NO_ERROR || runStreamChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    std::vector<float> splitData;
+    std::vector<float> streamedData;
+    if (!bench.readTensorTyped<float>(splitOut, &splitData) ||
+        !bench.readTensorTyped<float>(streamedOut, &streamedData)) {
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(splitData, streamedData, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    const int gateFamily = readSelectedCompactDenseFamily(bench, c.rows, c.hidden, c.inter, 4);
+    const int downFamily = readSelectedCompactDenseFamily(bench, c.rows, c.inter, c.hidden, 4);
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpStreamedTile] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "oc_tile=%d gate_family=%-22s down_family=%-22s split_chain=%.4f stream_kernel=%.4f "
+              "stream_chain=%.4f delta=%.4f ms max_abs=%.6f max_rel=%.6f bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock, ocTile,
+              gateFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(gateFamily)) : "-",
+              downFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(downFamily)) : "-",
+              splitChainMs, streamKernelMs, streamChainMs, streamChainMs - splitChainMs,
+              maxAbs, maxRel, badCount, streamedData.size());
+    ::fflush(stdout);
+    return badCount == 0;
+}
+
+static bool runDecodeRepairMlpSiluNhwcDownCase(const DecodeRepairMlpChainCase& c) {
+    const int kWgs = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_WGS", 64);
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto fusedOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto actNhwc = bench.tensorTyped<float>({ROUND_UP(c.inter, 4) * ROUND_UP(c.rows, 4)});
+    if (!hidden || !gate || !up || !splitAct || !splitOut || !fusedOut || !actNhwc) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_silu_nhwc_down_ref");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> splitActOutput = {splitAct};
+    std::vector<Tensor*> splitDownInput = {splitAct};
+    std::vector<Tensor*> splitDownOutput = {splitOut};
+
+    auto gateExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, gateOutput, gateOp->get(),
+                                                                       bench.openCLBackend());
+    auto upExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, upOutput, upOp->get(),
+                                                                     bench.openCLBackend());
+    auto siluExe = bench.create(siluInputs, splitActOutput, siluOp->get());
+    auto splitDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(splitDownInput, splitDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    if (!gateExe || !upExe || !siluExe || !splitDownExe) {
+        MNN_ERROR("failed to create SiluNhwcDown DecodeRepairMlp executions rows=%d\n", c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, splitActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(splitDownExe.get(), splitDownInput, splitDownOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("SiluNhwcDown DecodeRepairMlp onResize failed rows=%d code=%d\n", c.rows, code);
+        return false;
+    }
+    auto downResource = splitDownExe->resource();
+    if (!downResource || !downResource->mUseImage || !downResource->mKernelImage ||
+        !downResource->mDequantScaleOffsetBuffer || !downResource->mBias) {
+        MNN_ERROR("SiluNhwcDown DecodeRepairMlp requires image-backed down resource rows=%d\n", c.rows);
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    auto siluNhwcKernel = runtime->buildKernelFromSource(kDecodeRepairMlpSiluNhwcSource,
+                                                         "silu_c4_to_nhwc",
+                                                         {}, bench.openCLBackend()->getPrecision());
+    std::set<std::string> buildOptions = downResource->mBuildOptions;
+    buildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    buildOptions.emplace("-DQUANT_BIT=4");
+    buildOptions.emplace("-DUSE_IMAGE");
+    buildOptions.emplace("-DCOMPUTE_BATCH");
+    buildOptions.emplace("-DOUTPUT_C4NHW4");
+    buildOptions.emplace("-DOUTPUT_BHW=" + std::to_string(c.rows));
+    auto downKernel = runtime->buildKernel("gemv_conv1x1_buf", "gemv_conv_c8_buf",
+                                           buildOptions, bench.openCLBackend()->getPrecision());
+    if (!siluNhwcKernel || !downKernel) {
+        MNN_ERROR("failed to build SiluNhwcDown DecodeRepairMlp kernels rows=%d\n", c.rows);
+        return false;
+    }
+
+    const int inputChannelAlign = ROUND_UP(c.inter, 4);
+    const int outputChannelAlign8 = ROUND_UP(c.hidden, 8);
+    const int outputChannelBlocks = UP_DIV(c.hidden, 4);
+    const int inputChannelBlocks = UP_DIV(c.inter, 4);
+    const int blockDim = downResource->mInputChannel / downResource->mBlockSize;
+    std::vector<uint32_t> siluGws = {
+        static_cast<uint32_t>(UP_DIV(c.inter, 4)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+        1,
+    };
+    std::vector<uint32_t> siluLws = {16, 1, 1};
+    std::vector<uint32_t> downGws = {
+        static_cast<uint32_t>(kWgs),
+        static_cast<uint32_t>(UP_DIV(c.hidden, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> downLws = {static_cast<uint32_t>(kWgs), 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= siluNhwcKernel->get().setArg(idx++, static_cast<int>(siluGws[0]));
+        ret |= siluNhwcKernel->get().setArg(idx++, static_cast<int>(siluGws[1]));
+        ret |= siluNhwcKernel->get().setArg(idx++, static_cast<int>(siluGws[2]));
+        ret |= siluNhwcKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(gate));
+        ret |= siluNhwcKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(up));
+        ret |= siluNhwcKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(actNhwc));
+        ret |= siluNhwcKernel->get().setArg(idx++, c.rows);
+        ret |= siluNhwcKernel->get().setArg(idx++, c.inter);
+        ret |= siluNhwcKernel->get().setArg(idx++, inputChannelAlign);
+        if (!checkCL(ret, "setArg silu_c4_to_nhwc")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[0]));
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[1]));
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[2]));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(actNhwc));
+        ret |= downKernel->get().setArg(idx++, *downResource->mKernelImage.get());
+        ret |= downKernel->get().setArg(idx++, *downResource->mDequantScaleOffsetBuffer.get());
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downResource->mBias.get()));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(fusedOut));
+        ret |= downKernel->get().setArg(idx++, outputChannelAlign8);
+        ret |= downKernel->get().setArg(idx++, inputChannelAlign);
+        ret |= downKernel->get().setArg(idx++, outputChannelBlocks);
+        ret |= downKernel->get().setArg(idx++, inputChannelBlocks);
+        ret |= downKernel->get().setArg(idx++, c.inter);
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downResource->mBlockSize));
+        ret |= downKernel->get().setArg(idx++, blockDim);
+        ret |= downKernel->get().setArg(idx++, downResource->mCoef);
+        if (!checkCL(ret, "setArg silu_nhwc direct down projection")) {
+            return false;
+        }
+    }
+
+    auto runSiluNhwc = [&]() -> ErrorCode {
+        return runRawKernel(runtime, siluNhwcKernel, siluGws, siluLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runDownProjection = [&]() -> ErrorCode {
+        return runRawKernel(runtime, downKernel, downGws, downLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runSplitChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(siluExe.get(), siluInputs, splitActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(splitDownExe.get(), splitDownInput, splitDownOutput);
+    };
+    auto runFusedChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = runSiluNhwc();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runDownProjection();
+    };
+
+    if (bench.execute(gateExe.get(), hiddenInput, gateOutput) != NO_ERROR ||
+        bench.execute(upExe.get(), hiddenInput, upOutput) != NO_ERROR ||
+        runSiluNhwc() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    float splitChainMs = 0.0f;
+    float siluNhwcMs = 0.0f;
+    float directDownMs = 0.0f;
+    float fusedChainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runSplitChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &splitChainMs)) {
+        return false;
+    }
+    if (!timer.measure(runSiluNhwc, [&]() { return bench.sync(); }, c.warmup, c.repeat, &siluNhwcMs)) {
+        return false;
+    }
+    if (!timer.measure(runDownProjection, [&]() { return bench.sync(); }, c.warmup, c.repeat, &directDownMs)) {
+        return false;
+    }
+    if (!timer.measure(runFusedChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &fusedChainMs)) {
+        return false;
+    }
+    if (runSplitChain() != NO_ERROR || runFusedChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    std::vector<float> splitData;
+    std::vector<float> fusedData;
+    if (!bench.readTensorTyped<float>(splitOut, &splitData) ||
+        !bench.readTensorTyped<float>(fusedOut, &fusedData)) {
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(splitData, fusedData, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    const int gateFamily = readSelectedCompactDenseFamily(bench, c.rows, c.hidden, c.inter, 4);
+    const int downFamily = readSelectedCompactDenseFamily(bench, c.rows, c.inter, c.hidden, 4);
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpSiluNhwcDown] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "gate_family=%-22s down_family=%-22s split_chain=%.4f silu_nhwc=%.4f "
+              "direct_down=%.4f fused_chain=%.4f delta=%.4f ms max_abs=%.6f max_rel=%.6f bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              gateFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(gateFamily)) : "-",
+              downFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(downFamily)) : "-",
+              splitChainMs, siluNhwcMs, directDownMs, fusedChainMs, fusedChainMs - splitChainMs,
+              maxAbs, maxRel, badCount, fusedData.size());
+    ::fflush(stdout);
+    return badCount == 0;
+}
+
+static bool runDecodeRepairMlpSharedInputGateUpCase(const DecodeRepairMlpChainCase& c) {
+    const int kWgs = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_WGS", 64);
+    DirectOpBenchOpenCL bench;
+    if (!bench.valid()) {
+        return false;
+    }
+    auto hidden = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto gate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto up = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto sharedGate = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto sharedUp = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto sharedAct = bench.tensor({c.rows, c.inter, 1, 1}, Tensor::CAFFE);
+    auto splitOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto sharedOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto sharedNhwcOut = bench.tensor({c.rows, c.hidden, 1, 1}, Tensor::CAFFE);
+    auto inputNhwc = bench.tensorTyped<float>({ROUND_UP(c.hidden, 4) * ROUND_UP(c.rows, 4)});
+    auto actNhwc = bench.tensorTyped<float>({ROUND_UP(c.inter, 4) * ROUND_UP(c.rows, 4)});
+    if (!hidden || !gate || !up || !sharedGate || !sharedUp || !splitAct || !sharedAct ||
+        !splitOut || !sharedOut || !sharedNhwcOut || !inputNhwc || !actNhwc) {
+        return false;
+    }
+    if (!bench.writeTensor(hidden, makePattern(hidden->elementSize(), 0.0078125f))) {
+        return false;
+    }
+
+    auto gateOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto upOp = makeWeightOnlyLinearConvOp(c.hidden, c.inter, c.quantBlock);
+    auto siluOp = makePicSiluMulOp("bench_opencl_decode_repair_shared_input_gateup_silu");
+    auto downOp = makeWeightOnlyLinearConvOp(c.inter, c.hidden, c.quantBlock);
+
+    std::vector<Tensor*> hiddenInput = {hidden};
+    std::vector<Tensor*> gateOutput = {gate};
+    std::vector<Tensor*> upOutput = {up};
+    std::vector<Tensor*> sharedGateOutput = {sharedGate};
+    std::vector<Tensor*> sharedUpOutput = {sharedUp};
+    std::vector<Tensor*> siluInputs = {gate, up};
+    std::vector<Tensor*> sharedSiluInputs = {sharedGate, sharedUp};
+    std::vector<Tensor*> splitActOutput = {splitAct};
+    std::vector<Tensor*> sharedActOutput = {sharedAct};
+    std::vector<Tensor*> splitDownInput = {splitAct};
+    std::vector<Tensor*> sharedDownInput = {sharedAct};
+    std::vector<Tensor*> splitDownOutput = {splitOut};
+    std::vector<Tensor*> sharedDownOutput = {sharedOut};
+
+    auto gateExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, gateOutput, gateOp->get(),
+                                                                       bench.openCLBackend());
+    auto upExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(hiddenInput, upOutput, upOp->get(),
+                                                                     bench.openCLBackend());
+    auto siluExe = bench.create(siluInputs, splitActOutput, siluOp->get());
+    auto sharedSiluExe = bench.create(sharedSiluInputs, sharedActOutput, siluOp->get());
+    auto splitDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(splitDownInput, splitDownOutput,
+                                                                            downOp->get(), bench.openCLBackend());
+    auto sharedDownExe = std::make_shared<OpenCL::ConvBufLowMemoryExecution>(sharedDownInput, sharedDownOutput,
+                                                                             downOp->get(), bench.openCLBackend());
+    if (!gateExe || !upExe || !siluExe || !sharedSiluExe || !splitDownExe || !sharedDownExe) {
+        MNN_ERROR("failed to create SharedInputGateUp DecodeRepairMlp executions rows=%d\n", c.rows);
+        return false;
+    }
+    auto code = bench.resize(gateExe.get(), hiddenInput, gateOutput);
+    if (code == NO_ERROR) {
+        code = bench.resize(upExe.get(), hiddenInput, upOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(siluExe.get(), siluInputs, splitActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(sharedSiluExe.get(), sharedSiluInputs, sharedActOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(splitDownExe.get(), splitDownInput, splitDownOutput);
+    }
+    if (code == NO_ERROR) {
+        code = bench.resize(sharedDownExe.get(), sharedDownInput, sharedDownOutput);
+    }
+    if (code != NO_ERROR) {
+        MNN_ERROR("SharedInputGateUp DecodeRepairMlp onResize failed rows=%d code=%d\n", c.rows, code);
+        return false;
+    }
+
+    auto gateResource = gateExe->resource();
+    auto upResource = upExe->resource();
+    auto downResource = sharedDownExe->resource();
+    if (!gateResource || !upResource || !gateResource->mUseImage || !upResource->mUseImage ||
+        !gateResource->mKernelImage || !upResource->mKernelImage ||
+        !gateResource->mDequantScaleOffsetBuffer || !upResource->mDequantScaleOffsetBuffer ||
+        !gateResource->mBias || !upResource->mBias) {
+        MNN_ERROR("SharedInputGateUp DecodeRepairMlp requires image-backed gate/up resources rows=%d\n", c.rows);
+        return false;
+    }
+    if (!downResource || !downResource->mUseImage || !downResource->mKernelImage ||
+        !downResource->mDequantScaleOffsetBuffer || !downResource->mBias) {
+        MNN_ERROR("SharedInputGateUp DecodeRepairMlp requires image-backed down resource rows=%d\n", c.rows);
+        return false;
+    }
+
+    auto runtime = bench.runtime();
+    auto preKernel = runtime->buildKernel("gemm_conv1x1_buf", "gemm_c4nhw4_to_nhwc", {},
+                                          bench.openCLBackend()->getPrecision());
+    auto siluNhwcKernel = runtime->buildKernelFromSource(kDecodeRepairMlpSiluNhwcSource,
+                                                         "silu_c4_to_nhwc",
+                                                         {}, bench.openCLBackend()->getPrecision());
+    std::set<std::string> buildOptions = gateResource->mBuildOptions;
+    buildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    buildOptions.emplace("-DQUANT_BIT=4");
+    buildOptions.emplace("-DUSE_IMAGE");
+    buildOptions.emplace("-DCOMPUTE_BATCH");
+    buildOptions.emplace("-DOUTPUT_C4NHW4");
+    buildOptions.emplace("-DOUTPUT_BHW=" + std::to_string(c.rows));
+    auto gateKernel = runtime->buildKernel("gemv_conv1x1_buf", "gemv_conv_c8_buf",
+                                           buildOptions, bench.openCLBackend()->getPrecision());
+    auto upKernel = runtime->buildKernel("gemv_conv1x1_buf", "gemv_conv_c8_buf",
+                                         buildOptions, bench.openCLBackend()->getPrecision());
+    std::set<std::string> downBuildOptions = downResource->mBuildOptions;
+    downBuildOptions.emplace("-DWGS=" + std::to_string(kWgs));
+    downBuildOptions.emplace("-DQUANT_BIT=4");
+    downBuildOptions.emplace("-DUSE_IMAGE");
+    downBuildOptions.emplace("-DCOMPUTE_BATCH");
+    downBuildOptions.emplace("-DOUTPUT_C4NHW4");
+    downBuildOptions.emplace("-DOUTPUT_BHW=" + std::to_string(c.rows));
+    auto downKernel = runtime->buildKernel("gemv_conv1x1_buf", "gemv_conv_c8_buf",
+                                           downBuildOptions, bench.openCLBackend()->getPrecision());
+    if (!preKernel || !siluNhwcKernel || !gateKernel || !upKernel || !downKernel) {
+        MNN_ERROR("failed to build SharedInputGateUp DecodeRepairMlp kernels rows=%d\n", c.rows);
+        return false;
+    }
+
+    const int inputChannelAlign = ROUND_UP(c.hidden, 4);
+    const int outputChannelAlign8 = ROUND_UP(c.inter, 8);
+    const int outputChannelBlocks = UP_DIV(c.inter, 4);
+    const int inputChannelBlocks = UP_DIV(c.hidden, 4);
+    const int gateBlockDim = gateResource->mInputChannel / gateResource->mBlockSize;
+    const int upBlockDim = upResource->mInputChannel / upResource->mBlockSize;
+    const int actChannelAlign = ROUND_UP(c.inter, 4);
+    const int downOutputChannelAlign8 = ROUND_UP(c.hidden, 8);
+    const int downOutputChannelBlocks = UP_DIV(c.hidden, 4);
+    const int downInputChannelBlocks = UP_DIV(c.inter, 4);
+    const int downBlockDim = downResource->mInputChannel / downResource->mBlockSize;
+    std::vector<uint32_t> preGws = {
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+        static_cast<uint32_t>(UP_DIV(c.hidden, 4)),
+    };
+    std::vector<uint32_t> preLws = {1, 1};
+    std::vector<uint32_t> projGws = {
+        static_cast<uint32_t>(kWgs),
+        static_cast<uint32_t>(UP_DIV(c.inter, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> projLws = {static_cast<uint32_t>(kWgs), 1, 1};
+    std::vector<uint32_t> siluGws = {
+        static_cast<uint32_t>(UP_DIV(c.inter, 4)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+        1,
+    };
+    std::vector<uint32_t> siluLws = {16, 1, 1};
+    std::vector<uint32_t> downGws = {
+        static_cast<uint32_t>(kWgs),
+        static_cast<uint32_t>(UP_DIV(c.hidden, 8)),
+        static_cast<uint32_t>(UP_DIV(c.rows, 4)),
+    };
+    std::vector<uint32_t> downLws = {static_cast<uint32_t>(kWgs), 1, 1};
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[0]));
+        ret |= preKernel->get().setArg(idx++, static_cast<int>(preGws[1]));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(hidden));
+        ret |= preKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= preKernel->get().setArg(idx++, c.rows);
+        ret |= preKernel->get().setArg(idx++, c.hidden);
+        ret |= preKernel->get().setArg(idx++, inputChannelAlign);
+        if (!checkCL(ret, "setArg shared gateup preconvert")) {
+            return false;
+        }
+    }
+    auto setProjArgs = [&](const std::shared_ptr<KernelWrap>& kernel,
+                           const std::shared_ptr<OpenCL::ConvBufResource>& resource,
+                           Tensor* output, int blockDim, const char* name) -> bool {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= kernel->get().setArg(idx++, static_cast<int>(projGws[0]));
+        ret |= kernel->get().setArg(idx++, static_cast<int>(projGws[1]));
+        ret |= kernel->get().setArg(idx++, static_cast<int>(projGws[2]));
+        ret |= kernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(inputNhwc));
+        ret |= kernel->get().setArg(idx++, *resource->mKernelImage.get());
+        ret |= kernel->get().setArg(idx++, *resource->mDequantScaleOffsetBuffer.get());
+        ret |= kernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(resource->mBias.get()));
+        ret |= kernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(output));
+        ret |= kernel->get().setArg(idx++, outputChannelAlign8);
+        ret |= kernel->get().setArg(idx++, inputChannelAlign);
+        ret |= kernel->get().setArg(idx++, outputChannelBlocks);
+        ret |= kernel->get().setArg(idx++, inputChannelBlocks);
+        ret |= kernel->get().setArg(idx++, c.hidden);
+        ret |= kernel->get().setArg(idx++, static_cast<int>(resource->mBlockSize));
+        ret |= kernel->get().setArg(idx++, blockDim);
+        ret |= kernel->get().setArg(idx++, resource->mCoef);
+        return checkCL(ret, name);
+    };
+    if (!setProjArgs(gateKernel, gateResource, sharedGate, gateBlockDim, "setArg shared gate projection") ||
+        !setProjArgs(upKernel, upResource, sharedUp, upBlockDim, "setArg shared up projection")) {
+        return false;
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= siluNhwcKernel->get().setArg(idx++, static_cast<int>(siluGws[0]));
+        ret |= siluNhwcKernel->get().setArg(idx++, static_cast<int>(siluGws[1]));
+        ret |= siluNhwcKernel->get().setArg(idx++, static_cast<int>(siluGws[2]));
+        ret |= siluNhwcKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(sharedGate));
+        ret |= siluNhwcKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(sharedUp));
+        ret |= siluNhwcKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(actNhwc));
+        ret |= siluNhwcKernel->get().setArg(idx++, c.rows);
+        ret |= siluNhwcKernel->get().setArg(idx++, c.inter);
+        ret |= siluNhwcKernel->get().setArg(idx++, actChannelAlign);
+        if (!checkCL(ret, "setArg shared silu_c4_to_nhwc")) {
+            return false;
+        }
+    }
+    {
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[0]));
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[1]));
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downGws[2]));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(actNhwc));
+        ret |= downKernel->get().setArg(idx++, *downResource->mKernelImage.get());
+        ret |= downKernel->get().setArg(idx++, *downResource->mDequantScaleOffsetBuffer.get());
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(downResource->mBias.get()));
+        ret |= downKernel->get().setArg(idx++, MNN::OpenCL::openCLBuffer(sharedNhwcOut));
+        ret |= downKernel->get().setArg(idx++, downOutputChannelAlign8);
+        ret |= downKernel->get().setArg(idx++, actChannelAlign);
+        ret |= downKernel->get().setArg(idx++, downOutputChannelBlocks);
+        ret |= downKernel->get().setArg(idx++, downInputChannelBlocks);
+        ret |= downKernel->get().setArg(idx++, c.inter);
+        ret |= downKernel->get().setArg(idx++, static_cast<int>(downResource->mBlockSize));
+        ret |= downKernel->get().setArg(idx++, downBlockDim);
+        ret |= downKernel->get().setArg(idx++, downResource->mCoef);
+        if (!checkCL(ret, "setArg shared direct down projection")) {
+            return false;
+        }
+    }
+
+    auto runPre = [&]() -> ErrorCode {
+        std::vector<uint32_t> roundUp = {ROUND_UP(preGws[0], preLws[0]), ROUND_UP(preGws[1], preLws[1])};
+        cl_int ret = runtime->commandQueue().enqueueNDRangeKernel(preKernel->get(), cl::NullRange,
+                                                                  cl::NDRange(roundUp[0], roundUp[1]),
+                                                                  cl::NDRange(preLws[0], preLws[1]));
+        return checkCL(ret, "enqueue shared gateup preconvert") ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runProjection = [&](const std::shared_ptr<KernelWrap>& kernel) -> ErrorCode {
+        return runRawKernel(runtime, kernel, projGws, projLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runSiluNhwc = [&]() -> ErrorCode {
+        return runRawKernel(runtime, siluNhwcKernel, siluGws, siluLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runDownProjection = [&]() -> ErrorCode {
+        return runRawKernel(runtime, downKernel, downGws, downLws) ? NO_ERROR : COMPUTE_SIZE_ERROR;
+    };
+    auto runSharedGateUp = [&]() -> ErrorCode {
+        auto localCode = runPre();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = runProjection(gateKernel);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runProjection(upKernel);
+    };
+    auto runSplitChain = [&]() -> ErrorCode {
+        auto localCode = bench.execute(gateExe.get(), hiddenInput, gateOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(upExe.get(), hiddenInput, upOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(siluExe.get(), siluInputs, splitActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(splitDownExe.get(), splitDownInput, splitDownOutput);
+    };
+    auto runSharedChain = [&]() -> ErrorCode {
+        auto localCode = runSharedGateUp();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = bench.execute(sharedSiluExe.get(), sharedSiluInputs, sharedActOutput);
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return bench.execute(sharedDownExe.get(), sharedDownInput, sharedDownOutput);
+    };
+    auto runSharedNhwcChain = [&]() -> ErrorCode {
+        auto localCode = runSharedGateUp();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        localCode = runSiluNhwc();
+        if (localCode != NO_ERROR) {
+            return localCode;
+        }
+        return runDownProjection();
+    };
+
+    float splitChainMs = 0.0f;
+    float sharedGateUpMs = 0.0f;
+    float sharedChainMs = 0.0f;
+    float sharedSiluNhwcMs = 0.0f;
+    float sharedDirectDownMs = 0.0f;
+    float sharedNhwcChainMs = 0.0f;
+    OpenCLWallTimer timer;
+    if (!timer.measure(runSplitChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &splitChainMs)) {
+        return false;
+    }
+    if (!timer.measure(runSharedGateUp, [&]() { return bench.sync(); }, c.warmup, c.repeat, &sharedGateUpMs)) {
+        return false;
+    }
+    if (!timer.measure(runSharedChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &sharedChainMs)) {
+        return false;
+    }
+    if (runSharedGateUp() != NO_ERROR || runSiluNhwc() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    if (!timer.measure(runSiluNhwc, [&]() { return bench.sync(); }, c.warmup, c.repeat, &sharedSiluNhwcMs)) {
+        return false;
+    }
+    if (!timer.measure(runDownProjection, [&]() { return bench.sync(); }, c.warmup, c.repeat, &sharedDirectDownMs)) {
+        return false;
+    }
+    if (!timer.measure(runSharedNhwcChain, [&]() { return bench.sync(); }, c.warmup, c.repeat, &sharedNhwcChainMs)) {
+        return false;
+    }
+    if (runSplitChain() != NO_ERROR || runSharedChain() != NO_ERROR ||
+        runSharedNhwcChain() != NO_ERROR || !bench.sync()) {
+        return false;
+    }
+    std::vector<float> splitData;
+    std::vector<float> sharedData;
+    std::vector<float> sharedNhwcData;
+    if (!bench.readTensorTyped<float>(splitOut, &splitData) ||
+        !bench.readTensorTyped<float>(sharedOut, &sharedData) ||
+        !bench.readTensorTyped<float>(sharedNhwcOut, &sharedNhwcData)) {
+        return false;
+    }
+    float maxAbs = 0.0f;
+    float maxRel = 0.0f;
+    int badCount = 0;
+    float nhwcMaxAbs = 0.0f;
+    float nhwcMaxRel = 0.0f;
+    int nhwcBadCount = 0;
+    const float absTol = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_ABS_TOL_MILLI", 50) * 0.001f;
+    const float relTol = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_REL_TOL_MILLI", 80) * 0.001f;
+    if (!compareRawMlpOutput(splitData, sharedData, absTol, relTol, &maxAbs, &maxRel, &badCount)) {
+        return false;
+    }
+    if (!compareRawMlpOutput(splitData, sharedNhwcData, absTol, relTol,
+                             &nhwcMaxAbs, &nhwcMaxRel, &nhwcBadCount)) {
+        return false;
+    }
+    const int gateFamily = readSelectedCompactDenseFamily(bench, c.rows, c.hidden, c.inter, 4);
+    const int downFamily = readSelectedCompactDenseFamily(bench, c.rows, c.inter, c.hidden, 4);
+    MNN_PRINT("[bench_ops/opencl/perf/DecodeRepairMlpSharedInputGateUp] %-24s rows=%d hidden=%d inter=%d qblock=%d "
+              "gate_family=%-22s down_family=%-22s split_chain=%.4f shared_gateup=%.4f "
+              "shared_chain=%.4f delta=%.4f ms shared_silu_nhwc=%.4f shared_direct_down=%.4f "
+              "shared_nhwc_chain=%.4f nhwc_delta=%.4f ms max_abs=%.6f max_rel=%.6f bad=%d/%zu "
+              "nhwc_max_abs=%.6f nhwc_max_rel=%.6f nhwc_bad=%d/%zu\n",
+              c.name, c.rows, c.hidden, c.inter, c.quantBlock,
+              gateFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(gateFamily)) : "-",
+              downFamily >= 0 ? weightOnlyCompactDenseFamilyName(static_cast<uint32_t>(downFamily)) : "-",
+              splitChainMs, sharedGateUpMs, sharedChainMs, sharedChainMs - splitChainMs,
+              sharedSiluNhwcMs, sharedDirectDownMs, sharedNhwcChainMs, sharedNhwcChainMs - splitChainMs,
+              maxAbs, maxRel, badCount, sharedData.size(),
+              nhwcMaxAbs, nhwcMaxRel, nhwcBadCount, sharedNhwcData.size());
+    ::fflush(stdout);
+    return badCount == 0 && nhwcBadCount == 0;
+}
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpChainCases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20);
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80);
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536);
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608);
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64);
+    return {
+        {"minicpm_decode_mlp", 2, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 4, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 6, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 8, hidden, inter, quantBlock, warmup, repeat},
+    };
+}
+
+class OpenCLDecodeRepairMlpChainPerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpChain")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpChainCases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_CHAIN_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_CHAIN_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpChainCase(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpChainPerf, "bench_ops/opencl/perf/DecodeRepairMlpChain");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpFusedFloorCases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_FUSED_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_FUSED_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_FUSED_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_FUSED_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_FUSED_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    return {
+        {"minicpm_decode_mlp", 2, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 4, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 6, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 8, hidden, inter, quantBlock, warmup, repeat},
+    };
+}
+
+class OpenCLDecodeRepairMlpFusedFloorPerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpFusedFloor")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpFusedFloorCases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_FUSED_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_FUSED_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpFusedFloorCase(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpFusedFloorPerf, "bench_ops/opencl/perf/DecodeRepairMlpFusedFloor");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpResourceGateUpCases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_RESOURCE_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    return {
+        {"minicpm_decode_mlp", 2, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 4, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 6, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 8, hidden, inter, quantBlock, warmup, repeat},
+    };
+}
+
+class OpenCLDecodeRepairMlpResourceGateUpPerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpResourceGateUp")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpResourceGateUpCases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_RESOURCE_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_RESOURCE_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpResourceGateUpCase(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpResourceGateUpPerf,
+                     "bench_ops/opencl/perf/DecodeRepairMlpResourceGateUp");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpSiluDownC4Cases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    return {
+        {"minicpm_decode_mlp", 2, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 4, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 6, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 8, hidden, inter, quantBlock, warmup, repeat},
+    };
+}
+
+class OpenCLDecodeRepairMlpSiluDownC4Perf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpSiluDownC4")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpSiluDownC4Cases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_SILU_DOWN_C4_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpSiluDownC4Case(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpSiluDownC4Perf,
+                     "bench_ops/opencl/perf/DecodeRepairMlpSiluDownC4");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpGateUpSiluDownC4Cases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    return {
+        {"minicpm_decode_mlp", 2, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 4, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 6, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 8, hidden, inter, quantBlock, warmup, repeat},
+    };
+}
+
+class OpenCLDecodeRepairMlpGateUpSiluDownC4Perf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpGateUpSiluDownC4")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpGateUpSiluDownC4Cases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_GATEUP_SILU_DOWN_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpGateUpSiluDownC4Case(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpGateUpSiluDownC4Perf,
+                     "bench_ops/opencl/perf/DecodeRepairMlpGateUpSiluDownC4");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpStreamedTileCases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    return {
+        {"minicpm_decode_mlp", 2, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 4, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 6, hidden, inter, quantBlock, warmup, repeat},
+        {"minicpm_decode_mlp", 8, hidden, inter, quantBlock, warmup, repeat},
+    };
+}
+
+class OpenCLDecodeRepairMlpStreamedTilePerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpStreamedTile")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpStreamedTileCases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_STREAMED_TILE_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpStreamedTileCase(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpStreamedTilePerf,
+                     "bench_ops/opencl/perf/DecodeRepairMlpStreamedTile");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpSiluNhwcDownCases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    std::vector<DecodeRepairMlpChainCase> cases;
+    for (int rows : rowsFromEnvOrDefault("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_ROWS", {2, 4, 6, 8})) {
+        cases.push_back({"minicpm_decode_mlp", rows, hidden, inter, quantBlock, warmup, repeat});
+    }
+    return cases;
+}
+
+class OpenCLDecodeRepairMlpSiluNhwcDownPerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpSiluNhwcDown")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpSiluNhwcDownCases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_SILU_NHWC_DOWN_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpSiluNhwcDownCase(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpSiluNhwcDownPerf,
+                     "bench_ops/opencl/perf/DecodeRepairMlpSiluNhwcDown");
+
+static std::vector<DecodeRepairMlpChainCase> decodeRepairMlpSharedInputGateUpCases() {
+    const int warmup = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_WARMUP",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_WARMUP", 20));
+    const int repeat = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_REPEAT",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_REPEAT", 80));
+    const int hidden = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_HIDDEN",
+                              envInt("MNN_BENCH_OPENCL_MLP_CHAIN_HIDDEN", 1536));
+    const int inter = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_INTER",
+                             envInt("MNN_BENCH_OPENCL_MLP_CHAIN_INTER", 4608));
+    const int quantBlock = envInt("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_QBLOCK",
+                                  envInt("MNN_BENCH_OPENCL_MLP_CHAIN_QBLOCK", 64));
+    std::vector<DecodeRepairMlpChainCase> cases;
+    for (int rows : rowsFromEnvOrDefault("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_ROWS", {2, 4, 6, 8})) {
+        cases.push_back({"minicpm_decode_mlp", rows, hidden, inter, quantBlock, warmup, repeat});
+    }
+    return cases;
+}
+
+class OpenCLDecodeRepairMlpSharedInputGateUpPerf : public MNNTestCase {
+public:
+    bool run(int precision) override {
+        (void)precision;
+        if (!requireMemoryLowOpenCL("bench_ops/opencl/perf/DecodeRepairMlpSharedInputGateUp")) {
+            return false;
+        }
+        bool ok = true;
+        for (const auto& c : decodeRepairMlpSharedInputGateUpCases()) {
+            if (!enabledByFilter("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_CASE", c.name) ||
+                !enabledRow("MNN_BENCH_OPENCL_MLP_SHARED_INPUT_ROWS", c.rows)) {
+                continue;
+            }
+            ok = runDecodeRepairMlpSharedInputGateUpCase(c) && ok;
+        }
+        return ok;
+    }
+};
+
+MNNTestSuiteRegister(OpenCLDecodeRepairMlpSharedInputGateUpPerf,
+                     "bench_ops/opencl/perf/DecodeRepairMlpSharedInputGateUp");
 
 enum class SparseQueryPattern {
     Prefix = 0,

@@ -541,7 +541,10 @@ static bool _isPicExtraWithExternalWeights(const MNN::Extra* extra) {
     const auto type = extra->type()->str();
     return type == "PicGateUpWeightOnly" ||
            type == "PicGateUpSiluWeightOnly" ||
-           type == "PicLinearNhwcWeightOnly";
+           type == "PicAdrenoGateUpSiluWeightOnly" ||
+           type == "PicAdrenoTinyMlpWeightOnly" ||
+           type == "PicLinearNhwcWeightOnly" ||
+           type == "PicAdrenoLinearNhwcWeightOnly";
 }
 
 static bool _RebuildExternalOp(FileLoader* external, const MNN::Op* origin, flatbuffers::FlatBufferBuilder& builder) {

@@ -26,6 +26,7 @@
 
 #include <MNN/expr/ExecutorScope.hpp>
 #include <cstdlib>
+#include <cstdio>
 using namespace MNN::Express;
 namespace MNN {
 namespace Express {
@@ -236,11 +237,15 @@ std::vector<VARP> PipelineModule::onForward(const std::vector<VARP>& inputs) {
         std::vector<VARP> tempOutputs = std::get<0>(m)->onForward(tempInputs);
         if(tempOutputs.size() != std::get<2>(m).size()) {
             // Execute has error
-            if (::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-                MNN_PRINT("PIC module debug PipelineModule child failed index=%d type=%s inputs=%d outputs=%d "
-                          "expected=%d\n",
-                          index, std::get<0>(m)->type().c_str(), static_cast<int>(tempInputs.size()),
-                          static_cast<int>(tempOutputs.size()), static_cast<int>(std::get<2>(m).size()));
+            if (::getenv("MNN_PIC_DECODE_DEBUG") != nullptr ||
+                ::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr) {
+                std::fprintf(stderr,
+                             "PIC module debug PipelineModule child failed index=%d type=%s name=%s "
+                             "inputs=%d outputs=%d expected=%d\n",
+                             index, std::get<0>(m)->type().c_str(), std::get<0>(m)->name().c_str(),
+                             static_cast<int>(tempInputs.size()), static_cast<int>(tempOutputs.size()),
+                             static_cast<int>(std::get<2>(m).size()));
+                std::fflush(stderr);
             }
             return {};
         }

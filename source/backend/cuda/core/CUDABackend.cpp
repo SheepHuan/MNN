@@ -298,7 +298,15 @@ Execution* CUDABackend::onCreate(const std::vector<Tensor*>& inputs, const std::
             (extra->type()->str() == "PicSiluMul" || extra->type()->str() == "PicPackedSiluMul" ||
              extra->type()->str() == "PicGateUpWeightOnly" ||
              extra->type()->str() == "PicGateUpSiluWeightOnly" ||
-             extra->type()->str() == "PicLinearNhwcWeightOnly");
+             extra->type()->str() == "PicLinearNhwcWeightOnly"
+#ifdef MNN_CUDA_BENCH_OPS
+             // Test-only direct-op probes for test/bench_ops/cuda; exporter and production graphs must not rely on them.
+             ||
+             extra->type()->str() == "PicBenchFusedPackedSiluDown" ||
+             extra->type()->str() == "PicBenchStreamedPackedSiluDown" ||
+             extra->type()->str() == "PicBenchWmmaPackedSiluDown"
+#endif
+            );
         if (!backendNativeExtra && !FuseExecutionV2::check(op)) {
             if (extra == nullptr || extra->type() == nullptr || extra->info() == nullptr) {
                 return NULL;

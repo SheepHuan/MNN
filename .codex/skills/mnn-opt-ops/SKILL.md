@@ -251,6 +251,15 @@ Jetson 参考结果：accuracy rows4/5 gate/up/down/down_all 全部 `bad=0`；de
 - 强制 rows4/5 回到现有 `GEMV_FpAInt4B_V14_MB` 并枚举 `OC_PER_BLK=2/3/4/8/16` 也变慢；代表数据为 default rows4/5 chain `1.5962/1.6088ms`，`OC_PER_BLK=2` 退到 `2.1377/2.6379ms`，`OC_PER_BLK=16` 退到 `6.7765/8.3407ms`。
 - 相关临时 env 分支 `MNN_CUDA_PIC_INT4_ROWS45_PROTO_OC` 已从 CUDA path 移除；后续 rows4/5 主线必须是新的 INT4-native kernel family，或真正融合 `SwiGLU + down` 的累加路径。
 
+已验证过的 Jetson CUDA rows=4/6/8 MLP fused-down 负向分支也不要重复作为主线：
+
+- `PicBenchFusedPackedSiluDown` 只是把 `PicPackedSiluMul + cuBLAS down` 放进一个 bench-only Extra，rows4/6/8 delta 只有 `-0.0015 / +0.0031 / -0.0017ms`，没有实际 headroom。
+- `PicBenchStreamedPackedSiluDown` 避免 `[rows,8192]` activation 写回，但用 scalar 累加替代 tensor-core down，rows4/6/8 delta 为 `+2.1478 / +3.4889 / +4.7494ms`，明显不可行。
+- `PicBenchWmmaPackedSiluDown` 恢复了 tensor-core WMMA 级 custom down 试验，但简单 16x16 WMMA schedule 仍慢于当前 cuBLAS/tensor-core down；rows4/6/8 `wmma_delta=+0.5793/+0.5892/+0.6526ms`，guardrail rows1/2 也回退 `+0.4339/+0.5617ms`。
+- 结论：只把 `SwiGLU` 融进 down、只减少 activation materialization、或写一个 naive WMMA down kernel，都不能成为生产路线。生产 baseline 仍应保持 packed gate/up + `PicPackedSiluMul` + 当前 rows4/6/8 cuBLAS down；任何未来 fused MLP 必须先在 direct-op 上同时满足 rows4/6/8 `<= -0.25ms/layer`、rows1/2 不明显回退、accuracy pass，才允许讨论 exporter/graph/default runtime 集成。
+
+2026-07-01 Jetson 端到端 decode 复测补充：fresh CUDA gate/up exporter 产物当前不能作为生产路径。`PicLinearNhwcWeightOnly + PicPackedSiluMul`、direct concat `PicPackedSiluMul`、以及恢复历史 `concat_conv -> ConvertTensor -> Reshape -> PicPackedSiluMul` layout 的 score1/score10 fresh 导出，都会在 `/v1/prefill/text` 失败，错误为 `forwardRaw outputs empty seq_len=512`。历史 `gateup-packed-silu-patch` 虽能运行，但 x=`1/3/5/7`、ctx=`512/1024/1536` 的端到端 TPOT 比当前 `silumul-score10` baseline 慢约 `+2.0..+2.6ms/token`。因此 decode production baseline 仍以当前最快已验证导出为准；不要因为 direct-op 或旧 patch 局部信号，把 fresh gate/up graph rewrite 推为默认。
+
 汇总 config tune warm 结果：
 
 ```bash

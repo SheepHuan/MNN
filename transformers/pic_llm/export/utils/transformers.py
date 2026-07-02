@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 
 from .model_mapper import ModelMapper
-from .custom_op import FusedAttention, PagedAttention, MoE, FusedLinearAttention, PicSiluMul, PicGateUpWeightOnly, PicGateUpSiluWeightOnly
+from .custom_op import FusedAttention, PagedAttention, MoE, FusedLinearAttention, PicSiluMul, PicGateUpWeightOnly, PicGateUpSiluWeightOnly, PicAdrenoGateUpSiluWeightOnly, PicAdrenoTinyMlpWeightOnly
+from .pic_export_contract import pic_decode_fusion_family
 
 def _pic_indices(indices):
     if indices is None:
@@ -24,6 +25,9 @@ def _pic_gather_rows(tensor, indices, dim):
 def _is_silu_activation(act_fn):
     if act_fn is None:
         return False
+    if isinstance(act_fn, str):
+        name = act_fn.lower()
+        return name in ('silu', 'swish', 'siluactivation') or 'silu' in name or 'swish' in name
     if act_fn is torch.nn.SiLU or isinstance(act_fn, torch.nn.SiLU):
         return True
     if act_fn is F.silu or act_fn is torch.nn.functional.silu:
@@ -31,6 +35,9 @@ def _is_silu_activation(act_fn):
     name = getattr(act_fn, '__name__', '') or act_fn.__class__.__name__
     name = name.lower()
     return name in ('silu', 'swish', 'siluactivation') or 'silu' in name or 'swish' in name
+
+def _pic_decode_fusion_family(config):
+    return pic_decode_fusion_family(config)
 
 class Embedding(torch.nn.Module):
     def __init__(self, embed, config):
@@ -1118,21 +1125,39 @@ class Mlp(torch.nn.Module):
             'act_fn': 'act_fn',
         }
         ModelMapper.do_map(self, mlp, mapper.get('mlp', dense_mlp_map))
-        self.pic_tiny_fusion = bool(getattr(config, 'pic_decode_tiny_fusion', False)) and _is_silu_activation(getattr(self, 'act_fn', None))
-        self.pic_gateup_fusion = self.pic_tiny_fusion and bool(getattr(config, 'pic_decode_gateup_fusion', False))
+        self.pic_decode_fusion_family = _pic_decode_fusion_family(config)
+        self.pic_adreno_decode_fusion = self.pic_decode_fusion_family == 'adreno'
+        self.pic_native_decode_fusion = self.pic_decode_fusion_family in ('adreno', 'cuda')
+        mlp_uses_silu = (_is_silu_activation(getattr(self, 'act_fn', None)) or
+                         _is_silu_activation(getattr(config, 'hidden_act', None)))
+        self.pic_tiny_fusion = self.pic_native_decode_fusion and bool(getattr(config, 'pic_decode_tiny_fusion', False)) and mlp_uses_silu
+        self.pic_tiny_mlp_fusion = self.pic_adreno_decode_fusion and bool(getattr(config, 'pic_decode_tiny_mlp_fusion', False)) and mlp_uses_silu
+        self.pic_gateup_fusion = self.pic_tiny_fusion and self.pic_native_decode_fusion and bool(getattr(config, 'pic_decode_gateup_fusion', False))
         self.pic_gateup_split_fusion = self.pic_gateup_fusion and bool(getattr(config, 'pic_decode_gateup_split_fusion', False))
+        self.pic_silu_nhwc_down_fusion = self.pic_gateup_fusion and bool(getattr(config, 'pic_decode_silu_nhwc_down_fusion', False))
         self.is_moe = hasattr(self, 'experts')
         self.export_moe = False
         if not self.is_moe:
             self.pic_silu_mul = PicSiluMul(f'/layers.{layer_id}/mlp/PicSiluMul')
-            if self.pic_gateup_fusion:
-                self.pic_gate_up_silu = PicGateUpSiluWeightOnly(
+            if self.pic_tiny_mlp_fusion:
+                self.pic_tiny_mlp = PicAdrenoTinyMlpWeightOnly(
                     self.gate_proj.in_features,
                     self.gate_proj.out_features,
                     f'/layers.{layer_id}/mlp/gate_proj/Linear',
                     f'/layers.{layer_id}/mlp/up_proj/Linear',
-                    f'/layers.{layer_id}/mlp/PicGateUpSiluWeightOnly',
-                    split_fusion=self.pic_gateup_split_fusion)
+                    f'/layers.{layer_id}/mlp/down_proj/Linear',
+                    f'/layers.{layer_id}/mlp/PicAdrenoTinyMlpWeightOnly')
+            if self.pic_gateup_fusion:
+                gateup_cls = PicAdrenoGateUpSiluWeightOnly if self.pic_adreno_decode_fusion else PicGateUpSiluWeightOnly
+                gateup_type = 'PicAdrenoGateUpSiluWeightOnly' if self.pic_adreno_decode_fusion else 'PicGateUpSiluWeightOnly'
+                self.pic_gate_up_silu = gateup_cls(
+                    self.gate_proj.in_features,
+                    self.gate_proj.out_features,
+                    f'/layers.{layer_id}/mlp/gate_proj/Linear',
+                    f'/layers.{layer_id}/mlp/up_proj/Linear',
+                    f'/layers.{layer_id}/mlp/{gateup_type}',
+                    split_fusion=self.pic_gateup_split_fusion,
+                    silu_nhwc_down_fusion=self.pic_silu_nhwc_down_fusion)
             return
         self.custom_moe = MoE(self.num_experts, self.top_k, layer_id)
         if isinstance(self.experts, torch.nn.ModuleList):
@@ -1184,6 +1209,8 @@ class Mlp(torch.nn.Module):
     def forward(self, hidden_states: torch.Tensor):
         if not self.is_moe:
             # general Mlp
+            if self.pic_tiny_mlp_fusion:
+                return self.pic_tiny_mlp(hidden_states)
             if self.pic_gateup_fusion:
                 hidden_states = self.pic_gate_up_silu(hidden_states)
             elif self.pic_tiny_fusion:
@@ -1305,7 +1332,11 @@ class Decoder(torch.nn.Module):
         if mapper is None:
             mapper = config.model_map
         ModelMapper.do_map(self, decoder, mapper['decoder'])
-        if hasattr(self, 'mlp') and (hasattr(self.mlp, 'experts') or bool(getattr(config, 'pic_decode_tiny_fusion', False))):
+        if hasattr(self, 'mlp') and (
+            hasattr(self.mlp, 'experts') or
+            bool(getattr(config, 'pic_decode_tiny_fusion', False)) or
+            bool(getattr(config, 'pic_decode_tiny_mlp_fusion', False))
+        ):
             self.mlp = Mlp(self.mlp, mapper, layer_id, config)
 
         # gemma4 MoE: router and experts are at decoder layer level (parallel to dense MLP)

@@ -48,7 +48,8 @@ private:
     ErrorCode ensureAdrenoGemmPrefillTemps(int seqLen, int kvLen, int qSplitNum);
     ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureDecodeCausalKernel();
-    ErrorCode ensureDecodeRepairKernel();
+    ErrorCode ensureDecodeCausalKernelHD128Identity();
+    ErrorCode ensureDecodeAttentionRankKernel();
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount, int stageCandidateCount = 0);
     ErrorCode ensureAdrenoCacheBlendValueImage(int tokenCapacity);
@@ -74,9 +75,16 @@ private:
     ErrorCode runDecodeCausalAttention(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs,
                                        int kvLen, int attnLen, int baseLogical, bool sparseQuery,
                                        bool queryRowsAreFull);
-    ErrorCode runDecodeRepairCausalAttentionHD128(const std::vector<Tensor*>& inputs,
-                                                  const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
-                                                  int baseLogical, bool queryRowsAreFull, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128Identity(const std::vector<Tensor*>& inputs,
+                                                    const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+                                                    int baseLogical, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128IdentityFusedKV(const std::vector<Tensor*>& inputs,
+                                                           const std::vector<Tensor*>& outputs, int kvLen,
+                                                           int attnLen, int baseLogical, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128IdentityRecord(const std::vector<Tensor*>& inputs,
+                                                          const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+                                                          int baseLogical, int layerIndex, uint32_t lanes,
+                                                          std::shared_ptr<KernelWrap> kernel);
     ErrorCode runDecodeAttentionRankCaptureOpenCL(const Tensor* query, int layerIndex, int kvLen, int attnLen,
                                                   bool queryRowsAreFull);
 
@@ -119,8 +127,12 @@ private:
     std::shared_ptr<KernelWrap> mSparseFlashKernelMQTileHD128Q8K16KVImage;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernel64;
-    std::shared_ptr<KernelWrap> mDecodeRepairCausalKernelHD128Row32;
-    std::shared_ptr<KernelWrap> mDecodeRepairCausalKernelHD128Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityRow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityRow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVRow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVRow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVRow128;
     std::shared_ptr<KernelWrap> mDecodeAttentionRankScoreKernelHD128;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
@@ -177,7 +189,21 @@ private:
     int mAdrenoGemmQKVElements = 0;
     int mSparseFlashKernelGroupSize = 0;
     int mDecodeCausalKernelGroupSize = 0;
-    int mDecodeRepairKernelGroupSize = 0;
+    int mDecodeCausalHD128IdentityKernelGroupSize = 0;
+    RecordUpdateInfo mDecodeIdentityRecordUpdateInfo;
+    std::vector<RecordUpdateInfo*> mDecodeIdentityRecordUpdateInfos;
+    bool mDecodeIdentityRecordValid = false;
+    uint32_t mDecodeIdentityRecordLanes = 0;
+    uint32_t mDecodeIdentityRecordHeads = 0;
+    int mDecodeIdentityRecordAttnLen = 0;
+    uint32_t mDecodeIdentityRecordGws0 = 0;
+    uint32_t mDecodeIdentityRecordGws1 = 0;
+    uint32_t mDecodeIdentityRecordGws2 = 0;
+    int mDecodeIdentityRecordQuerySeqLen = 0;
+    int mDecodeIdentityRecordBaseLogical = 0;
+    int mDecodeIdentityRecordKvLen = 0;
+    int mDecodeIdentityRecordMaxSlots = 0;
+    int mDecodeAttentionRankKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
     bool mFastKernelSparse = false;

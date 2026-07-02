@@ -28,6 +28,7 @@ Environment:
   MNN_QUANT_BLOCK        MNN weight quant block. Defaults to 64.
   MNN_EMBED_BIT          Embedding bit. Defaults to 16.
   MNN_PAGED_KV_MAX_TOKENS  Default PIC export paged KV token limit. Defaults to 4096.
+  MNN_PIC_EXPORT_DEVICE  PIC target device contract: jetson, rhinopi, or orangepi.
   MNNCONVERT_PATH        Optional MNNConvert executable path. Auto-detected under MNN_ARTIFACT_ROOT when unset.
   MNN_EXPORT_DRY_RUN     Print resolved command without running export when set to 1.
 EOF
@@ -342,6 +343,11 @@ elif [[ "${EXPORTER}" == "pic" || "${EXPORTER}" == "prefix" ]]; then
   exit 2
 fi
 
+pic_export_args=()
+if [[ "${EXPORTER}" == "pic" && -n "${MNN_PIC_EXPORT_DEVICE:-}" ]]; then
+  pic_export_args=(--pic_export_device "${MNN_PIC_EXPORT_DEVICE}")
+fi
+
 python_cmd=(conda run -n kvshare-edge python)
 
 cmd=(
@@ -354,6 +360,7 @@ cmd=(
   --quant_block "${QUANT_BLOCK}"
   --embed_bit "${EMBED_BIT}"
   "${mnnconvert_args[@]}"
+  "${pic_export_args[@]}"
   "${EXTRA_ARGS[@]}"
 )
 
@@ -362,6 +369,9 @@ echo "exporter: ${EXPORTER}"
 echo "script: ${EXPORT_SCRIPT}"
 echo "artifact_platform: ${ARTIFACT_PLATFORM}"
 echo "artifact_root: ${ARTIFACT_ROOT}"
+if [[ "${EXPORTER}" == "pic" ]]; then
+  echo "pic_export_device: ${MNN_PIC_EXPORT_DEVICE:-<unset: exporter generic contract>}"
+fi
 echo "mnnconvert: ${RESOLVED_MNNCONVERT_PATH:-<pymnn fallback>}"
 echo "model: ${MODEL_PATH}"
 echo "dst: ${DST_PATH}"

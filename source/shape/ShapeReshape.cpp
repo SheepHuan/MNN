@@ -9,6 +9,8 @@
 #include "shape/SizeComputer.hpp"
 #include "core/Macro.h"
 #include "core/TensorUtils.hpp"
+#include <cstdlib>
+#include <string>
 
 namespace MNN {
 class FlattenComputer : public SizeComputer {
@@ -169,6 +171,28 @@ public:
         if (determinAxis >= 0) {
             output->buffer().dim[determinAxis].extent = totalSizeOutput ? totalSizeInput / totalSizeOutput : 0;
             totalSizeOutput *= output->buffer().dim[determinAxis].extent;
+        }
+        const char* opName = op->name() != nullptr ? op->name()->c_str() : "";
+        const bool picShapeDebug = std::getenv("MNN_PIC_GRAPH_PROFILE") != nullptr &&
+            (std::string(opName).find("/layers.0/mlp/down_proj/Linear") != std::string::npos ||
+             std::string(opName).find("/blocks.1/Reshape_output_0") != std::string::npos);
+        if (picShapeDebug) {
+            std::fprintf(stderr,
+                         "PicReshape shape name=%s input_dims=%d input=%d,%d,%d,%d output_dims=%d output=%d,%d,%d,%d total=%d->%d format=%d\n",
+                         opName,
+                         input->dimensions(),
+                         input->dimensions() > 0 ? input->length(0) : -1,
+                         input->dimensions() > 1 ? input->length(1) : -1,
+                         input->dimensions() > 2 ? input->length(2) : -1,
+                         input->dimensions() > 3 ? input->length(3) : -1,
+                         output->dimensions(),
+                         output->dimensions() > 0 ? output->length(0) : -1,
+                         output->dimensions() > 1 ? output->length(1) : -1,
+                         output->dimensions() > 2 ? output->length(2) : -1,
+                         output->dimensions() > 3 ? output->length(3) : -1,
+                         totalSizeInput, totalSizeOutput,
+                         static_cast<int>(TensorUtils::getDescribe(output)->dimensionFormat));
+            std::fflush(stderr);
         }
         if (totalSizeInput != totalSizeOutput) {
             MNN_PRINT("Reshape error: %d -> %d\n", totalSizeInput, totalSizeOutput);
