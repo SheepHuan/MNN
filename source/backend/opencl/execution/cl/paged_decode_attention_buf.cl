@@ -338,3 +338,183 @@ __kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
 DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_HD128(decode_causal_attention_hd128_identity_fused_kv_row32, 32)
 DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_HD128(decode_causal_attention_hd128_identity_fused_kv_row64, 64)
 DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_HD128(decode_causal_attention_hd128_identity_fused_kv_row128, 128)
+
+#define DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_GQA_HD128(KERNEL_NAME, LANES) \
+__kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
+                              __global const FLOAT *query, \
+                              __global const FLOAT *key, \
+                              __global const FLOAT *value, \
+                              __global FLOAT *key_cache, \
+                              __global FLOAT *value_cache, \
+                              __global FLOAT *output, \
+                              __private const float scale, \
+                              __private const int batch, \
+                              __private const int query_seq_len, \
+                              __private const int output_seq_len, \
+                              __private const int base_logical, \
+                              __private const int key_seq_len, \
+                              __private const int key_max_len, \
+                              __private const int head_num, \
+                              __private const int kv_head_num, \
+                              __private const int head_dim) { \
+    const int x = get_global_id(0); \
+    const int y = get_global_id(1); \
+    int z = get_global_id(2); \
+    DEAL_NON_UNIFORM_DIM3(x, y, z); \
+    const int lid = get_local_id(0); \
+    if (get_local_size(0) != LANES || lid >= LANES || head_dim != 128 || NUMHEAD_GROUP_SIZE <= 1) { \
+        return; \
+    } \
+    const int q_index = y; \
+    if (q_index >= output_seq_len) { \
+        return; \
+    } \
+    const int b = z / kv_head_num; \
+    const int kvh = z - b * kv_head_num; \
+    if (b >= batch || kvh >= kv_head_num) { \
+        return; \
+    } \
+    const int q_logical = base_logical + q_index; \
+    const int q_row = q_index; \
+    if (q_row < 0 || q_row >= query_seq_len || q_logical < 0 || q_logical >= key_max_len) { \
+        return; \
+    } \
+    for (int d = lid; d < 128; d += LANES) { \
+        const int in_offset = ((b * output_seq_len + q_index) * kv_head_num + kvh) * 128 + d; \
+        const int key_offset = ((q_logical * batch + b) * kv_head_num + kvh) * 128 + d; \
+        const int value_offset = ((b * kv_head_num + kvh) * key_max_len + q_logical) * 128 + d; \
+        key_cache[key_offset] = key[in_offset]; \
+        value_cache[value_offset] = value[in_offset]; \
+    } \
+    barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE); \
+    const int active_kv_seq_len = min(clamp(q_logical + 1, 0, key_seq_len), key_max_len); \
+    COMPUTE_FLOAT local local_q[NUMHEAD_GROUP_SIZE * 128]; \
+    COMPUTE_FLOAT local score_tile[NUMHEAD_GROUP_SIZE * LANES]; \
+    COMPUTE_FLOAT local reduce[NUMHEAD_GROUP_SIZE * LANES]; \
+    const int out_d4 = lid << 2; \
+    COMPUTE_FLOAT4 out4[NUMHEAD_GROUP_SIZE]; \
+    COMPUTE_FLOAT running_m[NUMHEAD_GROUP_SIZE]; \
+    COMPUTE_FLOAT running_l[NUMHEAD_GROUP_SIZE]; \
+    for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+        out4[gh] = (COMPUTE_FLOAT4)0; \
+        running_m[gh] = (COMPUTE_FLOAT)-FLT_MAX; \
+        running_l[gh] = (COMPUTE_FLOAT)0; \
+        const int h = kvh * NUMHEAD_GROUP_SIZE + gh; \
+        for (int d = lid; d < 128; d += LANES) { \
+            const int query_offset = ((b * query_seq_len + q_row) * head_num + h) * 128 + d; \
+            local_q[gh * 128 + d] = (COMPUTE_FLOAT)query[query_offset]; \
+        } \
+    } \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    for (int k_start = 0; k_start < active_kv_seq_len; k_start += LANES) { \
+        const int tile_count = min(LANES, active_kv_seq_len - k_start); \
+        COMPUTE_FLOAT score[NUMHEAD_GROUP_SIZE]; \
+        for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+            score[gh] = (COMPUTE_FLOAT)-FLT_MAX; \
+        } \
+        if (lid < tile_count) { \
+            const int k = k_start + lid; \
+            const int key_offset = ((k * batch + b) * kv_head_num + kvh) * 128; \
+            for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                score[gh] = (COMPUTE_FLOAT)0; \
+            } \
+            for (int d4 = 0; d4 < 128; d4 += 4) { \
+                COMPUTE_FLOAT4 kv = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset + d4)); \
+                for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                    COMPUTE_FLOAT4 qv = (COMPUTE_FLOAT4)(local_q[gh * 128 + d4], local_q[gh * 128 + d4 + 1], \
+                                                         local_q[gh * 128 + d4 + 2], local_q[gh * 128 + d4 + 3]); \
+                    score[gh] += dot(qv, kv); \
+                } \
+            } \
+            for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                score[gh] *= (COMPUTE_FLOAT)scale; \
+            } \
+        } \
+        for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+            const int base = gh * LANES; \
+            score_tile[base + lid] = score[gh]; \
+            reduce[base + lid] = score[gh]; \
+        } \
+        barrier(CLK_LOCAL_MEM_FENCE); \
+        for (int stride = LANES >> 1; stride > 0; stride >>= 1) { \
+            if (lid < stride) { \
+                for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                    const int base = gh * LANES; \
+                    reduce[base + lid] = fmax(reduce[base + lid], reduce[base + lid + stride]); \
+                } \
+            } \
+            barrier(CLK_LOCAL_MEM_FENCE); \
+        } \
+        COMPUTE_FLOAT tile_m[NUMHEAD_GROUP_SIZE]; \
+        COMPUTE_FLOAT tile_l[NUMHEAD_GROUP_SIZE]; \
+        for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+            const int base = gh * LANES; \
+            tile_m[gh] = reduce[base]; \
+            COMPUTE_FLOAT tile_l_part = (COMPUTE_FLOAT)0; \
+            if (lid < tile_count && tile_m[gh] != (COMPUTE_FLOAT)-FLT_MAX) { \
+                tile_l_part = exp(score_tile[base + lid] - tile_m[gh]); \
+            } \
+            score_tile[base + lid] = tile_l_part; \
+            reduce[base + lid] = tile_l_part; \
+        } \
+        barrier(CLK_LOCAL_MEM_FENCE); \
+        for (int stride = LANES >> 1; stride > 0; stride >>= 1) { \
+            if (lid < stride) { \
+                for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                    const int base = gh * LANES; \
+                    reduce[base + lid] += reduce[base + lid + stride]; \
+                } \
+            } \
+            barrier(CLK_LOCAL_MEM_FENCE); \
+        } \
+        COMPUTE_FLOAT old_scale[NUMHEAD_GROUP_SIZE]; \
+        COMPUTE_FLOAT tile_scale[NUMHEAD_GROUP_SIZE]; \
+        for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+            const int base = gh * LANES; \
+            tile_l[gh] = reduce[base]; \
+            old_scale[gh] = (COMPUTE_FLOAT)0; \
+            tile_scale[gh] = (COMPUTE_FLOAT)0; \
+            if (tile_l[gh] > (COMPUTE_FLOAT)0) { \
+                const COMPUTE_FLOAT new_m = running_l[gh] > (COMPUTE_FLOAT)0 ? fmax(running_m[gh], tile_m[gh]) : tile_m[gh]; \
+                old_scale[gh] = running_l[gh] > (COMPUTE_FLOAT)0 ? exp(running_m[gh] - new_m) : (COMPUTE_FLOAT)0; \
+                tile_scale[gh] = exp(tile_m[gh] - new_m); \
+                running_l[gh] = running_l[gh] * old_scale[gh] + tile_l[gh] * tile_scale[gh]; \
+                running_m[gh] = new_m; \
+            } \
+        } \
+        if (lid < 32) { \
+            COMPUTE_FLOAT4 tile_out4[NUMHEAD_GROUP_SIZE]; \
+            for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                tile_out4[gh] = (COMPUTE_FLOAT4)0; \
+            } \
+            for (int kk = 0; kk < tile_count; ++kk) { \
+                const int value_offset = ((b * kv_head_num + kvh) * key_max_len + (k_start + kk)) * 128 + out_d4; \
+                COMPUTE_FLOAT4 vv = CONVERT_COMPUTE_FLOAT4(vload4(0, value_cache + value_offset)); \
+                for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                    const COMPUTE_FLOAT tile_weight = score_tile[gh * LANES + kk]; \
+                    if (tile_weight != (COMPUTE_FLOAT)0) { \
+                        tile_out4[gh] += (COMPUTE_FLOAT4)tile_weight * vv; \
+                    } \
+                } \
+            } \
+            for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+                if (tile_l[gh] > (COMPUTE_FLOAT)0) { \
+                    out4[gh] = out4[gh] * (COMPUTE_FLOAT4)old_scale[gh] + tile_out4[gh] * (COMPUTE_FLOAT4)tile_scale[gh]; \
+                } \
+            } \
+        } \
+        barrier(CLK_LOCAL_MEM_FENCE); \
+    } \
+    if (lid < 32) { \
+        for (int gh = 0; gh < NUMHEAD_GROUP_SIZE; ++gh) { \
+            const COMPUTE_FLOAT inv_l = running_l[gh] > (COMPUTE_FLOAT)0 ? (COMPUTE_FLOAT)1 / running_l[gh] : (COMPUTE_FLOAT)0; \
+            const int h = kvh * NUMHEAD_GROUP_SIZE + gh; \
+            const int output_offset = ((b * output_seq_len + q_index) * head_num + h) * 128; \
+            vstore4(CONVERT_FLOAT4(out4[gh] * (COMPUTE_FLOAT4)inv_l), 0, output + output_offset + out_d4); \
+        } \
+    } \
+}
+
+DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_GQA_HD128(decode_causal_attention_hd128_identity_fused_kv_gqa_row32, 32)
+DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_GQA_HD128(decode_causal_attention_hd128_identity_fused_kv_gqa_row64, 64)
+DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_GQA_HD128(decode_causal_attention_hd128_identity_fused_kv_gqa_row128, 128)

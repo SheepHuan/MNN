@@ -286,6 +286,10 @@ static bool _picOpenCLDebug() {
     return _envFlagEnabled("MNN_PIC_DECODE_DEBUG", false);
 }
 
+static bool _decodeGqaFusedKVEnabled() {
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_GQA_FUSED", false);
+}
+
 static bool _compareCacheBlendTopK() {
     return _envFlagEnabled("MNN_PAGED_ATTENTION_COMPARE_CACHEBLEND_TOPK", false);
 }
@@ -2862,10 +2866,15 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernelHD128Identity() {
         return INVALID_VALUE;
     }
     const int groupSize = mNumHead / mKvNumHead;
+    const bool needGqaFusedKV = groupSize > 1 && _decodeGqaFusedKVEnabled();
     if (mDecodeCausalKernelHD128IdentityRow32 && mDecodeCausalKernelHD128IdentityRow64 &&
         mDecodeCausalKernelHD128IdentityRow128 &&
         mDecodeCausalKernelHD128IdentityFusedKVRow32 && mDecodeCausalKernelHD128IdentityFusedKVRow64 &&
         mDecodeCausalKernelHD128IdentityFusedKVRow128 &&
+        (!needGqaFusedKV ||
+         (mDecodeCausalKernelHD128IdentityFusedKVGQARow32 &&
+          mDecodeCausalKernelHD128IdentityFusedKVGQARow64 &&
+          mDecodeCausalKernelHD128IdentityFusedKVGQARow128)) &&
         mDecodeCausalHD128IdentityKernelGroupSize == groupSize) {
         return NO_ERROR;
     }
@@ -2894,12 +2903,35 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernelHD128Identity() {
         runtime->buildKernel("paged_decode_attention_buf", "decode_causal_attention_hd128_identity_fused_kv_row128",
                              {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                              mOpenCLBackend->getPrecision());
+    if (needGqaFusedKV) {
+        mDecodeCausalKernelHD128IdentityFusedKVGQARow32 =
+            runtime->buildKernel("paged_decode_attention_buf", "decode_causal_attention_hd128_identity_fused_kv_gqa_row32",
+                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128IdentityFusedKVGQARow64 =
+            runtime->buildKernel("paged_decode_attention_buf", "decode_causal_attention_hd128_identity_fused_kv_gqa_row64",
+                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128IdentityFusedKVGQARow128 =
+            runtime->buildKernel("paged_decode_attention_buf", "decode_causal_attention_hd128_identity_fused_kv_gqa_row128",
+                                 {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                                 mOpenCLBackend->getPrecision());
+    } else {
+        mDecodeCausalKernelHD128IdentityFusedKVGQARow32.reset();
+        mDecodeCausalKernelHD128IdentityFusedKVGQARow64.reset();
+        mDecodeCausalKernelHD128IdentityFusedKVGQARow128.reset();
+    }
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityRow32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityRow64);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityRow128);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVRow32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVRow64);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVRow128);
+    if (needGqaFusedKV) {
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVGQARow32);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVGQARow64);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVGQARow128);
+    }
     mDecodeCausalHD128IdentityKernelGroupSize = groupSize;
     return NO_ERROR;
 }
@@ -5329,6 +5361,89 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityFused
     return NO_ERROR;
 }
 
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityFusedKVGQA(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, int layerIndex) {
+    if (attnLen != 1 || kvLen <= 0 || mHeadDim != 128 || mCache == nullptr ||
+        !mCache->key || !mCache->value || inputs.size() < 3 || mKvNumHead <= 0 ||
+        mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    const int groupSize = mNumHead / mKvNumHead;
+    // Keep this first grouped decode path on the small GQA groups used by the target models.
+    if (groupSize <= 1 || groupSize > 8) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeCausalKernelHD128Identity();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    const bool profile = _profilePagedAttention();
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t causalWork = 0;
+    for (int i = 0; i < attnLen; ++i) {
+        causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
+    }
+    const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
+    const uint32_t lanes = causalWorkPerRow >= 512u ? 128u : (causalWorkPerRow >= 256u ? 64u : 32u);
+    auto kernel = lanes == 128u ? mDecodeCausalKernelHD128IdentityFusedKVGQARow128 :
+        (lanes == 64u ? mDecodeCausalKernelHD128IdentityFusedKVGQARow64
+                      : mDecodeCausalKernelHD128IdentityFusedKVGQARow32);
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    std::vector<uint32_t> gws = {
+        lanes,
+        static_cast<uint32_t>(attnLen),
+        static_cast<uint32_t>(mKvNumHead * mBatch),
+    };
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    ret |= kernel->get().setArg(idx++, gws[0]);
+    ret |= kernel->get().setArg(idx++, gws[1]);
+    ret |= kernel->get().setArg(idx++, gws[2]);
+    ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(key));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(value));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+    ret |= kernel->get().setArg(idx++, mScale);
+    ret |= kernel->get().setArg(idx++, mBatch);
+    ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= kernel->get().setArg(idx++, attnLen);
+    ret |= kernel->get().setArg(idx++, baseLogical);
+    ret |= kernel->get().setArg(idx++, kvLen);
+    ret |= kernel->get().setArg(idx++, mCache->maxSlots);
+    ret |= kernel->get().setArg(idx++, mNumHead);
+    ret |= kernel->get().setArg(idx++, mKvNumHead);
+    ret |= kernel->get().setArg(idx++, mHeadDim);
+    MNN_CHECK_CL_SUCCESS(ret, lanes == 128u ? "setArg decode_causal_attention_hd128_identity_fused_kv_gqa_row128" :
+        (lanes == 64u ? "setArg decode_causal_attention_hd128_identity_fused_kv_gqa_row64"
+                      : "setArg decode_causal_attention_hd128_identity_fused_kv_gqa_row32"));
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profile) {
+        runtime->commandQueue().finish();
+        const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_identity_fused_kv_gqa layer=%d "
+                  "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 group_size=%d "
+                  "kv_heads=%d dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
+                  layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, groupSize, mKvNumHead,
+                  static_cast<unsigned long long>(denseWork),
+                  static_cast<unsigned long long>(causalWork),
+                  static_cast<unsigned long long>(_nowUs() - startUs));
+    }
+    return NO_ERROR;
+}
+
 ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityRecord(
     const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
     int baseLogical, int layerIndex, uint32_t lanes, std::shared_ptr<KernelWrap> kernel) {
@@ -6699,6 +6814,13 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         mCache != nullptr && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery) {
         if (ordinaryDecodeCausal && mHeadDim == 128 && runtime != nullptr) {
             if (ordinaryDecodeFusedKV) {
+                if (_decodeGqaFusedKVEnabled()) {
+                    auto groupedGqaErr = runDecodeCausalAttentionHD128IdentityFusedKVGQA(
+                        inputs, outputs, kvLen, attnLen, baseLogical, layerIndex);
+                    if (groupedGqaErr == NO_ERROR) {
+                        return NO_ERROR;
+                    }
+                }
                 return runDecodeCausalAttentionHD128IdentityFusedKV(inputs, outputs, kvLen, attnLen, baseLogical,
                                                                     layerIndex);
             }

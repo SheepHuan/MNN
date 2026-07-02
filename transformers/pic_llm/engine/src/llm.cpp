@@ -1684,6 +1684,43 @@ void Llm::clearModuleForwardCaches() {
     }
 }
 
+void Llm::collectRuntimeGarbage() {
+    if (mExecutor != nullptr) {
+        MNN::Express::ExecutorScope s(mExecutor);
+        MNN::Express::ExecutorScope::Current()->gc(Executor::FULL);
+    }
+}
+
+size_t Llm::releaseForwardModuleClones() {
+    MNN::Express::ExecutorScope s(mExecutor);
+    clearModuleForwardCaches();
+    inputsEmbeds = nullptr;
+    attentionMask = nullptr;
+    positionIds = nullptr;
+    mPicRecomputeBudget = nullptr;
+    mPleInput = nullptr;
+    mTextEmbedsForPle = nullptr;
+
+    size_t released = 0;
+    for (auto iter = mModulePool.begin(); iter != mModulePool.end();) {
+        if (iter->second != nullptr && iter->second != mModule) {
+            iter = mModulePool.erase(iter);
+            ++released;
+        } else if (iter->first.first == mPrefillKey) {
+            iter = mModulePool.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
+    released += mDecodeModulePool.size();
+    mDecodeModulePool.clear();
+    released += mCacheBlendScoreModulePool.size();
+    mCacheBlendScoreModulePool.clear();
+    mCacheBlendScoreRuntimeManager.reset();
+    collectRuntimeGarbage();
+    return released;
+}
+
 std::shared_ptr<Module> Llm::cloneModuleWithRuntime(const Module* module) {
     if (module == nullptr || mRuntimeManager == nullptr) {
         return nullptr;

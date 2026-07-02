@@ -81,6 +81,9 @@ private:
     ErrorCode runDecodeCausalAttentionHD128IdentityFusedKV(const std::vector<Tensor*>& inputs,
                                                            const std::vector<Tensor*>& outputs, int kvLen,
                                                            int attnLen, int baseLogical, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128IdentityFusedKVGQA(const std::vector<Tensor*>& inputs,
+                                                              const std::vector<Tensor*>& outputs, int kvLen,
+                                                              int attnLen, int baseLogical, int layerIndex);
     ErrorCode runDecodeCausalAttentionHD128IdentityRecord(const std::vector<Tensor*>& inputs,
                                                           const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
                                                           int baseLogical, int layerIndex, uint32_t lanes,
@@ -133,6 +136,9 @@ private:
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVRow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVRow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVGQARow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVGQARow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVGQARow128;
     std::shared_ptr<KernelWrap> mDecodeAttentionRankScoreKernelHD128;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;

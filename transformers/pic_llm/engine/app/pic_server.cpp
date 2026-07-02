@@ -2173,18 +2173,55 @@ void PicServer::handleModels(const httplib::Request&, httplib::Response& res) {
     writeJson(res, body);
 }
 
-void PicServer::handleReset(const httplib::Request&, httplib::Response& res) {
+void PicServer::handleReset(const httplib::Request& req, httplib::Response& res) {
     allowCors(res);
+    bool releaseModuleClones = false;
+    bool reloadModel = false;
+    if (!req.body.empty()) {
+        json request;
+        if (!parseJsonBody(req, res, request)) {
+            return;
+        }
+        if (!request.is_null() && !request.is_object()) {
+            writeJsonError(res, 400, "Reset request body must be a JSON object");
+            return;
+        }
+        if (request.is_object()) {
+            releaseModuleClones = request.value("release_module_clones", false) ||
+                                  request.value("release_runtime_buffers", false);
+            reloadModel = request.value("reload_model", false);
+        }
+    }
     std::lock_guard<std::mutex> lock(mMutex);
+    size_t releasedModuleClones = 0;
+    bool reloaded = false;
+    json cleared = json::array({"prefix_cache_mode", "paged_pic_request", "context_history"});
     if (mLlm) {
         mLlm->clearPrefixCacheFile();
         mLlm->finishExternalPagedKVRequest();
         mLlm->reset();
+        if (releaseModuleClones) {
+            releasedModuleClones = mLlm->releaseForwardModuleClones();
+            cleared.push_back("module_clones");
+            cleared.push_back("runtime_buffer_free_lists");
+        }
+    }
+    if (reloadModel) {
+        std::string error;
+        mLlm.reset();
+        if (!loadLlmInstance(&error)) {
+            writeJsonError(res, 500, error);
+            return;
+        }
+        reloaded = true;
+        cleared.push_back("llm_model_runtime");
     }
     writeJson(res, json({
         {"status", "ok"},
         {"scope", "llm_request_state"},
-        {"cleared", json::array({"prefix_cache_mode", "paged_pic_request", "context_history"})},
+        {"cleared", cleared},
+        {"released_module_clones", releasedModuleClones},
+        {"reloaded_model", reloaded},
     }), 200, -1);
 }
 

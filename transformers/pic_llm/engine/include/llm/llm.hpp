@@ -147,6 +147,7 @@ public:
     std::vector<Express::VARP> getOutputs() const;
     int getOutputIndex(const std::string& name) const;
     void reset();
+    size_t releaseForwardModuleClones();
     void tuning(TuneType type, std::vector<int> candidates);
     void updateRuntimeCache();
     virtual std::vector<Express::VARP> forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs = {});
@@ -291,6 +292,7 @@ private:
     bool beginPagedRequestIfNeeded(int pendingInputTokens = 0, int maxNewTokens = -1);
     void finishPagedRequestIfNeeded();
     void clearModuleForwardCaches();
+    void collectRuntimeGarbage();
     std::shared_ptr<Express::Executor::RuntimeManager> createRuntimeManagerForCurrentConfig();
     std::shared_ptr<Express::Module> cloneModuleWithRuntime(const Express::Module* module);
     std::shared_ptr<Express::Module> getCacheBlendScoreModule(int scoreLayerIdx);
