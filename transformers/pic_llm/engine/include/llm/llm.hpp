@@ -179,6 +179,7 @@ public:
                                           const std::vector<MNN::PagedKVExternalSegment>& segments,
                                           int pic_start, int pic_token_count, int score_layer_idx,
                                           const std::vector<int>& selected_local_indices);
+    bool preparePagedDecode(int max_new_tokens = -1);
     bool preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_token_ids,
                                 const std::vector<int>& ranked_pic_local_indices,
                                 const std::vector<int>& seed_selected_pic_local_indices,

@@ -287,7 +287,89 @@ static bool _picOpenCLDebug() {
 }
 
 static bool _decodeGqaFusedKVEnabled() {
-    return _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_GQA_FUSED", false);
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_GQA_FUSED", false);
+    return enabled;
+}
+
+static bool _decodeTransposedKEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K", false);
+    return enabled;
+}
+
+static bool _decodeTransposedKAttentionOnlyEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K_ATTENTION_ONLY", false);
+    return enabled;
+}
+
+static bool _decodeTransposedKReadonlyOnlyEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K_READONLY_ONLY", false);
+    return enabled;
+}
+
+static bool _decodeIdentityAttentionOnlyBenchEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_IDENTITY_ATTENTION_ONLY_BENCH", false);
+    return enabled;
+}
+
+static bool _decodeTransposedKAttentionOnlyBenchEnabled() {
+    static const bool enabled =
+        _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K_Q1_ATTENTION_ONLY_BENCH", false);
+    return enabled;
+}
+
+static bool _decodeQ1SplitProfileEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_Q1_SPLIT_PROFILE", false);
+    return enabled;
+}
+
+static bool _legacyB863976OpenCL();
+
+static bool _decodeTransposedKSparseShapeSupported(OpenCLRuntime* runtime, int attnLen) {
+    if (runtime == nullptr || attnLen <= 1 || attnLen > 8) {
+        return false;
+    }
+    return !_legacyB863976OpenCL();
+}
+
+static bool _decodeTransposedKQ1NeedsDecodeKey() {
+    return _decodeTransposedKReadonlyOnlyEnabled() || _decodeTransposedKAttentionOnlyEnabled() ||
+           _decodeTransposedKAttentionOnlyBenchEnabled() || _decodeTransposedKEnabled();
+}
+
+static uint32_t _decodeHD128LaneWidth(uint64_t causalWorkPerRow) {
+    const char* forced = ::getenv("MNN_PAGED_ATTENTION_DECODE_HD128_FORCE_LANE");
+    if (forced != nullptr && forced[0] != '\0') {
+        const int lane = ::atoi(forced);
+        if (lane == 32 || lane == 64 || lane == 128) {
+            return static_cast<uint32_t>(lane);
+        }
+    }
+    return causalWorkPerRow >= 512u ? 128u : (causalWorkPerRow >= 256u ? 64u : 32u);
+}
+
+static uint32_t _decodeHD128SparseLaneWidth(OpenCLRuntime* runtime, uint64_t causalWorkPerRow, int attnLen) {
+    const char* forced = ::getenv("MNN_PAGED_ATTENTION_DECODE_HD128_FORCE_LANE");
+    if (forced != nullptr && forced[0] != '\0') {
+        const int lane = ::atoi(forced);
+        if (lane == 32 || lane == 64 || lane == 128) {
+            return static_cast<uint32_t>(lane);
+        }
+    }
+    if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI && attnLen > 1) {
+        return 64u;
+    }
+    return _decodeHD128LaneWidth(causalWorkPerRow);
+}
+
+static int _decodeHD128QTile(int attnLen) {
+    const char* forced = ::getenv("MNN_PAGED_ATTENTION_DECODE_QTILE_FORCE");
+    if (forced != nullptr && forced[0] != '\0') {
+        const int qTile = ::atoi(forced);
+        if (qTile == 2 || qTile == 4 || qTile == 8) {
+            return qTile;
+        }
+    }
+    return attnLen <= 2 ? 2 : (attnLen <= 4 ? 4 : 8);
 }
 
 static bool _compareCacheBlendTopK() {
@@ -1445,6 +1527,46 @@ static bool _slotTableIsIdentity(const PagedKVMeta* meta, int requiredSlots) {
     return meta->request_base == 0 && static_cast<int>(meta->slot_table_host.size()) >= requiredSlots;
 }
 
+static int _slotTablePhysicalSlotAt(const PagedKVMeta* meta, int logical) {
+    if (logical < 0) {
+        return -1;
+    }
+    if (meta == nullptr) {
+        return logical;
+    }
+    if (logical >= static_cast<int>(meta->slot_table_host.size())) {
+        return -1;
+    }
+    return meta->slot_table_host[logical];
+}
+
+static bool _slotTablePrefixMatches(const PagedKVMeta* meta, const std::vector<int>& prefixSlots,
+                                    int requiredSlots) {
+    if (requiredSlots <= 0) {
+        return true;
+    }
+    if (static_cast<int>(prefixSlots.size()) < requiredSlots) {
+        return false;
+    }
+    for (int i = 0; i < requiredSlots; ++i) {
+        if (prefixSlots[static_cast<size_t>(i)] != _slotTablePhysicalSlotAt(meta, i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void _captureSlotTablePrefix(const PagedKVMeta* meta, std::vector<int>& prefixSlots, int readySlots) {
+    if (readySlots <= 0) {
+        prefixSlots.clear();
+        return;
+    }
+    prefixSlots.resize(static_cast<size_t>(readySlots));
+    for (int i = 0; i < readySlots; ++i) {
+        prefixSlots[static_cast<size_t>(i)] = _slotTablePhysicalSlotAt(meta, i);
+    }
+}
+
 static std::mutex& _openCLPagedCacheRegistryMutex() {
     static std::mutex mutex;
     return mutex;
@@ -1478,8 +1600,8 @@ static std::string _openCLPagedCacheRegistryKey(OpenCLBackend* backend, const Pa
 static bool _openCLPagedCacheCompatible(
     const std::shared_ptr<PagedAttentionBufExecution::SharedPagedCache>& cache,
     int maxSlots, int batch, int kvHeads, int headDim, int bytes) {
-    return cache && cache->key && cache->value && cache->slotTable && cache->sparseQuery &&
-        cache->maxSlots == maxSlots && cache->batch == batch && cache->kvHeads == kvHeads &&
+    return cache && cache->key && cache->decodeKey && cache->value && cache->slotTable && cache->sparseQuery &&
+        cache->maxSlots >= maxSlots && cache->batch == batch && cache->kvHeads == kvHeads &&
         cache->headDim == headDim && cache->bytes == bytes;
 }
 
@@ -1509,6 +1631,144 @@ static void _storeOpenCLPagedCache(
     }
     std::lock_guard<std::mutex> lock(_openCLPagedCacheRegistryMutex());
     _openCLPagedCacheRegistry()[key] = cache;
+}
+
+struct OpenCLPagedDecodePrepareEntry {
+    int layerIndex = -1;
+    PagedAttentionBufExecution* execution = nullptr;
+};
+
+static bool _prepareOpenCLPagedDecode(PagedKVMeta* meta, int maxNewTokens);
+
+static std::mutex& _openCLPagedDecodePrepareRegistryMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+static std::unordered_map<PagedKVMeta*, std::vector<OpenCLPagedDecodePrepareEntry>>&
+_openCLPagedDecodePrepareRegistry() {
+    static std::unordered_map<PagedKVMeta*, std::vector<OpenCLPagedDecodePrepareEntry>> registry;
+    return registry;
+}
+
+static void _registerOpenCLPagedDecodePrepare(PagedKVMeta* meta, int layerIndex,
+                                              PagedAttentionBufExecution* execution) {
+    if (meta == nullptr || execution == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(_openCLPagedDecodePrepareRegistryMutex());
+    auto& entries = _openCLPagedDecodePrepareRegistry()[meta];
+    const auto exists = std::find_if(entries.begin(), entries.end(),
+                                     [execution](const OpenCLPagedDecodePrepareEntry& entry) {
+                                         return entry.execution == execution;
+                                     }) != entries.end();
+    if (!exists) {
+        OpenCLPagedDecodePrepareEntry entry;
+        entry.layerIndex = layerIndex;
+        entry.execution = execution;
+        entries.push_back(entry);
+    }
+    meta->decode_prepare_callback = _prepareOpenCLPagedDecode;
+}
+
+static void _unregisterOpenCLPagedDecodePrepare(PagedKVMeta* meta, PagedAttentionBufExecution* execution) {
+    if (meta == nullptr || execution == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(_openCLPagedDecodePrepareRegistryMutex());
+    auto& registry = _openCLPagedDecodePrepareRegistry();
+    auto iter = registry.find(meta);
+    if (iter == registry.end()) {
+        return;
+    }
+    auto& entries = iter->second;
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [execution](const OpenCLPagedDecodePrepareEntry& entry) {
+                                     return entry.execution == execution;
+                                 }),
+                  entries.end());
+    if (entries.empty()) {
+        registry.erase(iter);
+        if (meta->decode_prepare_callback == _prepareOpenCLPagedDecode) {
+            meta->decode_prepare_callback = nullptr;
+        }
+    }
+}
+
+static bool _prepareOpenCLPagedDecode(PagedKVMeta* meta, int maxNewTokens) {
+    if (meta == nullptr) {
+        return true;
+    }
+    const int kvLen = std::max(0, meta->logical_length);
+    if (kvLen <= 0) {
+        return true;
+    }
+    std::vector<OpenCLPagedDecodePrepareEntry> entries;
+    {
+        std::lock_guard<std::mutex> lock(_openCLPagedDecodePrepareRegistryMutex());
+        auto iter = _openCLPagedDecodePrepareRegistry().find(meta);
+        if (iter != _openCLPagedDecodePrepareRegistry().end()) {
+            entries = iter->second;
+        }
+    }
+    if (entries.empty()) {
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA prepare decode missing executions meta=%p kv_len=%d max_new=%d\n",
+                      static_cast<void*>(meta), kvLen, maxNewTokens);
+        }
+        return false;
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const OpenCLPagedDecodePrepareEntry& a, const OpenCLPagedDecodePrepareEntry& b) {
+                  if (a.layerIndex != b.layerIndex) {
+                      return a.layerIndex < b.layerIndex;
+                  }
+                  return a.execution < b.execution;
+              });
+    int preparedLayers = 0;
+    const uint64_t startUs = _profilePagedAttention() ? _nowUs() : 0;
+    for (size_t i = 0; i < entries.size();) {
+        const int layerIndex = entries[i].layerIndex;
+        if (layerIndex < 0) {
+            ++i;
+            continue;
+        }
+        bool layerPrepared = false;
+        ErrorCode layerErr = NOT_SUPPORT;
+        while (i < entries.size() && entries[i].layerIndex == layerIndex) {
+            if (entries[i].execution != nullptr) {
+                const auto err = entries[i].execution->prepareDecodePrefix(kvLen);
+                if (err == NO_ERROR) {
+                    layerPrepared = true;
+                    break;
+                }
+                if (err != NOT_SUPPORT) {
+                    layerErr = err;
+                }
+            }
+            ++i;
+        }
+        while (i < entries.size() && entries[i].layerIndex == layerIndex) {
+            ++i;
+        }
+        if (!layerPrepared) {
+            MNN_ERROR("OpenCLPagedAttention prepare decode failed layer=%d kv_len=%d err=%d\n",
+                      layerIndex, kvLen, static_cast<int>(layerErr));
+            return false;
+        }
+        ++preparedLayers;
+    }
+    if (meta->layer_nums > 0 && preparedLayers < meta->layer_nums) {
+        MNN_ERROR("OpenCLPagedAttention prepare decode incomplete, prepared=%d expected=%d kv_len=%d\n",
+                  preparedLayers, meta->layer_nums, kvLen);
+        return false;
+    }
+    if (_profilePagedAttention()) {
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_prepare_request layers=%d kv_len=%d max_new=%d us=%llu\n",
+                  preparedLayers, kvLen, maxNewTokens,
+                  static_cast<unsigned long long>(_nowUs() - startUs));
+    }
+    return true;
 }
 
 static size_t _segmentTokenCount(const std::vector<PagedKVExternalSegment>& segments) {
@@ -2344,6 +2604,7 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
     }
     mMeta = static_cast<PagedKVMeta*>(backend->getMetaPtr());
     mCache.reset(new SharedPagedCache);
+    _registerOpenCLPagedDecodePrepare(mMeta, mLayerIndex, this);
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     mCopyKernel = runtime->buildKernel("paged_attention_buf", "copy_paged_kv", {}, mOpenCLBackend->getPrecision());
     mAttentionKernel = runtime->buildKernel("paged_attention_buf", "paged_attention", {}, mOpenCLBackend->getPrecision());
@@ -2377,6 +2638,8 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
                                                 mOpenCLBackend->getPrecision());
     mSoftmaxKernel = runtime->buildKernel("softmax_buf", "softmax_v4_buf", {"-DSOFTMAX_LOCAL_SIZE=64"},
                                           mOpenCLBackend->getPrecision());
+    mDecodeSoftmaxKernel = runtime->buildKernel("softmax_buf", "softmax_in1_buf", {"-DSOFTMAX_LOCAL_SIZE=64"},
+                                                mOpenCLBackend->getPrecision());
     mZeroKernel = runtime->buildKernel("paged_attention_buf", "zero_output", {}, mOpenCLBackend->getPrecision());
     OPENCL_CHECK_KERNEL_CTOR(mCopyKernel);
     OPENCL_CHECK_KERNEL_CTOR(mAttentionKernel);
@@ -2395,7 +2658,12 @@ PagedAttentionBufExecution::PagedAttentionBufExecution(const MNN::Op* op, Backen
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeSparseQKernel);
     OPENCL_CHECK_KERNEL_CTOR(mRearrangeMaskKernel);
     OPENCL_CHECK_KERNEL_CTOR(mSoftmaxKernel);
+    OPENCL_CHECK_KERNEL_CTOR(mDecodeSoftmaxKernel);
     OPENCL_CHECK_KERNEL_CTOR(mZeroKernel);
+}
+
+PagedAttentionBufExecution::~PagedAttentionBufExecution() {
+    _unregisterOpenCLPagedDecodePrepare(mMeta, this);
 }
 
 ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int kvHeads, int headDim) {
@@ -2411,10 +2679,19 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
         }
     }
     if (mCache && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery &&
-        mCache->maxSlots == maxSlots && mCache->batch == batch && mCache->kvHeads == kvHeads &&
+        mCache->decodeKey &&
+        mCache->maxSlots >= maxSlots && mCache->batch == batch && mCache->kvHeads == kvHeads &&
         mCache->headDim == headDim && mCache->bytes == mBytes) {
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA cache reuse layer=%d cache=%p required_slots=%d max_slots=%d ready=%d "
+                      "slot_version=%d decode_slot_version=%d\n",
+                      mLayerIndex, static_cast<void*>(mCache.get()), maxSlots, mCache->maxSlots,
+                      mCache->decodeKeyReadyLength, mCache->slotTableVersion,
+                      mCache->decodeKeySlotTableVersion);
+        }
         if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
-            _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
+            _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes,
+                                               mCache->maxSlots,
                                                mCache->key, mCache->value,
                                                mOpenCLBackend->getOpenCLRuntime()->commandQueue(),
                                                _useAdrenoSourceSlotValueHydrate(mOpenCLBackend->getOpenCLRuntime()));
@@ -2426,17 +2703,20 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     }
     if (mBytes == 4) {
         mCache->key.reset(Tensor::createDevice<float>({maxSlots, batch, kvHeads, headDim}));
+        mCache->decodeKey.reset(Tensor::createDevice<float>({batch, kvHeads, headDim, maxSlots}));
         mCache->value.reset(Tensor::createDevice<float>({batch, kvHeads, maxSlots, headDim}));
     } else {
         mCache->key.reset(Tensor::createDevice<uint16_t>({maxSlots, batch, kvHeads, headDim}));
+        mCache->decodeKey.reset(Tensor::createDevice<uint16_t>({batch, kvHeads, headDim, maxSlots}));
         mCache->value.reset(Tensor::createDevice<uint16_t>({batch, kvHeads, maxSlots, headDim}));
     }
     mCache->slotTable.reset(Tensor::createDevice<int>({maxSlots}));
     mCache->sparseQuery.reset(Tensor::createDevice<int>({maxSlots}));
-    if (!mCache->key || !mCache->value || !mCache->slotTable || !mCache->sparseQuery) {
+    if (!mCache->key || !mCache->decodeKey || !mCache->value || !mCache->slotTable || !mCache->sparseQuery) {
         return OUT_OF_MEMORY;
     }
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->key.get(), Backend::STATIC));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->decodeKey.get(), Backend::STATIC));
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->value.get(), Backend::STATIC));
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->slotTable.get(), Backend::STATIC));
     OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mCache->sparseQuery.get(), Backend::STATIC));
@@ -2455,6 +2735,12 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(keyElements), cl::NullRange);
     idx = 0;
     ret = CL_SUCCESS;
+    ret |= mZeroKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    ret |= mZeroKernel->get().setArg(idx++, static_cast<int>(keyElements));
+    MNN_CHECK_CL_SUCCESS(ret, "setArg zero_decode_key_cache");
+    queue.enqueueNDRangeKernel(mZeroKernel->get(), cl::NullRange, cl::NDRange(keyElements), cl::NullRange);
+    idx = 0;
+    ret = CL_SUCCESS;
     ret |= mZeroKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
     ret |= mZeroKernel->get().setArg(idx++, static_cast<int>(valueElements));
     MNN_CHECK_CL_SUCCESS(ret, "setArg zero_paged_value_cache");
@@ -2469,8 +2755,15 @@ ErrorCode PagedAttentionBufExecution::ensureCache(int maxSlots, int batch, int k
     mCache->bytes = mBytes;
     mCache->slotTableVersion = -1;
     mCache->slotTableLength = 0;
+    mCache->decodeKeyReadyLength = 0;
+    mCache->decodeKeySlotTableVersion = -1;
+    mCache->decodeKeyReadyPrefixSlots.clear();
     mCache->sparseQueryHost.clear();
     _storeOpenCLPagedCache(registryKey, mCache);
+    if (_picOpenCLDebug()) {
+        MNN_PRINT("PIC OpenCL PA cache create layer=%d cache=%p max_slots=%d batch=%d kv_heads=%d dim=%d bytes=%d\n",
+                  mLayerIndex, static_cast<void*>(mCache.get()), maxSlots, batch, kvHeads, headDim, mBytes);
+    }
     if (!_legacyB863976OpenCL() && mLayerIndex >= 0) {
         _registerExternalLayerMappedTarget(mMeta, mLayerIndex, batch, kvHeads, headDim, mBytes, maxSlots,
                                            mCache->key, mCache->value,
@@ -2871,6 +3164,7 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernelHD128Identity() {
         mDecodeCausalKernelHD128IdentityRow128 &&
         mDecodeCausalKernelHD128IdentityFusedKVRow32 && mDecodeCausalKernelHD128IdentityFusedKVRow64 &&
         mDecodeCausalKernelHD128IdentityFusedKVRow128 &&
+        mDecodeQKIdentityKernel &&
         (!needGqaFusedKV ||
          (mDecodeCausalKernelHD128IdentityFusedKVGQARow32 &&
           mDecodeCausalKernelHD128IdentityFusedKVGQARow64 &&
@@ -2903,6 +3197,10 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernelHD128Identity() {
         runtime->buildKernel("paged_decode_attention_buf", "decode_causal_attention_hd128_identity_fused_kv_row128",
                              {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
                              mOpenCLBackend->getPrecision());
+    mDecodeQKIdentityKernel =
+        runtime->buildKernel("paged_decode_attention_buf", "matmul_qk_decode_paged_identity_hd128",
+                             {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)},
+                             mOpenCLBackend->getPrecision());
     if (needGqaFusedKV) {
         mDecodeCausalKernelHD128IdentityFusedKVGQARow32 =
             runtime->buildKernel("paged_decode_attention_buf", "decode_causal_attention_hd128_identity_fused_kv_gqa_row32",
@@ -2927,12 +3225,277 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeCausalKernelHD128Identity() {
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVRow32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVRow64);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVRow128);
+    OPENCL_CHECK_KERNEL(mDecodeQKIdentityKernel);
     if (needGqaFusedKV) {
         OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVGQARow32);
         OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVGQARow64);
         OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128IdentityFusedKVGQARow128);
     }
     mDecodeCausalHD128IdentityKernelGroupSize = groupSize;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
+    if (mHeadDim != 128 || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    const int groupSize = mNumHead / mKvNumHead;
+    if (mDecodeKeyTransposeKernel && mDecodeKeyAppendKernel && mDecodeKeyAppendSparseKernel &&
+        mDecodeQKTransposedKernel &&
+        mDecodeQKVTransposedKernel && mDecodeCausalKernelHD128TransposedKFusedKVRow32 &&
+        mDecodeCausalKernelHD128TransposedKFusedKVRow64 &&
+        mDecodeCausalKernelHD128TransposedKFusedKVRow128 &&
+        mDecodeCausalKernelHD128TransposedKReadonlyRow32 &&
+        mDecodeCausalKernelHD128TransposedKReadonlyRow64 &&
+        mDecodeCausalKernelHD128TransposedKReadonlyRow128 &&
+        mDecodeCausalKernelHD128TransposedKSparseRow32 &&
+        mDecodeCausalKernelHD128TransposedKSparseRow64 &&
+        mDecodeCausalKernelHD128TransposedKSparseRow128 &&
+        mDecodeCausalKernelHD128TransposedKQTile2Row32 &&
+        mDecodeCausalKernelHD128TransposedKQTile2Row64 &&
+        mDecodeCausalKernelHD128TransposedKQTile2Row128 &&
+        mDecodeCausalKernelHD128TransposedKQTile4Row32 &&
+        mDecodeCausalKernelHD128TransposedKQTile4Row64 &&
+        mDecodeCausalKernelHD128TransposedKQTile4Row128 &&
+        mDecodeCausalKernelHD128TransposedKQTile8Row32 &&
+        mDecodeCausalKernelHD128TransposedKQTile8Row64 &&
+        mDecodeCausalKernelHD128TransposedKQTile8Row128 &&
+        mDecodeTransposedKKernelGroupSize == groupSize) {
+        return NO_ERROR;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    const std::set<std::string> options = {"-DNUMHEAD_GROUP_SIZE=" + std::to_string(groupSize)};
+    mDecodeKeyTransposeKernel =
+        runtime->buildKernel("paged_decode_attention_buf", "transpose_paged_key_to_decode_key", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeKeyAppendKernel =
+        runtime->buildKernel("paged_decode_attention_buf", "append_decode_key_value_hd128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeKeyAppendSparseKernel =
+        runtime->buildKernel("paged_decode_attention_buf", "append_sparse_decode_key_value_hd128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeQKTransposedKernel =
+        runtime->buildKernel("paged_decode_attention_buf", "matmul_qk_decode_transposed_hd128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeQKVTransposedKernel =
+        runtime->buildKernel("paged_decode_attention_buf", "matmul_qkv_decode_value_hd128_b8", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKFusedKVRow32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_fused_kv_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKFusedKVRow64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_fused_kv_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKFusedKVRow128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_fused_kv_row128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKReadonlyRow32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_readonly_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKReadonlyRow64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_readonly_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKReadonlyRow128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_readonly_row128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKSparseRow32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_sparse_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKSparseRow64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_sparse_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKSparseRow128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_sparse_row128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile2Row32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q2_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile2Row64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q2_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile2Row128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q2_row128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile4Row32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q4_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile4Row64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q4_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile4Row128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q4_row128", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile8Row32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q8_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile8Row64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q8_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile8Row128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q8_row128", options,
+                             mOpenCLBackend->getPrecision());
+    OPENCL_CHECK_KERNEL(mDecodeKeyTransposeKernel);
+    OPENCL_CHECK_KERNEL(mDecodeKeyAppendKernel);
+    OPENCL_CHECK_KERNEL(mDecodeKeyAppendSparseKernel);
+    OPENCL_CHECK_KERNEL(mDecodeQKTransposedKernel);
+    OPENCL_CHECK_KERNEL(mDecodeQKVTransposedKernel);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKFusedKVRow32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKFusedKVRow64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKFusedKVRow128);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKReadonlyRow32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKReadonlyRow64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKReadonlyRow128);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKSparseRow32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKSparseRow64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKSparseRow128);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile2Row32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile2Row64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile2Row128);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile4Row32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile4Row64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile4Row128);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile8Row32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile8Row64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile8Row128);
+    mDecodeTransposedKKernelGroupSize = groupSize;
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedTemps(int kvLen) {
+    if (kvLen <= 0 || mBatch <= 0 || mNumHead <= 0) {
+        return INVALID_VALUE;
+    }
+    if (!(mTempQK && mTempSoftmax && mDecodeTransposedTempKvLen >= kvLen)) {
+        const int kvPack = ROUND_UP(kvLen, 8);
+        const int elements = kvPack * mNumHead * mBatch;
+        mTempQK.reset(Tensor::createDevice<float>({elements}));
+        mTempSoftmax.reset(Tensor::createDevice<float>({elements}));
+        if (!mTempQK || !mTempSoftmax) {
+            return OUT_OF_MEMORY;
+        }
+        mDecodeTransposedTempKvLen = kvPack;
+    }
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION));
+    OPENCL_CHECK_ALLOC(mOpenCLBackend->onAcquireBuffer(mTempSoftmax.get(), Backend::DYNAMIC_IN_EXECUTION));
+    mOpenCLBackend->onReleaseBuffer(mTempQK.get(), Backend::DYNAMIC_IN_EXECUTION);
+    mOpenCLBackend->onReleaseBuffer(mTempSoftmax.get(), Backend::DYNAMIC_IN_EXECUTION);
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::ensureDecodeKeyReady(int requiredLen, bool insideDecode) {
+    mLastDecodeKeyRequiredLen = requiredLen;
+    mLastDecodeKeyPrepareUs = 0;
+    mLastDecodeKeyReadyHit = false;
+    mLastDecodeKeyPrepared = false;
+    mLastDecodeKeyPrepareInsideDecode = false;
+    mLastDecodeKeySlotIdentity = false;
+    mLastDecodeKeyPrefixStable = false;
+    if (requiredLen <= 0) {
+        mLastDecodeKeyReadyHit = true;
+        mLastDecodeKeyPrefixStable = true;
+        return NO_ERROR;
+    }
+    if (!mCache || !mCache->key || !mCache->decodeKey || !mCache->slotTable ||
+        requiredLen > mCache->maxSlots) {
+        return OUT_OF_MEMORY;
+    }
+    const bool identitySlotTable = _slotTableIsIdentity(mMeta, requiredLen);
+    mLastDecodeKeySlotIdentity = identitySlotTable;
+    const bool sameSlotTableVersion = mCache->decodeKeySlotTableVersion == mCache->slotTableVersion;
+    const bool prefixStable =
+        _slotTablePrefixMatches(mMeta, mCache->decodeKeyReadyPrefixSlots, requiredLen);
+    mLastDecodeKeyPrefixStable = prefixStable;
+    if (mCache->decodeKeyReadyLength >= requiredLen &&
+        (sameSlotTableVersion || identitySlotTable || prefixStable)) {
+        mLastDecodeKeyReadyHit = true;
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA decode_key ready hit layer=%d cache=%p required=%d ready=%d "
+                      "slot_version=%d decode_slot_version=%d identity=%d same_version=%d prefix_stable=%d\n",
+                      mLayerIndex, static_cast<void*>(mCache.get()), requiredLen,
+                      mCache->decodeKeyReadyLength, mCache->slotTableVersion,
+                      mCache->decodeKeySlotTableVersion, identitySlotTable ? 1 : 0,
+                      sameSlotTableVersion ? 1 : 0, prefixStable ? 1 : 0);
+        }
+        return NO_ERROR;
+    }
+    if (_picOpenCLDebug()) {
+        MNN_PRINT("PIC OpenCL PA decode_key prepare layer=%d cache=%p required=%d ready=%d max_slots=%d "
+                  "slot_version=%d decode_slot_version=%d identity=%d same_version=%d prefix_stable=%d\n",
+                  mLayerIndex, static_cast<void*>(mCache.get()), requiredLen, mCache->decodeKeyReadyLength,
+                  mCache->maxSlots, mCache->slotTableVersion, mCache->decodeKeySlotTableVersion,
+                  identitySlotTable ? 1 : 0, sameSlotTableVersion ? 1 : 0, prefixStable ? 1 : 0);
+    }
+    if (insideDecode) {
+        mLastDecodeKeyPrepareInsideDecode = true;
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA decode_key prepare blocked inside decode layer=%d required=%d ready=%d "
+                      "slot_version=%d decode_slot_version=%d prefix_stable=%d\n",
+                      mLayerIndex, requiredLen, mCache->decodeKeyReadyLength, mCache->slotTableVersion,
+                      mCache->decodeKeySlotTableVersion, prefixStable ? 1 : 0);
+        }
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeTransposedKKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto& queue = runtime->commandQueue();
+    const bool profile = _profilePagedAttention();
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    std::vector<uint32_t> gws = {
+        static_cast<uint32_t>(requiredLen),
+        static_cast<uint32_t>(mBatch * mKvNumHead * mHeadDim),
+    };
+    uint32_t idx = 0;
+    cl_int ret = CL_SUCCESS;
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, gws[0]);
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, gws[1]);
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, mBatch);
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, mKvNumHead);
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, mHeadDim);
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, requiredLen);
+    ret |= mDecodeKeyTransposeKernel->get().setArg(idx++, mCache->maxSlots);
+    MNN_CHECK_CL_SUCCESS(ret, "setArg transpose_paged_key_to_decode_key");
+    queue.enqueueNDRangeKernel(mDecodeKeyTransposeKernel->get(), cl::NullRange,
+                               cl::NDRange(gws[0], gws[1]), cl::NullRange);
+    mCache->decodeKeyReadyLength = requiredLen;
+    mCache->decodeKeySlotTableVersion = mCache->slotTableVersion;
+    _captureSlotTablePrefix(mMeta, mCache->decodeKeyReadyPrefixSlots, requiredLen);
+    mLastDecodeKeyPrefixStable = true;
+    mLastDecodeKeyPrepared = true;
+    if (profile) {
+        queue.finish();
+        const int layerIndex = mLayerIndex >= 0 ? mLayerIndex : (mMeta != nullptr ? mMeta->layer_index : -1);
+        mLastDecodeKeyPrepareUs = _nowUs() - startUs;
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_prepare_transpose_k layer=%d kv_len=%d "
+                  "inside_decode=%d slot_identity=%d prefix_stable=%d us=%llu prepare_us=%llu\n",
+                  layerIndex, requiredLen, insideDecode ? 1 : 0, identitySlotTable ? 1 : 0,
+                  mLastDecodeKeyPrefixStable ? 1 : 0,
+                  static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                  static_cast<unsigned long long>(mLastDecodeKeyPrepareUs));
+    }
     return NO_ERROR;
 }
 
@@ -3390,6 +3953,71 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
                   directSegments, static_cast<int>(directTokens), static_cast<int>(fallbackTokens),
                   static_cast<unsigned long long>(_nowUs() - startUs));
     }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::prepareDecodePrefix(int kvLen) {
+    if (mMeta == nullptr || kvLen <= 0) {
+        return NO_ERROR;
+    }
+    if (mBatch <= 0 || mKvNumHead <= 0 || mHeadDim <= 0) {
+        return NOT_SUPPORT;
+    }
+    const int layerIndex = mLayerIndex >= 0 ? mLayerIndex : mMeta->layer_index;
+    if (layerIndex < 0) {
+        return NOT_SUPPORT;
+    }
+    int maxSlots = std::max(kvLen, mMeta->request_capacity > 0 ? mMeta->request_capacity : mMeta->max_tokens);
+    if (maxSlots <= 0) {
+        maxSlots = kvLen;
+    }
+    const size_t sourceSlots = _picCacheSourceSlotCount(mMeta);
+    if (sourceSlots > 0) {
+        const int sourceBase = _picCacheSourceSlotBase(mMeta, maxSlots);
+        if (sourceSlots > static_cast<size_t>(std::numeric_limits<int>::max() - sourceBase)) {
+            return OUT_OF_MEMORY;
+        }
+        maxSlots = std::max(maxSlots, sourceBase + static_cast<int>(sourceSlots));
+    }
+    auto err = ensureCache(maxSlots, mBatch, mKvNumHead, mHeadDim);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    err = syncSlotTable(kvLen);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    auto& queue = runtime->commandQueue();
+    if (!_legacyB863976OpenCL()) {
+        _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes,
+                                           mCache->maxSlots, mCache->key, mCache->value, queue,
+                                           _useAdrenoSourceSlotValueHydrate(runtime));
+    }
+    if (!_legacyB863976OpenCL() && mMeta->shouldHydrateExternalLayer(layerIndex)) {
+        _scheduleExternalLayerReadsFrom(mMeta, std::max(0, mMeta->external_hydrate_start_layer_idx),
+                                        mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
+    }
+    if (mMeta->shouldHydrateExternalLayer(layerIndex) && !mMeta->externalLayerLoaded(layerIndex)) {
+        err = hydrateExternalSegments(layerIndex, kvLen);
+        if (err != NO_ERROR) {
+            return err;
+        }
+    }
+    const bool q1DecodeKNeedsPrepare = _decodeTransposedKQ1NeedsDecodeKey();
+    const bool repairDecodeKNeedsPrepare =
+        mMeta->pic_decode_repair_tokens_per_step > 0 &&
+        _decodeTransposedKSparseShapeSupported(runtime, mMeta->pic_decode_repair_tokens_per_step + 1);
+    const bool needsDecodeKey =
+        _decodeTransposedKEnabled() && mHeadDim == 128 &&
+        (q1DecodeKNeedsPrepare || repairDecodeKNeedsPrepare);
+    if (needsDecodeKey) {
+        err = ensureDecodeKeyReady(kvLen, false);
+        if (err != NO_ERROR) {
+            return err;
+        }
+    }
+    queue.finish();
     return NO_ERROR;
 }
 
@@ -5221,19 +5849,34 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128Identity(
     auto output = outputs[0];
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
     const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t attentionUs = 0;
+    uint64_t rankUs = 0;
     uint64_t causalWork = 0;
     for (int i = 0; i < attnLen; ++i) {
         causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
     }
     const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
-    const uint32_t lanes = causalWorkPerRow >= 512u ? 128u : (causalWorkPerRow >= 256u ? 64u : 32u);
+    const uint32_t lanes = _decodeHD128LaneWidth(causalWorkPerRow);
     auto kernel = lanes == 128u ? mDecodeCausalKernelHD128IdentityRow128 :
         (lanes == 64u ? mDecodeCausalKernelHD128IdentityRow64 : mDecodeCausalKernelHD128IdentityRow32);
     if (!kernel) {
         return INVALID_VALUE;
     }
-    if (mOpenCLBackend->isUseRecordQueue() && !profile) {
+    if (_decodeIdentityAttentionOnlyBenchEnabled() && _decodeQ1SplitProfileEnabled() && profile) {
+        auto splitErr = runDecodeCausalAttentionHD128SplitProfile(inputs, outputs, kvLen, attnLen,
+                                                                  baseLogical, layerIndex, false);
+        if (splitErr == NO_ERROR) {
+            return NO_ERROR;
+        }
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA decode identity split profile fallback layer=%d err=%d\n",
+                      layerIndex, static_cast<int>(splitErr));
+        }
+    }
+    if (mOpenCLBackend->isUseRecordQueue() && !profile &&
+        (mMeta == nullptr || !mMeta->needsPicDecodeAttentionRankCapture(layerIndex))) {
         auto recordErr = runDecodeCausalAttentionHD128IdentityRecord(
             inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, lanes, kernel);
         if (recordErr == NO_ERROR) {
@@ -5270,17 +5913,52 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128Identity(
     if (ret != CL_SUCCESS) {
         return INVALID_VALUE;
     }
+    const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
     run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        attentionUs = _nowUs() - attentionStartUs;
+    }
+    const uint64_t rankStartUs = profileDetail ? _nowUs() : 0;
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        rankUs = _nowUs() - rankStartUs;
+    }
     if (profile) {
         runtime->commandQueue().finish();
         const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
-        MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_identity layer=%d "
-                  "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 "
-                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
-                  layerIndex, attnLen, mQuerySeqLen, kvLen, lanes,
-                  static_cast<unsigned long long>(denseWork),
-                  static_cast<unsigned long long>(causalWork),
-                  static_cast<unsigned long long>(_nowUs() - startUs));
+        if (profileDetail) {
+            MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_identity layer=%d "
+                      "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 slot_identity=1 "
+                      "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu "
+                      "rank_us=%llu attention_only=%d record_queue=0 "
+                      "decode_key_ready_hit=0 decode_key_prepared=0 decode_prepare_inside_decode=0 "
+                      "decode_prepare_us=0 prepare_us=0 decode_key_required=0 prefix_stable=1\n",
+                      layerIndex, attnLen, mQuerySeqLen, kvLen, lanes,
+                      static_cast<unsigned long long>(denseWork),
+                      static_cast<unsigned long long>(causalWork),
+                      static_cast<unsigned long long>(_nowUs() - startUs),
+                      static_cast<unsigned long long>(attentionUs),
+                      static_cast<unsigned long long>(rankUs),
+                      _decodeIdentityAttentionOnlyBenchEnabled() ? 1 : 0);
+        } else {
+            MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_identity layer=%d "
+                      "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 slot_identity=1 "
+                      "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu "
+                      "rank_us=0 attention_only=%d record_queue=0 "
+                      "decode_key_ready_hit=0 decode_key_prepared=0 decode_prepare_inside_decode=0 "
+                      "decode_prepare_us=0 prepare_us=0 decode_key_required=0 prefix_stable=1\n",
+                      layerIndex, attnLen, mQuerySeqLen, kvLen, lanes,
+                      static_cast<unsigned long long>(denseWork),
+                      static_cast<unsigned long long>(causalWork),
+                      static_cast<unsigned long long>(_nowUs() - startUs),
+                      static_cast<unsigned long long>(_nowUs() - startUs),
+                      _decodeIdentityAttentionOnlyBenchEnabled() ? 1 : 0);
+        }
     }
     return NO_ERROR;
 }
@@ -5302,13 +5980,16 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityFused
     auto output = outputs[0];
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
     const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t attentionUs = 0;
+    uint64_t rankUs = 0;
     uint64_t causalWork = 0;
     for (int i = 0; i < attnLen; ++i) {
         causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
     }
     const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
-    const uint32_t lanes = causalWorkPerRow >= 512u ? 128u : (causalWorkPerRow >= 256u ? 64u : 32u);
+    const uint32_t lanes = _decodeHD128LaneWidth(causalWorkPerRow);
     auto kernel = lanes == 128u ? mDecodeCausalKernelHD128IdentityFusedKVRow128 :
         (lanes == 64u ? mDecodeCausalKernelHD128IdentityFusedKVRow64 : mDecodeCausalKernelHD128IdentityFusedKVRow32);
     if (!kernel) {
@@ -5346,17 +6027,37 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityFused
     if (ret != CL_SUCCESS) {
         return INVALID_VALUE;
     }
+    const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
     run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        attentionUs = _nowUs() - attentionStartUs;
+    }
+    const uint64_t rankStartUs = profileDetail ? _nowUs() : 0;
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        rankUs = _nowUs() - rankStartUs;
+    }
     if (profile) {
         runtime->commandQueue().finish();
         const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        const uint64_t totalUs = _nowUs() - startUs;
         MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_identity_fused_kv layer=%d "
-                  "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 "
-                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
+                  "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 slot_identity=1 "
+                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu "
+                  "rank_us=%llu attention_only=0 record_queue=0 "
+                  "decode_key_ready_hit=0 decode_key_prepared=0 decode_prepare_inside_decode=0 "
+                  "decode_prepare_us=0 prepare_us=0 decode_key_required=0 prefix_stable=1\n",
                   layerIndex, attnLen, mQuerySeqLen, kvLen, lanes,
                   static_cast<unsigned long long>(denseWork),
                   static_cast<unsigned long long>(causalWork),
-                  static_cast<unsigned long long>(_nowUs() - startUs));
+                  static_cast<unsigned long long>(totalUs),
+                  static_cast<unsigned long long>(profileDetail ? attentionUs : totalUs),
+                  static_cast<unsigned long long>(profileDetail ? rankUs : 0));
     }
     return NO_ERROR;
 }
@@ -5384,13 +6085,16 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityFused
     auto output = outputs[0];
     auto runtime = mOpenCLBackend->getOpenCLRuntime();
     const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
     const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t attentionUs = 0;
+    uint64_t rankUs = 0;
     uint64_t causalWork = 0;
     for (int i = 0; i < attnLen; ++i) {
         causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
     }
     const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
-    const uint32_t lanes = causalWorkPerRow >= 512u ? 128u : (causalWorkPerRow >= 256u ? 64u : 32u);
+    const uint32_t lanes = _decodeHD128LaneWidth(causalWorkPerRow);
     auto kernel = lanes == 128u ? mDecodeCausalKernelHD128IdentityFusedKVGQARow128 :
         (lanes == 64u ? mDecodeCausalKernelHD128IdentityFusedKVGQARow64
                       : mDecodeCausalKernelHD128IdentityFusedKVGQARow32);
@@ -5429,17 +6133,1101 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128IdentityFused
     if (ret != CL_SUCCESS) {
         return INVALID_VALUE;
     }
+    const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
     run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        attentionUs = _nowUs() - attentionStartUs;
+    }
+    const uint64_t rankStartUs = profileDetail ? _nowUs() : 0;
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        rankUs = _nowUs() - rankStartUs;
+    }
     if (profile) {
         runtime->commandQueue().finish();
         const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        const uint64_t totalUs = _nowUs() - startUs;
         MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_identity_fused_kv_gqa layer=%d "
-                  "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 group_size=%d "
-                  "kv_heads=%d dense_kv_work=%llu causal_kv_work=%llu us=%llu\n",
+                  "query=%d input_query=%d full_q=0 kv_len=%d lane=%u identity_slot=1 slot_identity=1 "
+                  "group_size=%d kv_heads=%d dense_kv_work=%llu causal_kv_work=%llu us=%llu "
+                  "append_us=0 attention_us=%llu rank_us=%llu attention_only=0 record_queue=0 "
+                  "decode_key_ready_hit=0 decode_key_prepared=0 decode_prepare_inside_decode=0 "
+                  "decode_prepare_us=0 prepare_us=0 decode_key_required=0 prefix_stable=1\n",
                   layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, groupSize, mKvNumHead,
                   static_cast<unsigned long long>(denseWork),
                   static_cast<unsigned long long>(causalWork),
-                  static_cast<unsigned long long>(_nowUs() - startUs));
+                  static_cast<unsigned long long>(totalUs),
+                  static_cast<unsigned long long>(profileDetail ? attentionUs : totalUs),
+                  static_cast<unsigned long long>(profileDetail ? rankUs : 0));
+    }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKFusedKV(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, int layerIndex) {
+    if (attnLen != 1 || kvLen <= 0 || baseLogical < 0 || mHeadDim != 128 || mCache == nullptr ||
+        !mCache->key || !mCache->decodeKey || !mCache->value || inputs.size() < 3 ||
+        mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeTransposedKKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    err = ensureDecodeKeyReady(baseLogical, true);
+    if (err != NO_ERROR) {
+        return err;
+    }
+
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    const bool profile = _profilePagedAttention();
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t causalWork = 0;
+    for (int i = 0; i < attnLen; ++i) {
+        causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
+    }
+    const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
+    const uint32_t lanes = _decodeHD128LaneWidth(causalWorkPerRow);
+    auto kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKFusedKVRow128 :
+        (lanes == 64u ? mDecodeCausalKernelHD128TransposedKFusedKVRow64
+                      : mDecodeCausalKernelHD128TransposedKFusedKVRow32);
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    if (mOpenCLBackend->isUseRecordQueue() && !profile &&
+        (mMeta == nullptr || !mMeta->needsPicDecodeAttentionRankCapture(layerIndex))) {
+        auto recordErr = runDecodeCausalAttentionHD128TransposedKFusedKVRecord(
+            inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, lanes, kernel);
+        if (recordErr == NO_ERROR) {
+            return NO_ERROR;
+        }
+    }
+    std::vector<uint32_t> gws = {
+        lanes,
+        static_cast<uint32_t>(attnLen),
+        static_cast<uint32_t>(mNumHead * mBatch),
+    };
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    ret |= kernel->get().setArg(idx++, gws[0]);
+    ret |= kernel->get().setArg(idx++, gws[1]);
+    ret |= kernel->get().setArg(idx++, gws[2]);
+    ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(key));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(value));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+    ret |= kernel->get().setArg(idx++, mScale);
+    ret |= kernel->get().setArg(idx++, mBatch);
+    ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= kernel->get().setArg(idx++, attnLen);
+    ret |= kernel->get().setArg(idx++, baseLogical);
+    ret |= kernel->get().setArg(idx++, kvLen);
+    ret |= kernel->get().setArg(idx++, mCache->maxSlots);
+    ret |= kernel->get().setArg(idx++, mNumHead);
+    ret |= kernel->get().setArg(idx++, mKvNumHead);
+    ret |= kernel->get().setArg(idx++, mHeadDim);
+    MNN_CHECK_CL_SUCCESS(ret, lanes == 128u ?
+        "setArg decode_causal_attention_hd128_transposed_k_fused_kv_row128" :
+        (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_fused_kv_row64"
+                      : "setArg decode_causal_attention_hd128_transposed_k_fused_kv_row32"));
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    uint64_t attentionUs = 0;
+    uint64_t rankUs = 0;
+    const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
+    run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        attentionUs = _nowUs() - attentionStartUs;
+    }
+    mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, baseLogical + 1);
+    mCache->decodeKeySlotTableVersion = mCache->slotTableVersion;
+    _captureSlotTablePrefix(mMeta, mCache->decodeKeyReadyPrefixSlots, mCache->decodeKeyReadyLength);
+    const uint64_t rankStartUs = profileDetail ? _nowUs() : 0;
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    if (profileDetail) {
+        runtime->commandQueue().finish();
+        rankUs = _nowUs() - rankStartUs;
+    }
+
+    if (profile) {
+        runtime->commandQueue().finish();
+        const uint64_t totalUs = _nowUs() - startUs;
+        if (!profileDetail) {
+            attentionUs = totalUs;
+        }
+        const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_transposed_k_fused_kv layer=%d "
+                  "query=%d input_query=%d kv_len=%d lane=%u identity_slot=1 "
+                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu rank_us=%llu "
+                  "decode_key_ready_hit=%d decode_key_prepared=%d "
+                  "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
+                  "decode_key_required=%d slot_identity=%d prefix_stable=%d record_queue=0 append_fused=1\n",
+                  layerIndex, attnLen, mQuerySeqLen, kvLen, lanes,
+                  static_cast<unsigned long long>(denseWork),
+                  static_cast<unsigned long long>(causalWork),
+                  static_cast<unsigned long long>(totalUs),
+                  static_cast<unsigned long long>(attentionUs),
+                  static_cast<unsigned long long>(rankUs),
+                  mLastDecodeKeyReadyHit ? 1 : 0,
+                  mLastDecodeKeyPrepared ? 1 : 0,
+                  mLastDecodeKeyPrepareInsideDecode ? 1 : 0,
+                  static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                  static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                  mLastDecodeKeyRequiredLen,
+                  mLastDecodeKeySlotIdentity ? 1 : 0,
+                  mLastDecodeKeyPrefixStable ? 1 : 0);
+    }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKFusedKVRecord(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, int layerIndex, uint32_t lanes, std::shared_ptr<KernelWrap> kernel) {
+    if (!mOpenCLBackend->isUseRecordQueue() || _profilePagedAttention() || !kernel ||
+        attnLen != 1 || kvLen <= 0 || mCache == nullptr || !mCache->key || !mCache->decodeKey ||
+        !mCache->value || !mCache->slotTable || inputs.size() < 3 || outputs.empty() ||
+        mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0 ||
+        (mMeta != nullptr && mMeta->needsPicDecodeAttentionRankCapture(layerIndex))) {
+        return INVALID_VALUE;
+    }
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto output = outputs[0];
+    const uint32_t heads = static_cast<uint32_t>(mNumHead * mBatch);
+    const int groupSize = mNumHead / mKvNumHead;
+    const bool needRecord = !mDecodeTransposedFusedRecordValid ||
+        mDecodeTransposedFusedRecordLanes != lanes ||
+        mDecodeTransposedFusedRecordAttnLen != attnLen ||
+        mDecodeTransposedFusedRecordHeads != heads ||
+        mDecodeTransposedFusedRecordGroupSize != groupSize;
+
+    auto updateRecordArgs = [&]() {
+        auto& args = mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args;
+        if (args.size() < 13) {
+            return false;
+        }
+        mDecodeTransposedFusedRecordQuerySeqLen = mQuerySeqLen;
+        mDecodeTransposedFusedRecordBaseLogical = baseLogical;
+        mDecodeTransposedFusedRecordKvLen = kvLen;
+        mDecodeTransposedFusedRecordMaxSlots = mCache->maxSlots;
+        mDecodeTransposedFusedRecordScale = mScale;
+        args[0].arg_value = &openCLBuffer(query)();
+        args[1].arg_value = &openCLBuffer(key)();
+        args[2].arg_value = &openCLBuffer(value)();
+        args[3].arg_value = &openCLBuffer(mCache->key.get())();
+        args[4].arg_value = &openCLBuffer(mCache->value.get())();
+        args[5].arg_value = &openCLBuffer(mCache->decodeKey.get())();
+        args[6].arg_value = &openCLBuffer(mCache->slotTable.get())();
+        args[7].arg_value = &openCLBuffer(output)();
+        args[8].arg_value = &mDecodeTransposedFusedRecordScale;
+        args[9].arg_value = &mDecodeTransposedFusedRecordQuerySeqLen;
+        args[10].arg_value = &mDecodeTransposedFusedRecordBaseLogical;
+        args[11].arg_value = &mDecodeTransposedFusedRecordKvLen;
+        args[12].arg_value = &mDecodeTransposedFusedRecordMaxSlots;
+        return true;
+    };
+
+    if (needRecord) {
+        mDecodeTransposedFusedRecordGws0 = lanes;
+        mDecodeTransposedFusedRecordGws1 = static_cast<uint32_t>(attnLen);
+        mDecodeTransposedFusedRecordGws2 = heads;
+        mDecodeTransposedFusedRecordQuerySeqLen = mQuerySeqLen;
+        mDecodeTransposedFusedRecordBaseLogical = baseLogical;
+        mDecodeTransposedFusedRecordKvLen = kvLen;
+        mDecodeTransposedFusedRecordMaxSlots = mCache->maxSlots;
+        mDecodeTransposedFusedRecordScale = mScale;
+
+        std::vector<uint32_t> gws = {mDecodeTransposedFusedRecordGws0,
+                                     mDecodeTransposedFusedRecordGws1,
+                                     mDecodeTransposedFusedRecordGws2};
+        std::vector<uint32_t> lws = {lanes, 1u, 1u};
+        cl_int ret = CL_SUCCESS;
+        uint32_t idx = 0;
+        ret |= kernel->get().setArg(idx++, gws[0]);
+        ret |= kernel->get().setArg(idx++, gws[1]);
+        ret |= kernel->get().setArg(idx++, gws[2]);
+        ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(key));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(value));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedFusedRecordScale);
+        ret |= kernel->get().setArg(idx++, mBatch);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedFusedRecordQuerySeqLen);
+        ret |= kernel->get().setArg(idx++, attnLen);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedFusedRecordBaseLogical);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedFusedRecordKvLen);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedFusedRecordMaxSlots);
+        ret |= kernel->get().setArg(idx++, mNumHead);
+        ret |= kernel->get().setArg(idx++, mKvNumHead);
+        ret |= kernel->get().setArg(idx++, mHeadDim);
+        MNN_CHECK_CL_SUCCESS(ret, lanes == 128u ?
+            "record setArg decode_causal_attention_hd128_transposed_k_fused_kv_row128" :
+            (lanes == 64u ? "record setArg decode_causal_attention_hd128_transposed_k_fused_kv_row64"
+                          : "record setArg decode_causal_attention_hd128_transposed_k_fused_kv_row32"));
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.clear();
+        mDecodeTransposedFusedRecordUpdateInfo.update_global_size.clear();
+        mDecodeTransposedFusedRecordUpdateInfo.update_local_size.clear();
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 3, sizeof(cl_mem), &openCLBuffer(query)()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 4, sizeof(cl_mem), &openCLBuffer(key)()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 5, sizeof(cl_mem), &openCLBuffer(value)()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 6, sizeof(cl_mem), &openCLBuffer(mCache->key.get())()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 7, sizeof(cl_mem), &openCLBuffer(mCache->value.get())()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 8, sizeof(cl_mem), &openCLBuffer(mCache->decodeKey.get())()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 9, sizeof(cl_mem), &openCLBuffer(mCache->slotTable.get())()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 10, sizeof(cl_mem), &openCLBuffer(output)()});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 11, sizeof(mDecodeTransposedFusedRecordScale), &mDecodeTransposedFusedRecordScale});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 13, sizeof(mDecodeTransposedFusedRecordQuerySeqLen),
+             &mDecodeTransposedFusedRecordQuerySeqLen});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 15, sizeof(mDecodeTransposedFusedRecordBaseLogical),
+             &mDecodeTransposedFusedRecordBaseLogical});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 16, sizeof(mDecodeTransposedFusedRecordKvLen), &mDecodeTransposedFusedRecordKvLen});
+        mDecodeTransposedFusedRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 17, sizeof(mDecodeTransposedFusedRecordMaxSlots), &mDecodeTransposedFusedRecordMaxSlots});
+        mDecodeTransposedFusedRecordUpdateInfos.clear();
+        mDecodeTransposedFusedRecordUpdateInfos.emplace_back(&mDecodeTransposedFusedRecordUpdateInfo);
+
+        mOpenCLBackend->startRecord(mRecording);
+        mOpenCLBackend->recordKernel3d(kernel, gws, lws, &mDecodeTransposedFusedRecordUpdateInfo);
+        mOpenCLBackend->endRecord(mRecording);
+        mDecodeTransposedFusedRecordValid = true;
+        mDecodeTransposedFusedRecordLanes = lanes;
+        mDecodeTransposedFusedRecordAttnLen = attnLen;
+        mDecodeTransposedFusedRecordHeads = heads;
+        mDecodeTransposedFusedRecordGroupSize = groupSize;
+    }
+    if (!updateRecordArgs()) {
+        return INVALID_VALUE;
+    }
+    mOpenCLBackend->addRecord(mRecording, mDecodeTransposedFusedRecordUpdateInfos);
+    mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, baseLogical + 1);
+    mCache->decodeKeySlotTableVersion = mCache->slotTableVersion;
+    _captureSlotTablePrefix(mMeta, mCache->decodeKeyReadyPrefixSlots, mCache->decodeKeyReadyLength);
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::appendDecodeKeyValueHD128(const std::vector<Tensor*>& inputs,
+                                                                int baseLogical, bool profileDetail,
+                                                                uint64_t* appendUs) {
+    if (baseLogical < 0 || mHeadDim != 128 || mCache == nullptr || !mCache->key || !mCache->decodeKey ||
+        !mCache->value || !mCache->slotTable || !mDecodeKeyAppendKernel || inputs.size() < 3 ||
+        mKvNumHead <= 0) {
+        return INVALID_VALUE;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (runtime == nullptr) {
+        return INVALID_VALUE;
+    }
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto& queue = runtime->commandQueue();
+    const uint64_t appendStartUs = profileDetail ? _nowUs() : 0;
+    const uint32_t appendGws0 = 128u;
+    const uint32_t appendGws1 = static_cast<uint32_t>(mBatch * mKvNumHead);
+    uint32_t idx = 0;
+    cl_int ret = CL_SUCCESS;
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, appendGws0);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, appendGws1);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(key));
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(value));
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mBatch);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mKvNumHead);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mHeadDim);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, 0);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, baseLogical);
+    ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mCache->maxSlots);
+    MNN_CHECK_CL_SUCCESS(ret, "setArg append_decode_key_value_hd128");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    ret = queue.enqueueNDRangeKernel(mDecodeKeyAppendKernel->get(), cl::NullRange,
+                                     cl::NDRange(appendGws0, appendGws1), cl::NDRange(32, 1));
+    MNN_CHECK_CL_SUCCESS(ret, "enqueue append_decode_key_value_hd128");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, baseLogical + 1);
+    mCache->decodeKeySlotTableVersion = mCache->slotTableVersion;
+    _captureSlotTablePrefix(mMeta, mCache->decodeKeyReadyPrefixSlots, mCache->decodeKeyReadyLength);
+    if (profileDetail) {
+        queue.finish();
+        if (appendUs != nullptr) {
+            *appendUs = _nowUs() - appendStartUs;
+        }
+    } else if (appendUs != nullptr) {
+        *appendUs = 0;
+    }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128SplitProfile(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, int layerIndex, bool transposedK) {
+    if (!_profilePagedAttention() || !_decodeQ1SplitProfileEnabled() || attnLen != 1 || kvLen <= 0 ||
+        baseLogical + 1 != kvLen || mHeadDim != 128 || mCache == nullptr || !mCache->key ||
+        !mCache->value || inputs.empty() || outputs.empty() || mKvNumHead <= 0 || mNumHead <= 0 ||
+        mNumHead % mKvNumHead != 0 || !_slotTableIsIdentity(mMeta, kvLen)) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeTransposedKKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    if (!transposedK) {
+        err = ensureDecodeCausalKernelHD128Identity();
+        if (err != NO_ERROR) {
+            return err;
+        }
+    } else if (!mCache->decodeKey || mCache->decodeKeyReadyLength < kvLen ||
+               !_slotTablePrefixMatches(mMeta, mCache->decodeKeyReadyPrefixSlots, kvLen)) {
+        return INVALID_VALUE;
+    }
+    err = ensureDecodeTransposedTemps(kvLen);
+    if (err != NO_ERROR) {
+        return err;
+    }
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (runtime == nullptr) {
+        return INVALID_VALUE;
+    }
+    auto query = inputs[0];
+    auto output = outputs[0];
+    auto qkKernel = transposedK ? mDecodeQKTransposedKernel : mDecodeQKIdentityKernel;
+    if (!query || !output || !qkKernel || !mDecodeQKVTransposedKernel || !mDecodeSoftmaxKernel) {
+        return INVALID_VALUE;
+    }
+    auto& qkBuffer = openCLDeferBuffer(mTempQK.get());
+    auto& softmaxBuffer = openCLDeferBuffer(mTempSoftmax.get());
+
+    auto& queue = runtime->commandQueue();
+    const uint64_t startUs = _nowUs();
+    uint64_t qkUs = 0;
+    uint64_t softmaxUs = 0;
+    uint64_t qkvUs = 0;
+    uint64_t rankUs = 0;
+    const uint32_t outside = static_cast<uint32_t>(mBatch * mNumHead);
+    const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+    const uint64_t causalWork = static_cast<uint64_t>(kvLen);
+
+    {
+        std::vector<uint32_t> gws = {static_cast<uint32_t>((kvLen + 3) / 4), outside};
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= qkKernel->get().setArg(idx++, gws[0]);
+        ret |= qkKernel->get().setArg(idx++, gws[1]);
+        ret |= qkKernel->get().setArg(idx++, openCLBuffer(query));
+        ret |= qkKernel->get().setArg(
+            idx++, transposedK ? openCLBuffer(mCache->decodeKey.get()) : openCLBuffer(mCache->key.get()));
+        ret |= qkKernel->get().setArg(idx++, qkBuffer);
+        ret |= qkKernel->get().setArg(idx++, mScale);
+        ret |= qkKernel->get().setArg(idx++, mBatch);
+        ret |= qkKernel->get().setArg(idx++, mQuerySeqLen);
+        ret |= qkKernel->get().setArg(idx++, kvLen);
+        ret |= qkKernel->get().setArg(idx++, mCache->maxSlots);
+        ret |= qkKernel->get().setArg(idx++, mNumHead);
+        ret |= qkKernel->get().setArg(idx++, mKvNumHead);
+        ret |= qkKernel->get().setArg(idx++, mHeadDim);
+        MNN_CHECK_CL_SUCCESS(ret, transposedK ? "setArg matmul_qk_decode_transposed_hd128"
+                                              : "setArg matmul_qk_decode_paged_identity_hd128");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        const uint64_t opStartUs = _nowUs();
+        ret = queue.enqueueNDRangeKernel(qkKernel->get(), cl::NullRange, cl::NDRange(gws[0], gws[1]),
+                                         cl::NullRange);
+        MNN_CHECK_CL_SUCCESS(ret, transposedK ? "enqueue matmul_qk_decode_transposed_hd128"
+                                              : "enqueue matmul_qk_decode_paged_identity_hd128");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        queue.finish();
+        qkUs = _nowUs() - opStartUs;
+    }
+
+    {
+        std::vector<uint32_t> gws = {64u, 1u, outside};
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, gws[0]);
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, gws[1]);
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, gws[2]);
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, qkBuffer);
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, softmaxBuffer);
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, 1);
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, static_cast<int>(outside));
+        ret |= mDecodeSoftmaxKernel->get().setArg(idx++, kvLen);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg decode split softmax_in1_buf");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        const uint64_t opStartUs = _nowUs();
+        run3DKernelDefault(mDecodeSoftmaxKernel, gws, {64u, 1u, 1u}, runtime);
+        queue.finish();
+        softmaxUs = _nowUs() - opStartUs;
+    }
+
+    {
+        std::vector<uint32_t> gws = {static_cast<uint32_t>((mHeadDim + 7) / 8), outside};
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, gws[0]);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, gws[1]);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, softmaxBuffer);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, kvLen);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, mCache->maxSlots);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, mBatch);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, mNumHead);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mDecodeQKVTransposedKernel->get().setArg(idx++, mHeadDim);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg matmul_qkv_decode_value_hd128_b8");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        const uint64_t opStartUs = _nowUs();
+        ret = queue.enqueueNDRangeKernel(mDecodeQKVTransposedKernel->get(), cl::NullRange,
+                                         cl::NDRange(gws[0], gws[1]), cl::NullRange);
+        MNN_CHECK_CL_SUCCESS(ret, "enqueue matmul_qkv_decode_value_hd128_b8");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        queue.finish();
+        qkvUs = _nowUs() - opStartUs;
+    }
+
+    const uint64_t rankStartUs = _nowUs();
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    queue.finish();
+    rankUs = _nowUs() - rankStartUs;
+
+    const uint64_t attentionUs = qkUs + softmaxUs + qkvUs;
+    const uint64_t totalUs = _nowUs() - startUs;
+    MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_%s_split layer=%d "
+              "query=%d input_query=%d full_q=0 kv_len=%d lane=0 identity_slot=1 slot_identity=1 "
+              "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu "
+              "qk_us=%llu softmax_us=%llu qkv_us=%llu qk_only_us=%llu qkv_only_us=%llu rank_us=%llu "
+              "attention_only=1 record_queue=0 decode_key_ready_hit=%d decode_key_prepared=%d "
+              "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
+              "decode_key_required=%d prefix_stable=%d split_profile=1\n",
+              transposedK ? "transposed_k" : "identity", layerIndex, attnLen, mQuerySeqLen, kvLen,
+              static_cast<unsigned long long>(denseWork), static_cast<unsigned long long>(causalWork),
+              static_cast<unsigned long long>(totalUs), static_cast<unsigned long long>(attentionUs),
+              static_cast<unsigned long long>(qkUs), static_cast<unsigned long long>(softmaxUs),
+              static_cast<unsigned long long>(qkvUs), static_cast<unsigned long long>(qkUs),
+              static_cast<unsigned long long>(qkvUs), static_cast<unsigned long long>(rankUs),
+              transposedK && mLastDecodeKeyReadyHit ? 1 : 0,
+              transposedK && mLastDecodeKeyPrepared ? 1 : 0,
+              transposedK && mLastDecodeKeyPrepareInsideDecode ? 1 : 0,
+              static_cast<unsigned long long>(transposedK ? mLastDecodeKeyPrepareUs : 0),
+              static_cast<unsigned long long>(transposedK ? mLastDecodeKeyPrepareUs : 0),
+              transposedK ? mLastDecodeKeyRequiredLen : 0,
+              (!transposedK || mLastDecodeKeyPrefixStable) ? 1 : 0);
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKAppendReadonly(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, int layerIndex, bool appendCurrent) {
+    if (attnLen != 1 || kvLen <= 0 || baseLogical < 0 || mHeadDim != 128 || mCache == nullptr ||
+        !mCache->key || !mCache->decodeKey || !mCache->value || !mCache->slotTable || inputs.size() < 3 ||
+        mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeTransposedKKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    const int requiredDecodeKeyLen = appendCurrent ? baseLogical : kvLen;
+    err = ensureDecodeKeyReady(requiredDecodeKeyLen, true);
+    if (err != NO_ERROR) {
+        return err;
+    }
+
+    auto query = inputs[0];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (runtime == nullptr || output == nullptr) {
+        return INVALID_VALUE;
+    }
+
+    auto& queue = runtime->commandQueue();
+    const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t appendUs = 0;
+    uint64_t attentionUs = 0;
+    uint64_t rankUs = 0;
+
+    uint64_t causalWork = 0;
+    for (int i = 0; i < attnLen; ++i) {
+        causalWork += static_cast<uint64_t>(std::max(0, std::min(kvLen, baseLogical + i + 1)));
+    }
+    const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
+    const uint32_t lanes = _decodeHD128LaneWidth(causalWorkPerRow);
+    auto kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKReadonlyRow128 :
+        (lanes == 64u ? mDecodeCausalKernelHD128TransposedKReadonlyRow64
+                      : mDecodeCausalKernelHD128TransposedKReadonlyRow32);
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    if (appendCurrent && mOpenCLBackend->isUseRecordQueue() && !profile &&
+        (mMeta == nullptr || !mMeta->needsPicDecodeAttentionRankCapture(layerIndex))) {
+        auto recordErr = runDecodeCausalAttentionHD128TransposedKAppendReadonlyRecord(
+            inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, lanes, kernel);
+        if (recordErr == NO_ERROR) {
+            return NO_ERROR;
+        }
+    }
+
+    if (appendCurrent) {
+        auto appendErr = appendDecodeKeyValueHD128(inputs, baseLogical, profileDetail, &appendUs);
+        if (appendErr != NO_ERROR) {
+            return appendErr;
+        }
+    }
+
+    if (_decodeQ1SplitProfileEnabled() && profile) {
+        auto splitErr = runDecodeCausalAttentionHD128SplitProfile(inputs, outputs, kvLen, attnLen,
+                                                                  baseLogical, layerIndex, true);
+        if (splitErr == NO_ERROR) {
+            return NO_ERROR;
+        }
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA decode transposed_k split profile fallback layer=%d err=%d\n",
+                      layerIndex, static_cast<int>(splitErr));
+        }
+    }
+
+    const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
+    std::vector<uint32_t> gws = {
+        lanes,
+        static_cast<uint32_t>(attnLen),
+        static_cast<uint32_t>(mNumHead * mBatch),
+    };
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    ret |= kernel->get().setArg(idx++, gws[0]);
+    ret |= kernel->get().setArg(idx++, gws[1]);
+    ret |= kernel->get().setArg(idx++, gws[2]);
+    ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+    ret |= kernel->get().setArg(idx++, mScale);
+    ret |= kernel->get().setArg(idx++, mBatch);
+    ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= kernel->get().setArg(idx++, attnLen);
+    ret |= kernel->get().setArg(idx++, baseLogical);
+    ret |= kernel->get().setArg(idx++, kvLen);
+    ret |= kernel->get().setArg(idx++, mCache->maxSlots);
+    ret |= kernel->get().setArg(idx++, mNumHead);
+    ret |= kernel->get().setArg(idx++, mKvNumHead);
+    ret |= kernel->get().setArg(idx++, mHeadDim);
+    MNN_CHECK_CL_SUCCESS(ret, lanes == 128u ?
+        "setArg decode_causal_attention_hd128_transposed_k_readonly_row128" :
+        (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_readonly_row64"
+                      : "setArg decode_causal_attention_hd128_transposed_k_readonly_row32"));
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profileDetail) {
+        queue.finish();
+        attentionUs = _nowUs() - attentionStartUs;
+    }
+
+    const uint64_t rankStartUs = profileDetail ? _nowUs() : 0;
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    if (profileDetail) {
+        queue.finish();
+        rankUs = _nowUs() - rankStartUs;
+    }
+
+    if (profile) {
+        queue.finish();
+        const uint64_t totalUs = _nowUs() - startUs;
+        const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_transposed_k_readonly layer=%d "
+                  "query=%d input_query=%d kv_len=%d lane=%u append_count=%d prepare_len=%d identity_slot=1 "
+                  "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=%llu attention_us=%llu "
+                  "rank_us=%llu attention_only=1 append_fused=0 skip_append=%d "
+                  "decode_key_ready_hit=%d decode_key_prepared=%d "
+                  "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
+                  "decode_key_required=%d slot_identity=%d prefix_stable=%d record_queue=0\n",
+                  layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, appendCurrent ? 1 : 0,
+                  requiredDecodeKeyLen,
+                  static_cast<unsigned long long>(denseWork),
+                  static_cast<unsigned long long>(causalWork),
+                  static_cast<unsigned long long>(totalUs),
+                  static_cast<unsigned long long>(appendUs),
+                  static_cast<unsigned long long>(attentionUs),
+                  static_cast<unsigned long long>(rankUs),
+                  appendCurrent ? 0 : 1,
+                  mLastDecodeKeyReadyHit ? 1 : 0,
+                  mLastDecodeKeyPrepared ? 1 : 0,
+                  mLastDecodeKeyPrepareInsideDecode ? 1 : 0,
+                  static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                  static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                  mLastDecodeKeyRequiredLen,
+                  mLastDecodeKeySlotIdentity ? 1 : 0,
+                  mLastDecodeKeyPrefixStable ? 1 : 0);
+    }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKAppendReadonlyRecord(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int baseLogical, int layerIndex, uint32_t lanes, std::shared_ptr<KernelWrap> attentionKernel) {
+    if (!mOpenCLBackend->isUseRecordQueue() || _profilePagedAttention() || !attentionKernel ||
+        attnLen != 1 || kvLen <= 0 || mCache == nullptr || !mCache->key || !mCache->decodeKey ||
+        !mCache->value || !mCache->slotTable || !mDecodeKeyAppendKernel || inputs.size() < 3 ||
+        outputs.empty() || mKvNumHead <= 0 || mNumHead <= 0 || mNumHead % mKvNumHead != 0 ||
+        (mMeta != nullptr && mMeta->needsPicDecodeAttentionRankCapture(layerIndex))) {
+        return INVALID_VALUE;
+    }
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto output = outputs[0];
+    const uint32_t appendGws0 = 128u;
+    const uint32_t appendGws1 = static_cast<uint32_t>(mBatch * mKvNumHead);
+    const uint32_t heads = static_cast<uint32_t>(mNumHead * mBatch);
+    const int groupSize = mNumHead / mKvNumHead;
+    const bool needRecord = !mDecodeTransposedAppendReadonlyRecordValid ||
+        mDecodeTransposedAppendReadonlyRecordLanes != lanes ||
+        mDecodeTransposedAppendReadonlyRecordAttnLen != attnLen ||
+        mDecodeTransposedAppendReadonlyRecordHeads != heads ||
+        mDecodeTransposedAppendReadonlyRecordGroupSize != groupSize ||
+        mDecodeTransposedAppendReadonlyRecordAppendGws1 != appendGws1;
+
+    auto updateRecordArgs = [&]() {
+        auto& appendArgs = mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args;
+        auto& attentionArgs = mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args;
+        if (appendArgs.size() < 8 || attentionArgs.size() < 9) {
+            return false;
+        }
+        mDecodeTransposedAppendReadonlyRecordQuerySeqLen = mQuerySeqLen;
+        mDecodeTransposedAppendReadonlyRecordBaseLogical = baseLogical;
+        mDecodeTransposedAppendReadonlyRecordKvLen = kvLen;
+        mDecodeTransposedAppendReadonlyRecordMaxSlots = mCache->maxSlots;
+        mDecodeTransposedAppendReadonlyRecordScale = mScale;
+        appendArgs[0].arg_value = &openCLBuffer(key)();
+        appendArgs[1].arg_value = &openCLBuffer(value)();
+        appendArgs[2].arg_value = &openCLBuffer(mCache->key.get())();
+        appendArgs[3].arg_value = &openCLBuffer(mCache->value.get())();
+        appendArgs[4].arg_value = &openCLBuffer(mCache->decodeKey.get())();
+        appendArgs[5].arg_value = &openCLBuffer(mCache->slotTable.get())();
+        appendArgs[6].arg_value = &mDecodeTransposedAppendReadonlyRecordBaseLogical;
+        appendArgs[7].arg_value = &mDecodeTransposedAppendReadonlyRecordMaxSlots;
+        attentionArgs[0].arg_value = &openCLBuffer(query)();
+        attentionArgs[1].arg_value = &openCLBuffer(mCache->value.get())();
+        attentionArgs[2].arg_value = &openCLBuffer(mCache->decodeKey.get())();
+        attentionArgs[3].arg_value = &openCLBuffer(output)();
+        attentionArgs[4].arg_value = &mDecodeTransposedAppendReadonlyRecordScale;
+        attentionArgs[5].arg_value = &mDecodeTransposedAppendReadonlyRecordQuerySeqLen;
+        attentionArgs[6].arg_value = &mDecodeTransposedAppendReadonlyRecordBaseLogical;
+        attentionArgs[7].arg_value = &mDecodeTransposedAppendReadonlyRecordKvLen;
+        attentionArgs[8].arg_value = &mDecodeTransposedAppendReadonlyRecordMaxSlots;
+        return true;
+    };
+
+    if (needRecord) {
+        mDecodeTransposedAppendReadonlyRecordAppendGws0 = appendGws0;
+        mDecodeTransposedAppendReadonlyRecordAppendGws1 = appendGws1;
+        mDecodeTransposedAppendReadonlyRecordGws0 = lanes;
+        mDecodeTransposedAppendReadonlyRecordGws1 = static_cast<uint32_t>(attnLen);
+        mDecodeTransposedAppendReadonlyRecordGws2 = heads;
+        mDecodeTransposedAppendReadonlyRecordQuerySeqLen = mQuerySeqLen;
+        mDecodeTransposedAppendReadonlyRecordBaseLogical = baseLogical;
+        mDecodeTransposedAppendReadonlyRecordKvLen = kvLen;
+        mDecodeTransposedAppendReadonlyRecordMaxSlots = mCache->maxSlots;
+        mDecodeTransposedAppendReadonlyRecordScale = mScale;
+
+        std::vector<uint32_t> appendGws = {mDecodeTransposedAppendReadonlyRecordAppendGws0,
+                                           mDecodeTransposedAppendReadonlyRecordAppendGws1};
+        std::vector<uint32_t> appendLws = {32u, 1u};
+        std::vector<uint32_t> attentionGws = {mDecodeTransposedAppendReadonlyRecordGws0,
+                                              mDecodeTransposedAppendReadonlyRecordGws1,
+                                              mDecodeTransposedAppendReadonlyRecordGws2};
+        std::vector<uint32_t> attentionLws = {lanes, 1u, 1u};
+        cl_int ret = CL_SUCCESS;
+        uint32_t idx = 0;
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, appendGws[0]);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, appendGws[1]);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(key));
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(value));
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mBatch);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mHeadDim);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, 0);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordBaseLogical);
+        ret |= mDecodeKeyAppendKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordMaxSlots);
+        MNN_CHECK_CL_SUCCESS(ret, "record setArg append_decode_key_value_hd128");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        idx = 0;
+        ret = CL_SUCCESS;
+        ret |= attentionKernel->get().setArg(idx++, attentionGws[0]);
+        ret |= attentionKernel->get().setArg(idx++, attentionGws[1]);
+        ret |= attentionKernel->get().setArg(idx++, attentionGws[2]);
+        ret |= attentionKernel->get().setArg(idx++, openCLBuffer(query));
+        ret |= attentionKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= attentionKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+        ret |= attentionKernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= attentionKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordScale);
+        ret |= attentionKernel->get().setArg(idx++, mBatch);
+        ret |= attentionKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordQuerySeqLen);
+        ret |= attentionKernel->get().setArg(idx++, attnLen);
+        ret |= attentionKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordBaseLogical);
+        ret |= attentionKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordKvLen);
+        ret |= attentionKernel->get().setArg(idx++, mDecodeTransposedAppendReadonlyRecordMaxSlots);
+        ret |= attentionKernel->get().setArg(idx++, mNumHead);
+        ret |= attentionKernel->get().setArg(idx++, mKvNumHead);
+        ret |= attentionKernel->get().setArg(idx++, mHeadDim);
+        MNN_CHECK_CL_SUCCESS(ret, lanes == 128u ?
+            "record setArg decode_causal_attention_hd128_transposed_k_readonly_row128" :
+            (lanes == 64u ? "record setArg decode_causal_attention_hd128_transposed_k_readonly_row64"
+                          : "record setArg decode_causal_attention_hd128_transposed_k_readonly_row32"));
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.clear();
+        mDecodeTransposedAppendRecordUpdateInfo.update_global_size.clear();
+        mDecodeTransposedAppendRecordUpdateInfo.update_local_size.clear();
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 2, sizeof(cl_mem), &openCLBuffer(key)()});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 3, sizeof(cl_mem), &openCLBuffer(value)()});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 4, sizeof(cl_mem), &openCLBuffer(mCache->key.get())()});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 5, sizeof(cl_mem), &openCLBuffer(mCache->value.get())()});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 6, sizeof(cl_mem), &openCLBuffer(mCache->decodeKey.get())()});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 7, sizeof(cl_mem), &openCLBuffer(mCache->slotTable.get())()});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 12, sizeof(mDecodeTransposedAppendReadonlyRecordBaseLogical),
+             &mDecodeTransposedAppendReadonlyRecordBaseLogical});
+        mDecodeTransposedAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 13, sizeof(mDecodeTransposedAppendReadonlyRecordMaxSlots),
+             &mDecodeTransposedAppendReadonlyRecordMaxSlots});
+
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.clear();
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_global_size.clear();
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_local_size.clear();
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 3, sizeof(cl_mem), &openCLBuffer(query)()});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 4, sizeof(cl_mem), &openCLBuffer(mCache->value.get())()});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 5, sizeof(cl_mem), &openCLBuffer(mCache->decodeKey.get())()});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 6, sizeof(cl_mem), &openCLBuffer(output)()});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 7, sizeof(mDecodeTransposedAppendReadonlyRecordScale),
+             &mDecodeTransposedAppendReadonlyRecordScale});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 9, sizeof(mDecodeTransposedAppendReadonlyRecordQuerySeqLen),
+             &mDecodeTransposedAppendReadonlyRecordQuerySeqLen});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 11, sizeof(mDecodeTransposedAppendReadonlyRecordBaseLogical),
+             &mDecodeTransposedAppendReadonlyRecordBaseLogical});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 12, sizeof(mDecodeTransposedAppendReadonlyRecordKvLen),
+             &mDecodeTransposedAppendReadonlyRecordKvLen});
+        mDecodeTransposedReadonlyRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 13, sizeof(mDecodeTransposedAppendReadonlyRecordMaxSlots),
+             &mDecodeTransposedAppendReadonlyRecordMaxSlots});
+        mDecodeTransposedAppendReadonlyRecordUpdateInfos.clear();
+        mDecodeTransposedAppendReadonlyRecordUpdateInfos.emplace_back(&mDecodeTransposedAppendRecordUpdateInfo);
+        mDecodeTransposedAppendReadonlyRecordUpdateInfos.emplace_back(&mDecodeTransposedReadonlyRecordUpdateInfo);
+
+        mOpenCLBackend->startRecord(mRecording);
+        mOpenCLBackend->recordKernel2d(mDecodeKeyAppendKernel, appendGws, appendLws,
+                                       &mDecodeTransposedAppendRecordUpdateInfo);
+        mOpenCLBackend->recordKernel3d(attentionKernel, attentionGws, attentionLws,
+                                       &mDecodeTransposedReadonlyRecordUpdateInfo);
+        mOpenCLBackend->endRecord(mRecording);
+        mDecodeTransposedAppendReadonlyRecordValid = true;
+        mDecodeTransposedAppendReadonlyRecordLanes = lanes;
+        mDecodeTransposedAppendReadonlyRecordAttnLen = attnLen;
+        mDecodeTransposedAppendReadonlyRecordHeads = heads;
+        mDecodeTransposedAppendReadonlyRecordGroupSize = groupSize;
+    }
+    if (!updateRecordArgs()) {
+        return INVALID_VALUE;
+    }
+    mOpenCLBackend->addRecord(mRecording, mDecodeTransposedAppendReadonlyRecordUpdateInfos);
+    mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, baseLogical + 1);
+    mCache->decodeKeySlotTableVersion = mCache->slotTableVersion;
+    _captureSlotTablePrefix(mMeta, mCache->decodeKeyReadyPrefixSlots, mCache->decodeKeyReadyLength);
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSparse(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+    int layerIndex) {
+    if (attnLen <= 1 || attnLen > 8 || kvLen <= 0 || mHeadDim != 128 || mCache == nullptr ||
+        !mCache->key || !mCache->decodeKey || !mCache->value || !mCache->slotTable ||
+        !mCache->sparseQuery || inputs.size() < 3 || mMeta == nullptr ||
+        static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen ||
+        mNewKvSeqLen < attnLen || mKvNumHead <= 0 || mNumHead <= 0 ||
+        mNumHead % mKvNumHead != 0) {
+        return INVALID_VALUE;
+    }
+    auto err = ensureDecodeTransposedKKernel();
+    if (err != NO_ERROR) {
+        return err;
+    }
+    const int appendCount = std::max(0, std::min(mMeta->pic_decode_recompute_append_count, attnLen));
+    const int prepareLen = std::max(0, kvLen - appendCount);
+    err = ensureDecodeKeyReady(prepareLen, true);
+    if (err != NO_ERROR) {
+        return err;
+    }
+
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto output = outputs[0];
+    auto runtime = mOpenCLBackend->getOpenCLRuntime();
+    if (runtime == nullptr || output == nullptr) {
+        return INVALID_VALUE;
+    }
+
+    auto& queue = runtime->commandQueue();
+    const bool profile = _profilePagedAttention();
+    const bool profileDetail = profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+    const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t appendUs = 0;
+    uint64_t attentionUs = 0;
+    uint64_t rankUs = 0;
+
+    {
+        const uint64_t appendStartUs = profileDetail ? _nowUs() : 0;
+        std::vector<uint32_t> appendGws = {
+            128u,
+            static_cast<uint32_t>(attnLen),
+            static_cast<uint32_t>(mBatch * mKvNumHead),
+        };
+        uint32_t idx = 0;
+        cl_int ret = CL_SUCCESS;
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[0]);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[1]);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[2]);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(key));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(value));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mBatch);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mNewKvSeqLen);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, attnLen);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mHeadDim);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mCache->maxSlots);
+        MNN_CHECK_CL_SUCCESS(ret, "setArg append_sparse_decode_key_value_hd128");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+        run3DKernelDefault(mDecodeKeyAppendSparseKernel, appendGws, {32u, 1u, 1u}, runtime);
+        mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, kvLen);
+        mCache->decodeKeySlotTableVersion = mCache->slotTableVersion;
+        _captureSlotTablePrefix(mMeta, mCache->decodeKeyReadyPrefixSlots, mCache->decodeKeyReadyLength);
+        if (profileDetail) {
+            queue.finish();
+            appendUs = _nowUs() - appendStartUs;
+        }
+    }
+
+    uint64_t causalWork = _sparseLogicalWork(mMeta, attnLen, kvLen);
+    const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
+    const uint32_t lanes = _decodeHD128SparseLaneWidth(runtime, causalWorkPerRow, attnLen);
+    const int qTile = _decodeHD128QTile(attnLen);
+    std::shared_ptr<KernelWrap> kernel;
+    const char* kernelName = nullptr;
+    if (qTile == 2) {
+        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile2Row128 :
+            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile2Row64
+                          : mDecodeCausalKernelHD128TransposedKQTile2Row32);
+        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row128" :
+            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row64"
+                          : "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row32");
+    } else if (qTile == 4) {
+        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile4Row128 :
+            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile4Row64
+                          : mDecodeCausalKernelHD128TransposedKQTile4Row32);
+        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row128" :
+            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row64"
+                          : "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row32");
+    } else {
+        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile8Row128 :
+            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile8Row64
+                          : mDecodeCausalKernelHD128TransposedKQTile8Row32);
+        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row128" :
+            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row64"
+                          : "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row32");
+    }
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
+    std::vector<uint32_t> gws = {
+        lanes,
+        static_cast<uint32_t>((attnLen + qTile - 1) / qTile),
+        static_cast<uint32_t>(mNumHead * mBatch),
+    };
+    const int identitySlot = _slotTableIsIdentity(mMeta, kvLen) ? 1 : 0;
+    cl_int ret = CL_SUCCESS;
+    uint32_t idx = 0;
+    ret |= kernel->get().setArg(idx++, gws[0]);
+    ret |= kernel->get().setArg(idx++, gws[1]);
+    ret |= kernel->get().setArg(idx++, gws[2]);
+    ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->slotTable.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+    ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+    ret |= kernel->get().setArg(idx++, mScale);
+    ret |= kernel->get().setArg(idx++, mBatch);
+    ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    ret |= kernel->get().setArg(idx++, attnLen);
+    ret |= kernel->get().setArg(idx++, kvLen);
+    ret |= kernel->get().setArg(idx++, mCache->maxSlots);
+    ret |= kernel->get().setArg(idx++, identitySlot);
+    ret |= kernel->get().setArg(idx++, mNumHead);
+    ret |= kernel->get().setArg(idx++, mKvNumHead);
+    ret |= kernel->get().setArg(idx++, mHeadDim);
+    MNN_CHECK_CL_SUCCESS(ret, kernelName);
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    run3DKernelDefault(kernel, gws, {lanes, 1u, 1u}, runtime);
+    if (profileDetail) {
+        queue.finish();
+        attentionUs = _nowUs() - attentionStartUs;
+    }
+
+    const uint64_t rankStartUs = profileDetail ? _nowUs() : 0;
+    auto rankErr = runDecodeAttentionRankCaptureOpenCL(query, layerIndex, kvLen, attnLen, false);
+    if (rankErr != NO_ERROR) {
+        return rankErr;
+    }
+    if (profileDetail) {
+        queue.finish();
+        rankUs = _nowUs() - rankStartUs;
+    }
+
+    if (profile) {
+        queue.finish();
+        const uint64_t totalUs = _nowUs() - startUs;
+        const uint64_t denseWork = static_cast<uint64_t>(attnLen) * static_cast<uint64_t>(kvLen);
+        if (profileDetail) {
+            MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_transposed_k_sparse_qtile layer=%d "
+                      "query=%d input_query=%d kv_len=%d lane=%u q_tile=%d append_count=%d prepare_len=%d "
+                      "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=%llu attention_us=%llu "
+                      "rank_us=%llu decode_key_ready_hit=%d decode_key_prepared=%d "
+                      "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
+                      "decode_key_required=%d slot_identity=%d prefix_stable=%d identity_v=%d record_queue=0\n",
+                      layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, qTile, appendCount, prepareLen,
+                      static_cast<unsigned long long>(denseWork),
+                      static_cast<unsigned long long>(causalWork),
+                      static_cast<unsigned long long>(totalUs),
+                      static_cast<unsigned long long>(appendUs),
+                      static_cast<unsigned long long>(attentionUs),
+                      static_cast<unsigned long long>(rankUs),
+                      mLastDecodeKeyReadyHit ? 1 : 0,
+                      mLastDecodeKeyPrepared ? 1 : 0,
+                      mLastDecodeKeyPrepareInsideDecode ? 1 : 0,
+                      static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                      static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                      mLastDecodeKeyRequiredLen,
+                      mLastDecodeKeySlotIdentity ? 1 : 0,
+                      mLastDecodeKeyPrefixStable ? 1 : 0,
+                      identitySlot);
+        } else {
+            MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_transposed_k_sparse_qtile layer=%d "
+                      "query=%d input_query=%d kv_len=%d lane=%u q_tile=%d append_count=%d prepare_len=%d "
+                      "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu rank_us=0 "
+                      "decode_key_ready_hit=%d decode_key_prepared=%d "
+                      "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
+                      "decode_key_required=%d slot_identity=%d prefix_stable=%d identity_v=%d record_queue=0\n",
+                      layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, qTile, appendCount, prepareLen,
+                      static_cast<unsigned long long>(denseWork),
+                      static_cast<unsigned long long>(causalWork),
+                      static_cast<unsigned long long>(totalUs),
+                      static_cast<unsigned long long>(totalUs),
+                      mLastDecodeKeyReadyHit ? 1 : 0,
+                      mLastDecodeKeyPrepared ? 1 : 0,
+                      mLastDecodeKeyPrepareInsideDecode ? 1 : 0,
+                      static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                      static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                      mLastDecodeKeyRequiredLen,
+                      mLastDecodeKeySlotIdentity ? 1 : 0,
+                      mLastDecodeKeyPrefixStable ? 1 : 0,
+                      identitySlot);
+        }
     }
     return NO_ERROR;
 }
@@ -5698,13 +7486,18 @@ ErrorCode PagedAttentionBufExecution::runDecodeAttentionRankCaptureOpenCL(const 
     if (profile) {
         queue.finish();
         MNN_PRINT("OpenCLPagedAttention profile op=decode_attention_rank layer=%d pic_tokens=%d top_m=%d "
-                  "heads=%d q_logical=%d us=%llu score_us=%llu topk_us=%llu readback_us=%llu\n",
+                  "heads=%d q_logical=%d query=%d input_query=%d kv_len=%d lane=128 us=%llu rank_us=%llu "
+                  "score_us=%llu topk_us=%llu readback_us=%llu append_us=0 attention_us=0 record_queue=0 "
+                  "decode_key_ready_hit=0 decode_key_prepared=0 decode_prepare_inside_decode=0 "
+                  "decode_prepare_us=0 prepare_us=0 slot_identity=%d prefix_stable=1\n",
                   layerIndex, picTokenCount, topM,
-                  headIdCount > 0 ? headIdCount : mNumHead, qLogical,
+                  headIdCount > 0 ? headIdCount : mNumHead, qLogical, attnLen, mQuerySeqLen, kvLen,
+                  static_cast<unsigned long long>(_nowUs() - startUs),
                   static_cast<unsigned long long>(_nowUs() - startUs),
                   static_cast<unsigned long long>(scoreUs),
                   static_cast<unsigned long long>(topKUs),
-                  static_cast<unsigned long long>(readbackUs));
+                  static_cast<unsigned long long>(readbackUs),
+                  _slotTableIsIdentity(mMeta, kvLen) ? 1 : 0);
     }
     return NO_ERROR;
 }
@@ -6599,6 +8392,7 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         ordinaryDecodeHD128Identity && !mIsKVShared && kvWriteLen == 1 &&
         mCache != nullptr && mCache->key && mCache->value && inputs.size() >= 3 &&
         externalReadyForFusedDecode &&
+        !_decodeIdentityAttentionOnlyBenchEnabled() &&
         (mMeta == nullptr || mMeta->file_flag != KVMeta::PendingWrite) &&
         (mMeta == nullptr || !mMeta->needsCacheBlendScoring(layerIndex));
     if (_picOpenCLDebug() && ordinaryDecodeCausal && mHeadDim == 128) {
@@ -6637,8 +8431,48 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
             return hydrate;
         }
     }
+    const bool preEmitExternalHydrated = !shouldHydrateExternal || mMeta->externalLayerLoaded(layerIndex);
+    const bool preEmitQueryRowsAreFull = sparseQuery && mQuerySeqLen > attnLen;
+    const int decodeTransposedKSparseAppendCount =
+        (mMeta != nullptr && picDecodeRecompute) ?
+        std::max(0, std::min(mMeta->pic_decode_recompute_append_count, attnLen)) : 0;
+    const int decodeTransposedKSparsePrepareLen = std::max(0, kvLen - decodeTransposedKSparseAppendCount);
+    const bool decodeTransposedKEnabledGlobal = _decodeTransposedKEnabled();
+    const bool decodeTransposedKQ1NeedsDecodeKey =
+        decodeTransposedKEnabledGlobal && _decodeTransposedKQ1NeedsDecodeKey();
+    const bool decodeTransposedKEnabled =
+        decodeTransposedKEnabledGlobal && (attnLen > 1 || decodeTransposedKQ1NeedsDecodeKey);
+    const bool decodeTransposedKSparseCandidate =
+        decodeTransposedKEnabled && picDecodeRecompute && sparseQuery && decodeCausalMask &&
+        mHeadDim == 128 && attnLen > 1 && attnLen <= 8 && !preEmitQueryRowsAreFull &&
+        !mIsKVShared && preEmitExternalHydrated && runtime != nullptr &&
+        _decodeTransposedKSparseShapeSupported(runtime, attnLen) &&
+        mCache != nullptr && mCache->key && mCache->decodeKey && mCache->value &&
+        mCache->slotTable && mCache->sparseQuery && inputs.size() >= 3 &&
+        (mMeta == nullptr || mMeta->file_flag != KVMeta::PendingWrite) &&
+        (mMeta == nullptr || !mMeta->needsCacheBlendScoring(layerIndex));
+    const bool decodeTransposedKSparsePrefixReady =
+        decodeTransposedKSparseCandidate &&
+        mCache->decodeKeyReadyLength >= decodeTransposedKSparsePrepareLen &&
+        _slotTablePrefixMatches(mMeta, mCache->decodeKeyReadyPrefixSlots, decodeTransposedKSparsePrepareLen);
+    const bool decodeTransposedKSparse =
+        decodeTransposedKSparseCandidate && decodeTransposedKSparsePrefixReady;
+    const bool decodeTransposedKQ1AttentionOnlyBenchCandidate =
+        decodeTransposedKEnabled && _decodeTransposedKAttentionOnlyBenchEnabled() &&
+        ordinaryDecodeHD128Identity && !mIsKVShared && kvWriteLen == 1 &&
+        mCache != nullptr && mCache->key && mCache->decodeKey && mCache->value &&
+        mCache->slotTable && inputs.size() >= 3 && preEmitExternalHydrated &&
+        (mMeta == nullptr || mMeta->file_flag != KVMeta::PendingWrite) &&
+        (mMeta == nullptr || !mMeta->needsCacheBlendScoring(layerIndex));
+    const bool decodeTransposedKQ1AttentionOnlyBenchPrefixReady =
+        decodeTransposedKQ1AttentionOnlyBenchCandidate &&
+        mCache->decodeKeyReadyLength >= baseLogical &&
+        _slotTablePrefixMatches(mMeta, mCache->decodeKeyReadyPrefixSlots, baseLogical);
+    const bool decodeTransposedKQ1AttentionOnlyBench =
+        decodeTransposedKQ1AttentionOnlyBenchCandidate && decodeTransposedKQ1AttentionOnlyBenchPrefixReady;
 
-    if (!mIsKVShared && kvWriteLen > 0 && !ordinaryDecodeFusedKV) {
+    if (!mIsKVShared && kvWriteLen > 0 && !ordinaryDecodeFusedKV && !decodeTransposedKSparse &&
+        !decodeTransposedKQ1AttentionOnlyBench) {
         const int total = mBatch * kvWriteLen * mKvNumHead * mHeadDim;
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
@@ -6659,6 +8493,32 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         ret |= mCopyKernel->get().setArg(idx++, total);
         MNN_CHECK_CL_SUCCESS(ret, "setArg copy_paged_kv");
         queue.enqueueNDRangeKernel(mCopyKernel->get(), cl::NullRange, cl::NDRange(total), cl::NullRange);
+        if (mCache != nullptr) {
+            if (_picOpenCLDebug()) {
+                MNN_PRINT("PIC OpenCL PA decode_key invalidate layer=%d cache=%p reason=copy_paged_kv "
+                          "base=%d kv_write=%d kv_len=%d old_ready=%d\n",
+                          layerIndex, static_cast<void*>(mCache.get()), baseLogical, kvWriteLen, kvLen,
+                          mCache->decodeKeyReadyLength);
+            }
+            mCache->decodeKeyReadyLength = 0;
+            mCache->decodeKeySlotTableVersion = -1;
+            mCache->decodeKeyReadyPrefixSlots.clear();
+        }
+    }
+
+    const bool q1DecodeKNeedsPrepare = decodeTransposedKQ1NeedsDecodeKey;
+    const bool repairDecodeKNeedsPrepare =
+        mMeta != nullptr && mMeta->pic_decode_repair_tokens_per_step > 0 &&
+        _decodeTransposedKSparseShapeSupported(runtime, mMeta->pic_decode_repair_tokens_per_step + 1);
+    if (decodeTransposedKEnabled && (q1DecodeKNeedsPrepare || repairDecodeKNeedsPrepare) &&
+        !decodeStep && !sparseQuery && !scoreAttention &&
+        !picDecodeRecompute && mHeadDim == 128 && kvLen > 0 && mCache != nullptr &&
+        mCache->key && mCache->decodeKey && mCache->slotTable && runtime != nullptr) {
+        auto prepareDecodeKeyErr = ensureDecodeKeyReady(kvLen, false);
+        if (prepareDecodeKeyErr != NO_ERROR && _picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA decode transposed_k predecode prepare skipped layer=%d err=%d kv_len=%d\n",
+                      layerIndex, static_cast<int>(prepareDecodeKeyErr), kvLen);
+        }
     }
 
     err = runCacheBlendScoring(layerIndex, kvLen);
@@ -6813,7 +8673,83 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     if (ordinaryDecodeCausal && decodeCausalMask &&
         mCache != nullptr && mCache->key && mCache->value && mCache->slotTable && mCache->sparseQuery) {
         if (ordinaryDecodeCausal && mHeadDim == 128 && runtime != nullptr) {
+            if (decodeTransposedKQ1AttentionOnlyBench) {
+                const bool profile = _profilePagedAttention();
+                const bool profileDetail =
+                    profile && _envFlagEnabled("MNN_PAGED_ATTENTION_PROFILE_DETAIL", false);
+                uint64_t setupAppendUs = 0;
+                ErrorCode setupErr = ensureDecodeTransposedKKernel();
+                if (setupErr == NO_ERROR) {
+                    setupErr = ensureDecodeKeyReady(baseLogical, true);
+                }
+                if (setupErr == NO_ERROR) {
+                    setupErr = appendDecodeKeyValueHD128(inputs, baseLogical, profileDetail, &setupAppendUs);
+                }
+                if (setupErr != NO_ERROR) {
+                    if (_picOpenCLDebug()) {
+                        MNN_PRINT("PIC OpenCL PA decode transposed_k q1 attention-only setup "
+                                  "failed layer=%d err=%d\n",
+                                  layerIndex, static_cast<int>(setupErr));
+                    }
+                    return setupErr;
+                }
+                if (profile) {
+                    MNN_PRINT("OpenCLPagedAttention profile op=decode_transposed_k_q1_attention_only_setup "
+                              "layer=%d query=%d input_query=%d kv_len=%d append_us=%llu "
+                              "decode_key_ready_hit=%d decode_key_prepared=%d "
+                              "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
+                              "decode_key_required=%d slot_identity=%d prefix_stable=%d\n",
+                              layerIndex, attnLen, mQuerySeqLen, kvLen,
+                              static_cast<unsigned long long>(setupAppendUs),
+                              mLastDecodeKeyReadyHit ? 1 : 0,
+                              mLastDecodeKeyPrepared ? 1 : 0,
+                              mLastDecodeKeyPrepareInsideDecode ? 1 : 0,
+                              static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                              static_cast<unsigned long long>(mLastDecodeKeyPrepareUs),
+                              mLastDecodeKeyRequiredLen,
+                              mLastDecodeKeySlotIdentity ? 1 : 0,
+                              mLastDecodeKeyPrefixStable ? 1 : 0);
+                }
+                auto readonlyBenchErr = runDecodeCausalAttentionHD128TransposedKAppendReadonly(
+                    inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, false);
+                if (readonlyBenchErr == NO_ERROR) {
+                    return NO_ERROR;
+                }
+                if (_picOpenCLDebug()) {
+                    MNN_PRINT("PIC OpenCL PA decode transposed_k q1 attention-only bench "
+                              "failed layer=%d err=%d\n",
+                              layerIndex, static_cast<int>(readonlyBenchErr));
+                }
+                return readonlyBenchErr;
+            }
             if (ordinaryDecodeFusedKV) {
+                if (decodeTransposedKQ1NeedsDecodeKey) {
+                    if (_decodeTransposedKReadonlyOnlyEnabled()) {
+                        auto readonlyOnlyErr = runDecodeCausalAttentionHD128TransposedKAppendReadonly(
+                            inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, false);
+                        if (readonlyOnlyErr != NO_ERROR && _picOpenCLDebug()) {
+                            MNN_PRINT("PIC OpenCL PA decode transposed_k readonly-only failed layer=%d err=%d\n",
+                                      layerIndex, static_cast<int>(readonlyOnlyErr));
+                        }
+                        return readonlyOnlyErr;
+                    }
+                    if (_decodeTransposedKAttentionOnlyEnabled()) {
+                        auto readonlyErr = runDecodeCausalAttentionHD128TransposedKAppendReadonly(
+                            inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, true);
+                        if (readonlyErr != NO_ERROR && _picOpenCLDebug()) {
+                            MNN_PRINT("PIC OpenCL PA decode transposed_k readonly failed layer=%d err=%d\n",
+                                      layerIndex, static_cast<int>(readonlyErr));
+                        }
+                        return readonlyErr;
+                    }
+                    auto transposedErr = runDecodeCausalAttentionHD128TransposedKFusedKV(
+                        inputs, outputs, kvLen, attnLen, baseLogical, layerIndex);
+                    if (transposedErr != NO_ERROR && _picOpenCLDebug()) {
+                        MNN_PRINT("PIC OpenCL PA decode transposed_k fused failed layer=%d err=%d\n",
+                                  layerIndex, static_cast<int>(transposedErr));
+                    }
+                    return transposedErr;
+                }
                 if (_decodeGqaFusedKVEnabled()) {
                     auto groupedGqaErr = runDecodeCausalAttentionHD128IdentityFusedKVGQA(
                         inputs, outputs, kvLen, attnLen, baseLogical, layerIndex);
@@ -6833,6 +8769,18 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
             return runDecodeCausalAttention(inputs, outputs, kvLen, attnLen, baseLogical, sparseQuery,
                                             queryRowsAreFull);
         }
+    }
+    if (decodeTransposedKSparse) {
+        auto transposedSparseErr = runDecodeCausalAttentionHD128TransposedKSparse(
+            inputs, outputs, kvLen, attnLen, layerIndex);
+        if (transposedSparseErr == NO_ERROR) {
+            return NO_ERROR;
+        }
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA decode transposed_k sparse failed layer=%d err=%d q=%d kv_len=%d\n",
+                      layerIndex, static_cast<int>(transposedSparseErr), attnLen, kvLen);
+        }
+        return transposedSparseErr;
     }
     if (canUseFastPrefill(mask, baseLogical, attnLen, kvLen, sparseQuery, externalHydrated, &fastMaskKeyLen)) {
         return runFastPrefill(inputs, outputs, kvLen, fastMaskKeyLen);

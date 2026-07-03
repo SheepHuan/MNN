@@ -1248,6 +1248,10 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
         }
     }
     mPicDecodeRepair.pendingRepairLogicalIndices = selectPicDecodeRepairLogicalIndices();
+    if (mConfig->paged_attention()) {
+        auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        paged->pic_decode_repair_tokens_per_step = tokens_per_decode_step;
+    }
     MNN_PRINT("Prepared PIC decode repair token-id sparse decode selector=%s pic_start=%d pic_tokens=%d "
               "budget_per_step=%d attention_layer=%d attention_pool=%d ranked_tokens=%d first_scheduled=%d\n",
               mPicDecodeRepair.selector.c_str(), pic_start, picTokenCount, tokens_per_decode_step,
@@ -1259,6 +1263,10 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
 
 void Llm::clearPicDecodeRepair() {
     mPicDecodeRepair = PicDecodeRepairRuntimeState();
+    if (mConfig->paged_attention()) {
+        auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        paged->pic_decode_repair_tokens_per_step = 0;
+    }
 }
 
 std::vector<int> Llm::selectPicDecodeRepairLogicalIndices() {
@@ -1612,6 +1620,61 @@ void Llm::finishExternalPagedKVRequest() {
     clearPicDecodeRepair();
     clearModuleForwardCaches();
     finishPagedRequestIfNeeded();
+}
+
+bool Llm::preparePagedDecode(int maxNewTokens) {
+    if (!mConfig->paged_attention()) {
+        return true;
+    }
+    if (maxNewTokens < 0) {
+        maxNewTokens = mConfig->max_new_tokens();
+    }
+    if (maxNewTokens <= 0) {
+        return true;
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return true;
+    }
+    beginPagedRequestIfNeeded(0, maxNewTokens);
+    if (paged->logical_length <= 0 && mContext != nullptr) {
+        paged->logical_length = std::max(paged->logical_length, mContext->all_seq_len);
+    }
+    if (paged->logical_length <= 0) {
+        return true;
+    }
+    if (mConfig->backend_type() != "opencl") {
+        return true;
+    }
+    const int64_t startUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
+    if (paged->decode_prepare_callback == nullptr) {
+        std::ostringstream err;
+        err << "OpenCL PagedAttention decode prepare callback is unavailable"
+            << " logical_length=" << paged->logical_length
+            << " request_capacity=" << paged->request_capacity;
+        mLastError = err.str();
+        MNN_ERROR("%s\n", mLastError.c_str());
+        return false;
+    }
+    const bool ok = paged->decode_prepare_callback(paged, maxNewTokens);
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "tokens=" << maxNewTokens
+           << " logical_length=" << paged->logical_length
+           << " request_capacity=" << paged->request_capacity
+           << " ok=" << (ok ? 1 : 0);
+        picRequestProfileLog("prepare_paged_decode", picRequestMonotonicUs() - startUs, os.str());
+    }
+    if (!ok) {
+        std::ostringstream err;
+        err << "OpenCL PagedAttention decode prepare failed"
+            << " logical_length=" << paged->logical_length
+            << " request_capacity=" << paged->request_capacity
+            << " max_new_tokens=" << maxNewTokens;
+        mLastError = err.str();
+        MNN_ERROR("%s\n", mLastError.c_str());
+    }
+    return ok;
 }
 
 int Llm::pagedRequestCapacity(int pendingInputTokens, int maxNewTokens) const {

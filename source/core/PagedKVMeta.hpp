@@ -58,9 +58,12 @@ struct PagedKVExternalSegment {
 };
 
 struct PagedKVMeta : public KVMeta {
+    using DecodePrepareCallback = bool (*)(PagedKVMeta* meta, int maxNewTokens);
+
     bool paged_attention = true;
     bool full_causal_attention_mask = false;
     bool request_active = false;
+    DecodePrepareCallback decode_prepare_callback = nullptr;
     int max_tokens = 0;
     int request_base = 0;
     int request_capacity = 0;
@@ -77,6 +80,7 @@ struct PagedKVMeta : public KVMeta {
     int pic_active_start_layer_idx = 0;
     int pic_active_count = 0;
     std::vector<int> sparse_query_logical_indices;
+    int pic_decode_repair_tokens_per_step = 0;
     bool pic_decode_recompute_active = false;
     int pic_decode_recompute_append_count = 0;
     bool pic_decode_attention_rank_active = false;
@@ -124,6 +128,7 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_repair_tokens_per_step = 0;
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;
@@ -169,6 +174,7 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_repair_tokens_per_step = 0;
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;
@@ -403,6 +409,7 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_repair_tokens_per_step = 0;
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;

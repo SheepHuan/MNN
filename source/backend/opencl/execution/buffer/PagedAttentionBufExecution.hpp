@@ -11,6 +11,7 @@
 #include "backend/opencl/execution/image/CommonExecution.hpp"
 #include "backend/opencl/core/ImagePool.hpp"
 #include "core/PagedKVMeta.hpp"
+#include <cstdint>
 #include <vector>
 
 namespace MNN {
@@ -20,6 +21,7 @@ class PagedAttentionBufExecution : public CommonExecution {
 public:
     struct SharedPagedCache {
         std::shared_ptr<Tensor> key;         // [max_slots, B, H_kv, D]
+        std::shared_ptr<Tensor> decodeKey;   // [B, H_kv, D, max_slots], decode-only transposed K view
         std::shared_ptr<Tensor> value;       // [B, H_kv, max_slots, D]
         std::shared_ptr<Tensor> slotTable;   // [max_slots], int32
         std::shared_ptr<Tensor> sparseQuery; // [max_slots], int32
@@ -30,14 +32,18 @@ public:
         int bytes = 4;
         int slotTableVersion = -1;
         int slotTableLength = 0;
+        int decodeKeyReadyLength = 0;
+        int decodeKeySlotTableVersion = -1;
+        std::vector<int> decodeKeyReadyPrefixSlots;
         std::vector<int> sparseQueryHost;
     };
 
     PagedAttentionBufExecution(const MNN::Op* op, Backend* backend);
-    virtual ~PagedAttentionBufExecution() = default;
+    virtual ~PagedAttentionBufExecution();
     virtual ErrorCode onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) override;
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) override;
+    ErrorCode prepareDecodePrefix(int kvLen);
 
 private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
@@ -49,7 +55,12 @@ private:
     ErrorCode ensureSparseFlashKernel();
     ErrorCode ensureDecodeCausalKernel();
     ErrorCode ensureDecodeCausalKernelHD128Identity();
+    ErrorCode ensureDecodeTransposedKKernel();
     ErrorCode ensureDecodeAttentionRankKernel();
+    ErrorCode ensureDecodeTransposedTemps(int kvLen);
+    ErrorCode ensureDecodeKeyReady(int requiredLen, bool insideDecode = false);
+    ErrorCode appendDecodeKeyValueHD128(const std::vector<Tensor*>& inputs, int baseLogical,
+                                        bool profileDetail, uint64_t* appendUs);
     ErrorCode ensureExternalTemps(size_t keyElements, size_t valueElements);
     ErrorCode ensureCacheBlendScoreTemps(int scoreCount, int indexCount, int stageCandidateCount = 0);
     ErrorCode ensureAdrenoCacheBlendValueImage(int tokenCapacity);
@@ -84,6 +95,28 @@ private:
     ErrorCode runDecodeCausalAttentionHD128IdentityFusedKVGQA(const std::vector<Tensor*>& inputs,
                                                               const std::vector<Tensor*>& outputs, int kvLen,
                                                               int attnLen, int baseLogical, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKFusedKV(const std::vector<Tensor*>& inputs,
+                                                              const std::vector<Tensor*>& outputs, int kvLen,
+                                                              int attnLen, int baseLogical, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKFusedKVRecord(const std::vector<Tensor*>& inputs,
+                                                                    const std::vector<Tensor*>& outputs, int kvLen,
+                                                                    int attnLen, int baseLogical, int layerIndex,
+                                                                    uint32_t lanes,
+                                                                    std::shared_ptr<KernelWrap> kernel);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKAppendReadonly(const std::vector<Tensor*>& inputs,
+                                                                     const std::vector<Tensor*>& outputs,
+                                                                     int kvLen, int attnLen, int baseLogical,
+                                                                     int layerIndex, bool appendCurrent);
+    ErrorCode runDecodeCausalAttentionHD128SplitProfile(const std::vector<Tensor*>& inputs,
+                                                        const std::vector<Tensor*>& outputs, int kvLen,
+                                                        int attnLen, int baseLogical, int layerIndex,
+                                                        bool transposedK);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKAppendReadonlyRecord(
+        const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
+        int baseLogical, int layerIndex, uint32_t lanes, std::shared_ptr<KernelWrap> attentionKernel);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKSparse(const std::vector<Tensor*>& inputs,
+                                                             const std::vector<Tensor*>& outputs, int kvLen,
+                                                             int attnLen, int layerIndex);
     ErrorCode runDecodeCausalAttentionHD128IdentityRecord(const std::vector<Tensor*>& inputs,
                                                           const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
                                                           int baseLogical, int layerIndex, uint32_t lanes,
@@ -139,6 +172,31 @@ private:
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVGQARow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVGQARow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128IdentityFusedKVGQARow128;
+    std::shared_ptr<KernelWrap> mDecodeQKIdentityKernel;
+    std::shared_ptr<KernelWrap> mDecodeKeyTransposeKernel;
+    std::shared_ptr<KernelWrap> mDecodeKeyAppendKernel;
+    std::shared_ptr<KernelWrap> mDecodeKeyAppendSparseKernel;
+    std::shared_ptr<KernelWrap> mDecodeQKTransposedKernel;
+    std::shared_ptr<KernelWrap> mDecodeQKVTransposedKernel;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKReadonlyRow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKReadonlyRow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKReadonlyRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile2Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile2Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile2Row128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile4Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile4Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile4Row128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile8Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile8Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile8Row128;
+    std::shared_ptr<KernelWrap> mDecodeSoftmaxKernel;
     std::shared_ptr<KernelWrap> mDecodeAttentionRankScoreKernelHD128;
     std::shared_ptr<KernelWrap> mZeroKernel;
     std::shared_ptr<Tensor> mTempQ;
@@ -196,6 +254,15 @@ private:
     int mSparseFlashKernelGroupSize = 0;
     int mDecodeCausalKernelGroupSize = 0;
     int mDecodeCausalHD128IdentityKernelGroupSize = 0;
+    int mDecodeTransposedKKernelGroupSize = 0;
+    int mDecodeTransposedTempKvLen = 0;
+    int mLastDecodeKeyRequiredLen = 0;
+    uint64_t mLastDecodeKeyPrepareUs = 0;
+    bool mLastDecodeKeyReadyHit = false;
+    bool mLastDecodeKeyPrepared = false;
+    bool mLastDecodeKeyPrepareInsideDecode = false;
+    bool mLastDecodeKeySlotIdentity = false;
+    bool mLastDecodeKeyPrefixStable = false;
     RecordUpdateInfo mDecodeIdentityRecordUpdateInfo;
     std::vector<RecordUpdateInfo*> mDecodeIdentityRecordUpdateInfos;
     bool mDecodeIdentityRecordValid = false;
@@ -209,6 +276,39 @@ private:
     int mDecodeIdentityRecordBaseLogical = 0;
     int mDecodeIdentityRecordKvLen = 0;
     int mDecodeIdentityRecordMaxSlots = 0;
+    RecordUpdateInfo mDecodeTransposedFusedRecordUpdateInfo;
+    std::vector<RecordUpdateInfo*> mDecodeTransposedFusedRecordUpdateInfos;
+    bool mDecodeTransposedFusedRecordValid = false;
+    uint32_t mDecodeTransposedFusedRecordLanes = 0;
+    uint32_t mDecodeTransposedFusedRecordHeads = 0;
+    int mDecodeTransposedFusedRecordAttnLen = 0;
+    int mDecodeTransposedFusedRecordGroupSize = 0;
+    uint32_t mDecodeTransposedFusedRecordGws0 = 0;
+    uint32_t mDecodeTransposedFusedRecordGws1 = 0;
+    uint32_t mDecodeTransposedFusedRecordGws2 = 0;
+    int mDecodeTransposedFusedRecordQuerySeqLen = 0;
+    int mDecodeTransposedFusedRecordBaseLogical = 0;
+    int mDecodeTransposedFusedRecordKvLen = 0;
+    int mDecodeTransposedFusedRecordMaxSlots = 0;
+    float mDecodeTransposedFusedRecordScale = 1.0f;
+    RecordUpdateInfo mDecodeTransposedAppendRecordUpdateInfo;
+    RecordUpdateInfo mDecodeTransposedReadonlyRecordUpdateInfo;
+    std::vector<RecordUpdateInfo*> mDecodeTransposedAppendReadonlyRecordUpdateInfos;
+    bool mDecodeTransposedAppendReadonlyRecordValid = false;
+    uint32_t mDecodeTransposedAppendReadonlyRecordLanes = 0;
+    uint32_t mDecodeTransposedAppendReadonlyRecordHeads = 0;
+    int mDecodeTransposedAppendReadonlyRecordAttnLen = 0;
+    int mDecodeTransposedAppendReadonlyRecordGroupSize = 0;
+    uint32_t mDecodeTransposedAppendReadonlyRecordAppendGws0 = 0;
+    uint32_t mDecodeTransposedAppendReadonlyRecordAppendGws1 = 0;
+    uint32_t mDecodeTransposedAppendReadonlyRecordGws0 = 0;
+    uint32_t mDecodeTransposedAppendReadonlyRecordGws1 = 0;
+    uint32_t mDecodeTransposedAppendReadonlyRecordGws2 = 0;
+    int mDecodeTransposedAppendReadonlyRecordQuerySeqLen = 0;
+    int mDecodeTransposedAppendReadonlyRecordBaseLogical = 0;
+    int mDecodeTransposedAppendReadonlyRecordKvLen = 0;
+    int mDecodeTransposedAppendReadonlyRecordMaxSlots = 0;
+    float mDecodeTransposedAppendReadonlyRecordScale = 1.0f;
     int mDecodeAttentionRankKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;

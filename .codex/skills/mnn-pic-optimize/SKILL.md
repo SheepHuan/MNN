@@ -171,6 +171,20 @@ OpenCL 先跑通时的保守策略：
 - score layer backend 在 scoring/top-k 后需要把 active logical indices 写到 `outputs[1]`，同时同步到 `PagedKVMeta::sparse_query_logical_indices`，让后续层 PagedAttention 使用真实 logical slot。
 - 后续层输入 hidden 已被图中 gather 成 compact rows，OpenCL sparse fast path 才可以按 compact Q 继续优化。
 
+## Decode 算子优化约束
+
+OpenCL PIC decode 的优化目标是形成统一的新算子实现思路，而不是用按模型、head 数、设备或 q 长度的路由回退把端到端 TPOT 凑到不回退。`old` / identity PagedCache attention 只能作为 baseline 或显式 A/B 对照；生产默认不得自动根据 `llama3.2-3b`、`minicpm5-1b`、`qwen3-4b`、Mali/Adreno、`num_heads/kv_heads` 或单个 q 值切回 old。
+
+允许的收敛手段只有三类：
+
+- 优化新算子实现：例如 q=1 的 fused append+attention、record queue / fixed dispatch、decodeKey 写入合并、lane/local memory、QK/QKV 拆测后针对瓶颈改 kernel。
+- 调整参数或 autotune：例如 lane 32/64/128、q_tile、workgroup、local memory 布局、设备级 tune cache；参数可以按设备或 shape tune，但不能表达成“这个模型走 old、那个模型走 new”。
+- 提供显式实验变体：例如 fused、append+readonly、QK-only、QKV-only、split profile。变体必须用清晰 env 或 benchmark 标签运行并单独报告，不能作为默认自动 fallback。
+
+q=1 和 q>1 可以有不同 kernel 家族，因为 workload 不同：q=1 优先解决固定开销、append+attention 融合和 launch/record queue；q>1 必须做真正 qtile，让一个 workgroup/tile 共享同一段 K load，不能退化成多个 row 独立扫 K。若 `new_attention_only` 赢但端到端输，继续拆 `prepare/append/rank/launch/QK/QKV/V` 并修实现细节；若 qtile 在某设备或模型上回归，继续调 q_tile/lane/local memory 或新增 qtile 变体，而不是自动切回 old。
+
+decode-transposed K 的 prepare 边界是硬约束：prefill/full-reuse 后显式 prepare 历史 K，decode 计时内只允许 append 当前新 token 的 decodeKey。profile 中出现 `decode_prepare_inside_decode=1` 时，该实现直接判为不合格。
+
 ## 关键源码位置
 
 - `transformers/pic_llm/engine/app/pic_server.cpp`

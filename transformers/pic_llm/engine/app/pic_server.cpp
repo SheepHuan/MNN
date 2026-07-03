@@ -2695,6 +2695,12 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             }
         }
         if (maxTokens != 0) {
+            if (!mLlm->preparePagedDecode(maxTokens)) {
+                mLlm->finishExternalPagedKVRequest();
+                error = "Failed to prepare PagedAttention decode state before no-PIC decode" +
+                        llmContextSuffix(mLlm.get());
+                return false;
+            }
             if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
                 auto context = mLlm->getContext();
                 std::fprintf(stderr, "PIC server decode debug branch=no_pic max_tokens=%d status=%d current=%d "
@@ -3091,6 +3097,12 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             plan.metadata["decode_refine_attention_top_m"] = pic.decodeRefine.topM;
         }
         if (maxTokens != 0) {
+            if (!mLlm->preparePagedDecode(maxTokens)) {
+                mLlm->finishExternalPagedKVRequest();
+                error = "Failed to prepare PagedAttention decode state before PIC decode" +
+                        llmContextSuffix(mLlm.get());
+                return false;
+            }
             if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
                 auto context = mLlm->getContext();
                 std::fprintf(stderr, "PIC server decode debug branch=pic max_tokens=%d execution=%s status=%d "
