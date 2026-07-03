@@ -163,18 +163,14 @@ public:
     void clearTextCacheExport();
     bool beginExternalPagedKVRequest();
     bool reserveExternalPagedKVSourceSlots(size_t token_count);
-    bool appendExternalPagedKV(const std::vector<int>& token_ids, const std::vector<MNN::PagedKVExternalSegment>& segments);
-    bool recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids,
-                                  int sparse_start_layer_idx = 0);
-    bool selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
-                                         const std::vector<MNN::PagedKVExternalSegment>& segments,
-                                         int pic_start, int pic_token_count, int score_layer_idx,
-                                         double recompute_ratio, std::vector<int>& selected_local_indices);
     bool prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
                                                const std::vector<MNN::PagedKVExternalSegment>& segments,
                                                int pic_start, int pic_token_count, int score_layer_idx,
                                                double recompute_ratio,
                                                std::vector<int>& selected_local_indices);
+    bool prefillFullReuseExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                         const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                         int pic_start, int pic_token_count);
     bool prefillFixedGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
                                           const std::vector<MNN::PagedKVExternalSegment>& segments,
                                           int pic_start, int pic_token_count, int score_layer_idx,
@@ -250,7 +246,6 @@ protected:
     Express::VARP mTextEmbedsForPle; // Pure text embeddings for PLE projection
     std::shared_ptr<Sampler> mSampler;
     std::shared_ptr<Express::Executor::RuntimeManager> mRuntimeManager, mProcessorRuntimeManager;
-    std::shared_ptr<Express::Executor::RuntimeManager> mCacheBlendScoreRuntimeManager;
     std::shared_ptr<Express::Module> mModule;
     std::shared_ptr<Express::Module> mDecodeModule;
     /**
@@ -261,7 +256,6 @@ protected:
     const int mPrefillKey = 100;
     std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> mModulePool;
     std::map<std::pair<int, bool>, std::shared_ptr<Express::Module>> mDecodeModulePool;
-    std::map<int, std::shared_ptr<Express::Module>> mCacheBlendScoreModulePool;
     const Express::Module* mBaseModule = nullptr;
     Express::VARP inputsEmbeds, attentionMask, positionIds;
     Express::VARP mPicRecomputeBudget;
@@ -296,8 +290,6 @@ private:
     void collectRuntimeGarbage();
     std::shared_ptr<Express::Executor::RuntimeManager> createRuntimeManagerForCurrentConfig();
     std::shared_ptr<Express::Module> cloneModuleWithRuntime(const Express::Module* module);
-    std::shared_ptr<Express::Module> getCacheBlendScoreModule(int scoreLayerIdx);
-    bool runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, int scoreLayerIdx);
     std::vector<Express::VARP> forwardVecWithPicDecodeRepair(const std::vector<int>& inputIds);
     Express::VARP embeddingForPicDecodeRepair(const std::vector<int>& inputIds);
     Express::VARP genDecodeRepairPositionIds(const std::vector<int>& logicalIndices);

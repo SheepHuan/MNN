@@ -34,6 +34,11 @@ bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_orang
 ```
 
 OrangePi OpenCL 正式结果默认需要 warm，并由脚本写回 autotune cache。
+`--frequency-profile max` 会在正式 benchmark 前锁定 CPU policy、Mali GPU
+`/sys/class/devfreq/fb000000.gpu` 和 DDR DMC `/sys/class/devfreq/dmc` 到最高档；
+默认使用 `root@192.168.101.113` 执行 sysfs 写入。如果 root SSH 不可用，需要启用
+passwordless sudo 或设置 `MNN_ORANGEPI_SUDO_PASSWORD`。锁频校验失败时脚本必须直接退出，
+不能把未锁频结果写成 `cpu=max,gpu=max,ddr=max`。
 
 OrangePi 补测不再跑 PIC full-compute / `pic-full-recompute`。Qwen3-8B 在 ctx1536 的 PIC full-compute 曾触发全局 OOM，后续缺口补测只跑 normal baseline、full-reuse、cacheblend 和 epic。
 

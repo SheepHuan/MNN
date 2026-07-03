@@ -132,7 +132,7 @@ Rhino 实测：
 
 2. Rhino 曾经存在旧 tune cache / 旧 program binary 干扰
    - 这会让修复后的候选继续回放旧选择。
-   - PIC 手写 tune key 必须带设备族 namespace。固定 cache 路径不变，但 `paged_score_sparse_family_*`、`paged_sparse_flash_schedule_*`、`paged_sparse_flash_variant_*`、`paged_sparse_qsplit_chunk_*`、`paged_cacheblend_topk_family_*` 这类条目必须区分 `mali` / `adreno`，否则 OrangePi/Mali 与 Rhino/Adreno 会互相继承错误路由。
+   - PIC 手写 tune key 必须带设备族 namespace。固定 cache 路径不变，但 `paged_sparse_flash_schedule_*`、`paged_sparse_flash_variant_*`、`paged_sparse_qsplit_chunk_*`、`paged_cacheblend_topk_family_*` 这类条目必须区分 `mali` / `adreno`，否则 OrangePi/Mali 与 Rhino/Adreno 会互相继承错误路由。score-layer sparse family 现在按设备固定，不再通过 `paged_score_sparse_family_*` 选择。
 
 3. Mali 和 Adreno 的最优点本来就不一样
    - OrangePi 上跑得好的变体，不代表 Adreno 上也会是默认最优。

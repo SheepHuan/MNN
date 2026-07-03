@@ -2797,11 +2797,51 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
             MnnLlmPerfettoSlice prefillSlice("prefill", traceInfo);
             json scoreMetadata = json::object();
             bool graphBoundaryPrefillDone = false;
+            bool fullReusePrefillDone = false;
+            bool nativePicPrefillDone = false;
             const bool graphBoundaryEnabled =
                 jsonBool(modelConfig(), "pic_recompute_budget", false) &&
                 (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v" ||
                  pic.selectionAlgorithm == "epic");
-            if (graphBoundaryEnabled && pic.selectionAlgorithm == "epic") {
+            if (pic.selectionAlgorithm == "full-reuse") {
+                nativeSelectedLocalIndices.clear();
+                mLlm->reset();
+                mLlm->generate_init(&sink, "");
+                stageUs = monotonicUs();
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " prelude_tokens=" << preludeTokenIds.size()
+                       << " pic_tokens=" << pic.tokenIds.size()
+                       << " suffix_tokens=" << suffixTokenIds.size();
+                    picRequestProfileBegin("prefill_full_reuse_external_pagedkv", os.str());
+                }
+                if (!mLlm->prefillFullReuseExternalPagedKV(
+                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
+                        static_cast<int>(pic.tokenIds.size()))) {
+                    mLlm->finishExternalPagedKVRequest();
+                    error = "Native full-reuse hydrate+suffix prefill failed on backend " + runtimeBackend() +
+                            llmContextSuffix(mLlm.get());
+                    return false;
+                }
+                {
+                    std::ostringstream os;
+                    os << "selection_algorithm=" << pic.selectionAlgorithm
+                       << " prelude_tokens=" << preludeTokenIds.size()
+                       << " pic_tokens=" << pic.tokenIds.size()
+                       << " suffix_tokens=" << suffixTokenIds.size();
+                    picRequestProfileLog("prefill_full_reuse_external_pagedkv", monotonicUs() - stageUs, os.str());
+                }
+                fullReusePrefillDone = true;
+                nativePicPrefillDone = true;
+                scoreMetadata = {
+                    {"score_source", "none"},
+                    {"score_kind", "none"},
+                    {"score_pass", "not_required_full_reuse_hydrate_suffix"},
+                    {"graph_boundary", "none_full_reuse_hydrate_suffix"},
+                    {"selected_count", 0},
+                };
+            } else if (graphBoundaryEnabled && pic.selectionAlgorithm == "epic") {
                 const int effectiveScoreLayer =
                     std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
                 const int recompute = picTraceTokens <= 0 || pic.recomputeRatio <= 0.0
@@ -2838,6 +2878,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     picRequestProfileLog("prefill_fixed_graph_external_pagedkv", monotonicUs() - stageUs, os.str());
                 }
                 graphBoundaryPrefillDone = true;
+                nativePicPrefillDone = true;
                 scoreMetadata = {
                     {"score_layer_idx", effectiveScoreLayer},
                     {"score_source", "fixed_pic_head_contiguous_tokens"},
@@ -2879,6 +2920,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     picRequestProfileLog("prefill_cacheblend_graph_external_pagedkv", monotonicUs() - stageUs, os.str());
                 }
                 graphBoundaryPrefillDone = true;
+                nativePicPrefillDone = true;
                 hasNativeSelectedLocalIndices = true;
                 scoreMetadata = {
                     {"score_layer_idx", effectiveScoreLayer},
@@ -2888,48 +2930,6 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                     {"topk_location", "backend_device"},
                     {"host_transfer", "selected_local_indices_only"},
                     {"graph_boundary", "score_layer_pic_score_attention"},
-                    {"selected_count", nativeSelectedLocalIndices.size()},
-                };
-            } else if (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v") {
-                const int effectiveScoreLayer =
-                    std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-                mLlm->reset();
-                std::ostringstream scoreSink;
-                mLlm->generate_init(&scoreSink, "");
-                stageUs = monotonicUs();
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " effective_score_layer=" << effectiveScoreLayer
-                       << " recompute_ratio=" << pic.recomputeRatio
-                       << " prompt_tokens=" << fullPromptTokenIds.size()
-                       << " pic_tokens=" << pic.tokenIds.size();
-                    picRequestProfileBegin("select_cacheblend_external_pagedkv", os.str());
-                }
-                if (!mLlm->selectCacheBlendExternalPagedKV(
-                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
-                        static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
-                        nativeSelectedLocalIndices)) {
-                    error = "Native cacheblend score/top-k failed on backend " + runtimeBackend() +
-                            llmContextSuffix(mLlm.get());
-                    return false;
-                }
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " effective_score_layer=" << effectiveScoreLayer
-                       << " selected_count=" << nativeSelectedLocalIndices.size()
-                       << " recompute_ratio=" << pic.recomputeRatio;
-                    picRequestProfileLog("select_cacheblend_external_pagedkv", monotonicUs() - stageUs, os.str());
-                }
-                hasNativeSelectedLocalIndices = true;
-                scoreMetadata = {
-                    {"score_layer_idx", effectiveScoreLayer},
-                    {"score_source", "request_full_reference_pagedcache_minus_cached_pic_value"},
-                    {"score_kind", "layer_value_delta_mean_abs"},
-                    {"score_pass", "request_full_reference_pagedcache_no_disk_write"},
-                    {"topk_location", "backend_device"},
-                    {"host_transfer", "selected_local_indices_only"},
                     {"selected_count", nativeSelectedLocalIndices.size()},
                 };
             }
@@ -2953,27 +2953,40 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                    << " execution_mode=" << plan.executionMode;
                 picRequestProfileLog("build_execution_plan", monotonicUs() - stageUs, os.str());
             }
-            if (graphBoundaryPrefillDone) {
-                plan.executionMode = pic.selectionAlgorithm == "epic" ? "native-epic-graph-boundary"
-                                                                      : "native-cacheblend-graph-boundary";
+            if (fullReusePrefillDone) {
+                plan.executionMode = "native-full-reuse-hydrate-suffix";
+                plan.sparseRecompute = false;
+                plan.recomputeTokenCount = 0;
+                plan.metadata["native_sparse_recompute"] = false;
+                plan.metadata["score_pass"] = "not_required_full_reuse_hydrate_suffix";
+                plan.metadata["graph_boundary"] = "none_full_reuse_hydrate_suffix";
+                plan.metadata["graph_level_boundary"] = false;
+                plan.metadata["full_reuse_dataflow"] =
+                    "persistent_pic_cache_source_to_current_request_pagedcache_then_suffix_prefill";
+            } else if (graphBoundaryPrefillDone) {
+                if (pic.selectionAlgorithm == "epic") {
+                    plan.executionMode = "native-epic-graph-boundary";
+                } else {
+                    plan.executionMode = "native-cacheblend-graph-boundary";
+                }
                 plan.sparseRecompute = false;
                 plan.metadata["native_sparse_recompute_scope"] = "exported_graph_score_layer_boundary";
                 plan.metadata["graph_level_boundary"] = true;
             }
             traceInfo.executionMode = plan.executionMode;
             traceInfo.recomputeBudgetTokens = plan.recomputeTokenCount;
-            if (!graphBoundaryPrefillDone && plan.sparseRecompute && plan.scoreLayerIdx > 0) {
+            if (!nativePicPrefillDone && plan.sparseRecompute && plan.scoreLayerIdx > 0) {
                 error = "PIC sparse prefill score_layer_idx=" + std::to_string(plan.scoreLayerIdx) +
                         " requires a graph-boundary PIC model with pic_recompute_budget; "
-                        "legacy forwardVec(selected_tokens) sparse recompute from layer 0 is disabled";
+                        "legacy forwardVec(selected_tokens) sparse recompute from layer 0 has been removed";
                 return false;
             }
 
-            if (!graphBoundaryPrefillDone) {
+            if (!nativePicPrefillDone) {
                 mLlm->reset();
                 mLlm->generate_init(&sink, "");
             }
-            if (!graphBoundaryPrefillDone && plan.fullCompute) {
+            if (!nativePicPrefillDone && plan.fullCompute) {
                 picRequestProfileBegin("prefill_full_compute_pic_chat");
                 if (!mLlm->prefill(fullPromptTokenIds)) {
                     mLlm->finishExternalPagedKVRequest();
@@ -2987,79 +3000,12 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                                  context != nullptr ? context->all_seq_len : -1);
                     std::fflush(stderr);
                 }
-            } else if (!graphBoundaryPrefillDone) {
-                std::vector<int> firstPrefill;
-                firstPrefill.reserve(preludeTokenIds.size() + plan.prefillPicTokenIds.size());
-                firstPrefill.insert(firstPrefill.end(), preludeTokenIds.begin(), preludeTokenIds.end());
-                firstPrefill.insert(firstPrefill.end(), plan.prefillPicTokenIds.begin(),
-                                    plan.prefillPicTokenIds.end());
-                if (!firstPrefill.empty()) {
-                    picRequestProfileBegin("prefill_pic_prefix");
-                    if (!mLlm->prefill(firstPrefill)) {
-                        mLlm->finishExternalPagedKVRequest();
-                        error = "Failed to prefill prelude/PIC prefix tokens" + llmContextSuffix(mLlm.get());
-                        return false;
-                    }
-                    if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-                        auto context = mLlm->getContext();
-                        std::fprintf(stderr, "PIC server prefill debug step=first_prefill status=%d all_seq=%d "
-                                             "tokens=%d\n",
-                                     context != nullptr ? static_cast<int>(context->status) : -999,
-                                     context != nullptr ? context->all_seq_len : -1,
-                                     static_cast<int>(firstPrefill.size()));
-                        std::fflush(stderr);
-                    }
-                } else {
-                    mLlm->beginExternalPagedKVRequest();
-                }
-                if (!plan.externalTokenIds.empty()) {
-                    picRequestProfileBegin("append_external_paged_kv");
-                    if (!mLlm->appendExternalPagedKV(plan.externalTokenIds, plan.externalSegments)) {
-                        mLlm->finishExternalPagedKVRequest();
-                        error = "Failed to bind persistent PIC cache source into current request PagedCache" +
-                                llmContextSuffix(mLlm.get());
-                        return false;
-                    }
-                }
-                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-                    auto context = mLlm->getContext();
-                    std::fprintf(stderr, "PIC server prefill debug step=bind_pic_source status=%d all_seq=%d "
-                                         "tokens=%d\n",
-                                 context != nullptr ? static_cast<int>(context->status) : -999,
-                                 context != nullptr ? context->all_seq_len : -1,
-                                 static_cast<int>(plan.externalTokenIds.size()));
-                    std::fflush(stderr);
-                }
-                if (plan.sparseRecompute) {
-                    picRequestProfileBegin("recompute_external_paged_kv");
-                    if (!mLlm->recomputeExternalPagedKV(plan.sparseLogicalIndices, plan.sparseTokenIds,
-                                                        plan.scoreLayerIdx)) {
-                        mLlm->finishExternalPagedKVRequest();
-                        error = "Failed to sparse-recompute selected PIC KV tokens" + llmContextSuffix(mLlm.get());
-                        return false;
-                    }
-                }
-                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr && plan.sparseRecompute) {
-                    auto context = mLlm->getContext();
-                    std::fprintf(stderr, "PIC server prefill debug step=sparse_recompute status=%d all_seq=%d\n",
-                                 context != nullptr ? static_cast<int>(context->status) : -999,
-                                 context != nullptr ? context->all_seq_len : -1);
-                    std::fflush(stderr);
-                }
-                picRequestProfileBegin("prefill_pic_suffix");
-                if (!mLlm->prefill(suffixTokenIds)) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to prefill PIC prompt suffix tokens" + llmContextSuffix(mLlm.get());
-                    return false;
-                }
-                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-                    auto context = mLlm->getContext();
-                    std::fprintf(stderr, "PIC server prefill debug step=suffix status=%d all_seq=%d tokens=%d\n",
-                                 context != nullptr ? static_cast<int>(context->status) : -999,
-                                 context != nullptr ? context->all_seq_len : -1,
-                                 static_cast<int>(suffixTokenIds.size()));
-                    std::fflush(stderr);
-                }
+            } else if (!nativePicPrefillDone) {
+                mLlm->finishExternalPagedKVRequest();
+                error = "PIC " + pic.selectionAlgorithm +
+                        " requires a graph-boundary PIC model with pic_recompute_budget; "
+                        "legacy split prefix/append/suffix prefill has been removed";
+                return false;
             }
         }
         if (pic.decodeRefine.enabled && maxTokens != 0) {

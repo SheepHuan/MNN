@@ -25,7 +25,7 @@ __kernel void copy_paged_kv(
     __global const FLOAT* value,
     __global FLOAT* key_cache,
     __global FLOAT* value_cache,
-    __global const int* slot_table,
+
     __global const int* sparse_query,
     const int batch,
     const int new_kv_len,
@@ -50,7 +50,7 @@ __kernel void copy_paged_kv(
     if (logical < 0) {
         return;
     }
-    int slot = slot_table[logical];
+    int slot = logical;
     if (slot < 0 || slot >= max_slots || l >= new_kv_len) {
         return;
     }
@@ -66,7 +66,7 @@ __kernel void pack_paged_kv_prefill(GLOBAL_SIZE_3_DIMS
     __global const FLOAT* value_cache,    // [batch, kv_heads, max_slots, head_dim]
     __global FLOAT* packed_key,           // [batch * kv_heads, head_dim_pack, kv_len_pack]
     __global FLOAT* packed_value,         // [batch * kv_heads, kv_len_pack, head_dim_pack]
-    __global const int* slot_table,
+
     const int batch,
     const int kv_len,
     const int kv_heads,
@@ -94,10 +94,10 @@ __kernel void pack_paged_kv_prefill(GLOBAL_SIZE_3_DIMS
     FLOAT4 v3 = (FLOAT4)0;
 
     if (dim4 < head_dim) {
-        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
-        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
-        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
-        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        int slot0 = logical4 < kv_len ? logical4 : -1;
+        int slot1 = logical4 + 1 < kv_len ? logical4 + 1 : -1;
+        int slot2 = logical4 + 2 < kv_len ? logical4 + 2 : -1;
+        int slot3 = logical4 + 3 < kv_len ? logical4 + 3 : -1;
         if (slot0 >= 0 && slot0 < max_slots) {
             k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
             v0 = vload4(0, value_cache + ((b * kv_heads + h) * max_slots + slot0) * head_dim + dim4);
@@ -190,7 +190,7 @@ __kernel void pack_paged_kv_prefill_gemm(GLOBAL_SIZE_3_DIMS
     __global const FLOAT* value_cache,    // [batch, kv_heads, max_slots, head_dim]
     __global FLOAT* packed_key,           // [batch * kv_heads, head_dim_pack, kv_len_pack]
     __global FLOAT* packed_value,         // [batch * kv_heads, kv_len_pack, head_dim_pack]
-    __global const int* slot_table,
+
     const int batch,
     const int kv_len,
     const int kv_heads,
@@ -217,10 +217,10 @@ __kernel void pack_paged_kv_prefill_gemm(GLOBAL_SIZE_3_DIMS
     FLOAT4 v3 = (FLOAT4)0;
 
     if (dim4 < head_dim) {
-        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
-        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
-        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
-        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        int slot0 = logical4 < kv_len ? logical4 : -1;
+        int slot1 = logical4 + 1 < kv_len ? logical4 + 1 : -1;
+        int slot2 = logical4 + 2 < kv_len ? logical4 + 2 : -1;
+        int slot3 = logical4 + 3 < kv_len ? logical4 + 3 : -1;
         if (slot0 >= 0 && slot0 < max_slots) {
             k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
             v0 = vload4(0, value_cache + ((b * kv_heads + h) * max_slots + slot0) * head_dim + dim4);
@@ -267,7 +267,7 @@ __kernel void pack_paged_kv_prefill_gemm(GLOBAL_SIZE_3_DIMS
 __kernel void pack_paged_k_prefill(GLOBAL_SIZE_3_DIMS
     __global const FLOAT* key_cache,      // [max_slots, batch, kv_heads, head_dim]
     __global FLOAT* packed_key,           // [batch * kv_heads, head_dim_pack, kv_len_pack]
-    __global const int* slot_table,
+
     const int batch,
     const int kv_len,
     const int kv_heads,
@@ -291,10 +291,10 @@ __kernel void pack_paged_k_prefill(GLOBAL_SIZE_3_DIMS
     FLOAT4 k3 = (FLOAT4)0;
 
     if (dim4 < head_dim) {
-        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
-        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
-        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
-        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        int slot0 = logical4 < kv_len ? logical4 : -1;
+        int slot1 = logical4 + 1 < kv_len ? logical4 + 1 : -1;
+        int slot2 = logical4 + 2 < kv_len ? logical4 + 2 : -1;
+        int slot3 = logical4 + 3 < kv_len ? logical4 + 3 : -1;
         if (slot0 >= 0 && slot0 < max_slots) {
             k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
         }
@@ -328,7 +328,7 @@ __kernel void pack_paged_k_prefill(GLOBAL_SIZE_3_DIMS
 __kernel void pack_paged_k_prefill_to_image(GLOBAL_SIZE_3_DIMS
     __global const FLOAT* key_cache,      // [max_slots, batch, kv_heads, head_dim]
     __write_only image2d_t packed_key,    // linearized [batch * kv_heads, head_dim_pack, kv_len_pack]
-    __global const int* slot_table,
+
     const int batch,
     const int kv_len,
     const int kv_heads,
@@ -353,10 +353,10 @@ __kernel void pack_paged_k_prefill_to_image(GLOBAL_SIZE_3_DIMS
     FLOAT4 k3 = (FLOAT4)0;
 
     if (dim4 < head_dim) {
-        int slot0 = logical4 < kv_len ? slot_table[logical4] : -1;
-        int slot1 = logical4 + 1 < kv_len ? slot_table[logical4 + 1] : -1;
-        int slot2 = logical4 + 2 < kv_len ? slot_table[logical4 + 2] : -1;
-        int slot3 = logical4 + 3 < kv_len ? slot_table[logical4 + 3] : -1;
+        int slot0 = logical4 < kv_len ? logical4 : -1;
+        int slot1 = logical4 + 1 < kv_len ? logical4 + 1 : -1;
+        int slot2 = logical4 + 2 < kv_len ? logical4 + 2 : -1;
+        int slot3 = logical4 + 3 < kv_len ? logical4 + 3 : -1;
         if (slot0 >= 0 && slot0 < max_slots) {
             k0 = vload4(0, key_cache + ((slot0 * batch + b) * kv_heads + h) * head_dim + dim4);
         }
@@ -425,7 +425,7 @@ __kernel void pic_page_attention_hydrate_kv(
     __global const FLOAT* source_value,    // [batch, kv_heads, token_count, head_dim]
     __global FLOAT* key_cache,             // [max_slots, batch, kv_heads, head_dim]
     __global FLOAT* value_cache,           // [batch, kv_heads, max_slots, head_dim]
-    __global const int* slot_table,
+
     const int batch,
     const int kv_heads,
     const int head_dim,
@@ -460,7 +460,7 @@ __kernel void pic_page_attention_hydrate_kv(
         return;
     }
     int logical = logical_start + local_index;
-    int slot = slot_table[logical];
+    int slot = logical;
     if (slot < 0 || slot >= max_slots) {
         return;
     }
@@ -511,10 +511,91 @@ __kernel void pic_page_attention_hydrate_kv(
     }
 }
 
+__kernel void pic_page_attention_hydrate_kv_inplace(
+    __global FLOAT* key_cache,             // [max_slots, batch, kv_heads, head_dim]
+    __global FLOAT* value_cache,           // [batch, kv_heads, max_slots, head_dim]
+
+    const int batch,
+    const int kv_heads,
+    const int head_dim,
+    const int max_slots,
+    const int logical_start,
+    const int token_count,
+    const int key_source_slot_start,
+    const int value_source_start,
+    const int value_source_stride,
+    const int hydrate_value,
+    const int rope_dim_in,
+    const float rope_theta,
+    const int rope_type_llama3,
+    const float rope_scaling_factor,
+    const float rope_scaling_low_freq_factor,
+    const float rope_scaling_high_freq_factor,
+    const int rope_scaling_original_max_position_embeddings,
+    const int max_position_embeddings,
+    const float rope_attention_scaling,
+    const int total) {
+    int index = get_global_id(0);
+    if (index >= total) {
+        return;
+    }
+    int d = index % head_dim;
+    int t = index / head_dim;
+    int h = t % kv_heads;
+    t = t / kv_heads;
+    int b = t % batch;
+    int local_index = t / batch;
+    if (local_index >= token_count) {
+        return;
+    }
+    int logical = logical_start + local_index;
+    int slot = logical;
+    int source_slot = key_source_slot_start + local_index;
+    if (slot < 0 || slot >= max_slots || source_slot < 0 || source_slot >= max_slots) {
+        return;
+    }
+    int key_src_base = ((source_slot * batch + b) * kv_heads + h) * head_dim;
+    int key_dst_base = ((slot * batch + b) * kv_heads + h) * head_dim;
+    int value_source_token = value_source_start + local_index;
+    int value_dst = ((b * kv_heads + h) * max_slots + slot) * head_dim + d;
+    int rope_dim = min(rope_dim_in > 0 ? rope_dim_in : head_dim, head_dim);
+    rope_dim = (rope_dim / 2) * 2;
+    int rope_half = rope_dim / 2;
+    if (d < rope_half) {
+        int pair = d;
+        float inv_freq = paged_rope_inv_freq(
+            rope_theta > 0.0f ? rope_theta : 10000.0f,
+            rope_type_llama3,
+            max(rope_scaling_factor, 1.0f),
+            max(rope_scaling_low_freq_factor, 1.0e-6f),
+            max(rope_scaling_high_freq_factor, 1.0e-6f),
+            rope_scaling_original_max_position_embeddings > 0 ? rope_scaling_original_max_position_embeddings
+                                                              : max_position_embeddings,
+            pair,
+            rope_dim);
+        float angle = (float)logical * inv_freq;
+        float c = cos(angle);
+        float s = sin(angle);
+        float x0 = (float)key_cache[key_src_base + pair];
+        float x1 = (float)key_cache[key_src_base + pair + rope_half];
+        key_cache[key_dst_base + pair] = (FLOAT)((x0 * c - x1 * s) * rope_attention_scaling);
+        key_cache[key_dst_base + pair + rope_half] = (FLOAT)((x1 * c + x0 * s) * rope_attention_scaling);
+    } else if (d >= rope_dim) {
+        key_cache[key_dst_base + d] = key_cache[key_src_base + d];
+    }
+    if (hydrate_value != 0) {
+        if (value_source_token < 0 || value_source_token >= value_source_stride) {
+            return;
+        }
+        int value_src = ((b * kv_heads + h) * value_source_stride + value_source_token) * head_dim + d;
+        value_cache[value_dst] = value_cache[value_src];
+    }
+}
+
 __kernel void export_canonical_paged_key(
     __global const FLOAT* key_cache, // [max_slots, batch, kv_heads, head_dim]
     __global FLOAT* key_out,         // [kv_len, batch, kv_heads, head_dim]
-    __global const int* slot_table,
+
     const int batch,
     const int kv_len,
     const int kv_heads,
@@ -543,7 +624,7 @@ __kernel void export_canonical_paged_key(
     if (logical >= kv_len) {
         return;
     }
-    int slot = slot_table[logical];
+    int slot = logical;
     if (slot < 0 || slot >= max_slots) {
         return;
     }
@@ -604,7 +685,7 @@ inline FLOAT4 paged_attention_read_linear4_image(__read_only image2d_t image,
 __kernel void pic_cacheblend_value_score(
     __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
     __global const FLOAT* cached_value_cache,    // [batch, kv_heads, cached_max_slots, head_dim]
-    __global const int* slot_table,
+
     __global float* scores,
     const int batch,
     const int kv_heads,
@@ -624,7 +705,7 @@ __kernel void pic_cacheblend_value_score(
         scores[score_offset + token_local] = -3.4028234663852886e+38f;
         return;
     }
-    int slot = slot_table[logical];
+    int slot = logical;
     int cached_slot = cached_slot_start + token_local;
     if (slot < 0 || slot >= max_slots || cached_slot < 0 || cached_slot >= cached_max_slots) {
         scores[score_offset + token_local] = -3.4028234663852886e+38f;
@@ -648,7 +729,7 @@ __kernel void pic_cacheblend_value_score(
 __kernel void pic_cacheblend_value_score_cached_image(
     __global const FLOAT* reference_value_cache, // [batch, kv_heads, max_slots, head_dim]
     __read_only image2d_t cached_value_image,    // linearized [batch * kv_heads, cached_token_stride, head_dim]
-    __global const int* slot_table,
+
     __global float* scores,
     const int batch,
     const int kv_heads,
@@ -668,7 +749,7 @@ __kernel void pic_cacheblend_value_score_cached_image(
         scores[score_offset + token_local] = -3.4028234663852886e+38f;
         return;
     }
-    int slot = slot_table[logical];
+    int slot = logical;
     if (slot < 0 || slot >= max_slots || cached_token_stride <= 0 || cached_image_width <= 0) {
         scores[score_offset + token_local] = -3.4028234663852886e+38f;
         return;
@@ -944,7 +1025,7 @@ __kernel void paged_attention_row(
     __global const FLOAT* value_cache,
     __global FLOAT* output,
     __global const FLOAT* mask,
-    __global const int* slot_table,
+
     __global const int* sparse_query,
     const int mask_elements,
     const int batch,
@@ -980,7 +1061,7 @@ __kernel void paged_attention_row(
 
     float max_score = -3.4028234663852886e+38f;
     for (int k = 0; k < valid_len; ++k) {
-        int slot = slot_table[k];
+        int slot = k;
         if (slot < 0 || slot >= max_slots) {
             continue;
         }
@@ -1010,7 +1091,7 @@ __kernel void paged_attention_row(
     }
     float sum = 0.0f;
     for (int k = 0; k < valid_len; ++k) {
-        int slot = slot_table[k];
+        int slot = k;
         if (slot < 0 || slot >= max_slots) {
             continue;
         }
@@ -1050,7 +1131,7 @@ __kernel void paged_attention(
     __global const FLOAT* value_cache,
     __global FLOAT* output,
     __global const FLOAT* mask,
-    __global const int* slot_table,
+
     __global const int* sparse_query,
     const int mask_elements,
     const int batch,
@@ -1089,7 +1170,7 @@ __kernel void paged_attention(
 
     float max_score = -3.4028234663852886e+38f;
     for (int k = 0; k < valid_len; ++k) {
-        int slot = slot_table[k];
+        int slot = k;
         float score = 0.0f;
         for (int kd = 0; kd < head_dim; ++kd) {
             int q_offset = ((b * query_len + q_row) * num_heads + h) * head_dim + kd;
@@ -1113,7 +1194,7 @@ __kernel void paged_attention(
     float sum = 0.0f;
     float acc = 0.0f;
     for (int k = 0; k < valid_len; ++k) {
-        int slot = slot_table[k];
+        int slot = k;
         float score = 0.0f;
         for (int kd = 0; kd < head_dim; ++kd) {
             int q_offset = ((b * query_len + q_row) * num_heads + h) * head_dim + kd;

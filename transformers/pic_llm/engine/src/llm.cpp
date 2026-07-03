@@ -389,55 +389,6 @@ static bool checkFile(const std::string& path, const char* name) {
     return true;
 }
 
-static std::string findPagedAttentionOutputName(const std::string& modelPath, int layerIndex) {
-    if (layerIndex < 0) {
-        return "";
-    }
-    std::ifstream input(modelPath, std::ios::binary | std::ios::ate);
-    if (!input.is_open()) {
-        MNN_ERROR("Failed to open MNN model for cacheblend score-layer scan: %s\n", modelPath.c_str());
-        return "";
-    }
-    auto fileSize = input.tellg();
-    if (fileSize <= 0) {
-        return "";
-    }
-    std::vector<char> buffer(static_cast<size_t>(fileSize));
-    input.seekg(0, std::ios::beg);
-    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    if (!input.good()) {
-        return "";
-    }
-    auto net = flatbuffers::GetRoot<MNN::Net>(buffer.data());
-    if (net == nullptr || net->oplists() == nullptr || net->tensorName() == nullptr) {
-        return "";
-    }
-    auto ops = net->oplists();
-    auto tensorNames = net->tensorName();
-    for (int i = 0; i < ops->size(); ++i) {
-        auto op = ops->GetAs<MNN::Op>(i);
-        if (op == nullptr ||
-            (op->type() != MNN::OpType_PagedAttention && op->type() != MNN::OpType_PicScoreAttention)) {
-            continue;
-        }
-        auto param = op->main_as_AttentionParam();
-        if (param == nullptr || param->layer_index() != layerIndex) {
-            continue;
-        }
-        auto outputs = op->outputIndexes();
-        if (outputs == nullptr || outputs->size() <= 0) {
-            return "";
-        }
-        int outputIndex = outputs->Get(0);
-        if (outputIndex < 0 || outputIndex >= tensorNames->size()) {
-            return "";
-        }
-        auto name = tensorNames->GetAsString(outputIndex);
-        return name == nullptr ? "" : name->str();
-    }
-    return "";
-}
-
 bool Llm::load() {
     // check required files before loading
     std::string tokenizer_path = mConfig->tokenizer_file();
@@ -711,9 +662,6 @@ void Llm::updateRuntimeCache() {
     if (mRuntimeManager != nullptr) {
         mRuntimeManager->updateCache();
     }
-    if (mCacheBlendScoreRuntimeManager != nullptr) {
-        mCacheBlendScoreRuntimeManager->updateCache();
-    }
 }
 
 void Llm::switchMode(Llm::Stage stage) {
@@ -752,271 +700,6 @@ bool Llm::reserveExternalPagedKVSourceSlots(size_t token_count) {
         paged->beginRequest(mConfig->paged_kv_max_tokens());
     }
     return paged->reserveExternalSourceSlots(token_count);
-}
-
-bool Llm::appendExternalPagedKV(const std::vector<int>& token_ids,
-                                const std::vector<MNN::PagedKVExternalSegment>& segments) {
-    if (!mConfig->paged_attention()) {
-        MNN_ERROR("Persistent PIC cache source binding requires paged_attention=true\n");
-        return false;
-    }
-    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-    if (paged == nullptr) {
-        return false;
-    }
-    if (!paged->request_active) {
-        paged->beginRequest(mConfig->paged_kv_max_tokens());
-    }
-    size_t segmentTokens = 0;
-    for (const auto& segment : segments) {
-        segmentTokens += segment.tokenCount;
-    }
-    if (segmentTokens != token_ids.size()) {
-        MNN_ERROR("Persistent PIC cache source token mismatch, token_ids=%d segment_tokens=%d\n",
-                  static_cast<int>(token_ids.size()), static_cast<int>(segmentTokens));
-        return false;
-    }
-    if (!paged->appendExternalSegments(segments, token_ids.size())) {
-        MNN_ERROR("Persistent PIC cache source exceeds request PagedCache capacity, current=%d add=%d capacity=%d\n",
-                  paged->logical_length, static_cast<int>(token_ids.size()), paged->request_capacity);
-        return false;
-    }
-    mContext->all_seq_len += static_cast<int>(token_ids.size());
-    mContext->history_tokens.insert(mContext->history_tokens.end(), token_ids.begin(), token_ids.end());
-    return true;
-}
-
-bool Llm::recomputeExternalPagedKV(const std::vector<int>& logical_indices, const std::vector<int>& token_ids,
-                                   int sparse_start_layer_idx) {
-    if (!mConfig->paged_attention()) {
-        MNN_ERROR("Sparse PIC recompute requires paged_attention=true\n");
-        return false;
-    }
-    if (logical_indices.empty()) {
-        return true;
-    }
-    if (logical_indices.size() != token_ids.size()) {
-        MNN_ERROR("Sparse PIC recompute mismatch, logical_indices=%d token_ids=%d\n",
-                  static_cast<int>(logical_indices.size()), static_cast<int>(token_ids.size()));
-        return false;
-    }
-    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-    if (paged == nullptr || !paged->beginSparseQuery(logical_indices, sparse_start_layer_idx)) {
-        MNN_ERROR("Sparse PIC recompute failed to bind logical indices\n");
-        return false;
-    }
-    auto oldStatus = mContext->status;
-    auto outputs = forwardVec(token_ids);
-    paged->finishSparseQuery();
-    if (outputs.empty()) {
-        return false;
-    }
-    if (oldStatus == LlmStatus::RUNNING && mContext->status != LlmStatus::INTERNAL_ERROR &&
-        mContext->status != LlmStatus::TIMEOUT && mContext->status != LlmStatus::USER_CANCEL) {
-        mContext->status = oldStatus;
-    }
-    return true;
-}
-
-std::shared_ptr<Module> Llm::getCacheBlendScoreModule(int scoreLayerIdx) {
-    auto iter = mCacheBlendScoreModulePool.find(scoreLayerIdx);
-    if (iter != mCacheBlendScoreModulePool.end()) {
-        return iter->second;
-    }
-    auto scoreOutputName = findPagedAttentionOutputName(mConfig->llm_model(), scoreLayerIdx);
-    if (scoreOutputName.empty()) {
-        MNN_ERROR("Failed to find PagedAttention output for cacheblend score layer %d\n", scoreLayerIdx);
-        return nullptr;
-    }
-    Module::Config moduleConfig;
-    if (mConfig->backend_type() == "opencl" || mConfig->backend_type() == "vulkan" ||
-        mConfig->backend_type() == "npu") {
-        moduleConfig.shapeMutable = false;
-    } else {
-        moduleConfig.shapeMutable = true;
-    }
-    moduleConfig.rearrange = true;
-    if (mBaseModule != nullptr) {
-        moduleConfig.base = mBaseModule;
-    }
-    std::vector<std::string> inputNames {"input_ids", "attention_mask", "position_ids", "logits_index"};
-    if (mConfig->has_pic_recompute_budget()) {
-        inputNames.emplace_back("pic_recompute_budget");
-    }
-    if (mConfig->has_deepstack()) {
-        inputNames.emplace_back("deepstack_embeds");
-    }
-    if (mConfig->has_ple()) {
-        inputNames.emplace_back("ple_embeddings");
-    }
-    auto runtimeManager = mRuntimeManager;
-    if (mConfig->backend_type() == "opencl") {
-        if (mCacheBlendScoreRuntimeManager == nullptr) {
-            mCacheBlendScoreRuntimeManager = createRuntimeManagerForCurrentConfig();
-            if (mCacheBlendScoreRuntimeManager == nullptr) {
-                MNN_ERROR("Failed to create isolated OpenCL runtime for cacheblend score module\n");
-                return nullptr;
-            }
-            MNN_PRINT("OpenCL cacheblend score-layer module uses an isolated runtime manager\n");
-        }
-        runtimeManager = mCacheBlendScoreRuntimeManager;
-        runtimeManager->setHintPtr(Interpreter::KVCACHE_INFO, mMeta.get());
-    }
-    runtimeManager->setExternalFile(mConfig->llm_weight());
-    std::shared_ptr<Module> module(Module::load(inputNames, {scoreOutputName}, mConfig->llm_model().c_str(),
-                                                runtimeManager, &moduleConfig));
-    runtimeManager->setExternalFile("");
-    if (module == nullptr) {
-        MNN_ERROR("Failed to load cacheblend score-layer module for layer %d output %s\n",
-                  scoreLayerIdx, scoreOutputName.c_str());
-        return nullptr;
-    }
-    MNN_PRINT("Loaded cacheblend score-layer module layer=%d output=%s\n", scoreLayerIdx, scoreOutputName.c_str());
-    mCacheBlendScoreModulePool[scoreLayerIdx] = module;
-    return module;
-}
-
-bool Llm::runCacheBlendScorePrefill(const std::vector<int>& fullPromptTokenIds, int scoreLayerIdx) {
-    if (fullPromptTokenIds.empty()) {
-        return false;
-    }
-    MNN::Express::ExecutorScope s(mExecutor);
-    auto scoreModule = getCacheBlendScoreModule(scoreLayerIdx);
-    if (scoreModule == nullptr) {
-        return false;
-    }
-    scoreModule->clearCache();
-    auto hiddenStates = embedding(fullPromptTokenIds);
-    if (hiddenStates == nullptr) {
-        return false;
-    }
-    int seqLen = hiddenStates->getInfo()->dim[mSeqLenIndex];
-    if (seqLen <= 0) {
-        return false;
-    }
-    mMeta->add = seqLen;
-    auto attentionMask = gen_attention_mask(seqLen);
-    auto positionIds = gen_position_ids(seqLen);
-    mGenerateParam->input_embeds = nullptr;
-    mGenerateParam->outputs.clear();
-    mGenerateParam->validLogitSize = 0;
-    mGenerateParam->validLogitStart = 0;
-    Express::VARPS extraArgs;
-    if (mPleInput.get()) {
-        extraArgs.push_back(mPleInput);
-    }
-    std::vector<Express::VARP> inputs {hiddenStates, attentionMask, positionIds, logitsLastIdx};
-    auto picBudget = _picRecomputeBudgetVar(mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get()) : nullptr, seqLen,
-                                            mConfig->has_pic_recompute_budget());
-    if (picBudget.get() != nullptr) {
-        inputs.emplace_back(picBudget);
-    }
-    inputs.insert(inputs.end(), extraArgs.begin(), extraArgs.end());
-    auto outputs = scoreModule->onForward(inputs);
-    if (outputs.empty() || outputs[0] == nullptr) {
-        mContext->status = LlmStatus::INTERNAL_ERROR;
-        return false;
-    }
-    // Force the truncated graph to execute so the target PagedAttention layer can
-    // run its backend-side delta scoring and top-k selection.
-    if (outputs[0]->readMap<float>() == nullptr) {
-        mContext->status = LlmStatus::INTERNAL_ERROR;
-        return false;
-    }
-    if (mConfig->paged_attention()) {
-        static_cast<PagedKVMeta*>(mMeta.get())->syncPaged();
-    } else {
-        mMeta->sync();
-    }
-    updateContext(seqLen, 0);
-    if (mConfig->backend_type() == "opencl") {
-        outputs.clear();
-        hiddenStates = nullptr;
-        attentionMask = nullptr;
-        positionIds = nullptr;
-        this->inputsEmbeds = nullptr;
-        this->attentionMask = nullptr;
-        this->positionIds = nullptr;
-        this->mPicRecomputeBudget = nullptr;
-        this->mPleInput = nullptr;
-        this->mTextEmbedsForPle = nullptr;
-        MNN::Express::ExecutorScope::Current()->gc(Executor::PART);
-    }
-    return true;
-}
-
-bool Llm::selectCacheBlendExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
-                                          const std::vector<MNN::PagedKVExternalSegment>& segments,
-                                          int pic_start, int pic_token_count, int score_layer_idx,
-                                          double recompute_ratio, std::vector<int>& selected_local_indices) {
-    const int64_t totalStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
-    selected_local_indices.clear();
-    if (!mConfig->paged_attention()) {
-        MNN_ERROR("Native cacheblend scoring requires paged_attention=true\n");
-        return false;
-    }
-    if (pic_start < 0 || pic_token_count < 0 || score_layer_idx < 0 ||
-        pic_start + pic_token_count > static_cast<int>(full_prompt_token_ids.size())) {
-        return false;
-    }
-    int topK = 0;
-    if (pic_token_count > 0 && recompute_ratio > 0.0) {
-        topK = std::min(pic_token_count,
-                        std::max(1, static_cast<int>(std::ceil(pic_token_count * recompute_ratio))));
-    }
-    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-    if (paged == nullptr) {
-        return false;
-    }
-    bool startedPagedRequest = beginPagedRequestIfNeeded();
-    if (!paged->beginCacheBlendScoring(pic_start, pic_token_count, score_layer_idx, topK, segments)) {
-        if (startedPagedRequest) {
-            finishPagedRequestIfNeeded();
-        }
-        return false;
-    }
-    auto oldStatus = mContext->status;
-    const int64_t scorePrefillStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
-    if (!runCacheBlendScorePrefill(full_prompt_token_ids, score_layer_idx)) {
-        paged->finishCacheBlendScoring();
-        if (startedPagedRequest) {
-            finishPagedRequestIfNeeded();
-        }
-        if (oldStatus == LlmStatus::RUNNING && mContext->status != LlmStatus::TIMEOUT &&
-            mContext->status != LlmStatus::USER_CANCEL) {
-            mContext->status = oldStatus;
-        }
-        return false;
-    }
-    if (picRequestProfileEnabled()) {
-        std::ostringstream os;
-        os << "score_layer=" << score_layer_idx
-           << " pic_start=" << pic_start
-           << " pic_tokens=" << pic_token_count
-           << " topk=" << topK;
-        picRequestProfileLog("select_cacheblend_score_prefill", picRequestMonotonicUs() - scorePrefillStartUs, os.str());
-    }
-    const bool ready = paged->cacheblend_score_ready;
-    if (ready) {
-        selected_local_indices = paged->cacheblend_score_selected_local_indices;
-    }
-    paged->finishCacheBlendScoring();
-    if (startedPagedRequest) {
-        finishPagedRequestIfNeeded();
-    }
-    if (oldStatus == LlmStatus::RUNNING && mContext->status != LlmStatus::INTERNAL_ERROR &&
-        mContext->status != LlmStatus::TIMEOUT && mContext->status != LlmStatus::USER_CANCEL) {
-        mContext->status = oldStatus;
-    }
-    if (picRequestProfileEnabled()) {
-        std::ostringstream os;
-        os << "score_layer=" << score_layer_idx
-           << " selected_count=" << selected_local_indices.size()
-           << " topk=" << topK;
-        picRequestProfileLog("select_cacheblend_external_pagedkv_total", picRequestMonotonicUs() - totalStartUs,
-                             os.str());
-    }
-    return ready && static_cast<int>(selected_local_indices.size()) == topK;
 }
 
 bool Llm::prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
@@ -1110,6 +793,123 @@ bool Llm::prefillCacheBlendGraphExternalPagedKV(const std::vector<int>& full_pro
            << " selected_count=" << selected_local_indices.size()
            << " topk=" << topK;
         picRequestProfileLog("prefill_cacheblend_graph_external_pagedkv_total",
+                             picRequestMonotonicUs() - totalStartUs, os.str());
+    }
+    return true;
+}
+
+bool Llm::prefillFullReuseExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                          const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                          int pic_start, int pic_token_count) {
+    const int64_t totalStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
+    if (!mConfig->paged_attention() || full_prompt_token_ids.empty()) {
+        return false;
+    }
+    const int fullPromptLen = static_cast<int>(full_prompt_token_ids.size());
+    if (pic_start < 0 || pic_token_count < 0 || pic_start + pic_token_count > fullPromptLen) {
+        return false;
+    }
+    const int picEnd = pic_start + pic_token_count;
+    if (picEnd >= fullPromptLen) {
+        MNN_ERROR("Full-reuse hydrate+suffix prefill requires at least one suffix token\n");
+        return false;
+    }
+    std::vector<int> activeLogicalIndices;
+    std::vector<int> activeTokenIds;
+    activeLogicalIndices.reserve(static_cast<size_t>(fullPromptLen - pic_token_count));
+    activeTokenIds.reserve(static_cast<size_t>(fullPromptLen - pic_token_count));
+    for (int logical = 0; logical < pic_start; ++logical) {
+        activeLogicalIndices.emplace_back(logical);
+        activeTokenIds.emplace_back(full_prompt_token_ids[static_cast<size_t>(logical)]);
+    }
+    for (int logical = picEnd; logical < fullPromptLen; ++logical) {
+        activeLogicalIndices.emplace_back(logical);
+        activeTokenIds.emplace_back(full_prompt_token_ids[static_cast<size_t>(logical)]);
+    }
+    if (activeLogicalIndices.empty()) {
+        MNN_ERROR("Full-reuse hydrate+suffix prefill has no non-PIC query rows\n");
+        return false;
+    }
+    auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+    if (paged == nullptr) {
+        return false;
+    }
+    beginPagedRequestIfNeeded(fullPromptLen);
+    paged->finishSparseQuery();
+    paged->finishCacheBlendScoring();
+    paged->finishPicGraphActivePlan();
+
+    std::vector<PagedKVExternalSegment> boundSegments;
+    boundSegments.reserve(segments.size());
+    size_t cursor = 0;
+    for (auto segment : segments) {
+        segment.logicalStart = static_cast<size_t>(pic_start) + cursor;
+        cursor += segment.tokenCount;
+        boundSegments.emplace_back(std::move(segment));
+    }
+    if (cursor != static_cast<size_t>(pic_token_count)) {
+        MNN_ERROR("Full-reuse hydrate+suffix segment token mismatch, segments=%d pic_tokens=%d\n",
+                  static_cast<int>(cursor), pic_token_count);
+        return false;
+    }
+
+    int64_t stageStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
+    if (pic_token_count > 0 && !paged->reserveExternalSourceSlots(static_cast<size_t>(pic_token_count))) {
+        MNN_ERROR("Full-reuse hydrate+suffix failed to reserve persistent PIC cache source slots\n");
+        return false;
+    }
+    if (!paged->bindExternalSegments(boundSegments, fullPromptLen)) {
+        MNN_ERROR("Full-reuse hydrate+suffix failed to bind persistent PIC cache source segments\n");
+        return false;
+    }
+    paged->external_hydrate_start_layer_idx = 0;
+    paged->previous = 0;
+    paged->logical_length = fullPromptLen;
+    paged->remove = 0;
+    paged->add = 0;
+    paged->n_reserve = 0;
+    paged->reserve = nullptr;
+    if (!paged->beginSparseQuery(activeLogicalIndices, 0)) {
+        MNN_ERROR("Full-reuse hydrate+suffix failed to bind active non-PIC rows\n");
+        return false;
+    }
+    paged->sparse_query_force_plain_attention = true;
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "pic_start=" << pic_start
+           << " pic_tokens=" << pic_token_count
+           << " active_tokens=" << activeTokenIds.size()
+           << " logical_length=" << paged->logical_length
+           << " previous=" << static_cast<int>(paged->previous)
+           << " segments=" << boundSegments.size();
+        picRequestProfileLog("full_reuse_bind_active_external_segments", picRequestMonotonicUs() - stageStartUs,
+                             os.str());
+    }
+
+    stageStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
+    const bool ok = prefill(activeTokenIds);
+    paged->sparse_query_force_plain_attention = false;
+    paged->finishSparseQuery();
+    if (!ok) {
+        return false;
+    }
+    if (mContext == nullptr) {
+        return false;
+    }
+    mContext->all_seq_len = fullPromptLen;
+    mContext->prompt_len = fullPromptLen;
+    mContext->history_tokens = full_prompt_token_ids;
+    paged->logical_length = std::max(paged->logical_length, fullPromptLen);
+    paged->previous = static_cast<size_t>(paged->logical_length);
+    if (picRequestProfileEnabled()) {
+        std::ostringstream os;
+        os << "active_tokens=" << activeTokenIds.size()
+           << " prelude_tokens=" << pic_start
+           << " suffix_tokens=" << (fullPromptLen - picEnd)
+           << " full_prompt_tokens=" << fullPromptLen
+           << " logical_length=" << paged->logical_length;
+        picRequestProfileLog("full_reuse_prefill_active_non_pic", picRequestMonotonicUs() - stageStartUs, os.str());
+        picRequestProfileLog("prefill_full_reuse_external_pagedkv_total",
                              picRequestMonotonicUs() - totalStartUs, os.str());
     }
     return true;
@@ -1717,6 +1517,10 @@ void Llm::finishPagedRequestIfNeeded() {
 }
 
 void Llm::clearModuleForwardCaches() {
+    const bool profile = picRequestProfileEnabled();
+    const int64_t totalStartUs = profile ? picRequestMonotonicUs() : 0;
+    const size_t modulePoolBefore = profile ? mModulePool.size() : 0;
+    const size_t decodePoolBefore = profile ? mDecodeModulePool.size() : 0;
     if (mModule != nullptr) {
         mModule->clearCache();
     }
@@ -1733,17 +1537,23 @@ void Llm::clearModuleForwardCaches() {
             item.second->clearCache();
         }
     }
-    for (auto& item : mCacheBlendScoreModulePool) {
-        if (item.second != nullptr) {
-            item.second->clearCache();
-        }
-    }
     for (auto iter = mModulePool.begin(); iter != mModulePool.end();) {
-        if (iter->first.first == mPrefillKey) {
+        if (iter->first.first == mPrefillKey && iter->second != mModule) {
             iter = mModulePool.erase(iter);
         } else {
             ++iter;
         }
+    }
+    if (mModule != nullptr) {
+        mModulePool[std::make_pair(mPrefillKey, mConfig->all_logits())] = mModule;
+    }
+    if (profile) {
+        std::ostringstream os;
+        os << "module_pool_before=" << modulePoolBefore
+           << " module_pool_after=" << mModulePool.size()
+           << " decode_pool_before=" << decodePoolBefore
+           << " decode_pool_after=" << mDecodeModulePool.size();
+        picRequestProfileLog("clear_module_forward_caches", picRequestMonotonicUs() - totalStartUs, os.str());
     }
 }
 
@@ -1777,9 +1587,6 @@ size_t Llm::releaseForwardModuleClones() {
     }
     released += mDecodeModulePool.size();
     mDecodeModulePool.clear();
-    released += mCacheBlendScoreModulePool.size();
-    mCacheBlendScoreModulePool.clear();
-    mCacheBlendScoreRuntimeManager.reset();
     collectRuntimeGarbage();
     return released;
 }
@@ -1805,6 +1612,8 @@ std::shared_ptr<Module> Llm::cloneModuleWithRuntime(const Module* module) {
 std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs) {
     CHECK_LLM_RUNNING_RET(mContext, std::vector<Express::VARP>());
     MNN::Express::ExecutorScope s(mExecutor);
+    const bool profileForwardRaw = picRequestProfileEnabled();
+    const int64_t totalStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
     
     Express::VARP logitsIndex;
     bool inDecode = mDecodeForwardActive || mContext->gen_seq_len > 0;
@@ -1820,6 +1629,7 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
                                 !mPicDecodeRepair.enabled;
     auto moduleKey = std::make_pair(seqLenKey, isAllLogists);
     std::shared_ptr<Module> selectModule = mModule;
+    int64_t stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
     if (useDecodeGraph) {
         auto iter = mDecodeModulePool.find(moduleKey);
         if(iter == mDecodeModulePool.end()) {
@@ -1842,6 +1652,16 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
         MNN_ERROR("%s\n", mLastError.c_str());
         mContext->status = LlmStatus::INTERNAL_ERROR;
         return {};
+    }
+    if (profileForwardRaw) {
+        std::ostringstream os;
+        os << "seq_len=" << seqLen
+           << " seq_len_key=" << seqLenKey
+           << " all_logits=" << (isAllLogists ? 1 : 0)
+           << " use_decode_graph=" << (useDecodeGraph ? 1 : 0)
+           << " module_pool=" << mModulePool.size()
+           << " decode_pool=" << mDecodeModulePool.size();
+        picRequestProfileLog("forward_raw_select_module", picRequestMonotonicUs() - stageStartUs, os.str());
     }
 
     if (isAllLogists) {
@@ -1873,7 +1693,15 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
                      static_cast<int>(inputs.size()));
         std::fflush(stderr);
     }
+    stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
     std::vector<Express::VARP> outputs = selectModule->onForward(inputs);
+    if (profileForwardRaw) {
+        std::ostringstream os;
+        os << "seq_len=" << seqLen
+           << " inputs=" << inputs.size()
+           << " outputs=" << outputs.size();
+        picRequestProfileLog("forward_raw_on_forward", picRequestMonotonicUs() - stageStartUs, os.str());
+    }
 
     if (outputs.empty()) {
         std::ostringstream err;
@@ -1906,6 +1734,7 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     }
     // Validate output VARP. Only logits need to be materialized here; auxiliary
     // hidden outputs are consumed lazily by speculative/decode-repair paths.
+    stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
     for (size_t outputIndex = 0; outputIndex < outputs.size(); ++outputIndex) {
         auto o = outputs[outputIndex];
         if(nullptr == o || nullptr == o->getInfo()) {
@@ -1934,7 +1763,25 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
             return outputs;
         }
     }
-    if (outputs[0]->readMap<float>() == nullptr) {
+    if (profileForwardRaw) {
+        std::ostringstream os;
+        os << "seq_len=" << seqLen
+           << " outputs=" << outputs.size();
+        picRequestProfileLog("forward_raw_validate_outputs", picRequestMonotonicUs() - stageStartUs, os.str());
+    }
+    stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
+    auto logitsPtr = outputs[0]->readMap<float>();
+    if (profileForwardRaw) {
+        std::ostringstream os;
+        auto info = outputs[0]->getInfo();
+        os << "seq_len=" << seqLen
+           << " logits_ptr=" << (logitsPtr != nullptr ? 1 : 0);
+        if (info != nullptr) {
+            os << " logits_size=" << info->size;
+        }
+        picRequestProfileLog("forward_raw_logits_read_map", picRequestMonotonicUs() - stageStartUs, os.str());
+    }
+    if (logitsPtr == nullptr) {
         std::ostringstream err;
         err << "forwardRaw logits materialize failed seq_len=" << seqLen
             << " add=" << static_cast<int>(mMeta->add)
@@ -1965,7 +1812,13 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
         return outputs;
     }
     if (!mAsync) {
+        stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
         ((MNN::Tensor*)(outputs[0]->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
+        if (profileForwardRaw) {
+            std::ostringstream os;
+            os << "seq_len=" << seqLen;
+            picRequestProfileLog("forward_raw_logits_wait", picRequestMonotonicUs() - stageStartUs, os.str());
+        }
     }
     mGenerateParam->input_embeds = hiddenState;
     mGenerateParam->outputs = outputs;
@@ -2024,9 +1877,31 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     }
 #endif
     if (mConfig->paged_attention()) {
+        stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
         static_cast<PagedKVMeta*>(mMeta.get())->syncPaged();
+        if (profileForwardRaw) {
+            std::ostringstream os;
+            auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+            os << "seq_len=" << seqLen
+               << " logical_length=" << paged->logical_length
+               << " previous=" << static_cast<int>(paged->previous)
+               << " add=" << static_cast<int>(paged->add);
+            picRequestProfileLog("forward_raw_sync_paged", picRequestMonotonicUs() - stageStartUs, os.str());
+        }
     } else {
+        stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
         mMeta->sync();
+        if (profileForwardRaw) {
+            std::ostringstream os;
+            os << "seq_len=" << seqLen;
+            picRequestProfileLog("forward_raw_sync_meta", picRequestMonotonicUs() - stageStartUs, os.str());
+        }
+    }
+    if (profileForwardRaw) {
+        std::ostringstream os;
+        os << "seq_len=" << seqLen
+           << " outputs=" << outputs.size();
+        picRequestProfileLog("forward_raw_total", picRequestMonotonicUs() - totalStartUs, os.str());
     }
     return outputs;
 }
@@ -2900,7 +2775,6 @@ Llm::~Llm() {
     mModule.reset();
     mDecodeModule.reset();
     mDecodeModulePool.clear();
-    mCacheBlendScoreRuntimeManager.reset();
     mRuntimeManager.reset();
     mProcessorRuntimeManager.reset();
     mExecutor.reset();
@@ -3163,6 +3037,31 @@ VARP Llm::gen_attention_mask(int seq_len) {
     MNN::Express::ExecutorScope s(mExecutor);
     if (mConfig->paged_attention()) {
         auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        if (paged != nullptr && paged->sparse_query_active &&
+            paged->sparse_query_force_plain_attention && mConfig->has_pic_recompute_budget()) {
+            const int kv_seq_len = std::max(paged->logical_length, mContext->all_seq_len + seq_len);
+            if (mConfig->attention_mask() == "float") {
+                attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
+                auto ptr = attentionMask->writeMap<float>();
+                for (int i = 0; i < seq_len; i++) {
+                    const int queryPos = paged->sparseLogicalIndex(i);
+                    for (int j = 0; j < kv_seq_len; j++) {
+                        ptr[kv_seq_len * i + j] = (j > queryPos) * std::numeric_limits<float>::lowest();
+                    }
+                }
+                return attentionMask;
+            }
+            attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<int>());
+            auto ptr = attentionMask->writeMap<int>();
+            const bool is_glm2 = mConfig->attention_mask() == "glm2";
+            for (int i = 0; i < seq_len; i++) {
+                const int queryPos = paged->sparseLogicalIndex(i);
+                for (int j = 0; j < kv_seq_len; j++) {
+                    ptr[kv_seq_len * i + j] = is_glm2 ? j > queryPos : j <= queryPos;
+                }
+            }
+            return attentionMask;
+        }
         if (paged != nullptr && paged->sparse_query_active && !mConfig->has_pic_recompute_budget()) {
             attentionMask = _Input({}, NCHW, halide_type_of<float>());
             auto ptr = attentionMask->writeMap<float>();
@@ -3296,7 +3195,8 @@ VARP Llm::gen_position_ids(int seq_len) {
         bool is_glm2 = mConfig->attention_mask() == "glm2";
         if (mConfig->paged_attention()) {
             auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-            if (paged != nullptr && paged->sparse_query_active && !mConfig->has_pic_recompute_budget()) {
+            if (paged != nullptr && paged->sparse_query_active &&
+                (paged->sparse_query_force_plain_attention || !mConfig->has_pic_recompute_budget())) {
                 if (mConfig->is_mrope()) {
                     positionIds = _Input({3, seq_len}, NCHW, halide_type_of<int>());
                     auto ptr = positionIds->writeMap<int>();

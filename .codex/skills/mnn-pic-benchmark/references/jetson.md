@@ -21,6 +21,10 @@
 
 ## Prefill sweep
 
+`--frequency-profile max` 会在正式 sweep 前执行 `nvpmodel -m 0` 和 `jetson_clocks`，
+并用 `jetson_clocks --show` 校验 CPU / GPU / EMC 是否在 max。若 Jetson 没有
+passwordless sudo，设置 `MNN_JETSON_SUDO_PASSWORD`。
+
 单设备 debug/profile：
 
 ```bash

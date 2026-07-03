@@ -282,8 +282,8 @@ static bool _writeShapeFile(const std::string& path, int batch, int kvHeads, int
 }
 
 static ErrorCode _restoreExternalSegmentsCPU(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
-                                             int bytes, int maxSlots, const std::vector<int>& physicalSlots,
-                                             int kvLen, int8_t* keyCache, int8_t* valueCache) {
+                                             int bytes, int maxSlots, int kvLen, int8_t* keyCache,
+                                             int8_t* valueCache) {
     if (meta == nullptr || meta->external_segments.empty() || meta->externalLayerLoaded(layerIndex)) {
         return NO_ERROR;
     }
@@ -340,9 +340,7 @@ static ErrorCode _restoreExternalSegmentsCPU(PagedKVMeta* meta, int layerIndex, 
         const float attentionScale = segment.ropeAttentionScaling > 0.0f ? segment.ropeAttentionScaling : 1.0f;
         for (size_t local = 0; local < segment.tokenCount; ++local) {
             const int logical = static_cast<int>(segment.logicalStart + local);
-            const int slot = logical >= 0 && logical < static_cast<int>(physicalSlots.size())
-                ? physicalSlots[logical]
-                : -1;
+            const int slot = logical;
             if (slot < 0 || slot >= maxSlots) {
                 return OUT_OF_MEMORY;
             }
@@ -377,8 +375,7 @@ static ErrorCode _restoreExternalSegmentsCPU(PagedKVMeta* meta, int layerIndex, 
 }
 
 static ErrorCode _runCacheBlendScoringCPU(PagedKVMeta* meta, int layerIndex, int batch, int kvHeads, int headDim,
-                                          int bytes, int maxSlots, const std::vector<int>& physicalSlots,
-                                          int kvLen, const int8_t* valueCache) {
+                                          int bytes, int maxSlots, int kvLen, const int8_t* valueCache) {
     if (meta == nullptr || !meta->needsCacheBlendScoring(layerIndex)) {
         return NO_ERROR;
     }
@@ -437,10 +434,10 @@ static ErrorCode _runCacheBlendScoringCPU(PagedKVMeta* meta, int layerIndex, int
         const float denom = static_cast<float>(std::max(1, batch * kvHeads * headDim));
         for (size_t local = 0; local < segment.tokenCount; ++local) {
             const size_t logical = segment.logicalStart + local;
-            if (logical >= physicalSlots.size()) {
+            if (logical > maxInt) {
                 return INVALID_VALUE;
             }
-            const int slot = physicalSlots[logical];
+            const int slot = static_cast<int>(logical);
             if (slot < 0 || slot >= maxSlots) {
                 scores[scoreOffset + local] = -std::numeric_limits<float>::max();
                 continue;
@@ -610,9 +607,11 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     int reverse = _reverseCount(mMeta);
     int baseLogical = 0;
     int kvInsertLen = newKvLen;
+    const bool forcePlainSparseQuery = mMeta != nullptr && mMeta->sparse_query_active &&
+        mMeta->sparse_query_force_plain_attention;
     const bool picRuntimeActive = mMeta != nullptr &&
         (mMeta->sparse_query_active || mMeta->cacheblend_score_active || mMeta->pic_graph_active_plan_ready);
-    const int effectivePicAttentionMode = picRuntimeActive ? mPicAttentionMode : 0;
+    const int effectivePicAttentionMode = (picRuntimeActive && !forcePlainSparseQuery) ? mPicAttentionMode : 0;
     bool sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
     const bool picDecodeRecompute = mMeta != nullptr && mMeta->pic_decode_recompute_active;
     const bool scoreAttention = effectivePicAttentionMode == 1 && !picDecodeRecompute;
@@ -625,7 +624,11 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         kvInsertLen = mMeta->add > 0 ? static_cast<int>(std::min<size_t>(mMeta->add, newKvLen)) : newKvLen;
     }
     if (sparseQuery) {
-        if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+        if (!mMeta->validateSparseQueryRows(attnLen, queryLen, false)) {
+            MNN_ERROR("CPUPagedAttention layer %d invalid sparse rows before K/V write, query=%d attn=%d "
+                      "active=%d logical_length=%d\n",
+                      layerIndex, queryLen, attnLen,
+                      static_cast<int>(mMeta->sparse_query_logical_indices.size()), mMeta->logical_length);
             return INVALID_VALUE;
         }
         if (newKvLen < attnLen) {
@@ -656,16 +659,8 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
     auto vCache = mCache->value->host<int8_t>();
     const auto kInput = key->host<int8_t>();
     const auto vInput = value->host<int8_t>();
-    std::vector<int> physicalSlots(kvLen);
-    for (int k = 0; k < kvLen; ++k) {
-        int slot = mMeta ? mMeta->physicalSlot(k) : k;
-        if (slot < 0 || slot >= mCache->maxSlots) {
-            return OUT_OF_MEMORY;
-        }
-        physicalSlots[k] = slot;
-    }
     auto restore = _restoreExternalSegmentsCPU(mMeta, layerIndex, batch, kvHeads, headDim, mBytes,
-                                               mCache->maxSlots, physicalSlots, kvLen, kCache, vCache);
+                                               mCache->maxSlots, kvLen, kCache, vCache);
     if (restore != NO_ERROR) {
         return restore;
     }
@@ -676,7 +671,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                 if (logical < 0 || logical >= kvLen) {
                     return INVALID_VALUE;
                 }
-                int slot = physicalSlots[logical];
+                int slot = logical;
                 for (int h = 0; h < kvHeads; ++h) {
                     int inOffset = ((b * newKvLen + l) * kvHeads + h) * headDim;
                     int kOffset = ((slot * batch + b) * kvHeads + h) * headDim;
@@ -688,7 +683,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         }
     }
     auto cacheBlendScore = _runCacheBlendScoringCPU(mMeta, layerIndex, batch, kvHeads, headDim, mBytes,
-                                                    mCache->maxSlots, physicalSlots, kvLen, vCache);
+                                                    mCache->maxSlots, kvLen, vCache);
     if (cacheBlendScore != NO_ERROR) {
         return cacheBlendScore;
     }
@@ -700,7 +695,13 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         sparseQuery = mMeta != nullptr && mMeta->sparseQueryActiveForLayer(layerIndex);
         attnLen = output->length(1);
         if (sparseQuery) {
-            if (static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen) {
+            const bool allowFullQueryRows = scoreAttention && queryLen > attnLen;
+            if (!mMeta->validateSparseQueryRows(attnLen, queryLen, allowFullQueryRows)) {
+                MNN_ERROR("CPUPagedAttention layer %d invalid sparse rows after active-index emit, query=%d "
+                          "attn=%d active=%d logical_length=%d allow_full_q=%d\n",
+                          layerIndex, queryLen, attnLen,
+                          static_cast<int>(mMeta->sparse_query_logical_indices.size()), mMeta->logical_length,
+                          allowFullQueryRows ? 1 : 0);
                 return INVALID_VALUE;
             }
             baseLogical = 0;
@@ -715,7 +716,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
         std::vector<int8_t> keyData(static_cast<size_t>(kvLen) * batch * kvHeads * headDim * mBytes);
         std::vector<int8_t> valueData(static_cast<size_t>(batch) * kvHeads * kvLen * headDim * mBytes);
         for (int l = 0; l < kvLen; ++l) {
-            int slot = physicalSlots[l];
+            int slot = l;
             for (int b = 0; b < batch; ++b) {
                 for (int h = 0; h < kvHeads; ++h) {
                     const int8_t* srcK = kCache + ((slot * batch + b) * kvHeads + h) * headDim * mBytes;
@@ -767,7 +768,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
             int validLen = std::min(kvLen, qLogical + 1);
             float maxScore = -std::numeric_limits<float>::infinity();
             for (int k = 0; k < validLen; ++k) {
-                int slot = physicalSlots[k];
+                int slot = k;
                 float score = 0.0f;
                 if (mBytes == 4) {
                     const float* qPtr = reinterpret_cast<const float*>(qInput) +
@@ -802,7 +803,7 @@ ErrorCode CPUPagedAttention::onExecute(const std::vector<Tensor*>& inputs, const
                     if (scores[k] <= 0.0f) {
                         continue;
                     }
-                    int slot = physicalSlots[k];
+                    int slot = k;
                     int vOffset = ((b * kvHeads + kvHead) * mCache->maxSlots + slot) * headDim + d;
                     float v = mBytes == 4 ? reinterpret_cast<const float*>(vCache)[vOffset] : _pagedRead(vCache, vOffset, mBytes);
                     acc += scores[k] * invSum * v;

@@ -23,18 +23,13 @@ public:
         std::shared_ptr<Tensor> key;         // [max_slots, B, H_kv, D]
         std::shared_ptr<Tensor> decodeKey;   // [B, H_kv, D, max_slots], decode-only transposed K view
         std::shared_ptr<Tensor> value;       // [B, H_kv, max_slots, D]
-        std::shared_ptr<Tensor> slotTable;   // [max_slots], int32
         std::shared_ptr<Tensor> sparseQuery; // [max_slots], int32
         int maxSlots = 0;
         int batch = 0;
         int kvHeads = 0;
         int headDim = 0;
         int bytes = 4;
-        int slotTableVersion = -1;
-        int slotTableLength = 0;
         int decodeKeyReadyLength = 0;
-        int decodeKeySlotTableVersion = -1;
-        std::vector<int> decodeKeyReadyPrefixSlots;
         std::vector<int> sparseQueryHost;
     };
 
@@ -47,7 +42,6 @@ public:
 
 private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
-    ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int attnLen);
     ErrorCode ensureFastPrefillTemps(int seqLen, int kvLen, int qChunkLen, bool staticWorkspace);
     ErrorCode ensureSparseFlashTemps(int seqLen, int kvLen, bool staticWorkspace);
@@ -98,6 +92,9 @@ private:
     ErrorCode runDecodeCausalAttentionHD128TransposedKFusedKV(const std::vector<Tensor*>& inputs,
                                                               const std::vector<Tensor*>& outputs, int kvLen,
                                                               int attnLen, int baseLogical, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKFusedKVGQA(const std::vector<Tensor*>& inputs,
+                                                                 const std::vector<Tensor*>& outputs, int kvLen,
+                                                                 int attnLen, int baseLogical, int layerIndex);
     ErrorCode runDecodeCausalAttentionHD128TransposedKFusedKVRecord(const std::vector<Tensor*>& inputs,
                                                                     const std::vector<Tensor*>& outputs, int kvLen,
                                                                     int attnLen, int baseLogical, int layerIndex,
@@ -134,6 +131,7 @@ private:
     std::shared_ptr<KernelWrap> mPackPagedKeyKernel;
     std::shared_ptr<KernelWrap> mPackPagedKeyToImageKernel;
     std::shared_ptr<KernelWrap> mHydrateExternalKernel;
+    std::shared_ptr<KernelWrap> mHydrateExternalInplaceKernel;
     std::shared_ptr<KernelWrap> mExportCanonicalKeyKernel;
     std::shared_ptr<KernelWrap> mCacheBlendScoreKernel;
     std::shared_ptr<KernelWrap> mCacheBlendTopKKernel;
@@ -181,6 +179,9 @@ private:
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVGQARow32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVGQARow64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVGQARow128;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKReadonlyRow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKReadonlyRow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKReadonlyRow128;

@@ -19,6 +19,12 @@ Key requirements extracted:
 - During decode append, write both normal PagedCache K/V and DecodeK.
 - Cover q=1/2/4/6/8. The target design calls for q1/q2/q4/q8 small-Q kernels and eventually GQA cooperative K-load sharing without serializing query heads.
 
+Follow-up after Step 2': the "Use `slot_table`" line above is the original requirement before
+identity-slot analysis. Current PagedCache requests store tokens sequentially and `request_base`
+was always zero, so `slot_table[logical] == logical` for all live rows. The implemented removal
+keeps PagedCache as the semantic owner and replaces slot lookup with direct `slot = logical`.
+Correctness is now guarded by sparse-row validation, not by restoring a logical-to-physical table.
+
 ## Implementation
 
 Modified files:
@@ -1404,3 +1410,1212 @@ Next implementation details:
   5. Add identity-slot V fast path for full-reuse when slot_table is identity.
   6. Promote route only after no-regression endpoint TPOT across OrangePi and Rhino.
 ```
+
+## V6 Step 0 — Baseline rebuild + TPOT A/B confirmation (2026-07-03)
+
+Plan: `/root/.claude/plans/refactored-munching-wren.md` (approved).
+Workflow reference: `references/decode_opencl_workflow.md`.
+
+Rebuilt the route-v2 OrangePi artifact from commit `ca9fd3e` (clean working tree
+except doc edits — `decode_optimization_plan_v6.md`, `references/decode_opencl_workflow.md`,
+`CLAUDE.md` pointer). `opencl_codegen.py` produced no `.cl` diffs (source already
+committed). Build OK (only the pre-existing `perfetto_c.cc` `#pragma system_header`
+warnings); `file` confirmed AArch64 `pic_server`/`libMNN.so`/`libMNN_CL.so`/`libpic_llm.so`;
+rsynced to `orangepi@192.168.101.113`.
+
+Profile smoke (`step0_profile_smoke_orangepi_20260703`, llama3.2-3b q1/q4, profile on):
+2 ok rows, no `failures.csv`, **P0 validity scan clean** (no `decode_prepare_inside_decode=1`,
+no `ERROR`/`target unavailable`/`async read failed`). Harness + P0 boundary confirmed.
+
+Formal TPOT A/B (profile off, ctx512, q=1/2/4/6/8, 3 models, repeats=2/warm=1) —
+reproduces the handoff same-window table exactly (same committed source, identical
+binary). This is the Step 1+ reference:
+
+```text
+model         q    old_ms     new_ms    delta  old/new  status
+Llama3.2 3B   1    235.14     232.31    -2.83   1.012   OK
+Llama3.2 3B   2    408.69     351.29   -57.40   1.163   OK
+Llama3.2 3B   4    373.78     388.52   +14.75   0.962   REG   <- Step 3 target
+Llama3.2 3B   6    814.64     723.38   -91.26   1.126   OK
+Llama3.2 3B   8    844.87     770.14   -74.74   1.097   OK
+MiniCPM5-1B   1     61.68      60.24    -1.43   1.024   OK
+MiniCPM5-1B   2    280.51     244.13   -36.38   1.149   OK
+MiniCPM5-1B   4    240.75     285.44   +44.68   0.843   REG   <- Step 3 target
+MiniCPM5-1B   6    285.71     270.16   -15.55   1.058   OK
+MiniCPM5-1B   8    298.45     292.40    -6.05   1.021   OK
+Qwen3-4B      1    249.35     269.53   +20.17   0.925   REG   <- Step 1 target
+Qwen3-4B      2    805.20     740.57   -64.63   1.087   OK
+Qwen3-4B      4    826.33     843.58   +17.25   0.980   REG   <- Step 3 target
+Qwen3-4B      6   1107.96     978.14  -129.82   1.133   OK
+Qwen3-4B      8   1114.84    1010.03  -104.81   1.104   OK
+```
+
+Baseline runs (reused, same committed source):
+- old: `decode_ab_old_current_orangepi_20260703` (`MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=0`)
+- new: `decode_ab_new_mali_route_v2_orangepi_20260703` (`=1`, route-v2 default)
+
+Conclusion: Step 0 gate passed. Reference established. Next: Step 1 (q=1 GQA-cooperative
+transposed-K kernel) targets Qwen q1 (+20.17ms REG). Step 3 (qtile K_TILE + V-side
+parallel) targets Llama q4, MiniCPM q4, Qwen q4.
+
+## V6 Step 1 — q=1 GQA-cooperative transposed-K kernel (2026-07-03)
+
+### What was implemented
+
+New OpenCL kernel family `decode_causal_attention_hd128_transposed_k_fused_kv_gqa_row{32,64,128}`
+in `paged_decode_attention_buf.cl`: ports `DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_GQA_HD128` onto
+the transposed-K (decodeKey) data path. One workgroup per `(b, kvh)` shares the decodeKey K stream
+across the whole GQA group (`NUMHEAD_GROUP_SIZE` query heads), fuses the current-token append
+(key_cache + value_cache + decode_key), and keeps independent online-softmax per group head. Host:
+`ensureDecodeTransposedKKernel` builds it (guarded `groupSize > 1`), new
+`runDecodeCausalAttentionHD128TransposedKFusedKVGQA` dispatch with `gws z = mKvNumHead * mBatch`
+(not `mNumHead*mBatch`), routed in `onExecute` inside `if (decodeTransposedKQ1NeedsDecodeKey)`
+before the non-GQA fused path, gated on `_decodeGqaFusedKVEnabled()` (env
+`MNN_PAGED_ATTENTION_DECODE_GQA_FUSED=1`, default off). Build OK, codegen OK, AArch64 confirmed.
+
+### Rank-capture mechanism (recorded for future sessions)
+
+`runDecodeAttentionRankCaptureOpenCL` (`PagedAttentionBufExecution.cpp:7491`) is the PIC
+decode-repair attribution path. When `mMeta->needsPicDecodeAttentionRankCapture(layerIndex)` is
+true, after the attention kernel it runs `mDecodeAttentionRankScoreKernelHD128` to score the
+current query against the PIC token span and write a top-M candidate list — this is what picks
+which tokens get recompute-repaired on later steps. It is **separate** from the attention kernel
+and reuses `mCache->key`/`value`/`slotTable`/`sparseQuery` (no second KV). The profile `rank_us`
+field times it. Rank capture is why some layers show a non-zero `rank_us`; it does not change the
+attention dispatch. The identity profile lines seen in the smoke are NOT rank-capture — they are
+the non-fused identity decode path that fires when `ordinaryDecodeFusedKV` is false (see below).
+
+### TPOT already excludes the first token (warmup is not the issue)
+
+`pic_server.cpp:2011` computes `measuredDecodeTokens = max(1, completionTokens - 1)` and
+`decode_tpot_ms = decode_us / 1000 / measuredDecodeTokens`. ArGeneration reuses the prefill logits
+for the **first** generated token, so `decode_us` covers only tokens 2..N. The first decode step
+(which can hit the identity path when `external_loaded_layers` is still being filled) is the TTFT
+token and is excluded from TPOT. So TPOT is already a steady-state number; no harness change
+needed for warmup exclusion. `--warm-repeats` additionally discards whole warm requests before the
+measured ones.
+
+### Lane (recorded for future sessions)
+
+`lane` = `LANES` = the OpenCL workgroup size in dimension 0 (the K-reduction width). One workgroup
+of `LANES` lanes processes one output row/head: each lane owns one K position in the current K
+tile, computes one QK score, and the tile reduces across `LANES` lanes (tree reduction) for
+softmax max/sum. Larger lane = wider K tile per step = fewer K-loop iterations but more
+local-memory (`score_tile[LANES]`, `reduce[LANES]`, or `[Q_TILE*LANES]`/`[GROUP*LANES]`) and
+more register pressure. `_decodeHD128LaneWidth` picks 32/64/128 by `causalWorkPerRow` (kv_len
+bucket); `MNN_PAGED_ATTENTION_DECODE_HD128_FORCE_LANE` overrides. For GQA, local mem scales with
+`NUMHEAD_GROUP_SIZE*LANES`, so large groups + large lane blow up occupancy.
+
+### Results (OrangePi, ctx512, profile off, repeats=2/warm=1)
+
+```text
+model         q    old      v2     gqa128  gqa/old  gate
+Llama3.2 3B   1   235.14  232.31   204.14   1.152   OK   <- fixed
+Llama3.2 3B   2   408.69  351.29   356.75   1.146   OK
+Llama3.2 3B   4   373.78  388.52   341.53   1.094   OK
+Llama3.2 3B   6   814.64  723.38   686.97   1.186   OK
+Llama3.2 3B   8   844.87  770.14   783.33   1.079   OK
+MiniCPM5-1B   1    61.68   60.24    75.57   0.816   REG
+MiniCPM5-1B   2   280.51  244.13   232.50   1.206   OK
+MiniCPM5-1B   4   240.75  285.44   237.59   1.013   OK
+MiniCPM5-1B   6   285.71  270.16   285.68   1.000   OK
+MiniCPM5-1B   8   298.45  292.40   323.37   0.923   REG
+Qwen3-4B      1   249.35  269.53   262.39   0.950   REG   <- not fixed
+Qwen3-4B      2   805.20  740.57   679.51   1.185   OK
+Qwen3-4B      4   826.33  843.58   692.16   1.194   OK
+Qwen3-4B      6  1107.96  978.14  1047.87   1.057   OK
+Qwen3-4B      8  1114.84 1010.03  1093.61   1.019   OK
+```
+
+q1 lane sweep (GQA, force lane):
+```text
+MiniCPM q1: lane128=75.57  lane64=77.75  lane32=100.82  (old=61.68)  -> all REG
+Qwen3  q1:  lane128=262.39 lane64=274.47 lane32=317.99  (old=249.35) -> all REG
+```
+
+P0 clean for every run (no `decode_prepare_inside_decode=1`, no ERROR/target unavailable/async
+failed). GQA op confirmed firing for q1 (group>1): Llama=56, MiniCPM=48, Qwen=72 profile lines;
+q>1 still uses qtile (unchanged).
+
+### Conclusion
+
+Step 1 is **partially effective**: GQA fixes Llama q1 (the largest q1 win, 1.152x) and is neutral
+or better on most q>1, but it **regresses MiniCPM q1 (0.816x) and Qwen q1 (0.950x)** and the lane
+sweep cannot recover them. Root cause:
+
+- MiniCPM has only `kv_heads=2` -> GQA gws z = `kv_head*batch` = 2 workgroups, catastrophic
+  occupancy on Mali; the K-share benefit cannot offset the lost parallelism.
+- Qwen q1 (group=4, kv_heads=8, z=8) has enough workgroups but the per-workgroup local-memory
+  pressure (`local_q[4*128]`, `score_tile[4*LANES]`, `reduce[4*LANES]`) and the serialized
+  per-group softmax reduce outweigh the saved K loads at q1 (kv_len~512, tiny Q reuse).
+
+This matches the handoff diagnosis: q1 has too little Q reuse; K-share only pays when K reload
+cost dominates, which is true for q>1 (qtile) but not q1. The reverted q1 direct-read branch and
+now this GQA q1 both confirm: **q1 needs a different axis** — likely V-side / append / launch-
+record overhead reduction, not K-share.
+
+### Decision
+
+- Do **not** promote `MNN_PAGED_ATTENTION_DECODE_GQA_FUSED=1` to default (it regresses 2 of 3
+  models at q1). Keep it env-gated as an explicit variant (SKILL-compliant).
+- Keep the GQA kernel in source — it is the right building block for q>1 qtile×GQA (Step 4) where
+  K-share across Q_TILE rows × GQA group is the real win.
+- Step 1 q1 target (Qwen/MiniCPM q1) is **not met**. Per plan, q1 work pivots to V-side
+  identity-slot fast path (Step 2) and overhead reduction, not more K-share variants.
+
+Runs: `step1_gqa_profile_smoke_orangepi_20260703`, `step1_gqa_new_orangepi_20260703`,
+`step1_gqa_minicpm_q1_lane{64,32}_orangepi_20260703`, `step1_gqa_qwen_q1_lane{64,32}_orangepi_20260703`.
+
+## V6 Step 2' — slot_table removal smoke + prefill benchmark gate (2026-07-03)
+
+### Implementation note
+
+Removed identity `slot_table` logical->physical indirection from CPU, CUDA, and OpenCL
+PagedAttention paths. The runtime mapping is now direct:
+
+```text
+logical slot k -> physical slot k
+```
+
+This matches the actual invariant for current PIC requests: request tokens occupy sequential
+PagedCache slots, while persistent PIC cache source data uses separate source-slot kernel args
+(`_picCacheSourceSlotBase` / source slot start) and not the request slot table.
+
+Important bug found during smoke: the old `slot_table_version` was also part of CUDA/OpenCL async
+persistent-cache read task keys. Removing it together with the table made the key too broad across
+requests. This is not a token-ordering bug; PagedCache request tokens are still sequential. It is a
+request-lifetime invalidation issue. The fix keeps slot removal but adds:
+
+```text
+PagedKVMeta::request_generation
+```
+
+`beginRequest()` increments it, and CUDA/OpenCL `externalLayerRequestKey()` includes it. This
+keeps async task keys request-scoped without restoring logical->physical indirection.
+
+### Export graph check
+
+Static grep:
+
+```bash
+rg -n "slot_table|slotTable|request_base|physicalSlot|slot_table_host|slot_table_version" \
+  transformers/pic_llm source/shape -S
+```
+
+Result: no matches. Exporter and shape graph do not expose `slot_table`, so no exporter graph
+change is required for this removal.
+
+### Build / sync
+
+All builds used `JOBS=96` on the 192-core host.
+
+```bash
+JOBS=96 MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+
+JOBS=96 MNN_TARGET_DEVICE=jetson CROSS_COMPILE=ON ENABLE_CROSS_CUDA=ON CUDA_ARCHS=72 \
+  BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+
+JOBS=96 MNN_TARGET_DEVICE=aidlux_adreno_opencl BUILD_TARGET=pic_server BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+```
+
+`file` checks passed for:
+
+```text
+.cache/output/mnn/artifacts/orangepi5plus/bin/pic_server
+.cache/output/mnn/artifacts/orangepi5plus/lib/libMNN.so
+.cache/output/mnn/artifacts/orangepi5plus/lib/libMNN_CL.so
+.cache/output/mnn/artifacts/jetson/bin/pic_server
+.cache/output/mnn/artifacts/jetson/lib/libMNN.so
+.cache/output/mnn/artifacts/jetson/lib/libMNN_Cuda_Main.so
+.cache/output/mnn/artifacts/aidlux_adreno_opencl/bin/pic_server
+.cache/output/mnn/artifacts/aidlux_adreno_opencl/lib/libMNN.so
+.cache/output/mnn/artifacts/aidlux_adreno_opencl/lib/libMNN_CL.so
+```
+
+Artifacts synced to fixed benchmark paths:
+
+```bash
+rsync -a --delete .cache/output/mnn/artifacts/jetson/ \
+  jetson@192.168.101.192:/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda/
+
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/mnt/ssd/code/.cache/mnn_opencl_pic/artifacts/orangepi5plus/
+
+rsync -a --delete .cache/output/mnn/artifacts/aidlux_adreno_opencl/ \
+  aidlux@192.168.101.227:/mnt/nvme/mnn_pic_opencl/artifacts/aidlux_adreno_opencl/
+```
+
+Static checks:
+
+```bash
+git diff --check
+rg -n "slot_table|slotTable|slot_table_host|slot_table_version|physicalSlot|physicalSlots|request_base|_slotTable|syncSlotTable|decodeKeyReadyPrefixSlots|decodeKeySlotTableVersion|slotTableVersion|slotTableLength" \
+  source/core/PagedKVMeta.hpp source/backend/cpu source/backend/cuda source/backend/opencl source/shape transformers/pic_llm -S
+```
+
+`git diff --check` passed. Residual slot-table grep returned no matches.
+
+### Benchmark gate
+
+Minimal prefill benchmark: `MiniCPM5-1B`, ctx512, `full-reuse`, profile off, only rows already in
+`benchmark.csv`, no merge.
+
+```bash
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_jetson.sh \
+  --model-key minicpm5-1b --contexts 512 --modes full-reuse \
+  --benchmark-csv benchmark.csv --only-benchmark-csv-rows \
+  --run-id slot_table_request_generation_jetson_fullreuse_ctx512_20260703
+
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_orangepi.sh \
+  --model-key minicpm5-1b --contexts 512 --modes full-reuse \
+  --benchmark-csv benchmark.csv --only-benchmark-csv-rows \
+  --run-id slot_table_request_generation_orangepi_fullreuse_ctx512_20260703
+
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_rhino.sh \
+  --model-key minicpm5-1b --contexts 512 --modes full-reuse \
+  --benchmark-csv benchmark.csv --only-benchmark-csv-rows \
+  --run-id slot_table_request_generation_rhino_fullreuse_ctx512_20260703
+```
+
+Repeat for Jetson/OrangePi:
+
+```bash
+run_id=slot_table_request_generation_jetson_fullreuse_ctx512_repeat2_20260703
+run_id=slot_table_request_generation_orangepi_fullreuse_ctx512_repeat2_20260703
+```
+
+Results vs `benchmark.csv` baseline:
+
+```text
+device     benchmark.csv baseline    runs after slot removal      best ratio
+jetson     0.313210591 s           0.481185 / 0.472853 s          1.510x slower
+orangepi   0.429257000 s           0.624368 / 0.721490 s          1.455x slower
+rhino      0.289987000 s           FAIL warm: Empty reply / SSH timeout log
+```
+
+Successful Jetson/OrangePi measure responses were native full-reuse with cache hit:
+
+```text
+jetson:   status=200 prefill=0.481185 / 0.472853, execution_mode=native-full-reuse
+orangepi: status=200 prefill=0.624368 / 0.721490, execution_mode=native-full-reuse
+```
+
+OrangePi diagnostic profile smoke:
+
+```bash
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_orangepi.sh \
+  --model-key minicpm5-1b --contexts 512 --modes full-reuse \
+  --benchmark-csv benchmark.csv --only-benchmark-csv-rows \
+  --server-env MNN_PAGED_ATTENTION_PROFILE=1 \
+  --run-id slot_table_request_generation_orangepi_fullreuse_ctx512_profile_20260703
+```
+
+Key profile finding:
+
+```text
+OpenCLPagedAttention profile op=hydrate layer=0..23 tokens=498 kv_len=512
+async_read=1 direct_segments=1 direct_tokens=498 fallback_tokens=0
+```
+
+So the request-generation fix did not break async direct hydrate. The performance regression is
+not explained by prefetch falling back to sync read.
+
+### Decision
+
+Do not merge these summaries into `benchmark.csv`. Functional and build smoke passed, and export
+graph needs no change, but the prefill latency gate failed on both formal devices:
+
+```text
+Jetson best:   1.51x slower than current benchmark.csv
+OrangePi best: 1.455x slower than current benchmark.csv
+Rhino:         no valid measurement due device/SSH failure
+```
+
+Next debugging should isolate pure slot-table removal from the other same-window decode/hydrate
+experiments, then profile full-reuse by component (`hydrate`, suffix attention, graph dense) on
+Jetson and OrangePi. The current result supports the user's semantic point: request tokens are
+sequential in PagedCache, so slot removal should be correct. The unresolved issue is performance
+regression, not a need to restore `slot_table`.
+
+### Step 2' follow-up: full-reuse root-cause attribution
+
+The goal of this follow-up is root-cause attribution, not switching `full-reuse` to a different
+fast path. Slow `full-reuse` is the correct canary because every PIC mode pays its common floor:
+persistent PIC cache source hydrate, current-request PagedCache write/read, suffix/prompt graph
+execution, and backend PagedAttention. If `full-reuse` is high, `cacheblend` / `epic` / `kvshare`
+inherit that floor before adding scoring and sparse recompute.
+
+Formal-profile evidence splits by backend:
+
+```text
+MiniCPM5-1B ctx512 full-reuse:
+Jetson legacy native-full-reuse:      0.481185 / 0.472853 s
+Jetson graph-boundary evidence run:   0.081381 s, native-full-reuse-graph-boundary
+OrangePi legacy native-full-reuse:    0.624368 / 0.721490 s
+OrangePi graph-boundary evidence run: 0.976856 s
+```
+
+Jetson root cause:
+
+- Current `pic_server.cpp` only enables graph-boundary prefill for `cacheblend` / `delta-v` /
+  `epic`, not `full-reuse`.
+- Therefore `full-reuse` falls through the legacy split path:
+  `prefill_pic_prefix` -> `appendExternalPagedKV` -> `prefill_pic_suffix`.
+- Request profile proves the measured request spends two large chunks in tiny LLM forwards:
+
+```text
+prefill_pic_prefix: forward_raw_end cost_ms=232.299 seq_len=7
+prefill_pic_suffix: forward_raw_end cost_ms=238.490 seq_len=7
+```
+
+Warm in the same log showed the same shape with `296.708ms + 241.372ms`. This is not a
+PagedCache lookup problem. CUDA PagedAttention profile sums for the same shape:
+
+```text
+hydrate:   24 calls, 14.668 ms
+attention: 47 calls, 13.176 ms
+```
+
+The graph-op profile also points away from PagedAttention as the dominant Jetson cost:
+
+```text
+total graph profile: 146.132 ms
+Convolution:         72.144 ms
+PicSparseAttention:  26.860 ms
+Raster:              18.881 ms
+BinaryOp:             9.708 ms
+While:                7.763 ms
+PagedAttention:       1.186 ms
+PicScoreAttention:    1.527 ms
+```
+
+Interpretation: Jetson's current full-reuse latency is dominated by low-M dense graph execution
+and per-forward graph/runtime overhead from the legacy split scheduling. The existing
+`native-full-reuse-graph-boundary` 0.081381s run is useful evidence because it keeps
+`recompute_token_count=0` and `reuse_token_count=498` while avoiding the two tiny legacy forwards.
+It proves continuous PagedCache and slot-table removal are not inherently the Jetson bottleneck.
+It is evidence for the root cause, not the accepted fix target for this step.
+
+OrangePi root cause is different:
+
+- Legacy full-reuse is still slow even before considering scoring.
+- Non-detail OpenCL profile already accounts for most of the latency inside PagedAttention paths:
+
+```text
+hydrate:   24 calls, 201.652 ms
+attention: 48 calls, 417.017 ms
+```
+
+- Detail profile is not a formal latency number because it inserts queue finishes, but its
+  attribution is clear:
+
+```text
+attention total: 729.184 ms
+rearrange:       280.428 ms
+qkv:             236.573 ms
+qk:              132.718 ms
+pack:             33.636 ms
+mask:             15.667 ms
+softmax:          18.312 ms
+```
+
+Representative detail lines show two regimes:
+
+```text
+prefix tiny forward: query=7 kv_len=7, many layers spend ~12ms in rearrange
+suffix against cache: query=7 kv_len=512, qk ~= 4.8-5.1ms and qkv ~= 9.1-9.5ms per layer
+```
+
+Interpretation: on OrangePi, the full-reuse floor is genuinely operator-side: hydrate plus
+OpenCL prefill attention for small `query=7` and long `kv_len=512`, with `qkv`, `qk`, and
+unfavorable rearrange overhead. The graph-boundary evidence run is slower on OrangePi
+(`0.976856s`), so simply changing full-reuse scheduling is not sufficient there. The next
+root-cause work should split OrangePi full-reuse into:
+
+```text
+1. persistent PIC cache source read/hydrate cost
+2. suffix q=7 attention QK / softmax / QKV cost at kv_len=512
+3. query/rearrange/pack overhead for q=7
+4. dense graph overhead outside attention
+```
+
+This is the actionable conclusion: the rejected Step 2' benchmark is not explained by slot-table
+removal. Jetson is mostly legacy split-forward dense/graph overhead; OrangePi is mostly OpenCL
+PagedAttention/hydrate operator cost. Both are common PIC-floor costs, so optimizing
+cacheblend/epic ratios before lowering this floor will hide the real bottleneck.
+
+### Legacy split-forward path removal
+
+The follow-up code cleanup removes the server-side legacy chat scheduler instead of treating
+Jetson `full-reuse` as an isolated fast-path fix.
+
+Removed runtime path:
+
+```text
+prefill_pic_prefix
+appendExternalPagedKV
+recomputeExternalPagedKV
+prefill_pic_suffix
+```
+
+Removed public helpers:
+
+```text
+Llm::appendExternalPagedKV
+Llm::recomputeExternalPagedKV
+Llm::selectCacheBlendExternalPagedKV
+PagedKVMeta::appendExternalSegments
+```
+
+The score-layer module loader used only by the removed non-graph-boundary cacheblend scorer was
+also deleted:
+
+```text
+Llm::getCacheBlendScoreModule
+Llm::runCacheBlendScorePrefill
+mCacheBlendScoreModulePool
+mCacheBlendScoreRuntimeManager
+```
+
+New server behavior:
+
+```text
+full-compute:
+  unchanged full prompt execution
+
+full-reuse:
+  requires a graph-boundary PIC model with pic_recompute_budget
+  execution_mode = native-full-reuse-graph-boundary
+  selected PIC rows = empty
+  recompute_token_count = 0
+
+cacheblend / delta-v / epic:
+  require the same graph-boundary model
+  use exported score-layer boundary instead of layer-0 selected-token forward
+
+non-graph-boundary PIC reuse/sparse request:
+  fails early if it would need the removed split scheduler
+  falls back only through explicit full-compute metadata when scoring/top-k is unavailable
+```
+
+This deliberately removes the accidental fallback where non-graph-boundary chat could still run
+by stitching multiple forwards around a persistent PIC cache source. It also removes the stale
+non-graph-boundary cacheblend score-prefill helper, which would run an old truncated scoring pass
+only to fall back later. These fallbacks were the Jetson root cause and also hid common-floor costs
+from every PIC mode. The remaining model contract is clearer: request-time reuse and sparse
+recompute must be expressed through the exported graph boundary and the current request PagedCache.
+
+Important semantic note: the current exported graph-boundary is a score-layer boundary. It is the
+correct production path for cacheblend/epic/kvshare because rows are compacted only after the
+score layer. For `full-reuse`, the selected PIC row set is empty, so no PIC rows continue past the
+boundary; however the graph-boundary implementation still follows the exported boundary shape.
+If strict "hydrate plus suffix only from layer 0" is required later, it should be implemented as a
+separate graph contract or by teaching the graph-budget model to accept active-row logical
+position/mask input from layer 0. The removed legacy split path should not be reintroduced for
+that.
+
+Jetson validation after syncing the rebuilt CUDA artifact:
+
+```text
+run_id: fullreuse_path_removed_jetson_ctx512_synced_20260703
+model:  MiniCPM5-1B
+ctx:    512
+mode:   full-reuse
+latency: 0.080379 s
+```
+
+The remote fixed artifact path was updated before the validation:
+
+```text
+/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda/bin/pic_server
+/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda/lib/libpic_llm.so
+/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda/lib/libMNN_Cuda_Main.so
+```
+
+Request metadata from `raw/jetson/ctx512_chat_full-reuse_0.json`:
+
+```text
+execution_mode: native-full-reuse-graph-boundary
+graph_boundary: fixed_active_rows_full_reuse
+native_sparse_recompute_scope: exported_graph_score_layer_boundary
+score_pass: not_required_full_reuse_graph_boundary
+recompute_token_count: 0
+reuse_token_count: 498
+```
+
+Request profile from `raw/jetson/pic_server_ctx512.log` now uses the new single graph-boundary
+stage:
+
+```text
+prefill_fixed_graph_external_pagedkv selected_count=0
+forward_raw_end seq_len=512
+build_execution_plan recompute_tokens=0 reuse_tokens=498
+```
+
+The same log has no `prefill_pic_prefix`, `prefill_pic_suffix`, `select_cacheblend_external`, or
+`score_pool_*` fields, confirming that both the legacy split scheduler and the stale
+non-graph-boundary score-prefill helper are out of the runtime path.
+
+### Sparse Q row hardening after slot removal
+
+The functional issue to guard after deleting slot-table indirection is not logical-to-physical
+addressing. It is making sure sparse prefill changes Q-related lengths at the score-layer boundary:
+
+```text
+layer < score_layer_idx:
+  full prompt rows, no sparse query
+
+layer == score_layer_idx:
+  input queryLen is full context length
+  output/activeLen is selected-token length
+  qRow = sparse_query[q] for score-layer full-Q/compact-output
+  K/V write uses full prompt K/V before active indices are emitted
+
+layer > score_layer_idx:
+  queryLen == activeLen
+  qRow = q because graph hidden/Q/K/V are already compact rows
+  qLogical = sparse_query[q] only identifies the true logical position
+```
+
+Code hardening added:
+
+```text
+PagedKVMeta::beginSparseQuery:
+  requires strictly increasing logical indices within [0, logical_length)
+
+PagedKVMeta::validateSparseQueryRows(activeLen, queryLen, allowFullQueryRows):
+  active index vector size must equal activeLen
+  pic_active_count must equal activeLen
+  queryLen > activeLen is rejected unless allowFullQueryRows is true
+  every active logical index must be increasing and < logical_length
+  when full-Q is allowed, every active logical index must also be < queryLen
+```
+
+CPU/CUDA/OpenCL call this validation twice:
+
+```text
+before sparse K/V write:
+  allowFullQueryRows = false
+  later sparse layers must already be compact-Q
+
+after score-layer active-index emit:
+  allowFullQueryRows = scoreAttention && queryLen > activeLen
+  only PicScoreAttention can use full-Q/compact-output
+```
+
+The kernels then use the same rule across CPU/CUDA/OpenCL:
+
+```text
+qLogical = sparse_query[q]
+qRow     = queryRowsAreFull ? qLogical : q
+slot     = logical
+```
+
+This is the explicit guarantee that Q moves from full context rows to selected-token rows at the
+score layer, while K/V is still read and written by the true logical position in the sequential
+PagedCache.
+
+### Current-artifact prefill regression check after deleting legacy split/suffix
+
+Question: after deleting the identity `slot_table` indirection and deleting the legacy PIC
+split/suffix chat path, does PIC prefill recompute show an obvious regression versus
+`benchmark.csv` across algorithms?
+
+Artifacts and runs:
+
+```text
+Jetson slot-removal sparse smoke:
+  .cache/latency_budget_20260625/slot_table_smoke_jetson_minicpm5_ctx512_20260703/summary.csv
+
+Jetson full-reuse after path deletion:
+  .cache/latency_budget_20260625/fullreuse_path_removed_jetson_ctx512_synced_20260703/summary.csv
+
+OrangePi old slot-removal smoke:
+  .cache/latency_budget_20260625/slot_table_smoke_orangepi_minicpm5_ctx512_20260703/summary.csv
+
+OrangePi current artifact after deleting legacy split/suffix:
+  .cache/latency_budget_20260625/slot_table_removed_path_removed_orangepi_ctx512_20260703/summary.csv
+```
+
+The OrangePi artifact was rebuilt and synced before the current run. `libpic_llm.so` no longer
+exports the deleted split/suffix helpers (`appendExternalPagedKV`,
+`recomputeExternalPagedKV`, `runCacheBlendScorePrefill`, `getCacheBlendScoreModule`). The remaining
+PIC helper symbols are graph-boundary helpers.
+
+The current OrangePi server log has only the expected OpenCL cache update:
+
+```text
+Update cache to /mnt/ssd/code/.cache/mnn_opencl_pic/pic_prefill_latency_sweep/runtime_cache/opencl/mnn_cachefile.bin
+```
+
+There were no matches for:
+
+```text
+ERROR
+Cache invalid
+target unavailable
+async persistent PIC cache read failed
+prefill_pic_prefix
+prefill_pic_suffix
+```
+
+Current OrangePi raw metadata confirms graph-boundary native execution:
+
+```text
+full-reuse:
+  execution_mode = native-full-reuse-graph-boundary
+  recompute_token_count = 0
+
+cacheblend:
+  execution_mode = native-cacheblend-graph-boundary
+  native_sparse_recompute_scope = exported_graph_score_layer_boundary
+  graph_boundary = score_layer_pic_score_attention
+  pic_recompute_score_layer_idx = 1
+
+epic:
+  execution_mode = native-epic-graph-boundary
+  native_sparse_recompute_scope = exported_graph_score_layer_boundary
+  pic_recompute_score_layer_idx = 1
+```
+
+Joined comparison versus `benchmark.csv`:
+
+```text
+Jetson slot-removal sparse smoke
+mode                   budget  current_s  benchmark_s  ratio  delta
+normal-full-recompute  full    0.448997   0.450046     0.998  -0.2%
+full-reuse             0       0.442611   0.313211     1.413  +41.3%
+cacheblend             0.05    0.112536   0.127653     0.882  -11.8%
+cacheblend             0.10    0.114071   0.128897     0.885  -11.5%
+cacheblend             0.20    0.151300   0.169279     0.894  -10.6%
+cacheblend             0.30    0.186417   0.207742     0.897  -10.3%
+cacheblend             0.40    0.234237   0.259385     0.903  -9.7%
+cacheblend             0.50    0.274125   0.300547     0.912  -8.8%
+epic                   0.05    0.111039   0.113568     0.978  -2.2%
+epic                   0.10    0.107184   0.115133     0.931  -6.9%
+epic                   0.20    0.142285   0.146945     0.968  -3.2%
+epic                   0.30    0.175980   0.183102     0.961  -3.9%
+epic                   0.40    0.223118   0.232526     0.960  -4.0%
+epic                   0.50    0.272529   0.279597     0.975  -2.5%
+
+Jetson full-reuse after legacy path deletion
+mode                   budget  current_s  benchmark_s  ratio  delta
+full-reuse             0       0.080379   0.313211     0.257  -74.3%
+
+OrangePi current artifact after legacy path deletion
+mode                   budget  current_s  benchmark_s  ratio  delta
+normal-full-recompute  full    2.329689   2.087799     1.116  +11.6%
+full-reuse             0       0.724233   0.429257     1.687  +68.7%
+cacheblend             0.05    1.131507   0.622859     1.817  +81.7%
+cacheblend             0.10    1.209630   0.788489     1.534  +53.4%
+cacheblend             0.20    1.507391   1.122164     1.343  +34.3%
+cacheblend             0.30    2.150900   1.268948     1.695  +69.5%
+cacheblend             0.40    2.080987   1.494961     1.392  +39.2%
+cacheblend             0.50    2.396816   1.712549     1.400  +40.0%
+epic                   0.05    1.311376   0.617986     2.122  +112.2%
+epic                   0.10    1.108858   0.731855     1.515  +51.5%
+epic                   0.20    1.328631   1.060809     1.252  +25.2%
+epic                   0.30    1.610699   1.218384     1.322  +32.2%
+epic                   0.40    2.056601   1.440272     1.428  +42.8%
+epic                   0.50    2.055337   1.655416     1.242  +24.2%
+```
+
+OrangePi current artifact versus the older slot-removal smoke is mixed rather than uniformly
+slower:
+
+```text
+mode                   budget  current_s  old_s     ratio  delta
+normal-full-recompute  full    2.329689   2.371690  0.982  -1.8%
+full-reuse             0       0.724233   0.787570  0.920  -8.0%
+cacheblend             0.05    1.131507   1.023714  1.105  +10.5%
+cacheblend             0.10    1.209630   1.397316  0.866  -13.4%
+cacheblend             0.20    1.507391   1.336417  1.128  +12.8%
+cacheblend             0.30    2.150900   1.644752  1.308  +30.8%
+cacheblend             0.40    2.080987   2.115182  0.984  -1.6%
+cacheblend             0.50    2.396816   2.547934  0.941  -5.9%
+epic                   0.05    1.311376   0.784736  1.671  +67.1%
+epic                   0.10    1.108858   0.868082  1.277  +27.7%
+epic                   0.20    1.328631   1.563216  0.850  -15.0%
+epic                   0.30    1.610699   2.031200  0.793  -20.7%
+epic                   0.40    2.056601   1.805454  1.139  +13.9%
+epic                   0.50    2.055337   2.221829  0.925  -7.5%
+```
+
+Conclusion:
+
+1. Jetson does not show a PIC recompute regression after slot-table deletion. The sparse
+   algorithms are equal or faster than `benchmark.csv` (`cacheblend` 0.882x to 0.912x,
+   `epic` 0.931x to 0.978x). The previous Jetson `full-reuse` regression was the removed
+   legacy split/suffix routing, not slot-table deletion; the path-deleted run is 0.257x the
+   benchmark latency.
+2. OrangePi does show a current-artifact performance regression versus `benchmark.csv`, including
+   `full-reuse`, `cacheblend`, and `epic`.
+3. The OrangePi regression cannot be attributed solely to slot-table deletion from the available
+   evidence. `normal-full-recompute` also regresses by 11.6%, and current-vs-old slot-removal
+   results are mixed rather than a consistent slot-deletion penalty.
+4. The likely bucket is OpenCL/operator/runtime/tuning drift around the full compute floor plus
+   graph-boundary sparse kernels. Next attribution should profile the current OrangePi artifact
+   with `MNN_PAGED_ATTENTION_PROFILE=1` and compare:
+   full-prompt attention, score layer `score_flash_attention`, later `sparse_flash_attention`,
+   hydrate, and dense graph compact-row work.
+
+These results were not merged into `benchmark.csv`.
+
+### OrangePi obvious-regression profile after path deletion
+
+Targeted debug profile runs:
+
+```text
+regression_profile_orangepi_minicpm5_ctx512_fr_cb05_epic05_20260703
+regression_profile_orangepi_minicpm5_ctx512_cb30_20260703
+```
+
+Both runs used:
+
+```text
+MNN_PAGED_ATTENTION_PROFILE=1
+MNN_PAGED_ATTENTION_PROFILE_DETAIL=1
+MNN_PIC_GRAPH_PROFILE=1
+MNN_PIC_GRAPH_PROFILE_TOP=400
+```
+
+These latencies are debug/profile latencies only. Graph profile waits after ops, so they must not
+be compared to `benchmark.csv` as formal latency. The purpose is attribution.
+
+Formal current-artifact rows that motivated the profile:
+
+```text
+normal-full-recompute  2.329689s  vs benchmark 2.087799s  1.116x
+full-reuse             0.724233s  vs benchmark 0.429257s  1.687x
+cacheblend 0.05        1.131507s  vs benchmark 0.622859s  1.817x
+cacheblend 0.30        2.150900s  vs benchmark 1.268948s  1.695x
+epic 0.05              1.311376s  vs benchmark 0.617986s  2.122x
+```
+
+Profile measure breakdown:
+
+```text
+case              graph_total  Convolution  full PA  PicSparseAttention  score/topk  hydrate  active_rows
+full-reuse 0      1502.4 ms     672.7 ms     415.7    117.1 ms            n/a        16.0 ms  14
+cacheblend 0.05   2463.4 ms    1358.0 ms     327.0    308.2 ms            2.3 ms     27.4 ms  39
+epic 0.05         1793.0 ms     883.1 ms     405.5    136.0 ms            n/a        16.3 ms  39
+cacheblend 0.30   3521.3 ms    2069.2 ms     293.4    530.3 ms            3.2 ms     19.0 ms  164
+```
+
+More detailed measure sums:
+
+```text
+full-reuse:
+  OpenCL attention:
+    prefill_attention_fast_qk_softmax_qkv = 415.4 ms
+    sparse_flash_attention               = 87.3 ms across 22 layers
+    score_qsplit_attention               = 18.1 ms
+    hydrate                              = 16.0 ms across 22 layers
+  Graph:
+    Convolution                          = 672.7 ms across 169 ops
+    full-row Convolution                 = 251.9 ms across 10 ops
+    compact-row Convolution              = 387.7 ms across 158 ops
+
+cacheblend 0.05:
+  OpenCL attention:
+    prefill_attention_fast_qk_softmax_qkv = 326.8 ms
+    sparse_flash_attention               = 251.5 ms across 22 layers
+    cacheblend_score                     = 2.3 ms
+    hydrate                              = 27.4 ms across 22 layers
+  Graph:
+    Convolution                          = 1358.0 ms across 169 ops
+    full-row Convolution                 = 115.3 ms across 10 ops
+    compact-row Convolution              = 1201.0 ms across 158 ops
+  Sparse flash:
+    flash_us                             = 201.9 ms
+    qk_active_tiles / qk_rect_tiles      = 15466 / 20064 = 0.771
+
+epic 0.05:
+  OpenCL attention:
+    prefill_attention_fast_qk_softmax_qkv = 405.3 ms
+    sparse_flash_attention               = 104.7 ms across 22 layers
+    hydrate                              = 16.3 ms across 22 layers
+  Graph:
+    Convolution                          = 883.1 ms across 169 ops
+    full-row Convolution                 = 117.3 ms across 10 ops
+    compact-row Convolution              = 739.2 ms across 158 ops
+  Sparse flash:
+    flash_us                             = 76.8 ms
+    qk_active_tiles / qk_rect_tiles      = 6424 / 7040 = 0.912
+
+cacheblend 0.30:
+  OpenCL attention:
+    prefill_attention_fast_qk_softmax_qkv = 293.2 ms
+    sparse_flash_attention               = 496.1 ms across 22 layers
+    score_qsplit_attention               = 24.0 ms
+    cacheblend_score                     = 3.2 ms
+    hydrate                              = 19.0 ms across 22 layers
+  Graph:
+    Convolution                          = 2069.2 ms across 169 ops
+    full-row Convolution                 = 107.5 ms across 10 ops
+    compact-row Convolution              = 1935.1 ms across 158 ops
+  Sparse flash:
+    flash_us                             = 452.5 ms
+    qk_active_tiles / qk_rect_tiles      = 62128 / 71522 = 0.869
+```
+
+Interpretation:
+
+1. The obvious OrangePi regressions are not explained by persistent PIC cache hydrate. Hydrate is
+   tens of milliseconds in debug profile, not the dominant term.
+2. They are not explained by cacheblend score/top-k either. `cacheblend_score` is `2-3 ms` in
+   these ctx512 profiles.
+3. `full-reuse` is still expensive because the current graph-boundary implementation calls
+   `prefill(full_prompt_token_ids)`. With `score_layer_idx=1`, layer 0 is a full prompt layer and
+   score layer Q/K/V are still full rows. Active rows only take effect at the score-layer boundary.
+   This is one forward, but it has a full-compute region before the boundary and a compact region
+   after it. It is not a slot-table cost.
+4. `cacheblend` / `epic` inherit the same full-compute floor before the boundary. After the
+   boundary, OrangePi is dominated by compact-row `Convolution` / MLP plus `PicSparseAttention`.
+5. Cacheblend sparse attention is worse than epic at the same selected count because selected
+   logical positions are scattered. The profile confirms larger effective sparse QK work:
+   `cacheblend 0.05 active/rect = 0.771` with `20064` rect tiles, while `epic 0.05` has only
+   `7040` rect tiles because its selected PIC rows are prefix-contiguous.
+
+Source correspondence:
+
+```text
+transformers/pic_llm/engine/src/llm.cpp:
+  prefillFixedGraphExternalPagedKV(...)
+    paged->external_hydrate_start_layer_idx = score_layer_idx + 1
+    paged->beginPicGraphActivePlan(...)
+    prefill(full_prompt_token_ids)
+
+source/core/PagedKVMeta.hpp:
+  graphActiveBudget(seqLen)
+    active = seqLen - pic_token_count + selected_local_indices.size()
+```
+
+For MiniCPM5-1B ctx512, `pic_token_count=498`, so:
+
+```text
+full-reuse active rows: 512 - 498 + 0   = 14
+5% active rows:         512 - 498 + 25  = 39
+30% active rows:        512 - 498 + 150 = 164
+```
+
+Next actions:
+
+1. Decide whether `full-reuse` should get a separate true hydrate+suffix graph contract. The
+   deleted split/suffix scheduler should not return, but the current score-layer graph-boundary
+   contract is inherently too heavy for ideal full-reuse because it still computes layer 0 full
+   prompt rows.
+2. Profile and fix OpenCL compact-row `Convolution` / MLP routing for active row sizes 14, 39, and
+   164. This is currently the largest post-boundary cost.
+3. For cacheblend, optimize sparse flash around selected logical distribution, not score/top-k.
+   Low ratio still has large K work because selected rows are scattered across the PIC span.
+4. Treat the 11.6% normal-full-recompute regression as a separate OpenCL normal baseline drift.
+   It is not caused by slot-table deletion and should be checked with normal `llm_bench` / runtime
+   cache / artifact A/B if this becomes the blocking regression.
+
+## 2026-07-03 Full-Reuse Active Non-PIC Resolution
+
+Previous section identified the right root cause: current `full-reuse` was not ideal
+hydrate+suffix-only because it was routed through the score-layer graph-boundary contract. That
+forced one full-prompt forward until `score_layer_idx=1`, so layer0 and score-layer inputs were
+still full rows before compaction. The fix is not to restore the removed split/suffix scheduler.
+Instead, `full-reuse` now has a dedicated active-non-PIC prefill path:
+
+```text
+logical prompt length = 512
+PIC span              = [7, 505) = 498 tokens
+active rows           = prelude [0, 7) + suffix [505, 512) = 14 tokens
+```
+
+Implementation:
+
+- `prefillFullReuseExternalPagedKV(...)` builds `activeLogicalIndices` and `activeTokenIds` for
+  non-PIC rows only.
+- Persistent PIC cache source segments are bound with `logicalLength=fullPromptLen`; no scratch
+  `.k/.v` is created.
+- `PagedKVMeta::beginSparseQuery(activeLogicalIndices, 0)` makes every PagedAttention layer use
+  real logical positions while the graph input has only active rows.
+- `sparse_query_force_plain_attention` forces CPU/CUDA/OpenCL PagedAttention to avoid
+  `PicScoreAttention` / `PicSparseAttention` scoring behavior for this full-reuse request.
+- For graph-boundary models with `pic_recompute_budget`, forced sparse query now creates a real
+  `[active_rows, logical_length]` causal mask. The initial scalar-mask attempt failed because graph
+  gather nodes saw a rank/shape mismatch.
+
+The first active-row attempt failed in warm:
+
+```text
+Broad cast error, dim1 = 0, dim2 = 14
+Compute Shape Error for BinaryOp523
+forwardRaw outputs empty seq_len=14 add=14 all_seq=0 prompt=14 logical_length=512
+```
+
+Root cause: the graph-boundary export still gathers `attention_mask` after the score-layer-shaped
+PagedAttention op. A rank-0 scalar mask is valid for plain PagedAttention kernels, but invalid for
+the exported graph's gather path. The mask fix was to materialize query rows by sparse logical
+position:
+
+```text
+mask shape = [1, 1, active_rows, logical_length]
+mask[i, j] = -inf when j > sparseLogicalIndex(i)
+```
+
+Build and sync:
+
+```bash
+JOBS=$(( ($(nproc) + 1) / 2 )) \
+MNN_TARGET_DEVICE=orangepi5plus \
+BUILD_TARGET=pic_server \
+BUILD_MNNCONVERT=0 \
+INSTALL_AFTER_BUILD=1 \
+bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+
+rsync -a --delete .cache/output/mnn/artifacts/orangepi5plus/ \
+  orangepi@192.168.101.113:/mnt/ssd/code/.cache/mnn_opencl_pic/artifacts/orangepi5plus/
+```
+
+Artifact check:
+
+```text
+pic_server    ELF 64-bit LSB executable, ARM aarch64
+libMNN.so     ELF 64-bit LSB shared object, ARM aarch64
+libMNN_CL.so  ELF 64-bit LSB shared object, ARM aarch64
+libpic_llm.so ELF 64-bit LSB shared object, ARM aarch64
+MNN_OPENCL=ON, MNN_CUDA=OFF, MNN_VULKAN=ON
+```
+
+Formal prefill-only debug row:
+
+```bash
+NO_PROXY=192.168.101.113,127.0.0.1,localhost \
+no_proxy=192.168.101.113,127.0.0.1,localhost \
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_orangepi.sh \
+  --model-key minicpm5-1b \
+  --contexts 512 \
+  --modes full-reuse \
+  --run-id fullreuse_active_nonpic_mask_orangepi_ctx512_20260703 \
+  --benchmark-csv benchmark.csv \
+  --only-benchmark-csv-rows \
+  --allow-subset-devices \
+  --ssh-command-timeout-sec 960 \
+  --remote-bench-timeout-sec 900 \
+  --server-runtime-timeout-sec 1200
+```
+
+Result:
+
+```text
+summary.csv:
+orangepi,MiniCPM5-1B,OpenCL,ctx512,full-reuse,0,0.406900s,1258.29 tok/s
+
+benchmark.csv reference:
+orangepi,MiniCPM5-1B,OpenCL,ctx512,full-reuse,0,0.429257s
+```
+
+Metadata:
+
+```text
+execution_mode      = native-full-reuse-hydrate-suffix
+graph_boundary      = none_full_reuse_hydrate_suffix
+graph_level_boundary= false
+score_pass          = not_required_full_reuse_hydrate_suffix
+recompute_token_count = 0
+pic_recompute_logical_indices = []
+```
+
+Profile run:
+
+```bash
+NO_PROXY=192.168.101.113,127.0.0.1,localhost \
+no_proxy=192.168.101.113,127.0.0.1,localhost \
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_orangepi.sh \
+  --model-key minicpm5-1b \
+  --contexts 512 \
+  --modes full-reuse \
+  --run-id fullreuse_active_nonpic_mask_orangepi_ctx512_profile_20260703 \
+  --benchmark-csv benchmark.csv \
+  --only-benchmark-csv-rows \
+  --allow-subset-devices \
+  --ssh-command-timeout-sec 960 \
+  --remote-bench-timeout-sec 900 \
+  --server-runtime-timeout-sec 1200 \
+  --server-env MNN_PIC_REQUEST_PROFILE=1 \
+  --server-env MNN_PAGED_ATTENTION_PROFILE=1
+```
+
+Profile result:
+
+```text
+summary.csv latency under profiling overhead: 0.598636s
+forward_raw_on_forward: seq_len=14, outputs=1, cost=582.060 ms
+forward_raw_total:      seq_len=14, outputs=1, cost=598.144 ms
+full_reuse_prefill_active_non_pic:
+  active_tokens=14 prelude_tokens=7 suffix_tokens=7 full_prompt_tokens=512
+
+cacheblend_score count:      0
+score_flash_attention count: 0
+sparse_flash_attention count: 44 profile lines
+hydrate count:               22 profile lines
+full-prompt query=512 lines: 0
+```
+
+Manual decode smoke:
+
+```text
+request: same explicit tokens/span, full-reuse, max_tokens=1
+status: 200
+content: "<"
+execution_mode: native-full-reuse-hydrate-suffix
+graph_boundary: none_full_reuse_hydrate_suffix
+recompute_token_count: 0
+```
+
+Conclusion:
+
+`full-reuse` is no longer dragged through score-layer full-prompt graph-boundary compute for this
+case. The remaining production cost is now active-row graph execution plus persistent PIC cache
+source hydrate into current request PagedCache. The deleted legacy split/suffix path stays deleted;
+this fix uses one active-row forward over non-PIC logical rows and keeps PagedCache as the KV
+exchange layer.
+
+### Cacheblend / epic check after full-reuse hydrate+suffix fix
+
+Question: with the slot-table indirection removed and with `full-reuse` no longer routed through
+the score-layer graph-boundary, do `cacheblend` and `epic` prefill still regress versus
+`benchmark.csv`?
+
+Current-artifact debug sweep:
+
+```bash
+NO_PROXY=192.168.101.113,127.0.0.1,localhost \
+no_proxy=192.168.101.113,127.0.0.1,localhost \
+bash .codex/skills/mnn-pic-benchmark/scripts/run_pic_prefill_latency_sweep_orangepi.sh \
+  --model-key minicpm5-1b \
+  --contexts 512 \
+  --modes cacheblend,epic \
+  --run-id slotless_cb_epic_orangepi_ctx512_after_fullreusefix_20260703 \
+  --benchmark-csv benchmark.csv \
+  --only-benchmark-csv-rows \
+  --allow-subset-devices \
+  --ssh-command-timeout-sec 960 \
+  --remote-bench-timeout-sec 900 \
+  --server-runtime-timeout-sec 1200
+```
+
+Output:
+
+```text
+.cache/latency_budget_20260625/slotless_cb_epic_orangepi_ctx512_after_fullreusefix_20260703/summary.csv
+```
+
+Joined comparison versus `benchmark.csv`:
+
+```text
+mode          budget  current_s  benchmark_s  current/benchmark
+cacheblend    0.05     1.269443    0.622859        2.038
+cacheblend    0.10     1.114407    0.788489        1.413
+cacheblend    0.20     1.356220    1.122164        1.209
+cacheblend    0.30     1.878969    1.268948        1.481
+cacheblend    0.40     2.060806    1.494961        1.379
+cacheblend    0.50     2.321475    1.712549        1.356
+epic          0.05     0.794243    0.617986        1.285
+epic          0.10     1.068844    0.731855        1.460
+epic          0.20     1.325192    1.060809        1.249
+epic          0.30     1.789788    1.218384        1.469
+epic          0.40     2.054780    1.440272        1.427
+epic          0.50     2.109459    1.655416        1.274
+```
+
+Comparison against the earlier slotless sweep before the dedicated `full-reuse` fix:
+
+```text
+mode          budget  after_fix_s  old_slotless_s  after/old
+cacheblend    0.05     1.269443      1.131507        1.122
+cacheblend    0.10     1.114407      1.209630        0.921
+cacheblend    0.20     1.356220      1.507391        0.900
+cacheblend    0.30     1.878969      2.150900        0.874
+cacheblend    0.40     2.060806      2.080987        0.990
+cacheblend    0.50     2.321475      2.396816        0.969
+epic          0.05     0.794243      1.311376        0.606
+epic          0.10     1.068844      1.108858        0.964
+epic          0.20     1.325192      1.328631        0.997
+epic          0.30     1.789788      1.610699        1.111
+epic          0.40     2.054780      2.056601        0.999
+epic          0.50     2.109459      2.055337        1.026
+```
+
+Request metadata:
+
+```text
+completion_tokens=0
+decode_latency_s=0
+pic_recompute_score_layer_idx=1
+doc span: prompt_start=7, token_count=498, full_prompt_token_count=512
+cacheblend selected PIC counts: 25/50/100/150/200/249
+epic selected PIC counts:       25/50/100/150/200/249
+cacheblend active logical span at 30%: first=16 last=501, scattered rows
+epic active logical span at 30%:       first=7  last=156, contiguous prefix rows
+```
+
+Run log scan:
+
+```text
+ERROR / Cache invalid / target unavailable / async persistent PIC cache read failed: none
+old sparse_prefill path lines: none
+sparse_flash_attention at layer 0 or layer 1: none
+```
+
+Existing attribution profile remains the useful breakdown for this code path:
+
+```text
+profile run:
+  .cache/latency_budget_20260625/regression_profile_orangepi_minicpm5_ctx512_cb30_20260703
+
+OpenCLPagedAttention profile, cacheblend 30%, profile overhead enabled:
+  sparse_flash_attention total = 1120.978 ms, count=44
+  prefill_attention_fast_qk_softmax_qkv = 723.870 ms, count=2
+  score_qsplit_attention = 57.817 ms, count=2
+  hydrate = 41.242 ms, count=44
+  cacheblend_score = 5.828 ms, count=2
+
+Graph profile type totals:
+  Convolution        = 4124.155 ms, calls=338
+    MLP Convolution  = 2817.794 ms
+    attn projections = 1259.018 ms
+  PicSparseAttention = 1210.386 ms, calls=44
+  PagedAttention     = 724.297 ms, calls=2
+  PicScoreAttention  = 64.944 ms, calls=2
+```
+
+Interpretation:
+
+1. `cacheblend` / `epic` still show a real OrangePi current-artifact regression versus
+   `benchmark.csv` after slot-table removal and after the dedicated full-reuse fix.
+2. The regression is not explained by the deleted slot table itself. The current run is mixed
+   against the earlier slotless sweep and has no old-path or layer-0 sparse execution signal.
+3. It is also not a `full-reuse` hydrate+suffix problem anymore: fixed full-reuse is now
+   `0.406900s` versus benchmark `0.429257s`, while cacheblend/epic still regress.
+4. The intended graph-boundary floor remains for sparse algorithms: layer 0 is full-prompt
+   compute, layer 1 is the score layer, and layer >= 2 is compact sparse. This is the correct
+   cacheblend/epic contract, not the full-reuse bug.
+5. The measured bottlenecks are OpenCL operators after and around that boundary: compact-row
+   Convolution/MLP dominates the graph profile, followed by PicSparseAttention and the score-before
+   full PagedAttention floor. `cacheblend_score` and hydrate are small.
+6. Cacheblend is intrinsically harder than epic at the same selected count because selected rows are
+   scattered deep into the PIC span; at 30% it reaches logical 501, so sparse attention still sees a
+   near-full causal K range. Epic's prefix rows keep the causal range much smaller.
+
+Next root-cause direction:
+
+- Do not restore the removed slot table or the deleted legacy split/suffix path.
+- First compare current normal-full-recompute OpenCL tuning/artifact drift against the benchmark
+  normal row, because the earlier slotless run already showed normal `2.329689s` versus benchmark
+  `2.087799s` (1.116x).
+- Then profile current cacheblend/epic without changing semantics, focusing on compact-row
+  `Convolution` / MLP tune keys and `PicSparseAttention` active logical distribution. For
+  cacheblend-specific improvements that change row distribution, report a named algorithm variant
+  rather than ordinary cacheblend.
+
+These debug/profile results were not merged into `benchmark.csv`.

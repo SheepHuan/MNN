@@ -3373,7 +3373,6 @@ __kernel void decode_causal_attention_row64(GLOBAL_SIZE_3_DIMS
                               __global const FLOAT *query, // [batch, query_seq_len, head_num, head_dim]
                               __global const FLOAT *key_cache, // [max_slots, batch, kv_head_num, head_dim]
                               __global const FLOAT *value_cache, // [batch, kv_head_num, max_slots, head_dim]
-                              __global const int *slot_table, // [key_seq_len]
                               __global const int *sparse_query, // [output_seq_len], used when sparse_query_active != 0
                               __global FLOAT *output, // [batch, output_seq_len, head_num, head_dim]
                               __private const float scale,
@@ -3436,7 +3435,7 @@ __kernel void decode_causal_attention_row64(GLOBAL_SIZE_3_DIMS
     const int query_offset = ((b * query_seq_len + q_row) * head_num + h) * head_dim;
 
     for (int k = lid; k < active_kv_seq_len; k += 64) {
-        const int slot = slot_table[k];
+        const int slot = k;
         if (slot < 0 || slot >= key_max_len) {
             continue;
         }
@@ -3509,7 +3508,6 @@ __kernel void decode_causal_attention_row32(GLOBAL_SIZE_3_DIMS
                               __global const FLOAT *query, // [batch, query_seq_len, head_num, head_dim]
                               __global const FLOAT *key_cache, // [max_slots, batch, kv_head_num, head_dim]
                               __global const FLOAT *value_cache, // [batch, kv_head_num, max_slots, head_dim]
-                              __global const int *slot_table, // [key_seq_len]
                               __global const int *sparse_query, // [output_seq_len], used when sparse_query_active != 0
                               __global FLOAT *output, // [batch, output_seq_len, head_num, head_dim]
                               __private const float scale,
@@ -3572,7 +3570,7 @@ __kernel void decode_causal_attention_row32(GLOBAL_SIZE_3_DIMS
     const int query_offset = ((b * query_seq_len + q_row) * head_num + h) * head_dim;
 
     for (int k = lid; k < active_kv_seq_len; k += 32) {
-        const int slot = slot_table[k];
+        const int slot = k;
         if (slot < 0 || slot >= key_max_len) {
             continue;
         }
@@ -3644,7 +3642,6 @@ __kernel void decode_causal_attention_row32(GLOBAL_SIZE_3_DIMS
 __kernel void decode_attention_pic_rank_score_hd128(
                               __global const FLOAT *query, // [batch, query_seq_len, head_num, 128]
                               __global const FLOAT *key_cache, // [max_slots, batch, kv_head_num, 128]
-                              __global const int *slot_table, // [key_seq_len]
                               __global const int *head_ids,
                               __global float *scores, // [pic_token_count]
                               __private const int batch,
@@ -3670,7 +3667,7 @@ __kernel void decode_attention_pic_rank_score_hd128(
         scores[token_local] = -FLT_MAX;
         return;
     }
-    const int slot = slot_table[logical];
+    const int slot = logical;
     if (slot < 0 || slot >= key_max_len) {
         scores[token_local] = -FLT_MAX;
         return;

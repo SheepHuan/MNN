@@ -7,10 +7,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import shlex
 import signal
 import socket
-import subprocess
 import sys
 import time
 import uuid
@@ -75,6 +76,7 @@ DEVICES: dict[str, dict[str, Any]] = {
     "orangepi": {
         "display": "Orange Pi 5 Plus",
         "ssh": "orangepi@192.168.101.113",
+        "root_ssh": "root@192.168.101.113",
         "remote_work": "/mnt/ssd/code/.cache/mnn_opencl_pic",
         "artifact": "/mnt/ssd/code/.cache/mnn_opencl_pic/artifacts/orangepi5plus",
         "ld_library_path": "/mnt/ssd/code/.cache/mnn_opencl_pic/artifacts/orangepi5plus/lib",
@@ -396,6 +398,10 @@ def sudo_prefix(device: dict[str, Any]) -> str:
     password_env = ""
     if device.get("device_key") == "rhino":
         password_env = str(os.environ.get("MNN_RHINO_SUDO_PASSWORD", "")).strip()
+    elif device.get("device_key") == "orangepi":
+        password_env = str(os.environ.get("MNN_ORANGEPI_SUDO_PASSWORD", "")).strip()
+    elif device.get("device_key") == "jetson":
+        password_env = str(os.environ.get("MNN_JETSON_SUDO_PASSWORD", "")).strip()
     if password_env:
         return f"echo {shlex.quote(password_env)} | sudo -S -p ''"
     return "sudo -n"
@@ -408,7 +414,13 @@ def ssh_root(
     check: bool = True,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    wrapped = f"{sudo_prefix(device)} sh -c {shlex.quote(script)}"
+    root_ssh = str(device.get("root_ssh", "")).strip()
+    if root_ssh:
+        wrapped = f"sh -c {shlex.quote(script)}"
+        ssh_target = root_ssh
+    else:
+        wrapped = f"{sudo_prefix(device)} sh -c {shlex.quote(script)}"
+        ssh_target = device["ssh"]
     effective_timeout = timeout
     if effective_timeout is None:
         effective_timeout = float(device.get("ssh_command_timeout_sec", DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS))
@@ -427,7 +439,7 @@ def ssh_root(
             "ServerAliveCountMax=1",
             "-o",
             "StrictHostKeyChecking=accept-new",
-            device["ssh"],
+            ssh_target,
             wrapped,
         ],
         check=check,
@@ -440,15 +452,19 @@ def query_frequency_state(device: dict[str, Any]) -> dict[str, Any]:
 python3 - <<'PY'
 import json
 import os
+import re
+import shutil
+import subprocess
 
-CPU_POLICIES = {
-    "little": "/sys/devices/system/cpu/cpufreq/policy0",
-    "mid": "/sys/devices/system/cpu/cpufreq/policy3",
-    "big": "/sys/devices/system/cpu/cpufreq/policy5",
-}
 GPU_PATHS = [
+    "/sys/class/devfreq/fb000000.gpu",
+    "/sys/class/devfreq/mali0",
     "/sys/class/devfreq/3d00000.qcom,kgsl-3d0",
     "/sys/class/kgsl/kgsl-3d0",
+]
+DDR_PATHS = [
+    "/sys/class/devfreq/dmc",
+    "/sys/class/devfreq/dmc_ondemand",
 ]
 
 def read(path):
@@ -458,12 +474,38 @@ def read(path):
     except Exception:
         return ""
 
-state = {"cpu": {}, "gpu": {}}
-for name, base in CPU_POLICIES.items():
+def run_cmd(cmd):
+    try:
+        return subprocess.run(cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.strip()
+    except Exception:
+        return ""
+
+def policy_sort_key(path):
+    name = os.path.basename(path)
+    try:
+        return int(name.replace("policy", ""))
+    except Exception:
+        return 10**9
+
+state = {"cpu": {}, "gpu": {}, "ddr": {}}
+cpu_policy_root = "/sys/devices/system/cpu/cpufreq"
+cpu_policy_paths = []
+if os.path.isdir(cpu_policy_root):
+    cpu_policy_paths = [
+        os.path.join(cpu_policy_root, item)
+        for item in os.listdir(cpu_policy_root)
+        if item.startswith("policy") and os.path.isdir(os.path.join(cpu_policy_root, item))
+    ]
+cpu_policy_paths = sorted(cpu_policy_paths, key=policy_sort_key)
+cpu_names = ["little", "mid", "big"]
+for index, base in enumerate(cpu_policy_paths):
+    name = cpu_names[index] if index < len(cpu_names) else os.path.basename(base)
     info = {}
+    info["path"] = base
     for key in [
         "related_cpus",
         "affected_cpus",
+        "scaling_available_governors",
         "scaling_governor",
         "scaling_cur_freq",
         "scaling_min_freq",
@@ -483,6 +525,7 @@ for base in GPU_PATHS:
     info = {"path": base}
     for key in [
         "governor",
+        "available_governors",
         "cur_freq",
         "min_freq",
         "max_freq",
@@ -501,6 +544,74 @@ for base in GPU_PATHS:
         state["gpu"] = info
         break
 
+for base in DDR_PATHS:
+    if not os.path.exists(base):
+        continue
+    info = {"path": base}
+    for key in [
+        "governor",
+        "available_governors",
+        "cur_freq",
+        "min_freq",
+        "max_freq",
+        "available_frequencies",
+    ]:
+        path = os.path.join(base, key)
+        if os.path.isfile(path):
+            info[key] = read(path)
+    if len(info) > 1:
+        state["ddr"] = info
+        break
+
+jetson_clocks = shutil.which("jetson_clocks")
+if jetson_clocks:
+    show = run_cmd([jetson_clocks, "--show"])
+    if "root user" in show or "Permission denied" in show:
+        sudo = shutil.which("sudo")
+        if sudo:
+            sudo_show = run_cmd([sudo, "-n", jetson_clocks, "--show"])
+            if sudo_show:
+                show = sudo_show
+    jetson = {"jetson_clocks_show": show}
+    for line in show.splitlines():
+        line = line.strip()
+        match = re.match(r"GPU MinFreq=(\d+) MaxFreq=(\d+) CurrentFreq=(\d+)", line)
+        if match:
+            gpu = {
+                "path": "jetson_clocks",
+                "min_freq": match.group(1),
+                "max_freq": match.group(2),
+                "cur_freq": match.group(3),
+            }
+            jetson["gpu"] = gpu
+            if not state.get("gpu"):
+                state["gpu"] = gpu
+            continue
+        match = re.match(r"EMC MinFreq=(\d+) MaxFreq=(\d+) CurrentFreq=(\d+)(?: FreqOverride=(\d+))?", line)
+        if match:
+            ddr = {
+                "path": "jetson_clocks",
+                "min_freq": match.group(1),
+                "max_freq": match.group(2),
+                "cur_freq": match.group(3),
+            }
+            if match.group(4) is not None:
+                ddr["freq_override"] = match.group(4)
+            jetson["emc"] = ddr
+            if not state.get("ddr"):
+                state["ddr"] = ddr
+    nvpmodel = shutil.which("nvpmodel")
+    if nvpmodel:
+        nvpmodel_output = run_cmd([nvpmodel, "-q"])
+        if "NVPM ERROR" in nvpmodel_output or "Permission denied" in nvpmodel_output:
+            sudo = shutil.which("sudo")
+            if sudo:
+                sudo_nvpmodel_output = run_cmd([sudo, "-n", nvpmodel, "-q"])
+                if sudo_nvpmodel_output:
+                    nvpmodel_output = sudo_nvpmodel_output
+        jetson["nvpmodel"] = nvpmodel_output
+    state["jetson"] = jetson
+
 print(json.dumps(state, ensure_ascii=False))
 PY
 """
@@ -518,6 +629,114 @@ PY
 
 def apply_frequency_profile(device: dict[str, Any], profile: str) -> dict[str, Any]:
     profile = str(profile or "max").strip()
+    if device.get("device_key") == "jetson":
+        if profile not in {"", "max"}:
+            raise RuntimeError(f"frequency profile {profile!r} is not implemented for device jetson")
+        current_state = query_frequency_state(device)
+        if jetson_frequency_state_is_max(current_state):
+            return current_state
+        script = """
+set -e
+if command -v nvpmodel >/dev/null 2>&1; then
+  nvpmodel -m 0
+fi
+if command -v jetson_clocks >/dev/null 2>&1; then
+  jetson_clocks
+else
+  echo "missing jetson_clocks" >&2
+  exit 1
+fi
+"""
+        result = ssh_root(device, script, check=False, timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "failed to apply jetson max frequency profile; "
+                "set MNN_JETSON_SUDO_PASSWORD or enable passwordless sudo on Jetson\n"
+                + (result.stdout or "")
+                + (result.stderr or "")
+            )
+        frequency_state = query_frequency_state(device)
+        if not jetson_frequency_state_is_max(frequency_state):
+            raise RuntimeError(
+                "jetson frequency profile=max did not reach cpu=max,gpu=max,ddr=max\n"
+                + json.dumps(frequency_state, ensure_ascii=False, indent=2)
+            )
+        return frequency_state
+    if device.get("device_key") == "orangepi":
+        if profile not in {"", "max"}:
+            raise RuntimeError(f"frequency profile {profile!r} is not implemented for device orangepi")
+        current_state = query_frequency_state(device)
+        if orangepi_frequency_state_is_max(current_state):
+            return current_state
+        script = """
+set -e
+set_cpu_policy_max() {
+  policy="$1"
+  [ -d "$policy" ] || return 0
+  [ -f "$policy/cpuinfo_max_freq" ] || return 0
+  max_freq="$(cat "$policy/cpuinfo_max_freq")"
+  [ -n "$max_freq" ] || return 0
+  [ -f "$policy/scaling_max_freq" ] && echo "$max_freq" > "$policy/scaling_max_freq"
+  [ -f "$policy/scaling_min_freq" ] && echo "$max_freq" > "$policy/scaling_min_freq"
+  if [ -f "$policy/scaling_governor" ]; then
+    if [ -f "$policy/scaling_available_governors" ] && grep -qw performance "$policy/scaling_available_governors"; then
+      echo performance > "$policy/scaling_governor" || true
+    else
+      echo performance > "$policy/scaling_governor" 2>/dev/null || true
+    fi
+  fi
+}
+
+set_devfreq_max() {
+  path="$1"
+  label="$2"
+  [ -d "$path" ] || {
+    echo "missing $label devfreq path: $path" >&2
+    return 1
+  }
+  freq=""
+  if [ -f "$path/available_frequencies" ]; then
+    freq="$(tr ' ' '\\n' < "$path/available_frequencies" | awk 'NF {print}' | sort -n | tail -1)"
+  fi
+  if [ -z "$freq" ] && [ -f "$path/max_freq" ]; then
+    freq="$(cat "$path/max_freq")"
+  fi
+  [ -n "$freq" ] || {
+    echo "missing $label max frequency under $path" >&2
+    return 1
+  }
+  [ -f "$path/max_freq" ] && echo "$freq" > "$path/max_freq"
+  [ -f "$path/min_freq" ] && echo "$freq" > "$path/min_freq"
+  if [ -f "$path/governor" ]; then
+    if [ -f "$path/available_governors" ] && grep -qw performance "$path/available_governors"; then
+      echo performance > "$path/governor" || true
+    elif [ -f "$path/available_governors" ] && grep -qw userspace "$path/available_governors"; then
+      echo userspace > "$path/governor" || true
+    fi
+  fi
+}
+
+for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+  set_cpu_policy_max "$policy"
+done
+set_devfreq_max /sys/class/devfreq/fb000000.gpu gpu
+set_devfreq_max /sys/class/devfreq/dmc ddr
+"""
+        result = ssh_root(device, script, check=False, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "failed to apply orangepi max frequency profile; "
+                "ensure root SSH works or set MNN_ORANGEPI_SUDO_PASSWORD / passwordless sudo\n"
+                + (result.stdout or "")
+                + (result.stderr or "")
+            )
+        frequency_state = query_frequency_state(device)
+        if not orangepi_frequency_state_is_max(frequency_state):
+            raise RuntimeError(
+                "orangepi frequency profile=max did not reach cpu=max,gpu=max,ddr=max\n"
+                + json.dumps(frequency_state, ensure_ascii=False, indent=2)
+            )
+        return frequency_state
     if device.get("device_key") != "rhino":
         if profile in {"", "max"}:
             return query_frequency_state(device)
@@ -605,6 +824,93 @@ echo 680000000 > /sys/class/devfreq/3d00000.qcom,kgsl-3d0/max_freq
     return frequency_state
 
 
+def _max_available_freq(info: dict[str, Any] | None) -> str:
+    if not isinstance(info, dict):
+        return ""
+    values: list[int] = []
+    for token in str(info.get("available_frequencies", "")).replace(",", " ").split():
+        try:
+            values.append(int(token))
+        except ValueError:
+            pass
+    for key in ("cpuinfo_max_freq", "max_freq"):
+        try:
+            value = int(str(info.get(key, "")).strip())
+        except ValueError:
+            continue
+        if value > 0:
+            values.append(value)
+    return str(max(values)) if values else ""
+
+
+def _devfreq_is_locked_to_max(info: dict[str, Any] | None) -> bool:
+    if not isinstance(info, dict) or not info:
+        return False
+    target = _max_available_freq(info)
+    if not target:
+        return False
+    return str(info.get("min_freq", "")).strip() == target and str(info.get("max_freq", "")).strip() == target
+
+
+def orangepi_frequency_state_is_max(frequency_state: dict[str, Any] | None) -> bool:
+    if not isinstance(frequency_state, dict):
+        return False
+    cpu = frequency_state.get("cpu") if isinstance(frequency_state.get("cpu"), dict) else {}
+    if not cpu:
+        return False
+    for info in cpu.values():
+        if not isinstance(info, dict):
+            return False
+        target = _max_available_freq(info)
+        if not target:
+            return False
+        if str(info.get("scaling_min_freq", "")).strip() != target:
+            return False
+        if str(info.get("scaling_max_freq", "")).strip() != target:
+            return False
+    gpu = frequency_state.get("gpu") if isinstance(frequency_state.get("gpu"), dict) else {}
+    ddr = frequency_state.get("ddr") if isinstance(frequency_state.get("ddr"), dict) else {}
+    return _devfreq_is_locked_to_max(gpu) and _devfreq_is_locked_to_max(ddr)
+
+
+def jetson_frequency_state_is_max(frequency_state: dict[str, Any] | None) -> bool:
+    if not isinstance(frequency_state, dict):
+        return False
+    cpu = frequency_state.get("cpu") if isinstance(frequency_state.get("cpu"), dict) else {}
+    if not cpu:
+        return False
+    for info in cpu.values():
+        if not isinstance(info, dict):
+            return False
+        target = _max_available_freq(info)
+        if not target:
+            return False
+        if str(info.get("scaling_min_freq", "")).strip() != target:
+            return False
+        if str(info.get("scaling_max_freq", "")).strip() != target:
+            return False
+    gpu = frequency_state.get("gpu") if isinstance(frequency_state.get("gpu"), dict) else {}
+    ddr = frequency_state.get("ddr") if isinstance(frequency_state.get("ddr"), dict) else {}
+    for info in (gpu, ddr):
+        if not isinstance(info, dict) or not info:
+            return False
+        max_freq = str(info.get("max_freq", "")).strip()
+        cur_freq = str(info.get("cur_freq", "")).strip()
+        if not max_freq or cur_freq != max_freq:
+            return False
+    gpu_min = str(gpu.get("min_freq", "")).strip()
+    if gpu_min and gpu_min != str(gpu.get("max_freq", "")).strip():
+        return False
+    override = str(ddr.get("freq_override", "")).strip()
+    if override and override != "1":
+        return False
+    jetson = frequency_state.get("jetson") if isinstance(frequency_state.get("jetson"), dict) else {}
+    nvpmodel = str(jetson.get("nvpmodel", ""))
+    if nvpmodel and "MAXN" not in nvpmodel:
+        return False
+    return True
+
+
 def rhino_frequency_state_is_max(frequency_state: dict[str, Any] | None) -> bool:
     if not isinstance(frequency_state, dict):
         return False
@@ -625,22 +931,40 @@ def rhino_frequency_state_is_max(frequency_state: dict[str, Any] | None) -> bool
 
 
 def format_frequency_note(device: dict[str, Any], frequency_state: dict[str, Any] | None) -> str:
-    default = DEFAULT_MAX_FREQUENCY_NOTES.get(str(device.get("device_key", "")), "cpu=max,gpu=max,ddr=max")
-    if str(device.get("device_key", "")) == "rhino" and str(device.get("frequency_profile", "")).strip() == "max":
+    device_key = str(device.get("device_key", ""))
+    default = DEFAULT_MAX_FREQUENCY_NOTES.get(device_key, "cpu=max,gpu=max,ddr=max")
+    if device_key == "jetson" and str(device.get("frequency_profile", "")).strip() == "max":
+        if jetson_frequency_state_is_max(frequency_state):
+            return default
+    if device_key == "orangepi" and str(device.get("frequency_profile", "")).strip() == "max":
+        if orangepi_frequency_state_is_max(frequency_state):
+            return default
+    if device_key == "rhino" and str(device.get("frequency_profile", "")).strip() == "max":
         if rhino_frequency_state_is_max(frequency_state):
             return default
-    if not isinstance(frequency_state, dict):
+    if device_key not in {"jetson", "orangepi", "rhino"}:
         return default
+    if not isinstance(frequency_state, dict):
+        return "frequency=unknown"
     cpu = frequency_state.get("cpu") if isinstance(frequency_state.get("cpu"), dict) else {}
     gpu = frequency_state.get("gpu") if isinstance(frequency_state.get("gpu"), dict) else {}
+    ddr = frequency_state.get("ddr") if isinstance(frequency_state.get("ddr"), dict) else {}
     little = str(cpu.get("little", {}).get("scaling_max_freq", "")).strip() if isinstance(cpu.get("little"), dict) else ""
     mid = str(cpu.get("mid", {}).get("scaling_max_freq", "")).strip() if isinstance(cpu.get("mid"), dict) else ""
     big = str(cpu.get("big", {}).get("scaling_max_freq", "")).strip() if isinstance(cpu.get("big"), dict) else ""
-    gpu_freq = str(gpu.get("max_freq", "") or gpu.get("cur_freq", "")).strip()
-    if not (little and mid and big and gpu_freq):
-        return default
-    ddr_note = str(device.get("ddr_note", "max")).strip() or "max"
-    return f"cpu={little}/{mid}/{big},gpu={gpu_freq},ddr={ddr_note}"
+    cpu_parts = [item for item in (little, mid, big) if item]
+    if not cpu_parts:
+        for item in cpu.values():
+            if isinstance(item, dict):
+                freq = str(item.get("scaling_max_freq", "")).strip()
+                if freq:
+                    cpu_parts.append(freq)
+    cpu_note = "/".join(cpu_parts) if cpu_parts else "unknown"
+    gpu_freq = str(gpu.get("max_freq", "") or gpu.get("cur_freq", "") or "unknown").strip()
+    ddr_note = str(ddr.get("max_freq", "") or device.get("ddr_note", "") or "unknown").strip()
+    if not (cpu_note and gpu_freq):
+        return "frequency=unknown"
+    return f"cpu={cpu_note},gpu={gpu_freq},ddr={ddr_note}"
 
 
 def high_risk_context_error(device_name: str, frequency_profile: str, context: int) -> str | None:
@@ -2584,7 +2908,7 @@ def main() -> int:
     parser.add_argument(
         "--frequency-profile",
         default="max",
-        help="Device frequency setup profile before benchmark. Supported now: max, cpu-high-gpu-max, safe-low, cpu-low-gpu-max (rhino only).",
+        help="Device frequency setup profile before benchmark. max locks OrangePi/Rhino where supported; other named profiles are Rhino-only.",
     )
     parser.add_argument("--run-id", default="prefill_latency_" + time.strftime("%Y%m%d_%H%M%S"))
     parser.add_argument("--output-dir", default=str(MNN_ROOT / ".cache/latency_budget_20260625"))

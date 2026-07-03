@@ -19,7 +19,6 @@ public:
         struct MappedBuffer;
         std::shared_ptr<Tensor> key;       // [max_slots, B, H_kv, D]
         std::shared_ptr<Tensor> value;     // [B, H_kv, max_slots, D]
-        std::shared_ptr<Tensor> slotTable; // [max_slots], int32
         std::shared_ptr<Tensor> sparseQuery; // [max_slots], int32 logical indices for sparse recompute
         std::shared_ptr<MappedBuffer> mappedKey;
         std::shared_ptr<MappedBuffer> mappedValue;
@@ -28,8 +27,6 @@ public:
         int kvHeads = 0;
         int headDim = 0;
         int precision = 4;
-        int slotTableVersion = -1;
-        int slotTableLength = 0;
         std::vector<int> sparseQueryHost;
         bool zeroCopyKV = false;
     };
@@ -42,11 +39,9 @@ public:
 
 private:
     ErrorCode ensureCache(int maxSlots, int batch, int kvHeads, int headDim);
-    ErrorCode syncSlotTable(int requiredSlots);
     ErrorCode syncSparseQuery(int attnLen, const int** devicePtr);
     ErrorCode syncDecodeAttentionHeadIds(const int** devicePtr, int* count);
     bool ensurePrefillTemp(size_t elements);
-    bool ensureQTileTuneOutput(size_t bytes);
 
     CUDABackend* mCudaBackend = nullptr;
     PagedKVMeta* mMeta = nullptr;
@@ -66,9 +61,6 @@ private:
     float* mPrefillQK = nullptr;
     float* mPrefillSoftmax = nullptr;
     size_t mPrefillElements = 0;
-    void* mQTileTuneOutput = nullptr;
-    size_t mQTileTuneOutputBytes = 0;
-    std::string mQTileTuneShapeKey;
     void* mExternalKey = nullptr;
     size_t mExternalKeyBytes = 0;
     void* mExternalValue = nullptr;

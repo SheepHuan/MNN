@@ -31,6 +31,11 @@ description: 当用户要求分析或优化 MNN PIC/PagedAttention 的 OpenCL/CU
 - Rhino / Adreno 正式默认口径、当前错误路由、端到端目标和下一步工程动作：
   - 读取 `.codex/skills/mnn-pic-optimize/references/rhino.md`
   - 详细实验明细再回看 `.codex/skills/mnn-pic-optimize/log/rhino/2026-06-27-00/context.md`
+- OrangePi / Mali OpenCL decode build、benchmark、P0 validity scan 和 TPOT A/B 流程：
+  - 读取 `.codex/skills/mnn-pic-optimize/references/decode_opencl_workflow.md`
+- OrangePi / Mali OpenCL PMC scoped profiling 机制设计，用于 lagged-attention decode repair
+  的指定 kernel 前后硬件计数分析：
+  - 读取 `.codex/skills/mnn-pic-optimize/references/orangepi_opencl_pmc_profile.md`
 
 新增优化记录时：
 
@@ -240,16 +245,104 @@ MNN_PIC_GRAPH_PROFILE_TOP=1000
 - profile detail 会在每个子 op 后 `queue.finish()`，只用于拆瓶颈，不作为正式 latency。
 - `qk_active_tiles / qk_rect_tiles` 接近 1 时，说明 selected Q 的 logical position 很散，虽然 Q 行少了，但每个 Q chunk 的 K 方向仍接近满长。
 
+
+## OrangePi OpenCL PMC Profile 口径
+
+当需要分析 OrangePi / Mali 上 lagged-attention decode repair 的硬件瓶颈时，先读
+`.codex/skills/mnn-pic-optimize/references/orangepi_opencl_pmc_profile.md`。PMC profile
+只用于诊断，不作为正式 TPOT latency；正式性能报告必须关闭 PMC。
+
+执行顺序固定为：
+
+1. 先用 `MNN_PIC_GRAPH_PROFILE=1`、`MNN_PAGED_ATTENTION_PROFILE=1`、
+   `MNN_PAGED_ATTENTION_PROFILE_DETAIL=1`、`MNN_PIC_DECODE_REPAIR_PROFILE=1` 定位热点
+   graph op / PagedAttention sub-op。
+2. 再对少量指定 OpenCL kernel 做 scoped PMC。当前已实现路径是
+   `MNN_OPENCL_PMC_PROFILE=ON` 的 MNN 内部显式 scope，在目标 dispatch 前后
+   `queue.finish()` + `libGPUCounters` sample，并输出 JSONL。`LIBGPUCOUNTERS_ROOT`
+   指向源码/install 根；若库在单独 build 目录，额外设置 `LIBGPUCOUNTERS_BUILD_ROOT`。
+3. 如果热点不在 PagedAttention，再考虑 MNN OpenCL wrapper + thread-local label 的通用 hook。
+4. `LD_PRELOAD` / driver hook / Android `bhook` 只能作为诊断后备，不作为 OrangePi 首选方案。
+
+PMC scoped profile 的候选 kernel 优先包括：
+
+- `decode_prepare_transpose_k`
+- `append_decode_key_value_hd128`
+- `append_sparse_decode_key_value_hd128`
+- `decode_causal_attention_hd128_identity*`
+- `decode_causal_attention_hd128_transposed_k_*`
+- `decode_causal_attention_hd128_transposed_k_sparse_qtile`
+- `decode_attention_pic_rank_score_hd128`
+- `decode_attention_rank_topk`
+- `decode_attention_rank_readback`
+- `copy_paged_kv`
+
+建议环境变量口径：
+
+```bash
+MNN_PIC_PMC_PROFILE=1
+MNN_PIC_PMC_KERNEL_REGEX='decode_causal_attention_hd128_transposed_k_sparse_qtile|append_sparse_decode|decode_attention_rank'
+MNN_PIC_PMC_PHASE_REGEX='attention|append|rank|prepare'
+MNN_PIC_PMC_LAYER='all'
+MNN_PIC_PMC_COUNTERS='default'
+MNN_PIC_PMC_STRICT_FINISH=1
+MNN_PIC_PMC_OUTPUT='/mnt/ssd/code/.cache/mnn_opencl_pic/pmc/decode_repair.jsonl'
+```
+
+测试命令里通过 `PIC_SWEEP_SERVER_ENV_EXTRA` 参数化 PMC 获取。该变量会被 benchmark
+脚本透传到远端 `pic_server`，所以 skill 跑 PMC 诊断时应使用类似模板：
+
+```bash
+RUN_ID=pmc_decode_repair_sparse_qtile_orangepi_20260703
+PMC_REMOTE_OUT=/mnt/ssd/code/.cache/mnn_opencl_pic/pmc/${RUN_ID}.jsonl
+PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 \
+MNN_PIC_PMC_PROFILE=1 \
+MNN_PIC_PMC_KERNEL_REGEX='decode_causal_attention_hd128_transposed_k_sparse_qtile|append_sparse_decode|decode_attention_rank' \
+MNN_PIC_PMC_PHASE_REGEX='attention|append|rank' \
+MNN_PIC_PMC_LAYER='all' \
+MNN_PIC_PMC_COUNTERS='default' \
+MNN_PIC_PMC_OUTPUT='${PMC_REMOTE_OUT}' \
+MNN_PIC_PMC_MAX_RECORDS=2000" \
+python3 .cache/mnn-pic-benchmark/decode_experiment/run_decode_experiment.py \
+  --devices orangepi --models minicpm5-1b \
+  --contexts 512 --pic-repair-tokens 0,1,3,5,7 --pic-max-tokens 16 \
+  --repeats 1 --warm-repeats 1 --skip-normal \
+  --run-id "${RUN_ID}"
+```
+
+注意：`MNN_PIC_PMC_KERNEL_REGEX` 这类值里有 `|` 时，必须在
+`PIC_SWEEP_SERVER_ENV_EXTRA` 内部继续 shell-quote；本地用双引号包整串，远端 env value
+用单引号包住。当前 `run_decode_experiment.py` 不会把 extra env 写入 `run_config.json`，
+所以 PMC run 必须在 `run-id` 中带 `pmc` 和 kernel 标签，并把完整 env 记录到当小时
+`context.md`。后续 benchmark 脚本可以把 `--pmc-profile`、`--pmc-kernel-regex`、
+`--pmc-phase-regex`、`--pmc-output` 等 CLI 参数翻译成同一组 `MNN_PIC_PMC_*` env。
+
+PMC 数据是 GPU-wide delta，不是 OpenCL event 自带的 per-kernel counter。只有在目标
+dispatch 前后隔离 queue 并且设备上没有其它重 GPU workload 时，才能把 delta 归因到该
+kernel。若 record queue 隐藏了具体 dispatch，只能记录 coarse `record_queue_replay`
+或强制走非 record 显式 dispatch；不能声称拿到了 per-kernel PMC。
+
+分析时结合软件 profile 字段判断：
+
+- `attention_us` 高且 external read / KV 高：K/V scan、decodeKey layout、qtile 或 lane 是重点。
+- `append_us` 高且 write traffic 高：append K/V / decodeKey 写入路径是重点。
+- `rank_us` 高且 GPU active 低或 readback 明显：rank/top-k 或结果回读是重点。
+- wall time 高但 GPU active 低：CPU launch、queue、record、同步或 readback 是重点。
+- GPU cycles 高但外存流量低：算术、local memory、reduction 或寄存器压力是重点。
+
+`decode_prepare_inside_decode=1` 时，该 run 仍直接判为不合格，PMC 结果只能用于定位，
+不能用于性能结论。
+
 ## 优化优先级
 
 1. 先修正执行语义：`sparse_start_layer = score_layer_idx`。score layer 之前 full compute；score layer 当层先 full-K/V scoring，然后立刻裁剪 active hidden states，从本层开始 sparse。不要让 `forwardVec(selected_tokens)` 从 layer 0 开始触发 sparse query。
-2. 再把 OpenCL LWS tuning 移出正式计时请求，而不是禁用第一次 tuning。MNN 已有原生 OpenCL Autotuning cache：`RuntimeManager::setCache(...)` 加载 `mnn_cachefile.bin`，`RuntimeManager::updateCache()` 写回 `AutotuningT`。第一次遇到未覆盖的新 kernel / shape / local work size 时，warm 阶段必须允许 OpenCL 编译 program、尝试 LWS 候选并写回 cache；不要为了缩短 warm 而跳过必要的首次编译或伪造固定 LWS。不要在 PIC 正式请求路径里维护另一套在线 tuner。新增 sparse/PIC OpenCL kernel 默认接 `localWS2DDefault` / `localWS3DDefault` 和 MNN cache；固定 LWS 或禁用 tune 只作为 A/B 诊断开关。正式 OrangePi sweep 的正确流程是 normal baseline 先 warm 目标 prompt shape 并由 `llm_bench` 写回 runtime cache，PIC server 再 warm 目标 sparse shapes 并调用 `/v1/tune/update_cache`，然后在正式计时中复用同一份 MNN cache；冷 shape tuning 不能算作 cacheblend/epic request latency。OpenCL cache 根路径按设备固定，但 PIC 手写 tune key 必须带设备族 namespace，至少区分 `mali` 与 `adreno`，避免两类 GPU 互相回放 sparse family / schedule / variant 选择。PIC server 的 MNN OpenCL runtime/autotune cache 不按模型分叉；OrangePi 固定使用 `/mnt/ssd/code/.cache/mnn_opencl_pic/pic_prefill_latency_sweep/runtime_cache/opencl/mnn_cachefile.bin`，Rhino 固定使用 `/mnt/nvme/mnn_pic_opencl/cache/pic_prefill_latency_sweep/runtime_cache/opencl/mnn_cachefile.bin`，`shared_kv/<model>/` 只用于持久 text KV cache。warm 成功后写回，后续同设备 / 同 driver / 同 artifact 的 MNN OpenCL 运行应加载这份 cache，只有未覆盖的新 model/context/ratio shape 才需要新增 warm/tune。
+2. 再把 OpenCL LWS tuning 移出正式计时请求，而不是禁用第一次 tuning。MNN 已有原生 OpenCL Autotuning cache：`RuntimeManager::setCache(...)` 加载 `mnn_cachefile.bin`，`RuntimeManager::updateCache()` 写回 `AutotuningT`。第一次遇到未覆盖的新 kernel / shape / local work size 时，warm 阶段必须允许 OpenCL 编译 program、尝试 LWS 候选并写回 cache；不要为了缩短 warm 而跳过必要的首次编译或伪造固定 LWS。不要在 PIC 正式请求路径里维护另一套在线 tuner。新增 sparse/PIC OpenCL kernel 默认接 `localWS2DDefault` / `localWS3DDefault` 和 MNN cache；固定 LWS 或禁用 tune 只作为 A/B 诊断开关。正式 OrangePi sweep 的正确流程是 normal baseline 先 warm 目标 prompt shape 并由 `llm_bench` 写回 runtime cache，PIC server 再 warm 目标 sparse shapes 并调用 `/v1/tune/update_cache`，然后在正式计时中复用同一份 MNN cache；冷 shape tuning 不能算作 cacheblend/epic request latency。OpenCL cache 根路径按设备固定，但 PIC 手写 tune key 必须带设备族 namespace，至少区分 `mali` 与 `adreno`，避免两类 GPU 互相回放 sparse schedule / variant 选择。score-layer sparse family 不再通过 tune cache 或 env gate 选择；它按设备固定。PIC server 的 MNN OpenCL runtime/autotune cache 不按模型分叉；OrangePi 固定使用 `/mnt/ssd/code/.cache/mnn_opencl_pic/pic_prefill_latency_sweep/runtime_cache/opencl/mnn_cachefile.bin`，Rhino 固定使用 `/mnt/nvme/mnn_pic_opencl/cache/pic_prefill_latency_sweep/runtime_cache/opencl/mnn_cachefile.bin`，`shared_kv/<model>/` 只用于持久 text KV cache。warm 成功后写回，后续同设备 / 同 driver / 同 artifact 的 MNN OpenCL 运行应加载这份 cache，只有未覆盖的新 model/context/ratio shape 才需要新增 warm/tune。
 3. 再看 sparse attention 热点。通常 QK 是主热点，QKV 次之，hydrate/disk 往往不是第一瓶颈。
 4. 如果第一个 sparse layer 的 QK 比后续层慢数秒，优先怀疑 OpenCL `localWS3DDefault` 调参或首次执行开销。生产口径用 MNN tune cache/prewarm 解决；固定/禁用 LWS 只作为 A/B 实验开关，不作为长期生产路径。
 5. 如果 `qk_active_tiles / qk_rect_tiles` 很高，优化方向是让 sparse Q 按 logical position 分组、缩小 K 有效范围，或设计按 Q range 的分段 QK，而不是继续优化 hydrate。
 6. OpenCL sparse attention 当前生产路径是 fused sparse FlashAttention：
-   - `PicScoreAttention layer=1` 使用专门的 full-Q/compact-output `score_flash_attention` 路径：先完成 full prompt K/V 写入和 score/top-k，再用 active logical indices 读取 full query row 并输出 compact rows。不要把它理解成 compact-Q later-layer kernel。
-   - `PicSparseAttention layer>=2` 使用 compact-Q `sparse_flash_attention` 路径。
+   - `PicScoreAttention layer=1` 的 sparse family 按设备固定，不做请求期 family tune 或 env gate：Mali/headDim128 使用 score qsplit；Adreno 使用专门的 full-Q/compact-output `score_flash_attention` 路径；没有 qsplit 支持的 headDim 走 score flash。score flash 先完成 full prompt K/V 写入和 score/top-k，再用 active logical indices 读取 full query row 并输出 compact rows。不要把它理解成 compact-Q later-layer kernel。
+   - `PicSparseAttention layer>=2` 使用 compact-Q `sparse_flash_attention` 路径；qktile/row32/row64/image 只作为同一 sparse-flash family 内的设备变体，不允许回退到 qsplit、row/generic 或旧三段式 sparse path。
    - cacheblend/score-ready sparse flash 默认使用 single-piece 调度，`q_chunk=activeLen`、`q_split=1`，减少 fused row flash 的 per-layer launch 数；epic / 非 score-ready sparse flash 保留 range-aware q64 pieces，避免低预算路径回退。
    - sparse flash row32/row64 的 output accumulator 默认放在 private `COMPUTE_FLOAT8 o0..o7` 中，K loop 结束后再写入 `local_o` 做跨 lane reduction，避免在热循环里反复读写 local memory。
    - sparse flash 同时保留 row32/row64 两个内核，默认由内置形状/plan 启发式选择；不要重新增加请求期 env fallback。
@@ -266,6 +359,7 @@ MNN_PIC_GRAPH_PROFILE_TOP=1000
    - 不要新增 env fallback 或请求期在线 tuner；正式测试仍然先 warm 目标 ratios，再 `/v1/tune/update_cache`，计时请求复用 MNN cache。
 8. Jetson CUDA 按同一套 graph-boundary 语义适配，但 dense fast path 不能照搬 OpenCL：
    - CUDA `PagedAttentionExecution` 必须注册 `PicScoreAttention` / `PicSparseAttention`，拆分 `kvWriteLen` 和 `attnLen`，score layer 写出 `active_indices`，后续层按 compact active rows 计算并用真实 logical slot 写 PagedCache。
+   - Jetson CUDA PagedAttention 默认路径必须固定在代码内，只允许少量参数变体，不允许请求期 env gate、在线 tune cache 或自动试跑候选来选择实现。当前稀疏 attention 口径是：headDim=128 普通 sparse rows 在 `attnLen>=64` 走 `hd128_q4k16`，更小 active rows 保持既有非 qtile sparse path；decode repair 的 headDim=128 且 `attnLen>=2` 固定走 `hd128_q8k16`；headDim=64 高预算 sparse rows 保持固定 q8/q32-k32 tile path。新增或替换变体必须覆盖 Jetson 10/20/30/40/50，必要时补 1/5 smoke，不能以 env override 作为生产默认。
    - 不要新增朴素 packed INT4 CUDA `PicGEMM` 作为 PIC compact MLP 快路径。2026-06-11 Jetson A/B 证明它会让 cacheblend20 从 CUTLASS 路径的 `0.816942s` 退化到 `3.527971s`，216-row compact MLP 变成第一瓶颈。CUDA 目前默认保留 tensor-core CUTLASS + runtime dequant，直到有真正的 compact tensor-core GEMM 并在 1%-50% 全部更快。
    - 不要把现有 `v2_row_compressed_mask` 或 sparse single-piece qSplit 当作 CUDA sparse flash 替代品。Jetson A/B 证明 row-compressed fused kernel 会让 cacheblend20/50 退化到 `1.548174s`/`2.303546s`；single-piece qSplit 会让 cacheblend50 退化到 `1.860186s`。CUDA P0 必须是 tile-based sparse flash，而不是单 row flash 或单纯减少 split。
    - CUDA 当前默认使用 q8/k32 tile sparse flash，`attnLen >= 384` 的高预算 sparse tile 使用 q32/k32 wide-Q 变体：epic / fixed active-plan sparse rows 始终走 tile flash；cacheblend sparse rows 只有 `attnLen > 256` 才走 tile flash，`attnLen <= 256` 保持现有 QK/softmax/QKV 路径。tile flash 必须按每个 Q tile 的 `max_q_logical + 1` 限制 K/V streaming，跳过 causal 之外的整块 K/V；不要保留全长 K loop 的旧 tile-flash 路径。
@@ -276,6 +370,7 @@ MNN_PIC_GRAPH_PROFILE_TOP=1000
    - CUDA compact dense 下一步先拆 profile，不要直接上 dequant-cache。当前 low-memory weight-only 1x1 Conv 会在每次 execute 中把 INT4 weight dequant 到 DYNAMIC FP16 buffer 再跑 CUTLASS；这可能解释不同重算比例下 MLP latency 不按 active rows 线性下降。必须先分别计时 `DequantizeInt4Weight` 与 `runCutlassGemmFunc()`，确认收益后才能默认替换，并覆盖 1%-50% sweep。
    - 2026-06-11 Jetson profile 已确认 compact MLP dequant 是真成本但不是最大项：cb50 dequant 约 `60.9 ms`、epic50 约 `50.9 ms`，占 Conv profile `11%-14%`；M=519 的 gate/up/down 每个 Linear 大约 `0.85-0.93 ms` dequant + `6.3-7.0 ms` CUTLASS。下一步 P1 不应盲目全静态 dequant cache，而应做内存可控 cache 或 fused dequant+tensor-core/weight-only tensor-core GEMM，目标是同时减少 dequant 和 compact GEMM。
    - CUDA compact dense 默认使用 memory-capped static FP16 dequant cache：`ConvFpAIntBExecution::Resource` 对 low-memory INT4 1x1 Linear 在构造期预反量化一次，cap 为 `min(2 GiB, totalGlobalMem / 16)` 且不走 env 开关；超过 cap 或非目标 precision 仍保留 DYNAMIC runtime-dequant 作为内存安全路径。2026-06-11 Jetson 1024-token profile 显示 `runtime_dequant=1` 行数为 `0`、`static_cache_total=1946157056 bytes`，cb50 `Convolution` 从 `471.301 ms` 降到 `409.255 ms`。1/5/10/20/30/40/50 sweep 中 cacheblend 和 epic 全部快于 normal。
+   - CUDA weight-only compact dense production route 固定为 rows4-8 decode repair 在 static dequant 可用时走 rows45 cuBLAS（policy=all、tensor math、32F compute、tensor-op default algo），否则走现有 CUTLASS/generic fallback。不要保留 rows48 cuBLASLt、V15 packed small-M、V16 dp4a 这类 env-gated dense 实验入口作为生产可执行路径；新增 dense 变体必须作为代码内固定 heuristic 并覆盖 Jetson sweep 后才能替换默认。
    - CUDA compact dense 高预算默认使用 SM70 compact CUTLASS hybrid fast path：在 static FP16 dequant cache、fp16、无 activation 的 low-memory INT4 1x1 Linear 上，当 compact row `M in [384,768]` 且 `K >= 1024` 时使用 tensor-core Linear 变体；`384 <= M < 512` 走 `128x64x64`，`M >= 512` 走 `64x128x64`。2026-06-11 Jetson 1024-token sweep 显示 `M>=512` hybrid 后 cacheblend50 `0.753021s -> 0.721868s`、epic50 `0.635977s -> 0.606127s`，同时 cacheblend/epic 1%-40% 保持基本不退且全部快于 normal。不要把 `64x128x64` 扩到 `M < 512`：实测全量使用该 tile 会让 cacheblend40 从约 `0.636s` 退到约 `0.696s`。不要把 compact path 扩到 `M < 384`，除非重新覆盖 1/5/10/20/30/40/50 并确认低预算不退化。
    - CUDA FP16 contiguous `UnaryOpOperation_SILU` 默认使用 half2 fast path。2026-06-11 Jetson 1024-token sweep 显示 cacheblend50 `0.818838s -> 0.753021s`、epic50 `0.705095s -> 0.635977s`，profile 中 `UnaryOp` 从约 `74 ms` 降到约 `9 ms`，compact per-layer SiLU 从约 `4.16 ms` 降到约 `0.34 ms`。这不是完整 `SiLU(gate) * up` fusion；后续若继续做 activation，应聚焦 graph-level fusion 去掉 BinaryOp/中间 tensor。
    - Jetson sm72 上不要把真正的 INT4 tensor-core GEMM 当成默认可落地方向。更现实的 CUDA dense 路线是内存可控 FP16 dequant cache、fused dequant+FP16 GEMM、或 graph/export 级 gate_proj+up_proj 合并来改善现有 CUTLASS compact-row shape。

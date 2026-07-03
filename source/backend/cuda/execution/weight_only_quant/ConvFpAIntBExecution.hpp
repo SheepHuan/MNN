@@ -47,9 +47,6 @@ public:
         float2* mGemvParams = nullptr;  // allocated via cudaMalloc
         int mNumQg = 0;  // number of quantization groups per OC
 
-        // V16 (INT8 dp4a route): precomputed sum of nibble values per (oc, group),
-        // float array [oc * num_qg]. Used by the factored-dp4a combine term.
-        float* mSumNibble = nullptr;  // allocated via cudaMalloc
     };
     static bool isValid(const Convolution2D* conv, Backend* backend);
     ConvFpAIntBExecution(Backend* backend, const MNN::Op* op, std::shared_ptr<Resource> res);
@@ -63,8 +60,6 @@ private:
 
     std::shared_ptr<Tensor> mDequantFilterTensor;
     void* mDequantFilter = nullptr;
-    void* mPicRowsCublasLtPlan = nullptr;
-
     // Low-memory 1x1 GEMM uses Resource static dequant weights when the
     // memory cap admits them; remaining shapes refresh this DYNAMIC buffer.
     bool mNeedRuntimeDequant = false;

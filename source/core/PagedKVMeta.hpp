@@ -65,16 +65,15 @@ struct PagedKVMeta : public KVMeta {
     bool request_active = false;
     DecodePrepareCallback decode_prepare_callback = nullptr;
     int max_tokens = 0;
-    int request_base = 0;
     int request_capacity = 0;
     int logical_length = 0;
-    int slot_table_version = 0;
+    uint64_t request_generation = 0;
     int external_hydrate_start_layer_idx = 0;
     size_t external_source_slot_reserve = 0;
-    std::vector<int> slot_table_host;
     std::vector<PagedKVExternalSegment> external_segments;
     std::vector<int> external_loaded_layers;
     bool sparse_query_active = false;
+    bool sparse_query_force_plain_attention = false;
     int sparse_query_start_layer_idx = 0;
     bool pic_active_rows = false;
     int pic_active_start_layer_idx = 0;
@@ -108,7 +107,7 @@ struct PagedKVMeta : public KVMeta {
 
     void beginRequest(int capacity) {
         request_active = true;
-        request_base = 0;
+        ++request_generation;
         request_capacity = std::max(0, capacity);
         max_tokens = request_capacity;
         logical_length = 0;
@@ -123,6 +122,7 @@ struct PagedKVMeta : public KVMeta {
         external_segments.clear();
         external_loaded_layers.clear();
         sparse_query_active = false;
+        sparse_query_force_plain_attention = false;
         sparse_query_start_layer_idx = 0;
         pic_active_rows = false;
         pic_active_start_layer_idx = 0;
@@ -136,11 +136,6 @@ struct PagedKVMeta : public KVMeta {
         clearPicDecodeAttentionRankResult();
         finishCacheBlendScoring();
         finishPicGraphActivePlan();
-        slot_table_host.resize(request_capacity);
-        for (int i = 0; i < request_capacity; ++i) {
-            slot_table_host[i] = request_base + i;
-        }
-        ++slot_table_version;
     }
 
     bool reserveRequestCapacity(int capacity) {
@@ -153,12 +148,7 @@ struct PagedKVMeta : public KVMeta {
         if (!request_active) {
             return true;
         }
-        auto old = slot_table_host.size();
-        slot_table_host.resize(request_capacity);
-        for (size_t i = old; i < slot_table_host.size(); ++i) {
-            slot_table_host[i] = request_base + static_cast<int>(i);
-        }
-        ++slot_table_version;
+        ++request_generation;
         return true;
     }
 
@@ -169,6 +159,7 @@ struct PagedKVMeta : public KVMeta {
         external_segments.clear();
         external_loaded_layers.clear();
         sparse_query_active = false;
+        sparse_query_force_plain_attention = false;
         sparse_query_start_layer_idx = 0;
         pic_active_rows = false;
         pic_active_start_layer_idx = 0;
@@ -182,30 +173,6 @@ struct PagedKVMeta : public KVMeta {
         clearPicDecodeAttentionRankResult();
         finishCacheBlendScoring();
         finishPicGraphActivePlan();
-    }
-
-    bool appendExternalSegments(const std::vector<PagedKVExternalSegment>& segments, size_t tokenCount) {
-        if (!request_active) {
-            return false;
-        }
-        auto start = static_cast<size_t>(logical_length);
-        auto required = start + tokenCount;
-        if (!ensureLogicalCapacity(required)) {
-            return false;
-        }
-        size_t cursor = start;
-        for (auto segment : segments) {
-            segment.logicalStart = cursor;
-            cursor += segment.tokenCount;
-            external_segments.emplace_back(std::move(segment));
-        }
-        if (cursor != required) {
-            return false;
-        }
-        logical_length = static_cast<int>(required);
-        previous = required;
-        external_loaded_layers.clear();
-        return true;
     }
 
     bool reserveExternalSourceSlots(size_t tokenCount) {
@@ -275,12 +242,15 @@ struct PagedKVMeta : public KVMeta {
         if (!request_active || logicalIndices.empty()) {
             return false;
         }
+        int previousIndex = -1;
         for (int index : logicalIndices) {
-            if (index < 0 || index >= logical_length) {
+            if (index < 0 || index >= logical_length || index <= previousIndex) {
                 return false;
             }
+            previousIndex = index;
         }
         sparse_query_active = true;
+        sparse_query_force_plain_attention = false;
         sparse_query_start_layer_idx = std::max(0, sparseStartLayerIdx);
         pic_active_rows = true;
         pic_active_start_layer_idx = sparse_query_start_layer_idx;
@@ -321,6 +291,7 @@ struct PagedKVMeta : public KVMeta {
         }
         logical_length = newLength;
         sparse_query_active = true;
+        sparse_query_force_plain_attention = false;
         sparse_query_start_layer_idx = std::max(0, sparseStartLayerIdx);
         pic_active_rows = true;
         pic_active_start_layer_idx = sparse_query_start_layer_idx;
@@ -404,6 +375,7 @@ struct PagedKVMeta : public KVMeta {
 
     void finishSparseQuery() {
         sparse_query_active = false;
+        sparse_query_force_plain_attention = false;
         sparse_query_start_layer_idx = 0;
         pic_active_rows = false;
         pic_active_start_layer_idx = 0;
@@ -426,6 +398,33 @@ struct PagedKVMeta : public KVMeta {
             return -1;
         }
         return sparse_query_logical_indices[queryIndex];
+    }
+
+    bool validateSparseQueryRows(int activeLen, int queryLen, bool allowFullQueryRows) const {
+        if (!sparse_query_active) {
+            return true;
+        }
+        if (activeLen <= 0 || queryLen < activeLen ||
+            static_cast<int>(sparse_query_logical_indices.size()) != activeLen) {
+            return false;
+        }
+        if (pic_active_count > 0 && pic_active_count != activeLen) {
+            return false;
+        }
+        if (queryLen > activeLen && !allowFullQueryRows) {
+            return false;
+        }
+        int previousIndex = -1;
+        for (int index : sparse_query_logical_indices) {
+            if (index < 0 || index >= logical_length || index <= previousIndex) {
+                return false;
+            }
+            if (allowFullQueryRows && index >= queryLen) {
+                return false;
+            }
+            previousIndex = index;
+        }
+        return true;
     }
 
     bool sparseQueryActiveForLayer(int layerIndex) const {
@@ -635,26 +634,13 @@ struct PagedKVMeta : public KVMeta {
     }
 
     bool ensureLogicalCapacity(size_t required) {
-        if (required <= slot_table_host.size()) {
+        if (required == 0) {
             return true;
         }
         if (request_capacity <= 0 || required > static_cast<size_t>(request_capacity)) {
             return false;
         }
-        auto old = slot_table_host.size();
-        slot_table_host.resize(required);
-        for (size_t i = old; i < required; ++i) {
-            slot_table_host[i] = request_base + static_cast<int>(i);
-        }
-        ++slot_table_version;
         return true;
-    }
-
-    int physicalSlot(size_t logicalIndex) const {
-        if (logicalIndex >= slot_table_host.size()) {
-            return -1;
-        }
-        return slot_table_host[logicalIndex];
     }
 
     void syncPaged() {

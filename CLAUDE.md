@@ -30,6 +30,10 @@ Common examples:
 - New LLM model adaptation in `transformers/pic_llm`: read `.codex/skills/mnn-support-new-llm/SKILL.md`
 - Drafting an MNN commit message from the current working-tree diff: read `.codex/skills/mnn-git-commit-message/SKILL.md`
 
+Reusable quick-reference for OpenCL PIC decode optimization on OrangePi/Mali + Rhino/Adreno (manual `opencl_codegen.py` step, OrangePi/Rhino build+rsync commands, Rhino max-frequency sysfs, `run_decode_experiment.py` TPOT A/B harness + `PIC_SWEEP_SERVER_ENV_EXTRA` forwarding, P0 `decode_prepare_inside_decode=0` validity scan, fixed device cache paths, skill routing): `.codex/skills/mnn-pic-optimize/references/decode_opencl_workflow.md`. Read this before running any decode TPOT A/B.
+
+Analysis of removing `slot_table` indirect addressing from PagedCache (always identity today; prefill Q-truncation uses `sparse_query`, persistent-source hydrate uses kernel args — neither needs slot_table; change list across ~17 kernels + host, benefits, risks, validation): `.codex/skills/mnn-pic-optimize/references/paged_cache_slot_table_removal.md`.
+
 If any instruction in another document seems to conflict with `AGENTS.md`, treat
 `AGENTS.md` as authoritative for this repository and ask the user before taking
 an action that could violate it.
