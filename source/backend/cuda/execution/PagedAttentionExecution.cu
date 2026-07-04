@@ -1993,9 +1993,9 @@ static bool envFlagEnabled(const char* name, bool defaultValue) {
 }
 
 static CudaSparseQTileVariant selectCudaDecodeRepairQTileVariant(int headDim, int attnLen) {
-    // Decode repair uses very small active rows; hd128_q8k16 is faster than the
-    // row-compressed path even for rows2/4 on Xavier in this narrow decode mode.
-    if (headDim == 128 && attnLen >= 2) {
+    // Decode repair uses one implementation family for x=0/1/3/5/7: x=0 is the
+    // active-row=1 degenerate case, and x>0 only increases the compact row count.
+    if (headDim == 128 && attnLen >= 1) {
         return kCudaSparseQTileHD128Q8K16;
     }
     if (headDim == 64 && attnLen >= 16) {
@@ -3726,7 +3726,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     const bool ordinaryDecodeCausal = decodeStep && !sparseQuery && !picDecodeRecompute && fullCausalMask &&
         attnLen == 1 && mQuerySeqLen == 1 && mNewKvSeqLen == 1;
     CudaSparseQTileVariant decodeRepairQTileVariant = kCudaSparseQTileNone;
-    if (picDecodeRecompute && sparseQuery && attnLen > 1 &&
+    if (picDecodeRecompute && sparseQuery && attnLen >= 1 &&
         cudaDecodeRepairQTileEnabled(mHeadDim, attnLen)) {
         decodeRepairQTileVariant = selectCudaDecodeRepairQTileVariant(mHeadDim, attnLen);
     }
@@ -3969,7 +3969,7 @@ ErrorCode CUDAPagedAttention::onExecute(const std::vector<Tensor*>& inputs, cons
     const bool sparseTileSkipCausalMask = mMeta != nullptr && mMeta->full_causal_attention_mask;
     const float* qtileSparseMask = (!sparseTileSkipCausalMask && useMask) ? pagedDevPtr<float>(mask) : nullptr;
     const int qtileSparseMaskElements = qtileSparseMask != nullptr ? maskElements : 0;
-    const bool qtileAllowedSparse = (!picDecodeRecompute || useDecodeRepairQTile) && sparseQuery && attnLen > 1;
+    const bool qtileAllowedSparse = (!picDecodeRecompute || useDecodeRepairQTile) && sparseQuery && attnLen >= 1;
     CudaSparseQTileVariant sparseQTileVariant = qtileAllowedSparse
         ? (useDecodeRepairQTile ? decodeRepairQTileVariant :
            selectCudaSparseQTileVariant(mHeadDim, attnLen, cacheBlendLargeSparseTile, fixedPlanSparseTile))

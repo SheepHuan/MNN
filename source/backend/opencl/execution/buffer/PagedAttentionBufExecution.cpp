@@ -352,9 +352,26 @@ static bool _decodeGqaFusedKVEnabled() {
     return enabled;
 }
 
-static bool _decodeTransposedKEnabled() {
-    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K", false);
-    return enabled;
+enum DecodeGatePolicy : uint32_t {
+    kDecodeGateAuto = 0,
+    kDecodeGateForceOff = 1,
+    kDecodeGateForceOn = 2,
+};
+
+static DecodeGatePolicy _decodeGatePolicy(const char* name) {
+    const char* value = ::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return kDecodeGateAuto;
+    }
+    return value[0] != '0' ? kDecodeGateForceOn : kDecodeGateForceOff;
+}
+
+static DecodeGatePolicy _decodeQ1TransposedKPolicy() {
+    return _decodeGatePolicy("MNN_PAGED_ATTENTION_DECODE_Q1_TRANSPOSED_K");
+}
+
+static DecodeGatePolicy _decodeRepairSparseQTilePolicy() {
+    return _decodeGatePolicy("MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE");
 }
 
 static bool _decodeTransposedKAttentionOnlyEnabled() {
@@ -385,16 +402,60 @@ static bool _decodeQ1SplitProfileEnabled() {
 
 static bool _legacyB863976OpenCL();
 
-static bool _decodeTransposedKSparseShapeSupported(OpenCLRuntime* runtime, int attnLen) {
-    if (runtime == nullptr || attnLen <= 1 || attnLen > 8) {
+static bool _decodeRepairSparseQTileShapeSupported(OpenCLRuntime* runtime, int attnLen) {
+    if (runtime == nullptr || attnLen <= 0 || attnLen > 8) {
         return false;
     }
     return !_legacyB863976OpenCL();
 }
 
-static bool _decodeTransposedKQ1NeedsDecodeKey() {
-    return _decodeTransposedKReadonlyOnlyEnabled() || _decodeTransposedKAttentionOnlyEnabled() ||
-           _decodeTransposedKAttentionOnlyBenchEnabled() || _decodeTransposedKEnabled();
+static bool _decodeRepairSparseQTileDefaultEnabled(OpenCLRuntime* runtime, int attnLen) {
+    if (!_decodeRepairSparseQTileShapeSupported(runtime, attnLen)) {
+        return false;
+    }
+    return runtime->getGpuType() == GpuType::MALI;
+}
+
+static bool _decodeRepairSparseQTileEnabled(OpenCLRuntime* runtime, int attnLen) {
+    const DecodeGatePolicy policy = _decodeRepairSparseQTilePolicy();
+    if (policy == kDecodeGateForceOn) {
+        return _decodeRepairSparseQTileShapeSupported(runtime, attnLen);
+    }
+    if (policy == kDecodeGateForceOff) {
+        return false;
+    }
+    return _decodeRepairSparseQTileDefaultEnabled(runtime, attnLen);
+}
+
+static bool _decodeRepairFusedAppendEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_REPAIR_FUSED_APPEND", false);
+    return enabled;
+}
+
+static bool _decodeRepairQ1RowEnabled() {
+    // active_rows=1 is the degenerate decode-repair case; keep it in the same
+    // transposed-K sparse family and allow env=0 only as an explicit A/B variant.
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_REPAIR_Q1_ROW", true);
+    return enabled;
+}
+
+static bool _decodeRepairRecordQueueEnabled() {
+    static const bool enabled = _envFlagEnabled("MNN_PAGED_ATTENTION_DECODE_REPAIR_RECORD_QUEUE", true);
+    return enabled;
+}
+
+static bool _decodeQ1TransposedKVariantEnabled() {
+    // q=1 production decode uses the identity fused-KV family. Keep transposed-K q=1
+    // as an explicit A/B or profile variant until it consistently wins formal TPOT.
+    if (_decodeTransposedKReadonlyOnlyEnabled() || _decodeTransposedKAttentionOnlyEnabled() ||
+        _decodeTransposedKAttentionOnlyBenchEnabled()) {
+        return true;
+    }
+    const DecodeGatePolicy policy = _decodeQ1TransposedKPolicy();
+    if (policy == kDecodeGateForceOn) {
+        return true;
+    }
+    return false;
 }
 
 static uint32_t _decodeHD128LaneWidth(uint64_t causalWorkPerRow) {
@@ -422,12 +483,20 @@ static uint32_t _decodeHD128SparseLaneWidth(OpenCLRuntime* runtime, uint64_t cau
     return _decodeHD128LaneWidth(causalWorkPerRow);
 }
 
-static int _decodeHD128QTile(int attnLen) {
+static int _decodeHD128QTile(OpenCLRuntime* runtime, int attnLen) {
     const char* forced = ::getenv("MNN_PAGED_ATTENTION_DECODE_QTILE_FORCE");
     if (forced != nullptr && forced[0] != '\0') {
         const int qTile = ::atoi(forced);
-        if (qTile == 2 || qTile == 4 || qTile == 8) {
+        if (qTile == 1 || qTile == 2 || qTile == 4 || qTile == 8) {
             return qTile;
+        }
+    }
+    if (runtime != nullptr && runtime->getGpuType() == GpuType::MALI) {
+        if (attnLen >= 8) {
+            return 2;
+        }
+        if (attnLen >= 5) {
+            return 4;
         }
     }
     return attnLen <= 2 ? 2 : (attnLen <= 4 ? 4 : 8);
@@ -1834,8 +1903,8 @@ static std::unordered_map<std::string, ExternalLayerMappedTargetRef> gExternalLa
 static std::string _externalLayerMappedTargetKey(const PagedKVMeta* meta, int layerIndex, int batch, int kvHeads,
                                                  int headDim, int bytes) {
     std::ostringstream os;
-    os << reinterpret_cast<uintptr_t>(meta) << ":" << layerIndex << ":" << batch << ":" << kvHeads << ":"
-       << headDim << ":" << bytes;
+    os << reinterpret_cast<uintptr_t>(meta) << ":" << (meta != nullptr ? meta->request_generation : 0) << ":"
+       << layerIndex << ":" << batch << ":" << kvHeads << ":" << headDim << ":" << bytes;
     return os.str();
 }
 
@@ -3178,6 +3247,7 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
         return INVALID_VALUE;
     }
     const int groupSize = mNumHead / mKvNumHead;
+    const bool buildFusedAppend = _decodeRepairFusedAppendEnabled();
     if (mDecodeKeyTransposeKernel && mDecodeKeyAppendKernel && mDecodeKeyAppendSparseKernel &&
         mDecodeQKTransposedKernel &&
         mDecodeQKVTransposedKernel && mDecodeCausalKernelHD128TransposedKFusedKVRow32 &&
@@ -3189,6 +3259,9 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
         mDecodeCausalKernelHD128TransposedKSparseRow32 &&
         mDecodeCausalKernelHD128TransposedKSparseRow64 &&
         mDecodeCausalKernelHD128TransposedKSparseRow128 &&
+        mDecodeCausalKernelHD128TransposedKQTile1Row32 &&
+        mDecodeCausalKernelHD128TransposedKQTile1Row64 &&
+        mDecodeCausalKernelHD128TransposedKQTile1Row128 &&
         mDecodeCausalKernelHD128TransposedKQTile2Row32 &&
         mDecodeCausalKernelHD128TransposedKQTile2Row64 &&
         mDecodeCausalKernelHD128TransposedKQTile2Row128 &&
@@ -3198,6 +3271,19 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
         mDecodeCausalKernelHD128TransposedKQTile8Row32 &&
         mDecodeCausalKernelHD128TransposedKQTile8Row64 &&
         mDecodeCausalKernelHD128TransposedKQTile8Row128 &&
+        (!buildFusedAppend ||
+         (mDecodeCausalKernelHD128TransposedKQTileFused1Row32 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused1Row64 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused1Row128 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused2Row32 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused2Row64 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused2Row128 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused4Row32 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused4Row64 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused4Row128 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused8Row32 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused8Row64 &&
+          mDecodeCausalKernelHD128TransposedKQTileFused8Row128)) &&
         (groupSize <= 1 ||
          (mDecodeCausalKernelHD128TransposedKFusedKVGQARow32 &&
           mDecodeCausalKernelHD128TransposedKFusedKVGQARow64 &&
@@ -3276,6 +3362,18 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
         runtime->buildKernel("paged_decode_attention_buf",
                              "decode_causal_attention_hd128_transposed_k_sparse_row128", options,
                              mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile1Row32 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q1_row32", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile1Row64 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q1_row64", options,
+                             mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKQTile1Row128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_qtile_q1_row128", options,
+                             mOpenCLBackend->getPrecision());
     mDecodeCausalKernelHD128TransposedKQTile2Row32 =
         runtime->buildKernel("paged_decode_attention_buf",
                              "decode_causal_attention_hd128_transposed_k_qtile_q2_row32", options,
@@ -3312,6 +3410,69 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
         runtime->buildKernel("paged_decode_attention_buf",
                              "decode_causal_attention_hd128_transposed_k_qtile_q8_row128", options,
                              mOpenCLBackend->getPrecision());
+    if (buildFusedAppend) {
+        mDecodeCausalKernelHD128TransposedKQTileFused1Row32 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q1_row32", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused1Row64 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q1_row64", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused1Row128 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q1_row128", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused2Row32 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q2_row32", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused2Row64 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q2_row64", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused2Row128 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q2_row128", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused4Row32 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q4_row32", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused4Row64 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q4_row64", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused4Row128 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q4_row128", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused8Row32 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q8_row32", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused8Row64 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q8_row64", options,
+                                 mOpenCLBackend->getPrecision());
+        mDecodeCausalKernelHD128TransposedKQTileFused8Row128 =
+            runtime->buildKernel("paged_decode_attention_buf",
+                                 "decode_causal_attention_hd128_transposed_k_qtile_fused_q8_row128", options,
+                                 mOpenCLBackend->getPrecision());
+    } else {
+        mDecodeCausalKernelHD128TransposedKQTileFused1Row32 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused1Row64 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused1Row128 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused2Row32 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused2Row64 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused2Row128 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused4Row32 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused4Row64 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused4Row128 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused8Row32 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused8Row64 = nullptr;
+        mDecodeCausalKernelHD128TransposedKQTileFused8Row128 = nullptr;
+    }
     OPENCL_CHECK_KERNEL(mDecodeKeyTransposeKernel);
     OPENCL_CHECK_KERNEL(mDecodeKeyAppendKernel);
     OPENCL_CHECK_KERNEL(mDecodeKeyAppendSparseKernel);
@@ -3326,6 +3487,9 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKSparseRow32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKSparseRow64);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKSparseRow128);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile1Row32);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile1Row64);
+    OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile1Row128);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile2Row32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile2Row64);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile2Row128);
@@ -3335,6 +3499,20 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile8Row32);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile8Row64);
     OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTile8Row128);
+    if (buildFusedAppend) {
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused1Row32);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused1Row64);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused1Row128);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused2Row32);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused2Row64);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused2Row128);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused4Row32);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused4Row64);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused4Row128);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused8Row32);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused8Row64);
+        OPENCL_CHECK_KERNEL(mDecodeCausalKernelHD128TransposedKQTileFused8Row128);
+    }
     mDecodeTransposedKKernelGroupSize = groupSize;
     return NO_ERROR;
 }
@@ -3989,13 +4167,12 @@ ErrorCode PagedAttentionBufExecution::prepareDecodePrefix(int kvLen) {
             return err;
         }
     }
-    const bool q1DecodeKNeedsPrepare = _decodeTransposedKQ1NeedsDecodeKey();
+    const bool q1DecodeKNeedsPrepare = _decodeQ1TransposedKVariantEnabled();
     const bool repairDecodeKNeedsPrepare =
-        mMeta->pic_decode_repair_tokens_per_step > 0 &&
-        _decodeTransposedKSparseShapeSupported(runtime, mMeta->pic_decode_repair_tokens_per_step + 1);
+        mMeta->pic_decode_repair_enabled &&
+        _decodeRepairSparseQTileEnabled(runtime, mMeta->pic_decode_repair_tokens_per_step + 1);
     const bool needsDecodeKey =
-        _decodeTransposedKEnabled() && mHeadDim == 128 &&
-        (q1DecodeKNeedsPrepare || repairDecodeKNeedsPrepare);
+        mHeadDim == 128 && (q1DecodeKNeedsPrepare || repairDecodeKNeedsPrepare);
     if (needsDecodeKey) {
         err = ensureDecodeKeyReady(kvLen, false);
         if (err != NO_ERROR) {
@@ -4568,7 +4745,8 @@ bool PagedAttentionBufExecution::canUseSparseFastPrefill(const Tensor* mask, int
     if (!externalHydrated && !scoreLayerFullQ) {
         return false;
     }
-    if (attnLen <= 1 || kvLen <= 0 || mQuerySeqLen <= 0) {
+    const bool allowSingleRowLaterPicSparse = !queryRowsAreFull && mPicAttentionMode == 2 && attnLen == 1;
+    if (attnLen <= 0 || (!allowSingleRowLaterPicSparse && attnLen <= 1) || kvLen <= 0 || mQuerySeqLen <= 0) {
         return false;
     }
     if (!queryRowsAreFull && attnLen != mQuerySeqLen) {
@@ -7162,7 +7340,7 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKAp
 ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSparse(
     const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
     int layerIndex) {
-    if (attnLen <= 1 || attnLen > 8 || kvLen <= 0 || mHeadDim != 128 || mCache == nullptr ||
+    if (attnLen <= 0 || attnLen > 8 || kvLen <= 0 || mHeadDim != 128 || mCache == nullptr ||
         !mCache->key || !mCache->decodeKey || !mCache->value ||
         !mCache->sparseQuery || inputs.size() < 3 || mMeta == nullptr ||
         static_cast<int>(mMeta->sparse_query_logical_indices.size()) < attnLen ||
@@ -7198,77 +7376,130 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
     uint64_t attentionUs = 0;
     uint64_t rankUs = 0;
 
-    {
+    uint64_t causalWork = _sparseLogicalWork(mMeta, attnLen, kvLen);
+    const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
+    const uint32_t lanes = _decodeHD128SparseLaneWidth(runtime, causalWorkPerRow, attnLen);
+    const bool fusedAppend = _decodeRepairFusedAppendEnabled();
+    const bool q1Row = !fusedAppend && attnLen == 1 && _decodeRepairQ1RowEnabled();
+    const int qTile = q1Row ? 1 : _decodeHD128QTile(runtime, attnLen);
+
+    std::shared_ptr<KernelWrap> kernel;
+    const char* kernelName = nullptr;
+    if (q1Row) {
+        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKSparseRow128 :
+            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKSparseRow64
+                          : mDecodeCausalKernelHD128TransposedKSparseRow32);
+        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_sparse_row128" :
+            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_sparse_row64"
+                          : "setArg decode_causal_attention_hd128_transposed_k_sparse_row32");
+    } else if (qTile == 1) {
+        kernel = fusedAppend ?
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTileFused1Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTileFused1Row64
+                              : mDecodeCausalKernelHD128TransposedKQTileFused1Row32)) :
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile1Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile1Row64
+                              : mDecodeCausalKernelHD128TransposedKQTile1Row32));
+        kernelName = fusedAppend ?
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q1_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q1_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q1_row32")) :
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q1_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q1_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_q1_row32"));
+    } else if (qTile == 2) {
+        kernel = fusedAppend ?
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTileFused2Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTileFused2Row64
+                              : mDecodeCausalKernelHD128TransposedKQTileFused2Row32)) :
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile2Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile2Row64
+                              : mDecodeCausalKernelHD128TransposedKQTile2Row32));
+        kernelName = fusedAppend ?
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q2_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q2_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q2_row32")) :
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row32"));
+    } else if (qTile == 4) {
+        kernel = fusedAppend ?
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTileFused4Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTileFused4Row64
+                              : mDecodeCausalKernelHD128TransposedKQTileFused4Row32)) :
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile4Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile4Row64
+                              : mDecodeCausalKernelHD128TransposedKQTile4Row32));
+        kernelName = fusedAppend ?
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q4_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q4_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q4_row32")) :
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row32"));
+    } else {
+        kernel = fusedAppend ?
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTileFused8Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTileFused8Row64
+                              : mDecodeCausalKernelHD128TransposedKQTileFused8Row32)) :
+            (lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile8Row128 :
+                (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile8Row64
+                              : mDecodeCausalKernelHD128TransposedKQTile8Row32));
+        kernelName = fusedAppend ?
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q8_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q8_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_fused_q8_row32")) :
+            (lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row128" :
+                (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row64"
+                              : "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row32"));
+    }
+    if (!kernel) {
+        return INVALID_VALUE;
+    }
+    if (!fusedAppend) {
+        auto recordErr = runDecodeCausalAttentionHD128TransposedKSparseRecord(
+            inputs, outputs, kvLen, attnLen, layerIndex, lanes, qTile, kernel);
+        if (recordErr == NO_ERROR) {
+            return NO_ERROR;
+        }
         const uint64_t appendStartUs = profileDetail ? _nowUs() : 0;
         std::vector<uint32_t> appendGws = {
             128u,
             static_cast<uint32_t>(attnLen),
             static_cast<uint32_t>(mBatch * mKvNumHead),
         };
-        uint32_t idx = 0;
-        cl_int ret = CL_SUCCESS;
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[0]);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[1]);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[2]);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(key));
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(value));
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mBatch);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mNewKvSeqLen);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, attnLen);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mKvNumHead);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mHeadDim);
-        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mCache->maxSlots);
-        MNN_CHECK_CL_SUCCESS(ret, "setArg append_sparse_decode_key_value_hd128");
-        if (ret != CL_SUCCESS) {
+        uint32_t appendIdx = 0;
+        cl_int appendRet = CL_SUCCESS;
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, appendGws[0]);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, appendGws[1]);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, appendGws[2]);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, openCLBuffer(key));
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, openCLBuffer(value));
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, openCLBuffer(mCache->key.get()));
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, openCLBuffer(mCache->value.get()));
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, openCLBuffer(mCache->decodeKey.get()));
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, openCLBuffer(mCache->sparseQuery.get()));
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, mBatch);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, mNewKvSeqLen);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, attnLen);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, mKvNumHead);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, mHeadDim);
+        appendRet |= mDecodeKeyAppendSparseKernel->get().setArg(appendIdx++, mCache->maxSlots);
+        MNN_CHECK_CL_SUCCESS(appendRet, "setArg append_sparse_decode_key_value_hd128");
+        if (appendRet != CL_SUCCESS) {
             return INVALID_VALUE;
         }
         const std::vector<uint32_t> appendLws = {32u, 1u, 1u};
-        const auto pmcMeta = _makeOpenCLPmcMeta("append_sparse_decode_key_value_hd128", "append", layerIndex,
-                                               attnLen, mQuerySeqLen, kvLen, -1, 32, 0,
-                                               mNumHead, mKvNumHead, mHeadDim, appendGws, appendLws,
-                                               0, 0, appendCount, prepareLen, false);
-        _run3DKernelDefaultPmc(mDecodeKeyAppendSparseKernel, appendGws, appendLws, runtime, pmcMeta);
+        const auto appendPmcMeta = _makeOpenCLPmcMeta("append_sparse_decode_key_value_hd128", "append", layerIndex,
+                                                      attnLen, mQuerySeqLen, kvLen, -1, 32, 0,
+                                                      mNumHead, mKvNumHead, mHeadDim, appendGws, appendLws,
+                                                      0, 0, appendCount, prepareLen, false);
+        _run3DKernelDefaultPmc(mDecodeKeyAppendSparseKernel, appendGws, appendLws, runtime, appendPmcMeta);
         mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, kvLen);
         if (profileDetail) {
             queue.finish();
             appendUs = _nowUs() - appendStartUs;
         }
-    }
-
-    uint64_t causalWork = _sparseLogicalWork(mMeta, attnLen, kvLen);
-    const uint64_t causalWorkPerRow = attnLen > 0 ? causalWork / static_cast<uint64_t>(attnLen) : 0;
-    const uint32_t lanes = _decodeHD128SparseLaneWidth(runtime, causalWorkPerRow, attnLen);
-    const int qTile = _decodeHD128QTile(attnLen);
-    std::shared_ptr<KernelWrap> kernel;
-    const char* kernelName = nullptr;
-    if (qTile == 2) {
-        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile2Row128 :
-            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile2Row64
-                          : mDecodeCausalKernelHD128TransposedKQTile2Row32);
-        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row128" :
-            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row64"
-                          : "setArg decode_causal_attention_hd128_transposed_k_qtile_q2_row32");
-    } else if (qTile == 4) {
-        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile4Row128 :
-            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile4Row64
-                          : mDecodeCausalKernelHD128TransposedKQTile4Row32);
-        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row128" :
-            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row64"
-                          : "setArg decode_causal_attention_hd128_transposed_k_qtile_q4_row32");
-    } else {
-        kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKQTile8Row128 :
-            (lanes == 64u ? mDecodeCausalKernelHD128TransposedKQTile8Row64
-                          : mDecodeCausalKernelHD128TransposedKQTile8Row32);
-        kernelName = lanes == 128u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row128" :
-            (lanes == 64u ? "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row64"
-                          : "setArg decode_causal_attention_hd128_transposed_k_qtile_q8_row32");
-    }
-    if (!kernel) {
-        return INVALID_VALUE;
     }
     const uint64_t attentionStartUs = profileDetail ? _nowUs() : 0;
     std::vector<uint32_t> gws = {
@@ -7282,6 +7513,11 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
     ret |= kernel->get().setArg(idx++, gws[1]);
     ret |= kernel->get().setArg(idx++, gws[2]);
     ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+    if (fusedAppend) {
+        ret |= kernel->get().setArg(idx++, openCLBuffer(key));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(value));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    }
     ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
     ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
     ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
@@ -7289,6 +7525,9 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
     ret |= kernel->get().setArg(idx++, mScale);
     ret |= kernel->get().setArg(idx++, mBatch);
     ret |= kernel->get().setArg(idx++, mQuerySeqLen);
+    if (fusedAppend) {
+        ret |= kernel->get().setArg(idx++, mNewKvSeqLen);
+    }
     ret |= kernel->get().setArg(idx++, attnLen);
     ret |= kernel->get().setArg(idx++, kvLen);
     ret |= kernel->get().setArg(idx++, mCache->maxSlots);
@@ -7307,6 +7546,9 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
                                            mHeadDim, gws, lws, denseWork, causalWork,
                                            appendCount, prepareLen, false);
     _run3DKernelDefaultPmc(kernel, gws, lws, runtime, pmcMeta);
+    if (fusedAppend) {
+        mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, kvLen);
+    }
     if (profileDetail) {
         queue.finish();
         attentionUs = _nowUs() - attentionStartUs;
@@ -7328,13 +7570,15 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
         if (profileDetail) {
             MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_transposed_k_sparse_qtile layer=%d "
                       "query=%d input_query=%d kv_len=%d lane=%u q_tile=%d append_count=%d prepare_len=%d "
-                      "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=%llu attention_us=%llu "
+                      "dense_kv_work=%llu causal_kv_work=%llu fused_append=%d q1_row=%d us=%llu append_us=%llu attention_us=%llu "
                       "rank_us=%llu decode_key_ready_hit=%d decode_key_prepared=%d "
                       "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
                       "decode_key_required=%d slot_identity=%d prefix_stable=%d identity_v=%d record_queue=0\n",
                       layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, qTile, appendCount, prepareLen,
                       static_cast<unsigned long long>(denseWork),
                       static_cast<unsigned long long>(causalWork),
+                      fusedAppend ? 1 : 0,
+                      q1Row ? 1 : 0,
                       static_cast<unsigned long long>(totalUs),
                       static_cast<unsigned long long>(appendUs),
                       static_cast<unsigned long long>(attentionUs),
@@ -7351,13 +7595,15 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
         } else {
             MNN_PRINT("OpenCLPagedAttention profile op=decode_causal_attention_hd128_transposed_k_sparse_qtile layer=%d "
                       "query=%d input_query=%d kv_len=%d lane=%u q_tile=%d append_count=%d prepare_len=%d "
-                      "dense_kv_work=%llu causal_kv_work=%llu us=%llu append_us=0 attention_us=%llu rank_us=0 "
+                      "dense_kv_work=%llu causal_kv_work=%llu fused_append=%d q1_row=%d us=%llu append_us=0 attention_us=%llu rank_us=0 "
                       "decode_key_ready_hit=%d decode_key_prepared=%d "
                       "decode_prepare_inside_decode=%d decode_prepare_us=%llu prepare_us=%llu "
                       "decode_key_required=%d slot_identity=%d prefix_stable=%d identity_v=%d record_queue=0\n",
                       layerIndex, attnLen, mQuerySeqLen, kvLen, lanes, qTile, appendCount, prepareLen,
                       static_cast<unsigned long long>(denseWork),
                       static_cast<unsigned long long>(causalWork),
+                      fusedAppend ? 1 : 0,
+                      q1Row ? 1 : 0,
                       static_cast<unsigned long long>(totalUs),
                       static_cast<unsigned long long>(totalUs),
                       mLastDecodeKeyReadyHit ? 1 : 0,
@@ -7371,6 +7617,211 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
                       1);
         }
     }
+    return NO_ERROR;
+}
+
+ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSparseRecord(
+    const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
+    int attnLen, int layerIndex, uint32_t lanes, int qTile, std::shared_ptr<KernelWrap> kernel) {
+    if (!_decodeRepairRecordQueueEnabled() || !mOpenCLBackend->isUseRecordQueue() ||
+        _profilePagedAttention() || !kernel || !mDecodeKeyAppendSparseKernel ||
+        attnLen <= 0 || kvLen <= 0 || qTile <= 0 || mCache == nullptr ||
+        !mCache->key || !mCache->decodeKey || !mCache->value || !mCache->sparseQuery ||
+        inputs.size() < 3 || outputs.empty() ||
+        (mMeta != nullptr && mMeta->needsPicDecodeAttentionRankCapture(layerIndex))) {
+        return INVALID_VALUE;
+    }
+    auto query = inputs[0];
+    auto key = inputs[1];
+    auto value = inputs[2];
+    auto output = outputs[0];
+    const uint32_t heads = static_cast<uint32_t>(mNumHead * mBatch);
+    const bool needRecord = !mDecodeTransposedSparseRecordValid ||
+        mDecodeTransposedSparseRecordLanes != lanes ||
+        mDecodeTransposedSparseRecordAttnLen != attnLen ||
+        mDecodeTransposedSparseRecordHeads != heads ||
+        mDecodeTransposedSparseRecordQTile != qTile;
+
+    auto updateRecordArgs = [&]() {
+        auto& appendArgs = mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args;
+        auto& attentionArgs = mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args;
+        if (appendArgs.size() < 9 || attentionArgs.size() < 10) {
+            return false;
+        }
+        mDecodeTransposedSparseRecordQuerySeqLen = mQuerySeqLen;
+        mDecodeTransposedSparseRecordNewKvSeqLen = mNewKvSeqLen;
+        mDecodeTransposedSparseRecordKvLen = kvLen;
+        mDecodeTransposedSparseRecordMaxSlots = mCache->maxSlots;
+        mDecodeTransposedSparseRecordScale = mScale;
+
+        appendArgs[0].arg_value = &openCLBuffer(key)();
+        appendArgs[1].arg_value = &openCLBuffer(value)();
+        appendArgs[2].arg_value = &openCLBuffer(mCache->key.get())();
+        appendArgs[3].arg_value = &openCLBuffer(mCache->value.get())();
+        appendArgs[4].arg_value = &openCLBuffer(mCache->decodeKey.get())();
+        appendArgs[5].arg_value = &openCLBuffer(mCache->sparseQuery.get())();
+        appendArgs[6].arg_value = &mDecodeTransposedSparseRecordNewKvSeqLen;
+        appendArgs[7].arg_value = &mDecodeTransposedSparseRecordAttnLen;
+        appendArgs[8].arg_value = &mDecodeTransposedSparseRecordMaxSlots;
+
+        attentionArgs[0].arg_value = &openCLBuffer(query)();
+        attentionArgs[1].arg_value = &openCLBuffer(mCache->value.get())();
+        attentionArgs[2].arg_value = &openCLBuffer(mCache->decodeKey.get())();
+        attentionArgs[3].arg_value = &openCLBuffer(mCache->sparseQuery.get())();
+        attentionArgs[4].arg_value = &openCLBuffer(output)();
+        attentionArgs[5].arg_value = &mDecodeTransposedSparseRecordScale;
+        attentionArgs[6].arg_value = &mDecodeTransposedSparseRecordQuerySeqLen;
+        attentionArgs[7].arg_value = &mDecodeTransposedSparseRecordAttnLen;
+        attentionArgs[8].arg_value = &mDecodeTransposedSparseRecordKvLen;
+        attentionArgs[9].arg_value = &mDecodeTransposedSparseRecordMaxSlots;
+        return true;
+    };
+
+    if (needRecord) {
+        mDecodeTransposedSparseRecordAppendGws0 = 128u;
+        mDecodeTransposedSparseRecordAppendGws1 = static_cast<uint32_t>(attnLen);
+        mDecodeTransposedSparseRecordAppendGws2 = static_cast<uint32_t>(mBatch * mKvNumHead);
+        mDecodeTransposedSparseRecordGws0 = lanes;
+        mDecodeTransposedSparseRecordGws1 = static_cast<uint32_t>((attnLen + qTile - 1) / qTile);
+        mDecodeTransposedSparseRecordGws2 = heads;
+        mDecodeTransposedSparseRecordQuerySeqLen = mQuerySeqLen;
+        mDecodeTransposedSparseRecordNewKvSeqLen = mNewKvSeqLen;
+        mDecodeTransposedSparseRecordKvLen = kvLen;
+        mDecodeTransposedSparseRecordMaxSlots = mCache->maxSlots;
+        mDecodeTransposedSparseRecordScale = mScale;
+
+        std::vector<uint32_t> appendGws = {
+            mDecodeTransposedSparseRecordAppendGws0,
+            mDecodeTransposedSparseRecordAppendGws1,
+            mDecodeTransposedSparseRecordAppendGws2,
+        };
+        std::vector<uint32_t> appendLws = {32u, 1u, 1u};
+        std::vector<uint32_t> attentionGws = {
+            mDecodeTransposedSparseRecordGws0,
+            mDecodeTransposedSparseRecordGws1,
+            mDecodeTransposedSparseRecordGws2,
+        };
+        std::vector<uint32_t> attentionLws = {lanes, 1u, 1u};
+        cl_int ret = CL_SUCCESS;
+        uint32_t idx = 0;
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[0]);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[1]);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, appendGws[2]);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(key));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(value));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mBatch);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mDecodeTransposedSparseRecordNewKvSeqLen);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, attnLen);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mKvNumHead);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mHeadDim);
+        ret |= mDecodeKeyAppendSparseKernel->get().setArg(idx++, mDecodeTransposedSparseRecordMaxSlots);
+        MNN_CHECK_CL_SUCCESS(ret, "record setArg append_sparse_decode_key_value_hd128");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+
+        idx = 0;
+        ret = CL_SUCCESS;
+        ret |= kernel->get().setArg(idx++, attentionGws[0]);
+        ret |= kernel->get().setArg(idx++, attentionGws[1]);
+        ret |= kernel->get().setArg(idx++, attentionGws[2]);
+        ret |= kernel->get().setArg(idx++, openCLBuffer(query));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
+        ret |= kernel->get().setArg(idx++, openCLBuffer(output));
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedSparseRecordScale);
+        ret |= kernel->get().setArg(idx++, mBatch);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedSparseRecordQuerySeqLen);
+        ret |= kernel->get().setArg(idx++, attnLen);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedSparseRecordKvLen);
+        ret |= kernel->get().setArg(idx++, mDecodeTransposedSparseRecordMaxSlots);
+        ret |= kernel->get().setArg(idx++, mNumHead);
+        ret |= kernel->get().setArg(idx++, mKvNumHead);
+        ret |= kernel->get().setArg(idx++, mHeadDim);
+        MNN_CHECK_CL_SUCCESS(ret, "record setArg decode_causal_attention_hd128_transposed_k_sparse_qtile");
+        if (ret != CL_SUCCESS) {
+            return INVALID_VALUE;
+        }
+
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.clear();
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_global_size.clear();
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_local_size.clear();
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 3, sizeof(cl_mem), &openCLBuffer(key)()});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 4, sizeof(cl_mem), &openCLBuffer(value)()});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 5, sizeof(cl_mem), &openCLBuffer(mCache->key.get())()});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 6, sizeof(cl_mem), &openCLBuffer(mCache->value.get())()});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 7, sizeof(cl_mem), &openCLBuffer(mCache->decodeKey.get())()});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 8, sizeof(cl_mem), &openCLBuffer(mCache->sparseQuery.get())()});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 10, sizeof(mDecodeTransposedSparseRecordNewKvSeqLen),
+             &mDecodeTransposedSparseRecordNewKvSeqLen});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 11, sizeof(mDecodeTransposedSparseRecordAttnLen),
+             &mDecodeTransposedSparseRecordAttnLen});
+        mDecodeTransposedSparseAppendRecordUpdateInfo.update_kernel_args.push_back(
+            {0, 14, sizeof(mDecodeTransposedSparseRecordMaxSlots),
+             &mDecodeTransposedSparseRecordMaxSlots});
+
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.clear();
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_global_size.clear();
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_local_size.clear();
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 3, sizeof(cl_mem), &openCLBuffer(query)()});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 4, sizeof(cl_mem), &openCLBuffer(mCache->value.get())()});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 5, sizeof(cl_mem), &openCLBuffer(mCache->decodeKey.get())()});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 6, sizeof(cl_mem), &openCLBuffer(mCache->sparseQuery.get())()});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 7, sizeof(cl_mem), &openCLBuffer(output)()});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 8, sizeof(mDecodeTransposedSparseRecordScale),
+             &mDecodeTransposedSparseRecordScale});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 10, sizeof(mDecodeTransposedSparseRecordQuerySeqLen),
+             &mDecodeTransposedSparseRecordQuerySeqLen});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 11, sizeof(mDecodeTransposedSparseRecordAttnLen),
+             &mDecodeTransposedSparseRecordAttnLen});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 12, sizeof(mDecodeTransposedSparseRecordKvLen),
+             &mDecodeTransposedSparseRecordKvLen});
+        mDecodeTransposedSparseAttentionRecordUpdateInfo.update_kernel_args.push_back(
+            {1, 13, sizeof(mDecodeTransposedSparseRecordMaxSlots),
+             &mDecodeTransposedSparseRecordMaxSlots});
+        mDecodeTransposedSparseRecordUpdateInfos.clear();
+        mDecodeTransposedSparseRecordUpdateInfos.emplace_back(&mDecodeTransposedSparseAppendRecordUpdateInfo);
+        mDecodeTransposedSparseRecordUpdateInfos.emplace_back(&mDecodeTransposedSparseAttentionRecordUpdateInfo);
+
+        mOpenCLBackend->startRecord(mRecording);
+        mOpenCLBackend->recordKernel3d(mDecodeKeyAppendSparseKernel, appendGws, appendLws,
+                                       &mDecodeTransposedSparseAppendRecordUpdateInfo);
+        mOpenCLBackend->recordKernel3d(kernel, attentionGws, attentionLws,
+                                       &mDecodeTransposedSparseAttentionRecordUpdateInfo);
+        mOpenCLBackend->endRecord(mRecording);
+        mDecodeTransposedSparseRecordValid = true;
+        mDecodeTransposedSparseRecordLanes = lanes;
+        mDecodeTransposedSparseRecordAttnLen = attnLen;
+        mDecodeTransposedSparseRecordHeads = heads;
+        mDecodeTransposedSparseRecordQTile = qTile;
+    }
+    if (!updateRecordArgs()) {
+        return INVALID_VALUE;
+    }
+    mOpenCLBackend->addRecord(mRecording, mDecodeTransposedSparseRecordUpdateInfos);
+    mCache->decodeKeyReadyLength = std::max(mCache->decodeKeyReadyLength, kvLen);
     return NO_ERROR;
 }
 
@@ -8662,31 +9113,31 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     }
     const bool preEmitExternalHydrated = !shouldHydrateExternal || mMeta->externalLayerLoaded(layerIndex);
     const bool preEmitQueryRowsAreFull = sparseQuery && mQuerySeqLen > attnLen;
-    const int decodeTransposedKSparseAppendCount =
+    const int decodeRepairSparseQTileAppendCount =
         (mMeta != nullptr && picDecodeRecompute) ?
         std::max(0, std::min(mMeta->pic_decode_recompute_append_count, attnLen)) : 0;
-    const int decodeTransposedKSparsePrepareLen = std::max(0, kvLen - decodeTransposedKSparseAppendCount);
-    const bool decodeTransposedKEnabledGlobal = _decodeTransposedKEnabled();
-    const bool decodeTransposedKQ1NeedsDecodeKey =
-        decodeTransposedKEnabledGlobal && _decodeTransposedKQ1NeedsDecodeKey();
-    const bool decodeTransposedKEnabled =
-        decodeTransposedKEnabledGlobal && (attnLen > 1 || decodeTransposedKQ1NeedsDecodeKey);
-    const bool decodeTransposedKSparseCandidate =
-        decodeTransposedKEnabled && picDecodeRecompute && sparseQuery && decodeCausalMask &&
-        mHeadDim == 128 && attnLen > 1 && attnLen <= 8 && !preEmitQueryRowsAreFull &&
+    const int decodeRepairSparseQTilePrepareLen = std::max(0, kvLen - decodeRepairSparseQTileAppendCount);
+    const bool decodeRepairSparseQTileEnabled =
+        _decodeRepairSparseQTileEnabled(runtime, attnLen);
+    const bool decodeQ1TransposedKVariant = _decodeQ1TransposedKVariantEnabled();
+    const bool decodeNeedsTransposedK =
+        decodeRepairSparseQTileEnabled || decodeQ1TransposedKVariant;
+    const bool decodeRepairSparseQTileCandidate =
+        decodeRepairSparseQTileEnabled && picDecodeRecompute && sparseQuery && decodeCausalMask &&
+        mHeadDim == 128 && attnLen >= 1 && attnLen <= 8 && !preEmitQueryRowsAreFull &&
         !mIsKVShared && preEmitExternalHydrated && runtime != nullptr &&
-        _decodeTransposedKSparseShapeSupported(runtime, attnLen) &&
+        _decodeRepairSparseQTileShapeSupported(runtime, attnLen) &&
         mCache != nullptr && mCache->key && mCache->decodeKey && mCache->value &&
         mCache->sparseQuery && inputs.size() >= 3 &&
         (mMeta == nullptr || mMeta->file_flag != KVMeta::PendingWrite) &&
         (mMeta == nullptr || !mMeta->needsCacheBlendScoring(layerIndex));
-    const bool decodeTransposedKSparsePrefixReady =
-        decodeTransposedKSparseCandidate &&
-        mCache->decodeKeyReadyLength >= decodeTransposedKSparsePrepareLen;
-    const bool decodeTransposedKSparse =
-        decodeTransposedKSparseCandidate && decodeTransposedKSparsePrefixReady;
+    const bool decodeRepairSparseQTilePrefixReady =
+        decodeRepairSparseQTileCandidate &&
+        mCache->decodeKeyReadyLength >= decodeRepairSparseQTilePrepareLen;
+    const bool decodeRepairSparseQTile = decodeRepairSparseQTileCandidate;
+    const bool decodeQ1TransposedKRoute = ordinaryDecodeFusedKV && decodeQ1TransposedKVariant;
     const bool decodeTransposedKQ1AttentionOnlyBenchCandidate =
-        decodeTransposedKEnabled && _decodeTransposedKAttentionOnlyBenchEnabled() &&
+        _decodeTransposedKAttentionOnlyBenchEnabled() &&
         ordinaryDecodeHD128Identity && !mIsKVShared && kvWriteLen == 1 &&
         mCache != nullptr && mCache->key && mCache->decodeKey && mCache->value &&
         inputs.size() >= 3 && preEmitExternalHydrated &&
@@ -8698,7 +9149,27 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
     const bool decodeTransposedKQ1AttentionOnlyBench =
         decodeTransposedKQ1AttentionOnlyBenchCandidate && decodeTransposedKQ1AttentionOnlyBenchPrefixReady;
 
-    if (!mIsKVShared && kvWriteLen > 0 && !ordinaryDecodeFusedKV && !decodeTransposedKSparse &&
+    if (_picOpenCLDebug() && mHeadDim == 128 && (ordinaryDecodeCausal || picDecodeRecompute)) {
+        MNN_PRINT("PIC OpenCL PA decode hd128 route layer=%d ordinary_q1=%d repair=%d q=%d kv_len=%d "
+                  "q1_transposed_enabled=%d q1_transposed_route=%d "
+                  "repair_qtile_enabled=%d repair_qtile_candidate=%d "
+                  "repair_qtile_prefix_ready=%d repair_qtile_route=%d q1_attention_only_bench=%d "
+                  "record_queue=%d q1_policy=%u repair_policy=%u "
+                  "decode_key_ready=%d sparse_prepare_len=%d sparse_append=%d gqa_variant=%d\n",
+                  layerIndex, ordinaryDecodeCausal ? 1 : 0, picDecodeRecompute ? 1 : 0, attnLen, kvLen,
+                  decodeQ1TransposedKVariant ? 1 : 0, decodeQ1TransposedKRoute ? 1 : 0,
+                  decodeRepairSparseQTileEnabled ? 1 : 0, decodeRepairSparseQTileCandidate ? 1 : 0,
+                  decodeRepairSparseQTilePrefixReady ? 1 : 0, decodeRepairSparseQTile ? 1 : 0,
+                  decodeTransposedKQ1AttentionOnlyBench ? 1 : 0,
+                  mOpenCLBackend->isUseRecordQueue() ? 1 : 0,
+                  static_cast<uint32_t>(_decodeQ1TransposedKPolicy()),
+                  static_cast<uint32_t>(_decodeRepairSparseQTilePolicy()),
+                  mCache != nullptr ? mCache->decodeKeyReadyLength : -1,
+                  decodeRepairSparseQTilePrepareLen, decodeRepairSparseQTileAppendCount,
+                  _decodeGqaFusedKVEnabled() ? 1 : 0);
+    }
+
+    if (!mIsKVShared && kvWriteLen > 0 && !ordinaryDecodeFusedKV && !decodeRepairSparseQTile &&
         !decodeTransposedKQ1AttentionOnlyBench) {
         const int total = mBatch * kvWriteLen * mKvNumHead * mHeadDim;
         uint32_t idx = 0;
@@ -8746,11 +9217,11 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         }
     }
 
-    const bool q1DecodeKNeedsPrepare = decodeTransposedKQ1NeedsDecodeKey;
+    const bool q1DecodeKNeedsPrepare = decodeQ1TransposedKVariant;
     const bool repairDecodeKNeedsPrepare =
-        mMeta != nullptr && mMeta->pic_decode_repair_tokens_per_step > 0 &&
-        _decodeTransposedKSparseShapeSupported(runtime, mMeta->pic_decode_repair_tokens_per_step + 1);
-    if (decodeTransposedKEnabled && (q1DecodeKNeedsPrepare || repairDecodeKNeedsPrepare) &&
+        mMeta != nullptr && mMeta->pic_decode_repair_enabled &&
+        _decodeRepairSparseQTileEnabled(runtime, mMeta->pic_decode_repair_tokens_per_step + 1);
+    if (decodeNeedsTransposedK && (q1DecodeKNeedsPrepare || repairDecodeKNeedsPrepare) &&
         !decodeStep && !sparseQuery && !scoreAttention &&
         !picDecodeRecompute && mHeadDim == 128 && kvLen > 0 && mCache != nullptr &&
         mCache->key && mCache->decodeKey && runtime != nullptr) {
@@ -8964,7 +9435,7 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
                 return readonlyBenchErr;
             }
             if (ordinaryDecodeFusedKV) {
-                if (decodeTransposedKQ1NeedsDecodeKey) {
+                if (decodeQ1TransposedKVariant) {
                     if (_decodeTransposedKReadonlyOnlyEnabled()) {
                         auto readonlyOnlyErr = runDecodeCausalAttentionHD128TransposedKAppendReadonly(
                             inputs, outputs, kvLen, attnLen, baseLogical, layerIndex, false);
@@ -9023,7 +9494,7 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
                                             queryRowsAreFull);
         }
     }
-    if (decodeTransposedKSparse) {
+    if (decodeRepairSparseQTile) {
         auto transposedSparseErr = runDecodeCausalAttentionHD128TransposedKSparse(
             inputs, outputs, kvLen, attnLen, layerIndex);
         if (transposedSparseErr == NO_ERROR) {

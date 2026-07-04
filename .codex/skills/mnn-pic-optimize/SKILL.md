@@ -1,6 +1,6 @@
 ---
 name: mnn-pic-optimize
-description: 当用户要求分析或优化 MNN PIC/PagedAttention 的 OpenCL/CUDA/Adreno 稀疏 prefill、score layer 前后 full compute 与 sparse compute 边界、PagedAttention/attention kernel 热点、跨设备性能回归或优化日志维护时使用。
+description: 当用户要求分析或优化 MNN PIC/PagedAttention 的 OpenCL/CUDA/Adreno 稀疏 prefill、PIC dualgraph decode / decode-repair、score layer 前后 full compute 与 sparse compute 边界、PagedAttention/attention kernel 热点、跨设备性能回归或优化日志维护时使用；decode 口径默认区分 PIC dualgraph x0、PIC dualgraph decode-repair 非零 x、generic PIC dualgraph 对照和 true normal LLM x0。
 ---
 
 # MNN PIC Optimization
@@ -31,6 +31,7 @@ description: 当用户要求分析或优化 MNN PIC/PagedAttention 的 OpenCL/CU
 - Rhino / Adreno 正式默认口径、当前错误路由、端到端目标和下一步工程动作：
   - 读取 `.codex/skills/mnn-pic-optimize/references/rhino.md`
   - 详细实验明细再回看 `.codex/skills/mnn-pic-optimize/log/rhino/2026-06-27-00/context.md`
+  - native full-reuse 在 Rhino 上触发 module clone hang / 设备重启的 bug、修复方案和验证结果记录在 `.codex/skills/mnn-pic-optimize/log/rhino/2026-07-04-06/README.md` 与 `.codex/skills/mnn-pic-optimize/log/rhino/2026-07-04-06/context.md`
 - OrangePi / Mali OpenCL decode build、benchmark、P0 validity scan 和 TPOT A/B 流程：
   - 读取 `.codex/skills/mnn-pic-optimize/references/decode_opencl_workflow.md`
 - OrangePi / Mali OpenCL PMC scoped profiling 机制设计，用于 lagged-attention decode repair
@@ -178,6 +179,16 @@ OpenCL 先跑通时的保守策略：
 
 ## Decode 算子优化约束
 
+PIC decode 优化默认分析 PIC dualgraph 运行口径：`pic_llm` / `pic_server` 加载 `.cache/weight/<model>/` 或设备侧 PIC dualgraph config，`llm.mnn` 负责 PIC prefill graph，`llm_decode.mnn` 负责 PIC q=1 decode graph。`repair_tokens=0` 是 `PIC dualgraph x0`，不是 true normal LLM；`repair_tokens>0` 仍属于同一个 PIC dualgraph 模型包 / server。分析和报告时不要把这三类混在一起：`PIC dualgraph x0`、`PIC dualgraph decode-repair x>0`、`.cache/mnn-llm-export` 的 `true normal LLM x0`。
+
+PIC dualgraph decode-repair 的 `x=0/1/3/5/7/n` 必须收敛为同一个实现家族：`x=0` 是 active rows 为 1 的退化 repair decode，`x=n` 是 active rows / token budget 为 `n+1` 的同一路径扩展。实现上允许同一设备固定一套默认 family，并在这个 family 内保留 lane、row32/row64、q_tile、K/KV image、buffer/image layout、record queue 等参数或显式变体；不允许把 `x=0` 当成普通 q=1 identity decode、把 `x>0` 当成另一套 sparse qtile decode-repair 的两条生产路径，也不允许按模型、head/GQA、上下文长度或单个 x 值自动 gate 到不同算法家族。A/B 变体必须用清晰 env 或 benchmark 标签单独运行、单独报告，不能作为默认自动 fallback。
+
+PIC decode-repair 一旦进入 decode 阶段，必须继续使用 PIC dualgraph 的 decode-only graph（`llm_decode.mnn` / `mDecodeModule`）。`mPicDecodeRepair.enabled` 不能再成为禁止 decode graph 的条件；x0/x1/x3/x5/x7 的 active rows 都应通过 decode graph 执行，x0 只是 active rows=1。禁止因为 repair 开启、active rows 大于 1、shape pool 未命中或某个模型/ctx 慢，就静默回落到主图 `llm.mnn` / `mModule` / `mModulePool` 的 raw forward。主图 active-rows forward 不是完整 prompt prefill，但仍会重新带入通用图动态 shape、Raster/reshape、dense/logits tail 等隐藏开销，历史上会把 PIC x0 推成明显慢于 true normal 的错误口径。profile/debug 中应能明确看到 `use_decode_graph=1` 且 `pic_decode_repair_decode_graph=1`；若 decode-only graph 缺失或不支持该 active-row shape，应标注 unsupported/fallback 并单独报告，不能混入默认正式数据。
+
+本次 decode-repair 路由事故的经验教训：只要进入 decode，主图 `llm.mnn` active-rows forward 就不是“可接受的兼容路径”，而是会污染 TPOT 归因的错误路径。它可能在 profile 中表现为 `Convolution`、`Raster`、`While`、lm_head/logits tail 或 readback 变慢，让后续 attention/MLP 优化看起来无效。正确处理方式只有两种：让 `llm_decode.mnn` 覆盖该 active-row shape，或把该 shape 标为 unsupported/显式 fallback；不要为了功能可跑而把默认路由切回主图。
+
+旧的 sparse-prefill compact MLP 结论不能直接外推到 decode-only 子图。OrangePi `pic_gemm_b4_c8_*` 当时主要解决 score-layer 后 `globalY > 16` 的 compact-row 1x1 Conv / MLP tune cliff；decode-repair 的 active rows 是 1/2/4/6/8，可能落到 tiny GEMV、普通 low-memory Conv、lm_head 或其它 graph tail 路由。每次声称 MLP 优化对 decode 生效前，必须用 `MNN_PIC_GRAPH_PROFILE_SCOPE=decode` 拆 `Convolution`、`/mlp/{gate_proj,up_proj,down_proj}/Linear`、self-attn q/k/v/o projection、`/lm/lm_head/Linear` 和 `ArgMax`，并确认实际 kernel/tune key 覆盖这些 tiny-row shape。不要只凭 prefill/cacheblend 的 MLP 历史数据判断 decode x0/x>0。
+
 OpenCL PIC decode 的优化目标是形成统一的新算子实现思路，而不是用按模型、head 数、设备或 q 长度的路由回退把端到端 TPOT 凑到不回退。`old` / identity PagedCache attention 只能作为 baseline 或显式 A/B 对照；生产默认不得自动根据 `llama3.2-3b`、`minicpm5-1b`、`qwen3-4b`、Mali/Adreno、`num_heads/kv_heads` 或单个 q 值切回 old。
 
 允许的收敛手段只有三类：
@@ -186,9 +197,11 @@ OpenCL PIC decode 的优化目标是形成统一的新算子实现思路，而�
 - 调整参数或 autotune：例如 lane 32/64/128、q_tile、workgroup、local memory 布局、设备级 tune cache；参数可以按设备或 shape tune，但不能表达成“这个模型走 old、那个模型走 new”。
 - 提供显式实验变体：例如 fused、append+readonly、QK-only、QKV-only、split profile。变体必须用清晰 env 或 benchmark 标签运行并单独报告，不能作为默认自动 fallback。
 
-q=1 和 q>1 可以有不同 kernel 家族，因为 workload 不同：q=1 优先解决固定开销、append+attention 融合和 launch/record queue；q>1 必须做真正 qtile，让一个 workgroup/tile 共享同一段 K load，不能退化成多个 row 独立扫 K。若 `new_attention_only` 赢但端到端输，继续拆 `prepare/append/rank/launch/QK/QKV/V` 并修实现细节；若 qtile 在某设备或模型上回归，继续调 q_tile/lane/local memory 或新增 qtile 变体，而不是自动切回 old。
+OrangePi / Mali 当前生产默认应继续向统一 lagged-attention / decode-repair family 收敛：x0 和 x>0 都使用同一套 append、rank/repair 可空化、attention 和 PagedCache 访问设计，x0 只是不选择额外 repair rows。transposed-K、identity fused-KV、qtile、row32/row64、image/buffer 等只能作为同一 family 内的显式变体或参数，不得形成“x0 一套、x>0 一套”的自动生产分流。后续优化应优先解决固定开销、append+attention 融合、launch/record queue、QK/QKV/V 拆测和 qtile 共享 K load；若某个变体在某设备或模型上回归，继续调 lane/q_tile/local memory/layout 或新增显式变体，而不是自动切回 old。
 
 decode-transposed K 的 prepare 边界是硬约束：prefill/full-reuse 后显式 prepare 历史 K，decode 计时内只允许 append 当前新 token 的 decodeKey。profile 中出现 `decode_prepare_inside_decode=1` 时，该实现直接判为不合格。
+
+PIC dualgraph x0 的图级 profile 可能仍显示 `PicScoreAttention` / `PicSparseAttention` op type，因为模型是 graph-boundary PIC 导出；这不能单独说明 decode-repair gate 被打开。判断 x0 路径必须同时看：请求启用 `decode_refine` 且 `tokens_per_decode_step=0`、没有额外 repair rows、`forwardRaw` 选择 decode graph、metadata 记录 `mnn_token_id_sparse_decode` runtime，并且没有 `decode_prepare_inside_decode=1`。若这些条件满足，x0 慢因应继续拆同一 decode-repair family 在 active rows=1 时的 PagedAttention、PagedCache、dense/Raster/elementwise 开销，而不是把 x0 单独按普通 q=1 identity decode 处理。
 
 ## 关键源码位置
 
@@ -295,7 +308,7 @@ MNN_PIC_PMC_OUTPUT='/mnt/ssd/code/.cache/mnn_opencl_pic/pmc/decode_repair.jsonl'
 ```bash
 RUN_ID=pmc_decode_repair_sparse_qtile_orangepi_20260703
 PMC_REMOTE_OUT=/mnt/ssd/code/.cache/mnn_opencl_pic/pmc/${RUN_ID}.jsonl
-PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 \
+PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1 \
 MNN_PIC_PMC_PROFILE=1 \
 MNN_PIC_PMC_KERNEL_REGEX='decode_causal_attention_hd128_transposed_k_sparse_qtile|append_sparse_decode|decode_attention_rank' \
 MNN_PIC_PMC_PHASE_REGEX='attention|append|rank' \
@@ -359,7 +372,7 @@ kernel。若 record queue 隐藏了具体 dispatch，只能记录 coarse `record
    - 不要新增 env fallback 或请求期在线 tuner；正式测试仍然先 warm 目标 ratios，再 `/v1/tune/update_cache`，计时请求复用 MNN cache。
 8. Jetson CUDA 按同一套 graph-boundary 语义适配，但 dense fast path 不能照搬 OpenCL：
    - CUDA `PagedAttentionExecution` 必须注册 `PicScoreAttention` / `PicSparseAttention`，拆分 `kvWriteLen` 和 `attnLen`，score layer 写出 `active_indices`，后续层按 compact active rows 计算并用真实 logical slot 写 PagedCache。
-   - Jetson CUDA PagedAttention 默认路径必须固定在代码内，只允许少量参数变体，不允许请求期 env gate、在线 tune cache 或自动试跑候选来选择实现。当前稀疏 attention 口径是：headDim=128 普通 sparse rows 在 `attnLen>=64` 走 `hd128_q4k16`，更小 active rows 保持既有非 qtile sparse path；decode repair 的 headDim=128 且 `attnLen>=2` 固定走 `hd128_q8k16`；headDim=64 高预算 sparse rows 保持固定 q8/q32-k32 tile path。新增或替换变体必须覆盖 Jetson 10/20/30/40/50，必要时补 1/5 smoke，不能以 env override 作为生产默认。
+   - Jetson CUDA PagedAttention 默认路径必须固定在代码内，只允许少量参数变体，不允许请求期 env gate、在线 tune cache 或自动试跑候选来选择实现。当前稀疏 attention 口径是：headDim=128 普通 sparse rows 在 `attnLen>=64` 走 `hd128_q4k16`，更小 active rows 保持既有非 qtile sparse path；decode repair 的 headDim=128 且 `attnLen>=1` 固定走 `hd128_q8k16`，其中 x0 是 active rows=1 的同 family 退化情形；headDim=64 高预算 sparse rows 保持固定 q8/q32-k32 tile path。新增或替换变体必须覆盖 Jetson 10/20/30/40/50，必要时补 1/5 smoke，不能以 env override 作为生产默认。
    - 不要新增朴素 packed INT4 CUDA `PicGEMM` 作为 PIC compact MLP 快路径。2026-06-11 Jetson A/B 证明它会让 cacheblend20 从 CUTLASS 路径的 `0.816942s` 退化到 `3.527971s`，216-row compact MLP 变成第一瓶颈。CUDA 目前默认保留 tensor-core CUTLASS + runtime dequant，直到有真正的 compact tensor-core GEMM 并在 1%-50% 全部更快。
    - 不要把现有 `v2_row_compressed_mask` 或 sparse single-piece qSplit 当作 CUDA sparse flash 替代品。Jetson A/B 证明 row-compressed fused kernel 会让 cacheblend20/50 退化到 `1.548174s`/`2.303546s`；single-piece qSplit 会让 cacheblend50 退化到 `1.860186s`。CUDA P0 必须是 tile-based sparse flash，而不是单 row flash 或单纯减少 split。
    - CUDA 当前默认使用 q8/k32 tile sparse flash，`attnLen >= 384` 的高预算 sparse tile 使用 q32/k32 wide-Q 变体：epic / fixed active-plan sparse rows 始终走 tile flash；cacheblend sparse rows 只有 `attnLen > 256` 才走 tile flash，`attnLen <= 256` 保持现有 QK/softmax/QKV 路径。tile flash 必须按每个 Q tile 的 `max_q_logical + 1` 限制 K/V streaming，跳过 causal 之外的整块 K/V；不要保留全长 K loop 的旧 tile-flash 路径。

@@ -64,6 +64,11 @@ static void picRequestProfileLog(const char* stage, int64_t elapsedUs, const std
     std::fflush(stderr);
 }
 
+static bool picEnvFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 static bool picDecodeRepairProfileEnabled() {
     static const bool enabled = []() {
         const char* value = std::getenv("MNN_PIC_DECODE_REPAIR_PROFILE");
@@ -887,7 +892,20 @@ bool Llm::prefillFullReuseExternalPagedKV(const std::vector<int>& full_prompt_to
     }
 
     stageStartUs = picRequestProfileEnabled() ? picRequestMonotonicUs() : 0;
-    const bool ok = prefill(activeTokenIds);
+    bool ok = false;
+    {
+        struct ScopedForcePrefillForward {
+            bool& flag;
+            bool old;
+            explicit ScopedForcePrefillForward(bool& value) : flag(value), old(value) {
+                flag = true;
+            }
+            ~ScopedForcePrefillForward() {
+                flag = old;
+            }
+        } forcePrefillForward(mForcePrefillForward);
+        ok = prefill(activeTokenIds);
+    }
     paged->sparse_query_force_plain_attention = false;
     paged->finishSparseQuery();
     if (!ok) {
@@ -1050,6 +1068,7 @@ bool Llm::preparePicDecodeRepair(int pic_start, const std::vector<int>& pic_toke
     mPicDecodeRepair.pendingRepairLogicalIndices = selectPicDecodeRepairLogicalIndices();
     if (mConfig->paged_attention()) {
         auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        paged->pic_decode_repair_enabled = true;
         paged->pic_decode_repair_tokens_per_step = tokens_per_decode_step;
     }
     MNN_PRINT("Prepared PIC decode repair token-id sparse decode selector=%s pic_start=%d pic_tokens=%d "
@@ -1065,6 +1084,7 @@ void Llm::clearPicDecodeRepair() {
     mPicDecodeRepair = PicDecodeRepairRuntimeState();
     if (mConfig->paged_attention()) {
         auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+        paged->pic_decode_repair_enabled = false;
         paged->pic_decode_repair_tokens_per_step = 0;
     }
 }
@@ -1393,6 +1413,15 @@ std::vector<VARP> Llm::forwardVecWithPicDecodeRepair(const std::vector<int>& inp
     mGenerateParam->outputs = outputs;
     mGenerateParam->validLogitSize = 0;
     mGenerateParam->validLogitStart = 0;
+    auto logitsInfo = outputs[0]->getInfo();
+    if (logitsInfo != nullptr && !logitsInfo->dim.empty()) {
+        const int logitSize = logitsInfo->dim.back();
+        if (logitSize > 0 && logitsInfo->size >= logitSize) {
+            const int logitsRows = logitsInfo->size / logitSize;
+            mGenerateParam->validLogitStart = std::max(0, logitsRows - 1) * logitSize;
+            mGenerateParam->validLogitSize = logitSize;
+        }
+    }
     const int64_t bookkeepingUs = finishProfileStage();
     if (profileDecodeRepair) {
         const int64_t totalUs = picRequestMonotonicUs() - totalStartUs;
@@ -1616,17 +1645,24 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
     const int64_t totalStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
     
     Express::VARP logitsIndex;
-    bool inDecode = mDecodeForwardActive || mContext->gen_seq_len > 0;
+    bool inDecode = !mForcePrefillForward && (mDecodeForwardActive || mContext->gen_seq_len > 0);
     bool isAllLogists = mConfig->all_logits() ? true : (inDecode ? mInSpec : false);
     auto seqLen = hiddenState->getInfo()->dim[mSeqLenIndex];
     int seqLenKey = inDecode ? hiddenState->getInfo()->dim[mSeqLenIndex] : mPrefillKey;
     isAllLogists = seqLenKey == 1 ? false : isAllLogists;
-    const bool useDecodeGraph = mDecodeModule != nullptr &&
-                                inDecode &&
-                                seqLen == 1 &&
-                                seqLenKey == 1 &&
-                                !isAllLogists &&
-                                !mPicDecodeRepair.enabled;
+    const bool usePicDecodeRepairGraph = mDecodeModule != nullptr &&
+                                          mPicDecodeRepair.enabled &&
+                                          inDecode &&
+                                          seqLen >= 1 &&
+                                          seqLen == seqLenKey &&
+                                          !isAllLogists;
+    const bool useOrdinaryDecodeGraph = mDecodeModule != nullptr &&
+                                        !mPicDecodeRepair.enabled &&
+                                        inDecode &&
+                                        seqLen == 1 &&
+                                        seqLenKey == 1 &&
+                                        !isAllLogists;
+    const bool useDecodeGraph = usePicDecodeRepairGraph || useOrdinaryDecodeGraph;
     auto moduleKey = std::make_pair(seqLenKey, isAllLogists);
     std::shared_ptr<Module> selectModule = mModule;
     int64_t stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
@@ -1659,6 +1695,8 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
            << " seq_len_key=" << seqLenKey
            << " all_logits=" << (isAllLogists ? 1 : 0)
            << " use_decode_graph=" << (useDecodeGraph ? 1 : 0)
+           << " pic_decode_repair_decode_graph=" << (usePicDecodeRepairGraph ? 1 : 0)
+           << " force_prefill_forward=" << (mForcePrefillForward ? 1 : 0)
            << " module_pool=" << mModulePool.size()
            << " decode_pool=" << mDecodeModulePool.size();
         picRequestProfileLog("forward_raw_select_module", picRequestMonotonicUs() - stageStartUs, os.str());
@@ -1769,49 +1807,64 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
            << " outputs=" << outputs.size();
         picRequestProfileLog("forward_raw_validate_outputs", picRequestMonotonicUs() - stageStartUs, os.str());
     }
-    stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
-    auto logitsPtr = outputs[0]->readMap<float>();
-    if (profileForwardRaw) {
-        std::ostringstream os;
-        auto info = outputs[0]->getInfo();
-        os << "seq_len=" << seqLen
-           << " logits_ptr=" << (logitsPtr != nullptr ? 1 : 0);
-        if (info != nullptr) {
-            os << " logits_size=" << info->size;
+    const bool deferDecodeRepairLogitsRead =
+        mPicDecodeRepair.enabled && inDecode && nullptr != outputs[0] && outputs[0]->getInfo() != nullptr;
+    if (deferDecodeRepairLogitsRead) {
+        if (profileForwardRaw) {
+            std::ostringstream os;
+            auto info = outputs[0]->getInfo();
+            os << "seq_len=" << seqLen
+               << " logits_deferred=1";
+            if (info != nullptr) {
+                os << " logits_size=" << info->size;
+            }
+            picRequestProfileLog("forward_raw_logits_defer_map", 0, os.str());
         }
-        picRequestProfileLog("forward_raw_logits_read_map", picRequestMonotonicUs() - stageStartUs, os.str());
+    } else {
+        stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
+        auto logitsPtr = outputs[0]->readMap<float>();
+        if (profileForwardRaw) {
+            std::ostringstream os;
+            auto info = outputs[0]->getInfo();
+            os << "seq_len=" << seqLen
+               << " logits_ptr=" << (logitsPtr != nullptr ? 1 : 0);
+            if (info != nullptr) {
+                os << " logits_size=" << info->size;
+            }
+            picRequestProfileLog("forward_raw_logits_read_map", picRequestMonotonicUs() - stageStartUs, os.str());
+        }
+        if (logitsPtr == nullptr) {
+            std::ostringstream err;
+            err << "forwardRaw logits materialize failed seq_len=" << seqLen
+                << " add=" << static_cast<int>(mMeta->add)
+                << " all_seq=" << mContext->all_seq_len
+                << " gen_seq=" << mContext->gen_seq_len;
+            if (mConfig->paged_attention()) {
+                auto paged = static_cast<PagedKVMeta*>(mMeta.get());
+                err << " paged_max=" << paged->max_tokens
+                    << " request_capacity=" << paged->request_capacity
+                    << " logical_length=" << paged->logical_length
+                    << " previous=" << static_cast<int>(paged->previous)
+                    << " remove=" << static_cast<int>(paged->remove);
+            }
+            mLastError = err.str();
+            MNN_ERROR("PIC forward failed: logits materialize failed, seq_len=%d add=%d all_seq=%d gen_seq=%d "
+                      "paged_max=%d request_capacity=%d logical_length=%d\n",
+                      seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len,
+                      mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->max_tokens : 0,
+                      mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->request_capacity : 0,
+                      mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->logical_length : 0);
+            if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
+                std::fprintf(stderr,
+                             "PIC forward debug logits materialize failed seq_len=%d add=%d all_seq=%d gen_seq=%d\n",
+                             seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len);
+                std::fflush(stderr);
+            }
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            return outputs;
+        }
     }
-    if (logitsPtr == nullptr) {
-        std::ostringstream err;
-        err << "forwardRaw logits materialize failed seq_len=" << seqLen
-            << " add=" << static_cast<int>(mMeta->add)
-            << " all_seq=" << mContext->all_seq_len
-            << " gen_seq=" << mContext->gen_seq_len;
-        if (mConfig->paged_attention()) {
-            auto paged = static_cast<PagedKVMeta*>(mMeta.get());
-            err << " paged_max=" << paged->max_tokens
-                << " request_capacity=" << paged->request_capacity
-                << " logical_length=" << paged->logical_length
-                << " previous=" << static_cast<int>(paged->previous)
-                << " remove=" << static_cast<int>(paged->remove);
-        }
-        mLastError = err.str();
-        MNN_ERROR("PIC forward failed: logits materialize failed, seq_len=%d add=%d all_seq=%d gen_seq=%d "
-                  "paged_max=%d request_capacity=%d logical_length=%d\n",
-                  seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len,
-                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->max_tokens : 0,
-                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->request_capacity : 0,
-                  mConfig->paged_attention() ? static_cast<PagedKVMeta*>(mMeta.get())->logical_length : 0);
-        if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-            std::fprintf(stderr,
-                         "PIC forward debug logits materialize failed seq_len=%d add=%d all_seq=%d gen_seq=%d\n",
-                         seqLen, static_cast<int>(mMeta->add), mContext->all_seq_len, mContext->gen_seq_len);
-            std::fflush(stderr);
-        }
-        mContext->status = LlmStatus::INTERNAL_ERROR;
-        return outputs;
-    }
-    if (!mAsync) {
+    if (!mAsync && !deferDecodeRepairLogitsRead) {
         stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
         ((MNN::Tensor*)(outputs[0]->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
         if (profileForwardRaw) {
@@ -2062,10 +2115,96 @@ void Llm::updateContext(int seq_len, int gen_len) {
 
 int Llm::sample(VARP logits, int offset, int size) {
     MNN::Express::ExecutorScope s(mExecutor);
-    auto logitsShape = logits->getInfo()->dim;
+    Timer _t;
+    if (logits == nullptr || logits->getInfo() == nullptr) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        MNN_ERROR("LLM sampler failed: invalid logits\n");
+        return -1;
+    }
     if (offset && size) {
         MNN_ASSERT(logits->getInfo()->size >= offset + size);
-        logits = _Const(logits->readMap<float>() + offset, {size}, NHWC, halide_type_of<float>());
+        auto flatLogits = _Reshape(logits, {-1});
+        logits = _Slice(flatLogits, _var<int>({offset}, {1}), _var<int>({size}, {1}));
+    }
+    if (mConfig != nullptr && mConfig->sampler_type() == "greedy") {
+        const bool profileSample = picRequestProfileEnabled();
+        const int64_t sampleStartUs = profileSample ? picRequestMonotonicUs() : 0;
+        if (picEnvFlagEnabled("MNN_LLM_GREEDY_CPU_ARGMAX")) {
+            auto ptr = logits->readMap<float>();
+            if (ptr == nullptr) {
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+                MNN_ERROR("LLM greedy CPU sampler failed to materialize logits\n");
+                return -1;
+            }
+            auto info = logits->getInfo();
+            const int count = info != nullptr ? info->size : 0;
+            if (count <= 0) {
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+                MNN_ERROR("LLM greedy CPU sampler got empty logits\n");
+                return -1;
+            }
+            int token = 0;
+            float best = ptr[0];
+            for (int i = 1; i < count; ++i) {
+                if (ptr[i] > best) {
+                    best = ptr[i];
+                    token = i;
+                }
+            }
+            if (profileSample) {
+                std::ostringstream os;
+                os << "offset=" << offset
+                   << " size=" << size
+                   << " token=" << token
+                   << " logits_size=" << count;
+                picRequestProfileLog("sample_cpu_argmax", picRequestMonotonicUs() - sampleStartUs, os.str());
+            }
+            mContext->sample_us += _t.durationInUs();
+            return token;
+        }
+        if (picEnvFlagEnabled("MNN_LLM_GREEDY_TOPKV2")) {
+            auto topKV = _TopKV2(logits, _Scalar<int>(1));
+            auto indexVar = topKV.size() > 1 ? topKV[1] : nullptr;
+            auto tokenPtr = indexVar.get() != nullptr ? indexVar->readMap<int>() : nullptr;
+            if (tokenPtr == nullptr) {
+                mContext->status = LlmStatus::INTERNAL_ERROR;
+                MNN_ERROR("LLM greedy TopKV2 sampler failed to materialize top1 index\n");
+                return -1;
+            }
+            if (profileSample) {
+                std::ostringstream os;
+                auto info = logits->getInfo();
+                os << "offset=" << offset
+                   << " size=" << size
+                   << " token=" << tokenPtr[0];
+                if (info != nullptr) {
+                    os << " logits_size=" << info->size;
+                }
+                picRequestProfileLog("sample_device_topkv2", picRequestMonotonicUs() - sampleStartUs, os.str());
+            }
+            mContext->sample_us += _t.durationInUs();
+            return tokenPtr[0];
+        }
+        auto tokenVar = _ArgMax(logits, -1);
+        auto tokenPtr = tokenVar.get() != nullptr ? tokenVar->readMap<int>() : nullptr;
+        if (tokenPtr == nullptr) {
+            mContext->status = LlmStatus::INTERNAL_ERROR;
+            MNN_ERROR("LLM greedy sampler failed to materialize argmax\n");
+            return -1;
+        }
+        if (profileSample) {
+            std::ostringstream os;
+            auto info = logits->getInfo();
+            os << "offset=" << offset
+               << " size=" << size
+               << " token=" << tokenPtr[0];
+            if (info != nullptr) {
+                os << " logits_size=" << info->size;
+            }
+            picRequestProfileLog("sample_device_argmax", picRequestMonotonicUs() - sampleStartUs, os.str());
+        }
+        mContext->sample_us += _t.durationInUs();
+        return tokenPtr[0];
     }
     auto token_id = mSampler->sample(logits);
     return token_id;

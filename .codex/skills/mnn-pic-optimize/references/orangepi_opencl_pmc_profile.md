@@ -272,7 +272,7 @@ PMC_LAYER=all
 Then append the PMC controls to the server env:
 
 ```bash
-PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 \
+PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1 \
 MNN_PIC_PMC_PROFILE=1 \
 MNN_PIC_PMC_KERNEL_REGEX='${PMC_KERNEL_REGEX}' \
 MNN_PIC_PMC_PHASE_REGEX='${PMC_PHASE_REGEX}' \
@@ -469,7 +469,7 @@ First PMC pass:
 ```bash
 RUN_ID=pmc_decode_repair_ctx512_orangepi_20260703
 PMC_REMOTE_OUT=/mnt/ssd/code/.cache/mnn_opencl_pic/pmc/${RUN_ID}.jsonl
-PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 \
+PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1 \
 MNN_PIC_PMC_PROFILE=1 \
 MNN_PIC_PMC_KERNEL_REGEX='decode_causal_attention_hd128_transposed_k_sparse_qtile|append_sparse_decode|decode_attention_rank' \
 MNN_PIC_PMC_PHASE_REGEX='attention|append|rank' \

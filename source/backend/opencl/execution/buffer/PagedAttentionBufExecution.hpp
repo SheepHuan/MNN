@@ -114,6 +114,9 @@ private:
     ErrorCode runDecodeCausalAttentionHD128TransposedKSparse(const std::vector<Tensor*>& inputs,
                                                              const std::vector<Tensor*>& outputs, int kvLen,
                                                              int attnLen, int layerIndex);
+    ErrorCode runDecodeCausalAttentionHD128TransposedKSparseRecord(
+        const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
+        int attnLen, int layerIndex, uint32_t lanes, int qTile, std::shared_ptr<KernelWrap> kernel);
     ErrorCode runDecodeCausalAttentionHD128IdentityRecord(const std::vector<Tensor*>& inputs,
                                                           const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
                                                           int baseLogical, int layerIndex, uint32_t lanes,
@@ -188,6 +191,9 @@ private:
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile1Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile1Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile1Row128;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile2Row32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile2Row64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile2Row128;
@@ -197,6 +203,18 @@ private:
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile8Row32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile8Row64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile8Row128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused1Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused1Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused1Row128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused2Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused2Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused2Row128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused4Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused4Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused4Row128;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused8Row32;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused8Row64;
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTileFused8Row128;
     std::shared_ptr<KernelWrap> mDecodeSoftmaxKernel;
     std::shared_ptr<KernelWrap> mDecodeAttentionRankScoreKernelHD128;
     std::shared_ptr<KernelWrap> mZeroKernel;
@@ -310,6 +328,25 @@ private:
     int mDecodeTransposedAppendReadonlyRecordKvLen = 0;
     int mDecodeTransposedAppendReadonlyRecordMaxSlots = 0;
     float mDecodeTransposedAppendReadonlyRecordScale = 1.0f;
+    RecordUpdateInfo mDecodeTransposedSparseAppendRecordUpdateInfo;
+    RecordUpdateInfo mDecodeTransposedSparseAttentionRecordUpdateInfo;
+    std::vector<RecordUpdateInfo*> mDecodeTransposedSparseRecordUpdateInfos;
+    bool mDecodeTransposedSparseRecordValid = false;
+    uint32_t mDecodeTransposedSparseRecordLanes = 0;
+    uint32_t mDecodeTransposedSparseRecordHeads = 0;
+    int mDecodeTransposedSparseRecordAttnLen = 0;
+    int mDecodeTransposedSparseRecordQTile = 0;
+    uint32_t mDecodeTransposedSparseRecordAppendGws0 = 0;
+    uint32_t mDecodeTransposedSparseRecordAppendGws1 = 0;
+    uint32_t mDecodeTransposedSparseRecordAppendGws2 = 0;
+    uint32_t mDecodeTransposedSparseRecordGws0 = 0;
+    uint32_t mDecodeTransposedSparseRecordGws1 = 0;
+    uint32_t mDecodeTransposedSparseRecordGws2 = 0;
+    int mDecodeTransposedSparseRecordQuerySeqLen = 0;
+    int mDecodeTransposedSparseRecordNewKvSeqLen = 0;
+    int mDecodeTransposedSparseRecordKvLen = 0;
+    int mDecodeTransposedSparseRecordMaxSlots = 0;
+    float mDecodeTransposedSparseRecordScale = 1.0f;
     int mDecodeAttentionRankKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;

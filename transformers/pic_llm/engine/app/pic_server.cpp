@@ -217,6 +217,40 @@ bool picGraphProfileEnabled() {
     return envInt("MNN_PIC_GRAPH_PROFILE", 0) > 0;
 }
 
+std::string envString(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string() : std::string(value);
+}
+
+std::string lowerAscii(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+std::string picGraphProfileScope() {
+    return lowerAscii(envString("MNN_PIC_GRAPH_PROFILE_SCOPE"));
+}
+
+bool picGraphProfileScopeEnabled(const char* phase) {
+    if (!picGraphProfileEnabled()) {
+        return false;
+    }
+    const std::string scope = picGraphProfileScope();
+    const std::string phaseName = lowerAscii(phase == nullptr ? "request" : phase);
+    if (scope.empty() || scope == "request" || scope == "all") {
+        return phaseName == "request";
+    }
+    if (scope == "decode" || scope == "decode-only") {
+        return phaseName == "decode";
+    }
+    if (scope == "prefill" || scope == "prefill-only") {
+        return phaseName == "prefill";
+    }
+    return phaseName == "request";
+}
+
 bool picGraphProfileProgressEnabled() {
     return envInt("MNN_PIC_GRAPH_PROFILE_PROGRESS", 0) > 0;
 }
@@ -484,9 +518,12 @@ private:
 
 class PicGraphProfileRequestScope {
 public:
-    explicit PicGraphProfileRequestScope(std::string label) : mEnabled(picGraphProfileEnabled()) {
+    explicit PicGraphProfileRequestScope(std::string label, const char* phase = "request")
+        : mEnabled(picGraphProfileScopeEnabled(phase)) {
         if (mEnabled) {
-            PicGraphProfiler::get().beginRequest(label);
+            std::ostringstream scopedLabel;
+            scopedLabel << "phase=" << (phase == nullptr ? "request" : phase) << "," << label;
+            PicGraphProfiler::get().beginRequest(scopedLabel.str());
         }
     }
 
@@ -2011,6 +2048,7 @@ json performanceSummary(const MNN::Transformer::LlmContext* context, int complet
     const int measuredDecodeTokens = decodeUs > 0 ? std::max(1, completionTokens - 1) : 0;
     const double prefillS = static_cast<double>(prefillUs) / 1000000.0;
     const double decodeS = static_cast<double>(decodeUs) / 1000000.0;
+    const double sampleS = static_cast<double>(sampleUs) / 1000000.0;
     const double wallS = static_cast<double>(requestWallUs) / 1000000.0;
     const double decodeTpotMs = measuredDecodeTokens > 0
         ? static_cast<double>(decodeUs) / 1000.0 / static_cast<double>(measuredDecodeTokens)
@@ -2018,6 +2056,11 @@ json performanceSummary(const MNN::Transformer::LlmContext* context, int complet
     const double decodeTps = decodeS > 0.0
         ? static_cast<double>(measuredDecodeTokens) / decodeS
         : 0.0;
+    const double sampleTpotMs = completionTokens > 0
+        ? static_cast<double>(sampleUs) / 1000.0 / static_cast<double>(completionTokens)
+        : 0.0;
+    const double wallMinusDecodeS = std::max(0.0, wallS - decodeS);
+    const double wallMinusDecodeSampleS = std::max(0.0, wallS - decodeS - sampleS);
     return {
         {"prefill_us", prefillUs},
         {"prefill_latency_s", prefillS},
@@ -2029,9 +2072,13 @@ json performanceSummary(const MNN::Transformer::LlmContext* context, int complet
         {"completion_tokens", completionTokens},
         {"active_tokens_per_decode_step", activeTokensPerDecodeStep},
         {"sample_us", sampleUs},
+        {"sample_latency_s", sampleS},
+        {"sample_tpot_ms", sampleTpotMs},
         {"ttfa_us", ttfaUs},
         {"request_wall_us", requestWallUs},
         {"request_wall_s", wallS},
+        {"wall_minus_decode_s", wallMinusDecodeS},
+        {"wall_minus_decode_sample_s", wallMinusDecodeSampleS},
     };
 }
 
@@ -2283,11 +2330,17 @@ void PicServer::handleChatCompletions(const httplib::Request& req, httplib::Resp
 
 json PicServer::runtimeInfo() const {
     auto cfg = modelConfig();
+    const auto decodeModel = jsonString(cfg, "llm_decode_model", "");
+    const auto decodeWeight = jsonString(cfg, "llm_decode_weight", "");
     return {
         {"name", "mnn_pic_server"},
         {"backend", runtimeBackend()},
         {"attention_mode", jsonBool(cfg, "paged_attention", false) ? "paged" : "standard"},
         {"paged_attention", jsonBool(cfg, "paged_attention", false)},
+        {"pic_dualgraph_decode", !decodeModel.empty()},
+        {"llm_decode_model", decodeModel},
+        {"llm_decode_weight", decodeWeight},
+        {"llm_decode_shared_weight", jsonBool(cfg, "llm_decode_shared_weight", false)},
         {"request_scoped_kv", true},
         {"kv_cache_dir", absoluteString(mConfig.kvCacheDir)},
         {"runtime_cache_dir", absoluteString(mConfig.runtimeCacheDir)},
@@ -2711,6 +2764,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 std::fflush(stderr);
             }
             MnnLlmPerfettoSlice decodeSlice("decode", traceInfo);
+            PicGraphProfileRequestScope decodeGraphProfileScope(picGraphProfileLabel(request), "decode");
             outputTokens = mLlm->decode(maxTokens);
         }
         auto context = mLlm->getContext();
@@ -3060,6 +3114,7 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
                 std::fflush(stderr);
             }
             MnnLlmPerfettoSlice decodeSlice("decode", traceInfo);
+            PicGraphProfileRequestScope decodeGraphProfileScope(picGraphProfileLabel(request), "decode");
             outputTokens = mLlm->decode(maxTokens);
         } else {
             auto context = mLlm->getContext();

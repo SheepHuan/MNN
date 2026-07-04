@@ -281,6 +281,7 @@ private:
     std::shared_ptr<GenerationParams> mGenerateParam;
     bool mAsync = true;
     bool mDecodeForwardActive = false;
+    bool mForcePrefillForward = false;
     int mBlockSize = 0;
     std::vector<int> mValidBlockSize;
     int pagedRequestCapacity(int pendingInputTokens = 0, int maxNewTokens = -1) const;

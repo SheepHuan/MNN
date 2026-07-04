@@ -79,6 +79,7 @@ struct PagedKVMeta : public KVMeta {
     int pic_active_start_layer_idx = 0;
     int pic_active_count = 0;
     std::vector<int> sparse_query_logical_indices;
+    bool pic_decode_repair_enabled = false;
     int pic_decode_repair_tokens_per_step = 0;
     bool pic_decode_recompute_active = false;
     int pic_decode_recompute_append_count = 0;
@@ -128,6 +129,7 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_repair_enabled = false;
         pic_decode_repair_tokens_per_step = 0;
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
@@ -165,6 +167,7 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
+        pic_decode_repair_enabled = false;
         pic_decode_repair_tokens_per_step = 0;
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
@@ -381,7 +384,6 @@ struct PagedKVMeta : public KVMeta {
         pic_active_start_layer_idx = 0;
         pic_active_count = 0;
         sparse_query_logical_indices.clear();
-        pic_decode_repair_tokens_per_step = 0;
         pic_decode_recompute_active = false;
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;

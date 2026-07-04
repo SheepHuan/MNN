@@ -1,6 +1,6 @@
 ---
 name: mnn-pic-benchmark
-description: 当用户要求把本 MNN 仓库本地构建或交叉编译出的 pic_server / libpic_llm / CUDA / OpenCL artifact 推送到 Jetson、Orange Pi 5 Plus 或 Rhino Pi-X1/Aidlux Adreno 设备上运行，并从本机发起 PIC benchmark、prefill latency sweep、decode repair benchmark、dataset bench、benchmark.csv 合并或缺口补测时使用；也用于区分 formal 设备矩阵与 Rhino extra-profile 流程、固定端口清理旧进程、共享 text cache 和每设备独立测试方案。
+description: 当用户要求把本 MNN 仓库本地构建或交叉编译出的 pic_server / libpic_llm / CUDA / OpenCL artifact 推送到 Jetson、Orange Pi 5 Plus 或 Rhino Pi-X1/Aidlux Adreno 设备上运行，并从本机发起 PIC benchmark、prefill latency sweep、PIC dualgraph decode repair benchmark、dataset bench、benchmark.csv 合并或缺口补测时使用；也用于区分 formal 设备矩阵与 Rhino extra-profile 流程、固定端口清理旧进程、共享 text cache、PIC dualgraph x0 / optimized decode-repair / generic decode-repair / true normal LLM x0 口径，以及每设备独立测试方案。
 ---
 
 # MNN PIC Benchmark
@@ -27,9 +27,11 @@ description: 当用户要求把本 MNN 仓库本地构建或交叉编译出的 p
 10. PIC 功耗采集走本 skill 下的 power 流程；只包正式 measure 请求，不把 artifact 同步、cache build、warm、OpenCL tune 写回或手动等待计入 power CSV。
 11. PIC 功耗测试不跑 `Llama3.2 1B` / `llama3.2-1b`；从 `benchmark.csv` 选 power 配置时直接排除它。
 12. 从本机访问 Jetson / OrangePi / Rhino 的 `pic_server` 时，显式设置 `NO_PROXY/no_proxy` 覆盖目标 IP、`127.0.0.1` 和 `localhost`；本机 HTTP proxy 返回的 `502 Bad Gateway` 不代表设备端 `pic_server` 失败。
-13. decode repair benchmark 中 `repair_tokens=0` / `tpd=0` 是 no-repair decode baseline，请求不得发送 `decode_refine`；只有 `repair_tokens>0` 才要求 `decode_refine.enabled=true` 并校验 `mnn_token_id_sparse_decode`。
-14. Decode TPOT 测试必须组织成双族对比，而不是只拿一个 `x0` 做分母：`optimized-decode-repair` 和 `normal/generic-decode-repair` 都要分别测 `x=0/1/3/5/7`。这里 `x` 是 `repair_tokens` / `tokens_per_decode_step`；`x=0` 是同一族内部的 no-repair 诊断行。普通 MNN LLM 的真实 baseline 仍使用 `.cache/mnn-llm-export/<model>/config.json` 的 normal export，只对应绝对参考 `normal-llm-x0`；若要给 normal 族也列 `x=1/3/5/7`，必须使用未启用后端专属 decode-repair 优化的 generic decode-repair 导出 / server，而不能把 optimized 模型或 PIC no-repair 行冒充 normal LLM。报告至少给出 `optimized_tpot[x]`、`normal_tpot[x]`、`optimized_extra_ms[x]=optimized_tpot[x]-optimized_tpot[0]`、`normal_extra_ms[x]=normal_tpot[x]-normal_tpot[0]`、`speedup_opt_vs_normal_same_x=normal_tpot[x]/optimized_tpot[x]`。
-15. `dualgraph` 只属于 PIC/PagedAttention LLM 的 `.cache/weight/<model>/` 导出和 `pic_llm` / `pic_server` 运行路径，用来把 PIC prefill 和 PIC decode 拆成两个 graph。`true normal` baseline 必须始终使用 `.cache/mnn-llm-export/<model>/` 的普通 MNN LLM 模型和普通 normal 计算图；不要把 dualgraph 描述为 normal LLM 模型，不要用 `llm_bench` / `llm_demo` 把 dualgraph 产物跑成 normal baseline，也不要把 dualgraph 结果命名为 `normal-llm-x0`。
+13. PIC LLM / `pic_server` decode benchmark 默认就是 PIC dualgraph 运行口径：模型来自 `.cache/weight/<model>/` 或设备侧对应 PIC dualgraph 目录，入口是 `pic_llm` / `pic_server`，其中 `llm.mnn` 是 PIC prefill graph，`llm_decode.mnn` 是 PIC decode graph。不要再把“是否 dualgraph”当作待确认前提；需要确认的是 server 是否实际加载了正确的 PIC dualgraph config。
+14. decode repair benchmark 中 `repair_tokens=0` / `tpd=0` 是 `PIC dualgraph x0`，即同一 decode-repair family 内 active rows=1 的退化 repair decode；请求仍发送 `decode_refine.enabled=true, tokens_per_decode_step=0` 并校验 `mnn_token_id_sparse_decode`，但不得产生额外 repair token。不得把这行命名或解释成 `true normal LLM`。
+15. Decode TPOT 测试必须组织成 PIC dualgraph 双族对比，而不是只拿一个 `x0` 做分母：`optimized-decode-repair` 和 `normal/generic-decode-repair` 都要分别测 `x=0/1/3/5/7`。这里 `x` 是 `repair_tokens` / `tokens_per_decode_step`；`x=0` 是各自族内的 `PIC dualgraph x0`。普通 MNN LLM 的真实 baseline 仍使用 `.cache/mnn-llm-export/<model>/config.json` 的 normal export，只对应绝对参考 `true-normal-llm-x0`；若要给 normal 族也列 `x=1/3/5/7`，必须使用未启用后端专属 decode-repair 优化的 generic PIC dualgraph decode-repair 导出 / server，而不能把 optimized 模型或 PIC x0 行冒充 normal LLM。报告至少给出 `optimized_tpot[x]`、`generic_tpot[x]`、`optimized_extra_ms[x]=optimized_tpot[x]-optimized_tpot[0]`、`generic_extra_ms[x]=generic_tpot[x]-generic_tpot[0]`、`speedup_opt_vs_generic_same_x=generic_tpot[x]/optimized_tpot[x]`；`true-normal-llm-x0` 只作为绝对参考。
+16. Decode repair 的 `x=0/1/3/5/7/n` 必须按同一个实现 family 组织 benchmark 和回归判断：`x=0` 是 active rows 为 1 的退化情形，`x=n` 是 active rows / token budget 为 `n+1`；不同 x 只能改变同一路径的参数、shape 或显式变体标签。不能把 `x=0` 的结果解释成另一套普通 decode/identity 实现，也不能让 `x>0` 自动 gate 到完全不同的 sparse repair 算法家族后再和 x0 混报。
+17. `dualgraph` 只属于 PIC/PagedAttention LLM 的 `.cache/weight/<model>/` 导出和 `pic_llm` / `pic_server` 运行路径。`true normal` baseline 必须始终使用 `.cache/mnn-llm-export/<model>/` 的普通 MNN LLM 模型和普通 normal 计算图；不要把 dualgraph 描述为 normal LLM 模型，不要用 `llm_bench` / `llm_demo` 把 dualgraph 产物跑成 normal baseline，也不要把 dualgraph 结果命名为 `normal-llm-x0`。
 
 ## Power 采集
 

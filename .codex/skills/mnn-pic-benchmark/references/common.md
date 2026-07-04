@@ -51,14 +51,20 @@ decode repair 主入口：
 python3 .codex/skills/mnn-pic-benchmark/scripts/run_pic_decode_repair_benchmark.py
 ```
 
-Decode TPOT 正式表格改为双族对比：
+Decode TPOT 正式表格按 PIC dualgraph 双族对比。PIC LLM / `pic_server` 默认就是
+dualgraph 运行口径：`.cache/weight/<model>/` 或设备侧 PIC dualgraph config 里
+`llm.mnn` 是 PIC prefill graph，`llm_decode.mnn` 是 PIC decode graph。不要再把
+“是否 dualgraph”当作待确认前提；需要确认的是 server 是否实际加载了正确的
+PIC dualgraph config。
 
-- `optimized-decode-repair`：使用当前要验证的优化导出 / server，测 `x=0/1/3/5/7`。
-- `normal/generic-decode-repair`：使用同一模型、同一 prompt/token、同一 selector、同一 context/max_tokens/repeats，但导出时关闭后端专属 decode-repair fusion，例如 `--pic_decode_fusion_backend generic`；同样测 `x=0/1/3/5/7`。
-- `normal-llm-x0`：可额外用普通 normal export `.cache/mnn-llm-export/<model>/config.json` 跑普通 MNN decode，作为绝对 baseline；普通 LLM 没有 `x=1/3/5/7` 的 decode-repair workload，不能把这 4 列伪造出来。
-- `repair_tokens=0` / `tpd=0` 是各自族内的 no-repair 诊断行，列名可以是 `x0`，但必须带上族名，不能把 `optimized x0`、`generic x0` 和 `normal-llm-x0` 混成同一列。
+- `optimized-decode-repair`：使用当前要验证的优化 PIC dualgraph 导出 / server，测 `x=0/1/3/5/7`。
+- `normal/generic-decode-repair`：使用同一模型、同一 prompt/token、同一 selector、同一 context/max_tokens/repeats，但导出时关闭后端专属 decode-repair fusion，例如 `--pic_decode_fusion_backend generic`；同样测 `x=0/1/3/5/7`。这是 generic PIC dualgraph decode-repair 对照，不是普通 LLM。
+- `true-normal-llm-x0`：可额外用普通 normal export `.cache/mnn-llm-export/<model>/config.json` 跑普通 MNN decode，作为绝对 baseline；普通 LLM 没有 `x=1/3/5/7` 的 decode-repair workload，不能把这 4 列伪造出来。
+- `repair_tokens=0` / `tpd=0` 是各自 PIC dualgraph decode-repair family 内 active rows=1 的退化行，列名可以是 `x0`，但必须带上族名，不能把 `optimized x0`、`generic x0` 和 `true-normal-llm-x0` 混成同一列。
+- `repair_tokens=0/1/3/5/7/n` 必须按同一个 decode-repair 实现 family 理解和测试：`x=0` 是 active rows 为 1 的退化情形，`x=n` 是 active rows / token budget 为 `n+1`；不同 x 只能改变同一路径的 shape、参数或显式变体标签。不要把 x0 当成另一套普通 q=1 identity decode，也不要让 x>0 自动 gate 到完全不同的 sparse repair 算法家族后和 x0 混报。
+- `repair_tokens>0` 仍属于同一个 PIC dualgraph 模型包 / `pic_server`，报告应写成 `PIC dualgraph decode-repair x>0`，不要写成 true normal 或普通 q=1 decode graph。
 - `dualgraph` 只用于 PIC/PagedAttention LLM：模型目录必须来自 `.cache/weight/<model>/`，运行入口是 `pic_llm` / `pic_server`，语义是 PIC prefill graph 和 PIC decode graph 分离。`true normal` 必须来自 `.cache/mnn-llm-export/<model>/` 并走普通 normal 计算图；不要用 `llm_bench` / `llm_demo` 把 dualgraph 产物跑成 normal baseline，也不要把 dualgraph 产物、dualgraph 日志或 PIC no-repair 行写成 `normal-llm-x0`。
-- 报告 speedup 时优先按同一 `x` 对比：`speedup_opt_vs_normal_same_x = normal_tpot[x] / optimized_tpot[x]`。同时报告族内增量：`extra_ms[x] = tpot[x] - tpot[0]`。
+- 报告 speedup 时优先按同一 `x` 对比：`speedup_opt_vs_generic_same_x = generic_tpot[x] / optimized_tpot[x]`。同时报告族内增量：`extra_ms[x] = tpot[x] - tpot[0]`。`true-normal-llm-x0` 只作为绝对参考。
 - OpenCL 两个族都要使用同一个设备级 runtime/autotune cache，正式计时前分别 warm 目标 context / generated token / repair-token shape 并写回 cache；kernel build、LWS tuning、旧 cache rebuild 不计入正式 TPOT。
 
 推荐表格：
@@ -67,13 +73,13 @@ Decode TPOT 正式表格改为双族对比：
 device,model,ctx,family,x0,x1,x3,x5,x7
 device,model,ctx,optimized-decode-repair,...
 device,model,ctx,normal/generic-decode-repair,...
-device,model,ctx,normal-llm-x0,<value>,,,,
+device,model,ctx,true-normal-llm-x0,<value>,,,,
 ```
 
 推荐派生表：
 
 ```text
-device,model,ctx,x,optimized_tpot_ms,normal_tpot_ms,speedup_opt_vs_normal_same_x,optimized_extra_ms,normal_extra_ms
+device,model,ctx,x,optimized_tpot_ms,generic_tpot_ms,speedup_opt_vs_generic_same_x,optimized_extra_ms,generic_extra_ms
 ```
 
 formal dataset/decode 结论仍要求 Jetson 和 OrangePi 各自独立覆盖一轮；Rhino 只记 profile。

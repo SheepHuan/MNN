@@ -216,8 +216,8 @@ prefill pack / hydrate / score / export:
 1. 改完 `opencl_codegen.py` → `git diff --check` → build OrangePi + Rhino → `file` → rsync。
 2. profile smoke（profile on）→ P0 validity scan clean → 确认所有 decode/prefill op 仍正常 fire，
    无 slot_table 相关 setArg 报错。
-3. 正式 TPOT A/B（profile off）：`old`（`MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=0`，去除前基线）
-   vs `new`（去除后，`=1`）。**通过条件：全矩阵 `new <= old`（持平或微升），无 `failures.csv`，
+3. 正式 TPOT A/B（profile off）：repair qtile `old`（`MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=0`，去除前基线）
+   vs `new`（去除后，`MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1`）。**通过条件：全矩阵 `new <= old`（持平或微升），无 `failures.csv`，
    P0 clean。**
 4. 特别检查 cacheblend/epic prefill 路径（Q 截断 + hydrate） correctness —— 跑一次
    `run_pic_prefill_latency_sweep` 确认 sparse prefill 输出与去除前一致（精度不坏）。

@@ -65,7 +65,9 @@ PIC/PagedAttention: .cache/weight/<model>/config.json           用 pic_llm_demo
 
 不要把 `.cache/weight/` 下的 PIC 模型复制或改配置当作普通模型对比；普通模型以 `.cache/mnn-llm-export/` 下的正常导出为准。两边用同一个 prompt、相同 backend / precision / memory / sampler 配置，并分别从各自模型目录执行 demo。
 
-`dualgraph` 只属于 PIC/PagedAttention LLM：模型必须来自 `.cache/weight/<model>/`，运行入口必须是 `pic_llm_demo` / `pic_llm_bench` / `pic_server`。普通 `true normal` LLM baseline 必须来自 `.cache/mnn-llm-export/<model>/` 并走普通 normal 计算图；不要把 dualgraph 产物、日志或 PIC no-repair 行命名或解释成 normal LLM。
+`dualgraph` 只属于 PIC/PagedAttention LLM：模型必须来自 `.cache/weight/<model>/`，运行入口必须是 `pic_llm_demo` / `pic_llm_bench` / `pic_server`。普通 `true normal` LLM baseline 必须来自 `.cache/mnn-llm-export/<model>/` 并走普通 normal 计算图；不要把 dualgraph 产物、日志或 PIC x0 行命名或解释成 normal LLM。
+
+PIC dualgraph decode-repair 的 `x=0/1/3/5/7/n` 必须视为同一个实现家族：`x=0` 是没有额外 repair token 的退化情形，`x=n` 只是 active rows / token budget 变成 `n+1`。同一设备上生产默认只能固定一种实现思路，并允许 lane、row tile、q tile、layout、image/buffer 等参数或显式变体；不能让 `x=0` 走一套普通 decode/identity 路径、`x>0` 走另一套 sparse repair 路径，也不能按模型、head 数、上下文或单个 x 值自动 gate 到不同算法家族。A/B 变体必须显式命名和单独报告，不能混入默认结果。
 
 `--skip_weight` 导出的模型只用于检查导出流程和图结构，不作为正确性或性能测试产物。尤其 GLM / GLM-Edge 这类 `tie_word_embeddings=false` 的模型，不能因为 skip-weight skeleton 里的空/meta tensor 看起来相等就把 `tie_word_embeddings` / `tie_embeddings` 写成 true；正确性测试必须使用真实 embedding 文件和完整 `llm.mnn.weight`。历史上 OrangePi GLM PIC skiptest 产物曾因为错误 tied embedding 和 EOF 后 lm_head offset 输出 NUL/`APP`，修复后的判据是普通/PIC demo 都能输出自然语言，再进入 PIC server full-compute/full-reuse/cacheblend/epic 测试。
 

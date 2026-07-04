@@ -8,9 +8,25 @@
 
 #ifndef MNN_OPENCL_BUFFER_CLOSED
 #include "backend/opencl/execution/buffer/ArgMaxBufExecution.hpp"
+#include <cstdlib>
 
 namespace MNN {
 namespace OpenCL {
+
+static int _argMaxLocalSizeOverride(int dim, int maxLocalSize) {
+    const char* value = std::getenv("MNN_OPENCL_ARGMAX_LOCAL_FORCE");
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
+    }
+    const int forced = std::atoi(value);
+    if (forced <= 0 || forced > dim || forced > maxLocalSize) {
+        return 0;
+    }
+    if ((forced & (forced - 1)) != 0) {
+        return 0;
+    }
+    return forced;
+}
 
 ArgMaxBufExecution::ArgMaxBufExecution(const std::string &compute, const MNN::Op* op, Backend* backend, const int axis) : CommonExecution(backend, op) {
     mBuildOptions.emplace(compute);
@@ -103,6 +119,10 @@ ErrorCode ArgMaxBufExecution::onEncode(const std::vector<Tensor*>& inputs, const
     {
         Unit unit;
         int localSize = getLocalSize(dim, MaxLocalSize);
+        const int forcedLocalSize = _argMaxLocalSizeOverride(dim, MaxLocalSize);
+        if (forcedLocalSize > 0) {
+            localSize = forcedLocalSize;
+        }
         if(localSize < 4){
             localSize = 1;
         }

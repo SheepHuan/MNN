@@ -169,8 +169,14 @@ Sampler::Sampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig>
 
 SamplerState Sampler::createState(Express::VARP logits) {
     SamplerState state;
+    if (logits == nullptr || logits->getInfo() == nullptr) {
+        return state;
+    }
     auto ptr = logits->readMap<float>();
     int lastDim = logits->getInfo()->dim.back();
+    if (ptr == nullptr || lastDim <= 0) {
+        return state;
+    }
     state.vocab_size = lastDim;
     state.logits.assign(ptr, ptr + lastDim);
     state.is_subset = false;
@@ -219,6 +225,11 @@ void Sampler::buildPipeline() {
 int Sampler::sample(Express::VARP logits) {
     Timer _t;
     SamplerState state = createState(logits);
+    if (state.logits.empty()) {
+        mContext->status = LlmStatus::INTERNAL_ERROR;
+        MNN_ERROR("LLM sampler failed to materialize logits\n");
+        return -1;
+    }
     for (auto& step : mPipeline) {
         step(state);
     }

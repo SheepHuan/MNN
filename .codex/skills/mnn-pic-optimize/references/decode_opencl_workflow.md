@@ -22,8 +22,9 @@ device-specific conclusions, see `references/rhino.md`.
 
 ## Hard rules (must hold for every step)
 
-- No routing back to `old` identity by model / device / GPU / head / q. `old` is
-  A/B only (`MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=0`).
+- No routing back to `old` identity by model / device / GPU / head / q. Repair
+  qtile A/B uses `MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=0/1`; q1
+  transposed-K A/B uses `MNN_PAGED_ATTENTION_DECODE_Q1_TRANSPOSED_K=1`.
 - Historical K transpose (`decode_prepare_transpose_k`) runs only in
   `prepareDecodePrefix` (`transformers/pic_llm/engine/src/llm.cpp:1625` →
   `PagedAttentionBufExecution.cpp:3959`). Timed decode may only append current-token
@@ -101,7 +102,7 @@ OrangePi/Mali has no frequency step.
 use it only to confirm op routing and the prepare boundary, never as official latency.
 
 ```bash
-PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PAGED_ATTENTION_PROFILE=1 MNN_PAGED_ATTENTION_PROFILE_DETAIL=1 MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 MNN_PIC_DECODE_DEBUG=1 MNN_PIC_REQUEST_PROFILE=1' \
+PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PAGED_ATTENTION_PROFILE=1 MNN_PAGED_ATTENTION_PROFILE_DETAIL=1 MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1 MNN_PIC_DECODE_DEBUG=1 MNN_PIC_REQUEST_PROFILE=1' \
 python3 .cache/mnn-pic-benchmark/decode_experiment/run_decode_experiment.py \
   --devices orangepi --models llama3.2-3b,minicpm5-1b,qwen3-4b \
   --contexts 512 --pic-repair-tokens 0,1,3 --pic-max-tokens 2 \
@@ -141,7 +142,7 @@ PMC_REMOTE_OUT=/mnt/ssd/code/.cache/mnn_opencl_pic/pmc/${RUN_ID}_${PMC_TAG}.json
 PMC_KERNEL_REGEX='decode_causal_attention_hd128_transposed_k_sparse_qtile|append_sparse_decode|decode_attention_rank'
 PMC_PHASE_REGEX='attention|append|rank'
 
-PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 \
+PIC_SWEEP_SERVER_ENV_EXTRA="MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1 \
 MNN_PIC_PMC_PROFILE=1 \
 MNN_PIC_PMC_KERNEL_REGEX='${PMC_KERNEL_REGEX}' \
 MNN_PIC_PMC_PHASE_REGEX='${PMC_PHASE_REGEX}' \
@@ -181,16 +182,16 @@ process. `run_config.json` does **not** record this env, so encode old-vs-new in
 `--run-id` name (matching the `decode_ab_old_*` / `decode_ab_new_*` convention).
 
 ```bash
-# OLD baseline (once per device; reuse across steps if artifact unchanged):
-PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=0' \
+# OLD repair qtile baseline (once per device; reuse across steps if artifact unchanged):
+PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=0' \
 python3 .cache/mnn-pic-benchmark/decode_experiment/run_decode_experiment.py \
   --devices orangepi --models llama3.2-3b,minicpm5-1b,qwen3-4b \
   --contexts 512 --pic-repair-tokens 0,1,3,5,7 --pic-max-tokens 16 \
   --repeats 2 --warm-repeats 1 --skip-normal \
   --run-id decode_ab_old_current_orangepi_20260703
 
-# NEW (this step), with step-specific env appended:
-PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PAGED_ATTENTION_DECODE_TRANSPOSED_K=1 <step_env>' \
+# NEW repair qtile candidate, with step-specific env appended:
+PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PAGED_ATTENTION_DECODE_REPAIR_SPARSE_QTILE=1 <step_env>' \
 python3 .cache/mnn-pic-benchmark/decode_experiment/run_decode_experiment.py \
   --devices orangepi --models llama3.2-3b,minicpm5-1b,qwen3-4b \
   --contexts 512 --pic-repair-tokens 0,1,3,5,7 --pic-max-tokens 16 \

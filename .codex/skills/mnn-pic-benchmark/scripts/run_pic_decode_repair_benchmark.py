@@ -125,6 +125,40 @@ def post_json(base_url: str, endpoint: str, payload: dict[str, Any], timeout: in
     return json.loads(raw.decode("utf-8", errors="replace"))
 
 
+def get_json(base_url: str, endpoint: str, timeout: int) -> dict[str, Any]:
+    url = base_url.rstrip("/") + endpoint
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        detail = raw.decode("utf-8", errors="replace")
+        raise RuntimeError(f"GET {endpoint} failed HTTP {exc.code}: {detail}") from exc
+    if status < 200 or status >= 300:
+        detail = raw.decode("utf-8", errors="replace")
+        raise RuntimeError(f"GET {endpoint} failed HTTP {status}: {detail}")
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def validate_pic_dualgraph_loaded(args: argparse.Namespace) -> None:
+    info = get_json(args.base_url, "/", args.timeout)
+    if info.get("pic_dualgraph_decode") is True:
+        return
+    if "pic_dualgraph_decode" not in info:
+        raise RuntimeError(
+            "pic_server did not expose pic_dualgraph_decode; rebuild/sync a server with dualgraph reporting "
+            "or pass --no-require-pic-dualgraph for an explicit non-dualgraph diagnostic run"
+        )
+    raise RuntimeError(
+        "pic_server loaded a PIC config without llm_decode_model; refusing to label this run as PIC dualgraph "
+        f"(model_config={args.model_config})"
+    )
+
+
 def unwrap_chat_response(response: dict[str, Any]) -> dict[str, Any]:
     data = response.get("data")
     if isinstance(data, list) and data and isinstance(data[0], dict):
@@ -201,15 +235,14 @@ def build_pic_spec(
         "pic_token_start": 0,
         "token_count": len(token_ids),
     }
-    if int(repair_tokens) > 0:
-        spec["decode_refine"] = {
-            "enabled": True,
-            "tokens_per_decode_step": int(repair_tokens),
-            "top_m": int(top_m),
-            "selector": selector,
-            "attention_layer_idx": int(attention_layer_idx),
-            "attention_head_ids": attention_head_ids,
-        }
+    spec["decode_refine"] = {
+        "enabled": True,
+        "tokens_per_decode_step": int(repair_tokens),
+        "top_m": int(top_m),
+        "selector": selector,
+        "attention_layer_idx": int(attention_layer_idx),
+        "attention_head_ids": attention_head_ids,
+    }
     return spec
 
 
@@ -231,6 +264,32 @@ def extract_metrics(response: dict[str, Any], requested_repair_tokens: int) -> d
     )
     selector = decode.get("selector", pr_decode.get("selector", ""))
     selection_source = metadata.get("decode_refine_selection_source") or metadata.get("decode_refine_ranking_source", "")
+    request_wall_s = float(perf.get("request_wall_s", 0.0) or 0.0)
+    decode_latency_s = float(perf.get("decode_latency_s", 0.0) or 0.0)
+    sample_latency_s = float(perf.get("sample_latency_s", 0.0) or 0.0)
+    if sample_latency_s <= 0.0:
+        sample_latency_s = float(perf.get("sample_us", 0.0) or 0.0) / 1000000.0
+    decode_measured_tokens = int(perf.get("decode_measured_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", perf.get("completion_tokens", 0)) or 0)
+    wall_tokens = completion_tokens or decode_measured_tokens
+    request_wall_tpot_ms = (request_wall_s * 1000.0 / float(wall_tokens)) if request_wall_s > 0.0 and wall_tokens > 0 else 0.0
+    sample_tpot_ms = float(perf.get("sample_tpot_ms", 0.0) or 0.0)
+    if sample_tpot_ms <= 0.0 and sample_latency_s > 0.0 and completion_tokens > 0:
+        sample_tpot_ms = sample_latency_s * 1000.0 / float(completion_tokens)
+    wall_minus_decode_s = float(perf.get("wall_minus_decode_s", 0.0) or 0.0)
+    if wall_minus_decode_s <= 0.0 and request_wall_s > 0.0:
+        wall_minus_decode_s = max(0.0, request_wall_s - decode_latency_s)
+    wall_minus_decode_tpot_ms = (
+        wall_minus_decode_s * 1000.0 / float(wall_tokens)
+        if wall_minus_decode_s > 0.0 and wall_tokens > 0 else 0.0
+    )
+    wall_minus_decode_sample_s = float(perf.get("wall_minus_decode_sample_s", 0.0) or 0.0)
+    if wall_minus_decode_sample_s <= 0.0 and request_wall_s > 0.0:
+        wall_minus_decode_sample_s = max(0.0, request_wall_s - decode_latency_s - sample_latency_s)
+    wall_minus_decode_sample_tpot_ms = (
+        wall_minus_decode_sample_s * 1000.0 / float(wall_tokens)
+        if wall_minus_decode_sample_s > 0.0 and wall_tokens > 0 else 0.0
+    )
     active = perf.get("active_tokens_per_decode_step")
     if active is None:
         active = int(requested_repair_tokens) + 1
@@ -238,12 +297,19 @@ def extract_metrics(response: dict[str, Any], requested_repair_tokens: int) -> d
         "benchmark_status": "ok",
         "error_message": "",
         "prefill_latency_s": float(perf.get("prefill_latency_s", 0.0) or 0.0),
-        "decode_latency_s": float(perf.get("decode_latency_s", 0.0) or 0.0),
+        "decode_latency_s": decode_latency_s,
         "decode_tpot_ms": float(perf.get("decode_tpot_ms", 0.0) or 0.0),
         "decode_tps": float(perf.get("decode_tps", 0.0) or 0.0),
-        "request_wall_s": float(perf.get("request_wall_s", 0.0) or 0.0),
-        "decode_measured_tokens": int(perf.get("decode_measured_tokens", 0) or 0),
-        "completion_tokens": int(usage.get("completion_tokens", perf.get("completion_tokens", 0)) or 0),
+        "sample_latency_s": sample_latency_s,
+        "sample_tpot_ms": sample_tpot_ms,
+        "request_wall_s": request_wall_s,
+        "request_wall_tpot_ms": request_wall_tpot_ms,
+        "wall_minus_decode_s": wall_minus_decode_s,
+        "wall_minus_decode_tpot_ms": wall_minus_decode_tpot_ms,
+        "wall_minus_decode_sample_s": wall_minus_decode_sample_s,
+        "wall_minus_decode_sample_tpot_ms": wall_minus_decode_sample_tpot_ms,
+        "decode_measured_tokens": decode_measured_tokens,
+        "completion_tokens": completion_tokens,
         "active_tokens_per_decode_step": int(active or 0),
         "execution_mode": pr.get("execution_mode", ""),
         "decode_runtime": runtime,
@@ -260,7 +326,14 @@ def unsupported_metrics(message: str, requested_repair_tokens: int) -> dict[str,
         "decode_latency_s": "",
         "decode_tpot_ms": "",
         "decode_tps": "",
+        "sample_latency_s": "",
+        "sample_tpot_ms": "",
         "request_wall_s": "",
+        "request_wall_tpot_ms": "",
+        "wall_minus_decode_s": "",
+        "wall_minus_decode_tpot_ms": "",
+        "wall_minus_decode_sample_s": "",
+        "wall_minus_decode_sample_tpot_ms": "",
         "decode_measured_tokens": "",
         "completion_tokens": "",
         "active_tokens_per_decode_step": int(requested_repair_tokens) + 1,
@@ -279,7 +352,14 @@ def average_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "decode_latency_s",
         "decode_tpot_ms",
         "decode_tps",
+        "sample_latency_s",
+        "sample_tpot_ms",
         "request_wall_s",
+        "request_wall_tpot_ms",
+        "wall_minus_decode_s",
+        "wall_minus_decode_tpot_ms",
+        "wall_minus_decode_sample_s",
+        "wall_minus_decode_sample_tpot_ms",
     ]
     out: dict[str, Any] = {key: mean([float(sample.get(key, 0.0) or 0.0) for sample in samples]) for key in keys_float}
     out["decode_measured_tokens"] = int(round(mean([float(sample.get("decode_measured_tokens", 0) or 0) for sample in samples])))
@@ -388,6 +468,7 @@ def main() -> int:
     parser.add_argument("--update-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--require-exact-context", action="store_true")
     parser.add_argument("--require-decode-runtime", default="mnn_token_id_sparse_decode")
+    parser.add_argument("--require-pic-dualgraph", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--continue-on-unsupported", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--allow-high-risk-contexts",
@@ -413,6 +494,8 @@ def main() -> int:
             raise SystemExit(f"unsupported --decode-selectors value: {selector}")
     if "lagged_attention_hkvd" in decode_selectors and int(args.attention_layer_idx) < 0:
         raise SystemExit("--decode-selector lagged_attention_hkvd requires --attention-layer-idx")
+    if args.require_pic_dualgraph:
+        validate_pic_dualgraph_loaded(args)
 
     contexts = parse_csv_ints(args.contexts)
     budgets = parse_csv_floats(args.budgets)
@@ -428,15 +511,33 @@ def main() -> int:
         "backend",
         "frequency_profile",
         "context_tokens",
+        "family",
+        "x",
         "mode",
         "budget",
         "decode_selector",
         "repair_tokens",
+        "active_tokens_per_decode_step",
         "generated_tokens",
+        "completion_tokens",
+        "decode_measured_tokens",
         "decode_latency_s",
         "decode_tpot_ms",
         "decode_tps",
+        "sample_latency_s",
+        "sample_tpot_ms",
+        "request_wall_s",
+        "request_wall_tpot_ms",
+        "wall_minus_decode_s",
+        "wall_minus_decode_tpot_ms",
+        "wall_minus_decode_sample_s",
+        "wall_minus_decode_sample_tpot_ms",
+        "execution_mode",
+        "decode_runtime",
+        "decode_selection_source",
         "benchmark_status",
+        "model_config",
+        "source",
     ]
     ensure_header(output_csv, fields, args.append)
 
@@ -591,7 +692,7 @@ def main() -> int:
                         if metrics.get("benchmark_status") == "unsupported":
                             samples.append(metrics)
                             break
-                        if repair > 0 and args.require_decode_runtime:
+                        if args.require_decode_runtime:
                             if metrics.get("decode_runtime") != args.require_decode_runtime:
                                 raise RuntimeError(
                                     "decode repair did not enter required runtime: "
@@ -603,6 +704,8 @@ def main() -> int:
                 rows: list[dict[str, Any]] = []
                 for repair in selector_repair_tokens:
                     metrics = by_repair[repair]
+                    family = "pic-dualgraph-decode-repair"
+                    source = "pic_server full-reuse PIC dualgraph decode_refine"
                     row = {
                         "device": args.device,
                         "device_display": args.device_display,
@@ -610,15 +713,33 @@ def main() -> int:
                         "backend": args.backend,
                         "frequency_profile": args.frequency_profile,
                         "context_tokens": actual_context or target_context,
+                        "family": family,
+                        "x": repair,
                         "mode": args.mode,
                         "budget": fmt_budget(budget),
                         "decode_selector": selector,
                         "repair_tokens": repair,
+                        "active_tokens_per_decode_step": metrics.get("active_tokens_per_decode_step", ""),
                         "generated_tokens": int(args.max_tokens),
+                        "completion_tokens": metrics.get("completion_tokens", ""),
+                        "decode_measured_tokens": metrics.get("decode_measured_tokens", ""),
                         "decode_latency_s": metrics.get("decode_latency_s", ""),
                         "decode_tpot_ms": metrics.get("decode_tpot_ms", ""),
                         "decode_tps": metrics.get("decode_tps", ""),
+                        "sample_latency_s": metrics.get("sample_latency_s", ""),
+                        "sample_tpot_ms": metrics.get("sample_tpot_ms", ""),
+                        "request_wall_s": metrics.get("request_wall_s", ""),
+                        "request_wall_tpot_ms": metrics.get("request_wall_tpot_ms", ""),
+                        "wall_minus_decode_s": metrics.get("wall_minus_decode_s", ""),
+                        "wall_minus_decode_tpot_ms": metrics.get("wall_minus_decode_tpot_ms", ""),
+                        "wall_minus_decode_sample_s": metrics.get("wall_minus_decode_sample_s", ""),
+                        "wall_minus_decode_sample_tpot_ms": metrics.get("wall_minus_decode_sample_tpot_ms", ""),
+                        "execution_mode": metrics.get("execution_mode", ""),
+                        "decode_runtime": metrics.get("decode_runtime", ""),
+                        "decode_selection_source": metrics.get("decode_selection_source", ""),
                         "benchmark_status": metrics.get("benchmark_status", ""),
+                        "model_config": args.model_config,
+                        "source": source,
                     }
                     rows.append(row)
                 append_rows(output_csv, fields, rows)

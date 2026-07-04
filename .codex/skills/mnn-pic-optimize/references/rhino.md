@@ -4,6 +4,8 @@
 
 - `.codex/skills/mnn-pic-optimize/log/rhino/2026-06-27-00/README.md`
 - `.codex/skills/mnn-pic-optimize/log/rhino/2026-06-27-00/context.md`
+- `.codex/skills/mnn-pic-optimize/log/rhino/2026-07-04-06/README.md`
+- `.codex/skills/mnn-pic-optimize/log/rhino/2026-07-04-06/context.md`
 
 ## 范围
 
@@ -30,7 +32,7 @@
 
 ## 现在确认的问题
 
-Rhino 上不是 attention 全面失效，当前已经确认有 4 个独立问题：
+Rhino 上不是 attention 全面失效，当前已经确认有 5 个独立问题：
 
 1. `run_pic_prefill_latency_sweep.py` 之前把 Rhino `frequency_profile=max` 当成“查询当前状态”，没有真正下发 `cpu=max,gpu=max,ddr=max`。
 2. normal `llm_bench` 之前没有 OpenCL warmup，`Llama3.2 3B` 在 `ctx=1024` 首轮 cache rebuild / shape-tune 会被直接算进 baseline。
@@ -38,8 +40,15 @@ Rhino 上不是 attention 全面失效，当前已经确认有 4 个独立问题
 4. 在真正 graph-boundary 路径跑通之后，算子级默认路由仍有两处需要继续优化：
    - score layer 的 full-Q sparse family 仍会默认选到 `qsplit`
    - later sparse layer 的 `headDim=128` 变体仍会默认选到 `mqtile_hd128_q4k16`
+5. 2026-07-04 在新的 native full-reuse prefill 路径上，`MiniCPM5-1B / ctx=512` 的第一条 PIC chat warm 曾在 `Warning: module need new clone, cloning now.` 后挂住并导致 Rhino 重启；已用 scoped prefill-forward guard 修复。
+   - 这不是 cacheblend/epic 的性能退化数据：normal baseline 成功，`/v1/prefill/text` cache hit 成功，第一条 `full-reuse` warm 等待 `585.64s` 后 `curl: (52) Empty reply from server`，后续 cacheblend/epic 只是端口已断开的 `Connection refused`。
+   - 该问题命中 native full-reuse 的 `prefillFullReuseExternalPagedKV()`：只计算 prelude+suffix active rows，同时 hydrate 498 个持久 PIC token 到当前请求 PagedCache；ctx512 下 active rows 只有 14 行，近 10 分钟和整机重启不是正常算力成本。
+   - 根因/修复点：full-reuse active prefill 是 prefill 语义，但曾可能被 `forwardRaw()` 按 decode-ish 状态选择 14-token module key 并触发 OpenCL module clone。`transformers/pic_llm/engine/src/llm.cpp` 现在在 `prefillFullReuseExternalPagedKV()` 内用 `mForcePrefillForward` 作用域标志包住 `prefill(activeTokenIds)`，`forwardRaw()` 在该标志下强制按 prefill graph 选择 `seq_len_key=100`。
+   - 验证 run `fullreuse_rhino_fix_ctx512_20260704_153815`：warm/measure 都 HTTP 200；measure `full-reuse ctx512 = 0.573422s`、`892.885 tok/s`；远端 log 无 `Warning: module need new clone`，并出现 `forward_raw_select_module ... seq_len=14 seq_len_key=100 ... force_prefill_forward=1`，随后 24 层 hydrate 全部完成；Rhino 仍在线。
+   - 同 artifact 上低 ratio sparse smoke `sparse_rhino_fix_ctx512_20260704_154150` 也已通过：`cacheblend 5% = 0.374792s`、`epic 5% = 0.340086s`，均 HTTP 200，Rhino 未重启。该结果只证明崩溃 gate 已解除，不替代完整 ratio sweep。
+   - 若回归，不要直接跑全量 cacheblend/epic sweep。先只跑 `full-reuse` ctx512 smoke，打开 `MNN_PIC_REQUEST_PROFILE=1`、`MNN_PAGED_ATTENTION_PROFILE=1`、`MNN_PAGED_ATTENTION_PROFILE_DETAIL=1` 和必要时 `MNN_PIC_GRAPH_PROFILE=1`。若又卡在 clone，检查 `force_prefill_forward=1` / `seq_len_key=100`；若进入 hydrate 后重启，再 A/B `MNN_PAGED_ATTENTION_OPENCL_ALLOW_KV_STAGING_FALLBACK=1` 只作诊断。staging fallback 不能作为生产性能结果。
 
-前 3 个问题会直接污染端到端 benchmark；后 1 个问题才是当前真正的算子优化方向。
+前 3 个问题会直接污染端到端 benchmark；第 4 个问题才是当前真正的算子优化方向；第 5 个问题已解除 full-reuse 稳定性 gate，且 cacheblend/epic 低 ratio smoke 已过；完整性能结论仍需修复后独立 ratio sweep，不能沿用崩溃 run 的失败行判断性能。
 
 ## 算子级实测结论
 
