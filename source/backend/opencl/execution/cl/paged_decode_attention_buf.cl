@@ -127,6 +127,44 @@ __kernel void append_sparse_decode_key_value_hd128(GLOBAL_SIZE_3_DIMS
     decode_key[((b * kv_head_num + kvh) * 128 + d) * key_max_len + logical] = k;
 }
 
+__kernel void append_sparse_decode_key_value_hd128_slot_identity(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *key, // [batch, new_kv_len, kv_head_num, 128]
+                              __global const FLOAT *value, // [batch, new_kv_len, kv_head_num, 128]
+                              __global FLOAT *key_cache, // [max_slots, batch, kv_head_num, 128]
+                              __global FLOAT *value_cache, // [batch, kv_head_num, max_slots, 128]
+
+                              __global const int *sparse_query,
+                              __private const int batch,
+                              __private const int new_kv_len,
+                              __private const int kv_write_len,
+                              __private const int kv_head_num,
+                              __private const int head_dim,
+                              __private const int key_max_len) {
+    const int d = get_global_id(0);
+    const int l = get_global_id(1);
+    const int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(d, l, z);
+    if (head_dim != 128 || d >= 128 || l >= kv_write_len || l >= new_kv_len) {
+        return;
+    }
+    const int b = z / kv_head_num;
+    const int kvh = z - b * kv_head_num;
+    if (b >= batch || kvh >= kv_head_num) {
+        return;
+    }
+    const int logical = sparse_query[l];
+    if (logical < 0 || logical >= key_max_len) {
+        return;
+    }
+    const int in = ((b * new_kv_len + l) * kv_head_num + kvh) * 128 + d;
+    key_cache[((logical * batch + b) * kv_head_num + kvh) * 128 + d] = key[in];
+    value_cache[((b * kv_head_num + kvh) * key_max_len + logical) * 128 + d] = value[in];
+}
+
+// Disabled after Rhino/Adreno A/B on 2026-07-05. This diagnostic append skipped
+// decode_key writes for key-cache qtile v2, but the route did not remove the PIC
+// x0 gap and regressed Llama/Qwen x0.
+
 __kernel void matmul_qk_decode_transposed_hd128(GLOBAL_SIZE_2_DIMS
                               __global const FLOAT *query, // [batch, query_seq_len, head_num, 128]
                               __global const FLOAT *decode_key, // [batch, kv_head_num, 128, max_slots]
@@ -295,6 +333,141 @@ __kernel void matmul_qk_decode_paged_identity_hd128(GLOBAL_SIZE_2_DIMS
     } else if (x4 < key_seq_len) {
         qk[qk_offset] = (FLOAT)out0.s0;
     }
+}
+
+__kernel void matmul_qk_decode_repair_slot_identity_hd128(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *query, // [batch, query_seq_len, head_num, 128]
+                              __global const FLOAT *key_cache, // [max_slots, batch, kv_head_num, 128]
+                              __global const int *sparse_query,
+                              __global FLOAT *qk, // [batch * head_num * output_seq_len, key_seq_len]
+                              __private const float scale,
+                              __private const int batch,
+                              __private const int query_seq_len,
+                              __private const int output_seq_len,
+                              __private const int key_seq_len,
+                              __private const int key_max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0); // key_seq_len / 4
+    const int q_index = get_global_id(1);
+    const int z = get_global_id(2); // batch * head_num
+    DEAL_NON_UNIFORM_DIM3(x, q_index, z);
+    if (head_dim != 128 || q_index >= output_seq_len || q_index >= query_seq_len) {
+        return;
+    }
+    const int b = z / head_num;
+    const int h = z - b * head_num;
+    const int kvh = h / NUMHEAD_GROUP_SIZE;
+    if (b >= batch || kvh >= kv_head_num) {
+        return;
+    }
+    const int logical = sparse_query[q_index];
+    const int active_len = (logical >= 0 && logical < key_seq_len && logical < key_max_len) ?
+        min(logical + 1, key_seq_len) : 0;
+    const int x4 = x << 2;
+    const int qk_offset = (z * output_seq_len + q_index) * key_seq_len + x4;
+    COMPUTE_FLOAT4 out0 = (COMPUTE_FLOAT4)-FLT_MAX;
+    if (active_len <= 0) {
+        if (x4 + 3 < key_seq_len) {
+            vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
+        } else if (x4 + 2 < key_seq_len) {
+            vstore3(CONVERT_FLOAT3((COMPUTE_FLOAT3)(out0.s012)), 0, qk + qk_offset);
+        } else if (x4 + 1 < key_seq_len) {
+            vstore2(CONVERT_FLOAT2((COMPUTE_FLOAT2)(out0.s01)), 0, qk + qk_offset);
+        } else if (x4 < key_seq_len) {
+            qk[qk_offset] = (FLOAT)out0.s0;
+        }
+        return;
+    }
+    out0 = (COMPUTE_FLOAT4)0;
+    const int query_offset = ((b * query_seq_len + q_index) * head_num + h) * 128;
+    for (int d4 = 0; d4 < 128; d4 += 4) {
+        COMPUTE_FLOAT4 qv = CONVERT_COMPUTE_FLOAT4(vload4(0, query + query_offset + d4));
+        if (x4 < active_len) {
+            const int key_offset0 = (((x4 * batch + b) * kv_head_num + kvh) * 128 + d4);
+            COMPUTE_FLOAT4 kv0 = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset0));
+            out0.s0 += dot(qv, kv0);
+        }
+        if (x4 + 1 < active_len) {
+            const int key_offset1 = ((((x4 + 1) * batch + b) * kv_head_num + kvh) * 128 + d4);
+            COMPUTE_FLOAT4 kv1 = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset1));
+            out0.s1 += dot(qv, kv1);
+        }
+        if (x4 + 2 < active_len) {
+            const int key_offset2 = ((((x4 + 2) * batch + b) * kv_head_num + kvh) * 128 + d4);
+            COMPUTE_FLOAT4 kv2 = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset2));
+            out0.s2 += dot(qv, kv2);
+        }
+        if (x4 + 3 < active_len) {
+            const int key_offset3 = ((((x4 + 3) * batch + b) * kv_head_num + kvh) * 128 + d4);
+            COMPUTE_FLOAT4 kv3 = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset3));
+            out0.s3 += dot(qv, kv3);
+        }
+    }
+    out0 *= (COMPUTE_FLOAT4)scale;
+    out0.s0 = x4 < active_len ? out0.s0 : (COMPUTE_FLOAT)-FLT_MAX;
+    out0.s1 = x4 + 1 < active_len ? out0.s1 : (COMPUTE_FLOAT)-FLT_MAX;
+    out0.s2 = x4 + 2 < active_len ? out0.s2 : (COMPUTE_FLOAT)-FLT_MAX;
+    out0.s3 = x4 + 3 < active_len ? out0.s3 : (COMPUTE_FLOAT)-FLT_MAX;
+    if (x4 + 3 < key_seq_len) {
+        vstore4(CONVERT_FLOAT4(out0), 0, qk + qk_offset);
+    } else if (x4 + 2 < key_seq_len) {
+        vstore3(CONVERT_FLOAT3((COMPUTE_FLOAT3)(out0.s012)), 0, qk + qk_offset);
+    } else if (x4 + 1 < key_seq_len) {
+        vstore2(CONVERT_FLOAT2((COMPUTE_FLOAT2)(out0.s01)), 0, qk + qk_offset);
+    } else if (x4 < key_seq_len) {
+        qk[qk_offset] = (FLOAT)out0.s0;
+    }
+}
+
+__kernel void matmul_qkv_decode_repair_slot_identity_hd128_b8(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *qk, // [batch * head_num * output_seq_len, qk_seq_len]
+                              __global const FLOAT *value_cache, // [batch, kv_head_num, max_slots, 128]
+                              __global FLOAT *output, // [batch, output_seq_len, head_num, 128]
+                              __private const int qk_seq_len,
+                              __private const int output_seq_len,
+                              __private const int max_len,
+                              __private const int batch,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0); // head_dim / 8
+    const int q_index = get_global_id(1);
+    const int z = get_global_id(2); // batch * head_num
+    DEAL_NON_UNIFORM_DIM3(x, q_index, z);
+    if (head_dim != 128 || q_index >= output_seq_len) {
+        return;
+    }
+    const int x8 = x << 3;
+    const int b = z / head_num;
+    const int h = z - b * head_num;
+    const int kvh = h / NUMHEAD_GROUP_SIZE;
+    if (b >= batch || kvh >= kv_head_num) {
+        return;
+    }
+    const int qk_offset = (z * output_seq_len + q_index) * qk_seq_len;
+    const int value_offset = ((b * kv_head_num + kvh) * max_len) * 128 + x8;
+    COMPUTE_FLOAT8 out0 = (COMPUTE_FLOAT8)0;
+    const int loop_end = max((qk_seq_len + 7) / 8 - 1, 0);
+    for (int i = 0; i < loop_end; ++i) {
+        const int i8 = i << 3;
+        const COMPUTE_FLOAT8 w = CONVERT_COMPUTE_FLOAT8(vload8(0, qk + qk_offset + i8));
+        out0 = mad((COMPUTE_FLOAT8)w.s0, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 0) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s1, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 1) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s2, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 2) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s3, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 3) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s4, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 4) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s5, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 5) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s6, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 6) * 128)), out0);
+        out0 = mad((COMPUTE_FLOAT8)w.s7, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + (i8 + 7) * 128)), out0);
+    }
+    for (int i = (loop_end << 3); i < qk_seq_len; ++i) {
+        const COMPUTE_FLOAT w = (COMPUTE_FLOAT)qk[qk_offset + i];
+        out0 = mad((COMPUTE_FLOAT8)w, CONVERT_COMPUTE_FLOAT8(vload8(0, value_cache + value_offset + i * 128)), out0);
+    }
+    const int output_offset = ((b * output_seq_len + q_index) * head_num + h) * 128 + x8;
+    vstore8(CONVERT_FLOAT8(out0), 0, output + output_offset);
 }
 
 #define DEFINE_DECODE_CAUSAL_IDENTITY_HD128(KERNEL_NAME, LANES) \
@@ -556,6 +729,10 @@ __kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
 DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_HD128(decode_causal_attention_hd128_identity_fused_kv_row32, 32)
 DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_HD128(decode_causal_attention_hd128_identity_fused_kv_row64, 64)
 DEFINE_DECODE_CAUSAL_IDENTITY_FUSED_KV_HD128(decode_causal_attention_hd128_identity_fused_kv_row128, 128)
+
+// Disabled after Rhino/Adreno A/B on 2026-07-05. The q1 identity fused-KV
+// diagnostic remained far slower than true normal x0 and regressed larger
+// models, so the kernel body was removed.
 
 #define DEFINE_DECODE_CAUSAL_TRANSPOSED_K_FUSED_KV_HD128(KERNEL_NAME, LANES) \
 __kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
@@ -969,6 +1146,9 @@ DEFINE_DECODE_CAUSAL_TRANSPOSED_K_SPARSE_HD128(decode_causal_attention_hd128_tra
 DEFINE_DECODE_CAUSAL_TRANSPOSED_K_SPARSE_HD128(decode_causal_attention_hd128_transposed_k_sparse_row64, 64)
 DEFINE_DECODE_CAUSAL_TRANSPOSED_K_SPARSE_HD128(decode_causal_attention_hd128_transposed_k_sparse_row128, 128)
 
+// Disabled after Rhino/Adreno A/B on 2026-07-05. Sharing one workgroup across a
+// GQA group reduced parallelism and regressed every tested x0 model/context.
+
 #define DEFINE_DECODE_CAUSAL_TRANSPOSED_K_QTILE_HD128(KERNEL_NAME, LANES, Q_TILE) \
 __kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
                               __global const FLOAT *query, \
@@ -1185,6 +1365,9 @@ DEFINE_DECODE_CAUSAL_TRANSPOSED_K_QTILE_HD128(decode_causal_attention_hd128_tran
 DEFINE_DECODE_CAUSAL_TRANSPOSED_K_QTILE_HD128(decode_causal_attention_hd128_transposed_k_qtile_q8_row64, 64, 8)
 DEFINE_DECODE_CAUSAL_TRANSPOSED_K_QTILE_HD128(decode_causal_attention_hd128_transposed_k_qtile_q8_row128, 128, 8)
 
+// Disabled after Rhino/Adreno A/B on 2026-07-05. No-transposed-K identity qtile
+// helped MiniCPM but regressed Llama/Qwen; default remains transposed-K qtile.
+
 #define DEFINE_DECODE_CAUSAL_TRANSPOSED_K_QTILE_FUSED_APPEND_HD128(KERNEL_NAME, LANES, Q_TILE) \
 __kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
                               __global const FLOAT *query, \
@@ -1395,7 +1578,7 @@ __kernel void KERNEL_NAME(GLOBAL_SIZE_3_DIMS \
                 const COMPUTE_FLOAT inv_l = running_l[qr] > (COMPUTE_FLOAT)0 ? (COMPUTE_FLOAT)1 / running_l[qr] : (COMPUTE_FLOAT)0; \
                 const int q_index = q_base + qr; \
                 const int output_offset = ((b * output_seq_len + q_index) * head_num + h) * 128 + out_d4; \
-                vstore4(CONVERT_FLOAT4(out4[qr] * (COMPUTE_FLOAT4)inv_l), 0, output + output_offset + out_d4); \
+                vstore4(CONVERT_FLOAT4(out4[qr] * (COMPUTE_FLOAT4)inv_l), 0, output + output_offset); \
             } \
         } \
     } \

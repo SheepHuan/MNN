@@ -836,10 +836,12 @@ static void printUsage(int /* argc */, char ** argv) {
     printf("  -qatten, --quant-attention <0|1>          (default: 0) | Note: if 1, quantize attention's key value to int8; default 0\n");
     printf("  -j, --json <filename>                     (default: llm_bench.json) | Note: if set, output result to a JSON file\n");
     printf("  --profile                                 Enable operator-level profiling to print detailed timing statistics\n");
+    printf("  --profile-scope <all|decode>              Profile the whole response or only autoregressive decode\n");
+    printf("  --profile-top <n>                         Print top-n operator names sorted by time when profiling\n");
 }
 
 
-static bool parseCmdParams(int argc, char ** argv, RuntimeParameters & runtimeParams, TestParameters & testParams, FILE** outfile, bool& helpInfo, bool& jsonMode, std::string& jsonFile, bool& enableProfile) {
+static bool parseCmdParams(int argc, char ** argv, RuntimeParameters & runtimeParams, TestParameters & testParams, FILE** outfile, bool& helpInfo, bool& jsonMode, std::string& jsonFile, bool& enableProfile, std::string& profileScope, int& profileTop) {
     std::string       arg;
     bool              invalidParam = false;
     const std::string argPrefix    = "--";
@@ -1013,6 +1015,22 @@ static bool parseCmdParams(int argc, char ** argv, RuntimeParameters & runtimePa
              }
         } else if (arg == "--profile") {
             enableProfile = true;
+        } else if (arg == "--profile-scope") {
+            if (++i >= argc) {
+                invalidParam = true;
+                break;
+            }
+            profileScope = argv[i];
+            if (profileScope != "all" && profileScope != "decode") {
+                invalidParam = true;
+                break;
+            }
+        } else if (arg == "--profile-top") {
+            if (++i >= argc) {
+                invalidParam = true;
+                break;
+            }
+            profileTop = std::max(0, atoi(argv[i]));
         }
         else {
             invalidParam = true;
@@ -1161,7 +1179,9 @@ int main(int argc, char ** argv) {
     bool jsonMode = false;
     std::string jsonFile = "llm_bench.json";
     bool enableProfile = false;
-    bool parseSuccess = parseCmdParams(argc, argv, runtimeParams, testParams, &outfile, helpInfo, jsonMode, jsonFile, enableProfile);
+    std::string profileScope = "all";
+    int profileTop = 0;
+    bool parseSuccess = parseCmdParams(argc, argv, runtimeParams, testParams, &outfile, helpInfo, jsonMode, jsonFile, enableProfile, profileScope, profileTop);
     if (!parseSuccess) {
         MNN_ERROR("Parse arguments error\n");
         return -1;
@@ -1210,7 +1230,11 @@ int main(int argc, char ** argv) {
 
         auto llmPtr = buildLLM(instance.mCmdParam.model, instance.mCmdParam.backend, instance.mCmdParam.memory, instance.mCmdParam.precision, instance.mCmdParam.threads, instance.mCmdParam.power, instance.mCmdParam.dynamicOption, instance.mCmdParam.useMmap, instance.mCmdParam.divisionRatioSme2Neon, instance.mCmdParam.smeCoreNum, instance.mCmdParam.nPrompt, instance.mCmdParam.attentionOption);
         std::unique_ptr<Llm> llm(llmPtr);
+        const bool profileDecodeOnly = enableProfile && profileScope == "decode";
         if (enableProfile) {
+            llm->set_config(R"({"enable_debug":true})");
+        }
+        auto installProfileCallback = [&]() {
             llm->set_config(R"({"enable_debug":true})");
             auto profiler = MNN::Profiler::getInstance();
             llm->setDebugCallback(
@@ -1226,6 +1250,12 @@ int main(int argc, char ** argv) {
                     return true;
                 }
             );
+        };
+        auto clearProfileCallback = [&]() {
+            llm->setDebugCallback(MNN::TensorCallBackWithInfo(), MNN::TensorCallBackWithInfo());
+        };
+        if (enableProfile && !profileDecodeOnly) {
+            installProfileCallback();
         }
         if (instance.mCmdParam.loadingTime == "true") {
             for (int k = 0; k < 3; ++k) {
@@ -1252,7 +1282,22 @@ int main(int argc, char ** argv) {
             std::vector<int> tokens(prompt_tokens, 16);
 
             for (int i = 0; i < instance.mCmdParam.nRepeat + 1; ++i) {
-                llm->response(tokens, nullptr, nullptr, decodeTokens);
+                if (profileDecodeOnly) {
+                    clearProfileCallback();
+                    llm->response(tokens, nullptr, nullptr, 0);
+                    if (i > 0) {
+                        MNN::Profiler::getInstance()->reset();
+                        installProfileCallback();
+                    }
+                    for (int g = 0; g < decodeTokens && !llm->stoped(); ++g) {
+                        llm->generate(1);
+                    }
+                    if (i > 0) {
+                        clearProfileCallback();
+                    }
+                } else {
+                    llm->response(tokens, nullptr, nullptr, decodeTokens);
+                }
                 auto prefillTime = context->prefill_us;
                 auto decodeTime = context->decode_us;
                 if (i > 0) { // Exclude the first performance value.
@@ -1310,8 +1355,10 @@ int main(int argc, char ** argv) {
     if (enableProfile) {
         auto profiler = MNN::Profiler::getInstance();
         fprintf(stdout, "\n========== Operator Profile Results ==========\n");
-        // profiler->printTimeByName(1);
         profiler->printTimeByType(1);
+        if (profileTop > 0) {
+            profiler->printTimeByName(1, profileTop, true);
+        }
     }
 
     fprintf(stdout, "\n");

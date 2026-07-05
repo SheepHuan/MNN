@@ -181,13 +181,19 @@ OpenCL 先跑通时的保守策略：
 
 PIC decode 优化默认分析 PIC dualgraph 运行口径：`pic_llm` / `pic_server` 加载 `.cache/weight/<model>/` 或设备侧 PIC dualgraph config，`llm.mnn` 负责 PIC prefill graph，`llm_decode.mnn` 负责 PIC q=1 decode graph。`repair_tokens=0` 是 `PIC dualgraph x0`，不是 true normal LLM；`repair_tokens>0` 仍属于同一个 PIC dualgraph 模型包 / server。分析和报告时不要把这三类混在一起：`PIC dualgraph x0`、`PIC dualgraph decode-repair x>0`、`.cache/mnn-llm-export` 的 `true normal LLM x0`。
 
-PIC dualgraph decode-repair 的 `x=0/1/3/5/7/n` 必须收敛为同一个实现家族：`x=0` 是 active rows 为 1 的退化 repair decode，`x=n` 是 active rows / token budget 为 `n+1` 的同一路径扩展。实现上允许同一设备固定一套默认 family，并在这个 family 内保留 lane、row32/row64、q_tile、K/KV image、buffer/image layout、record queue 等参数或显式变体；不允许把 `x=0` 当成普通 q=1 identity decode、把 `x>0` 当成另一套 sparse qtile decode-repair 的两条生产路径，也不允许按模型、head/GQA、上下文长度或单个 x 值自动 gate 到不同算法家族。A/B 变体必须用清晰 env 或 benchmark 标签单独运行、单独报告，不能作为默认自动 fallback。
+PIC dualgraph decode-repair 的 `x=0/1/3/5/7/n` 必须保持同一运行口径：都走 PIC dualgraph 的 decode-only graph、`decode_refine` 请求语义和 `mnn_token_id_sparse_decode` runtime；`x=0` 是 active rows 为 1 的 PIC x0，不是 true normal LLM。kernel 实现上允许把 `x=0` 明确作为 q1/rows=1 专用实现处理，而 `x=1/3/5/7/n` 收敛到统一 rows>1 kernel family；不允许按模型、head/GQA、上下文长度或单个非零 x 值自动 gate 到不同算法家族。A/B 变体必须用清晰 env 或 benchmark 标签单独运行、单独报告，不能作为默认自动 fallback。
 
 PIC decode-repair 一旦进入 decode 阶段，必须继续使用 PIC dualgraph 的 decode-only graph（`llm_decode.mnn` / `mDecodeModule`）。`mPicDecodeRepair.enabled` 不能再成为禁止 decode graph 的条件；x0/x1/x3/x5/x7 的 active rows 都应通过 decode graph 执行，x0 只是 active rows=1。禁止因为 repair 开启、active rows 大于 1、shape pool 未命中或某个模型/ctx 慢，就静默回落到主图 `llm.mnn` / `mModule` / `mModulePool` 的 raw forward。主图 active-rows forward 不是完整 prompt prefill，但仍会重新带入通用图动态 shape、Raster/reshape、dense/logits tail 等隐藏开销，历史上会把 PIC x0 推成明显慢于 true normal 的错误口径。profile/debug 中应能明确看到 `use_decode_graph=1` 且 `pic_decode_repair_decode_graph=1`；若 decode-only graph 缺失或不支持该 active-row shape，应标注 unsupported/fallback 并单独报告，不能混入默认正式数据。
 
 本次 decode-repair 路由事故的经验教训：只要进入 decode，主图 `llm.mnn` active-rows forward 就不是“可接受的兼容路径”，而是会污染 TPOT 归因的错误路径。它可能在 profile 中表现为 `Convolution`、`Raster`、`While`、lm_head/logits tail 或 readback 变慢，让后续 attention/MLP 优化看起来无效。正确处理方式只有两种：让 `llm_decode.mnn` 覆盖该 active-row shape，或把该 shape 标为 unsupported/显式 fallback；不要为了功能可跑而把默认路由切回主图。
 
+decode 正式数据的 P0 判据必须包含路由判据：`use_decode_graph=1`、`pic_decode_repair_decode_graph=1`、`ordinary_q1=0`、`decode_prepare_inside_decode=0`。如果任一 active-row shape 因 clone/shape pool/kernel 缺失走到 `use_decode_graph=0`，该行只能作为显式 fallback/debug 记录，不能进入默认结果，也不能拿来证明 MLP、attention 或 logits 优化有效。
+
 旧的 sparse-prefill compact MLP 结论不能直接外推到 decode-only 子图。OrangePi `pic_gemm_b4_c8_*` 当时主要解决 score-layer 后 `globalY > 16` 的 compact-row 1x1 Conv / MLP tune cliff；decode-repair 的 active rows 是 1/2/4/6/8，可能落到 tiny GEMV、普通 low-memory Conv、lm_head 或其它 graph tail 路由。每次声称 MLP 优化对 decode 生效前，必须用 `MNN_PIC_GRAPH_PROFILE_SCOPE=decode` 拆 `Convolution`、`/mlp/{gate_proj,up_proj,down_proj}/Linear`、self-attn q/k/v/o projection、`/lm/lm_head/Linear` 和 `ArgMax`，并确认实际 kernel/tune key 覆盖这些 tiny-row shape。不要只凭 prefill/cacheblend 的 MLP 历史数据判断 decode x0/x>0。
+
+OrangePi / Mali decode-only rows 2/4/6/8 的 dense/MLP 优化要按 tiny-row family 单独验证。2026-07-04 的 rows<=8 direct C4 GEMV A/B 显示，x3/x5 这类 active rows>1 可以从 tiny direct GEMV 获益，但 x0 active rows=1 不走同一新增分支，x0 变化应视作噪声或其它固定开销。当前默认设计是：x0 保持 q1/rows=1 专用实现；x1/x3/x5/x7 走统一 rows>1 dense kernel family。后续若继续优化 MLP，必须分别报告 x0 rows=1、x1 rows=2、x3 rows=4、x5 rows=6、x7 rows=8 的 Conv/MLP profile 和 kernel decision source，不能用单个 “MLP optimized” 结论覆盖所有 x。
+
+计划项：如果未来要把 x0 纳入 direct C4 / dense-family 对比，必须新增真正支持 rows=1 的 direct C4 variant，或把 q1 GEMV 改造成只接受 `global_y=1` 的显式 family candidate；不能把现有只支持单行的 `gemv_conv_c8_buf` 直接拿去跑 rows>1，也不能把这个计划混入当前默认实现。
 
 OpenCL PIC decode 的优化目标是形成统一的新算子实现思路，而不是用按模型、head 数、设备或 q 长度的路由回退把端到端 TPOT 凑到不回退。`old` / identity PagedCache attention 只能作为 baseline 或显式 A/B 对照；生产默认不得自动根据 `llama3.2-3b`、`minicpm5-1b`、`qwen3-4b`、Mali/Adreno、`num_heads/kv_heads` 或单个 q 值切回 old。
 
@@ -197,7 +203,7 @@ OpenCL PIC decode 的优化目标是形成统一的新算子实现思路，而�
 - 调整参数或 autotune：例如 lane 32/64/128、q_tile、workgroup、local memory 布局、设备级 tune cache；参数可以按设备或 shape tune，但不能表达成“这个模型走 old、那个模型走 new”。
 - 提供显式实验变体：例如 fused、append+readonly、QK-only、QKV-only、split profile。变体必须用清晰 env 或 benchmark 标签运行并单独报告，不能作为默认自动 fallback。
 
-OrangePi / Mali 当前生产默认应继续向统一 lagged-attention / decode-repair family 收敛：x0 和 x>0 都使用同一套 append、rank/repair 可空化、attention 和 PagedCache 访问设计，x0 只是不选择额外 repair rows。transposed-K、identity fused-KV、qtile、row32/row64、image/buffer 等只能作为同一 family 内的显式变体或参数，不得形成“x0 一套、x>0 一套”的自动生产分流。后续优化应优先解决固定开销、append+attention 融合、launch/record queue、QK/QKV/V 拆测和 qtile 共享 K load；若某个变体在某设备或模型上回归，继续调 lane/q_tile/local memory/layout 或新增显式变体，而不是自动切回 old。
+OrangePi / Mali 当前生产默认应继续向明确的 lagged-attention / decode-repair 口径收敛：x0 可以保留 q1/rows=1 专用 kernel，x1/x3/x5/x7 统一使用 rows>1 repair kernel family。transposed-K、identity fused-KV、qtile、row32/row64、image/buffer 等只能作为各自实现内的显式变体或参数，不得形成“x1 一套、x3 另一套、x5/x7 再一套”的自动生产分流。后续优化应优先解决固定开销、append+attention 融合、launch/record queue、QK/QKV/V 拆测和 qtile 共享 K load；若某个变体在某设备或模型上回归，继续调 lane/q_tile/local memory/layout 或新增显式变体，而不是自动切回 old。
 
 decode-transposed K 的 prepare 边界是硬约束：prefill/full-reuse 后显式 prepare 历史 K，decode 计时内只允许 append 当前新 token 的 decodeKey。profile 中出现 `decode_prepare_inside_decode=1` 时，该实现直接判为不合格。
 

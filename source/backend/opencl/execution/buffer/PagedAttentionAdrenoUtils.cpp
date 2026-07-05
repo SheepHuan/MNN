@@ -195,6 +195,39 @@ bool useAdrenoGemmClipNullLws(OpenCLRuntime* runtime, bool legacyOpenCL, int seq
     return true;
 }
 
+bool rejectSparseFlashVariantFromCache(OpenCLRuntime* runtime, bool legacyOpenCL, int batch, int kvHeads,
+                                       int headDim, int activeLen, int kvLen, bool queryRowsAreFull,
+                                       uint32_t variant, bool variantIsKVImage, uint32_t laterQ4K8Variant) {
+    if (!variantIsKVImage) {
+        if (!queryRowsAreFull &&
+            preferAdrenoLaterSparseQ4K8(runtime, legacyOpenCL, batch, kvHeads, headDim, activeLen, kvLen)) {
+            return variant != laterQ4K8Variant;
+        }
+        return false;
+    }
+    return preferAdrenoSparseFlashKImage(runtime, legacyOpenCL, batch, kvHeads, headDim, kvLen);
+}
+
+bool rejectSparseFlashScheduleFromCache(OpenCLRuntime* runtime, bool legacyOpenCL, int batch, int kvHeads,
+                                        int headDim, int activeLen, int kvLen, bool queryRowsAreFull,
+                                        uint32_t schedule, uint32_t rangeQ128Schedule) {
+    if (queryRowsAreFull || schedule != rangeQ128Schedule) {
+        return false;
+    }
+    return preferAdrenoLaterSparseQ4K8(runtime, legacyOpenCL, batch, kvHeads, headDim, activeLen, kvLen);
+}
+
+bool disableStaticSparseFlashWorkspace(OpenCLRuntime* runtime, bool legacyOpenCL, int numHeads, int kvHeads,
+                                       int headDim, int activeLen, int kvLen, bool queryRowsAreFull) {
+    if (queryRowsAreFull || !isAdrenoRuntime(runtime, legacyOpenCL)) {
+        return false;
+    }
+    if (headDim != 128 || numHeads < 32 || kvHeads <= 0 || activeLen < 768 || kvLen < 2048) {
+        return false;
+    }
+    return true;
+}
+
 } // namespace PagedAttentionAdreno
 } // namespace OpenCL
 } // namespace MNN

@@ -245,3 +245,65 @@ Decode-specific q1-row PagedAttention totals 36 layers / 22.034 ms, mean
 about 0.6 ms in this profile, so the remaining Qwen ctx1024 x0 gap is not logits
 readback. The next generic targets are still `lm_head + top1` production and
 decode attention fixed scan/append cost inside the same repair family.
+
+## Mali Tiny Direct C4 GEMV
+
+Implemented a Mali-only decode dense route for low-memory INT4 1x1 Conv when
+`rows in 2..8`, `IC >= 1024`, and `OC >= 256`. The route reuses the existing
+direct C4 GEMV compact kernel family and records
+`decision_source=mali_decode_tiny_direct_c4_gemv`. This is a same-family dense
+variant for PIC dualgraph decode-repair rows 2/4/6/8; it does not change x0
+active rows=1 and does not route any decode request back to the main graph.
+
+Profile smoke:
+
+```text
+profile_mali_direct_c4gemv_qwen_ctx1024_x35_orangepi_20260704_2305
+```
+
+Validity:
+
+- `use_decode_graph=1`, `pic_decode_repair_decode_graph=1`
+- `ordinary_q1=0`, `repair=1`, `repair_qtile_route=1`
+- `decode_prepare_inside_decode=0`
+- batch 4 direct Conv lines: 252; batch 6 direct Conv lines: 252; fallback: 0
+
+Qwen3-4B ctx1024 profile attribution:
+
+```text
+x3: PagedAttention 233.030 ms, Convolution 210.650 ms, Raster 59.186 ms
+x5: PagedAttention 240.826 ms, Convolution 369.368 ms, Raster 57.565 ms
+```
+
+Explicit A/B against forced generic quant on the same artifact:
+
+```text
+x0: 173.729 -> 155.062 ms  delta -18.667 ms
+x3: 286.298 -> 254.388 ms  delta -31.910 ms
+x5: 482.644 -> 414.905 ms  delta -67.740 ms
+```
+
+The x0 A/B movement is not attributed to this new branch because rows=1 does not
+enter the `mali_decode_tiny_direct_c4_gemv` condition. Treat x0 movement here as
+run/cache noise or other fixed-cost interaction.
+
+Formal OrangePi ctx512/1024 PIC-only matrix:
+
+```text
+decode_mali_tiny_direct_formal_orangepi_ctx512_1024_20260704_2330
+```
+
+Average deltas versus `decode_repair_record_formal_orangepi_ctx512_1024_20260704_135242`:
+
+```text
+x0 +0.93 ms
+x1 -13.85 ms
+x3 -10.36 ms
+x5 -30.11 ms
+x7 -17.63 ms
+```
+
+Conclusion: rows>1 decode dense/MLP routing is a real hidden cost and the direct
+C4 GEMV branch is broadly positive on Mali. It is not an x0 fix; the remaining
+x0 work is still terminal vocab/top1, PagedAttention fixed scan/append, and
+graph tail/Raster/elementwise overhead inside the decode-only graph.

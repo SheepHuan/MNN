@@ -8,6 +8,7 @@
 #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 #ifndef MNN_OPENCL_BUFFER_CLOSED
 
+#include <cstdint>
 #include <vector>
 
 #include "backend/opencl/core/runtime/OpenCLRuntime.hpp"
@@ -45,6 +46,14 @@ bool useAdrenoGemmTransNullLws(OpenCLRuntime* runtime, bool legacyOpenCL, int se
                                int batchHeads, std::vector<uint32_t>* lws);
 bool useAdrenoGemmClipNullLws(OpenCLRuntime* runtime, bool legacyOpenCL, int seqLen, int numHeads,
                               int headDim, std::vector<uint32_t>* lws);
+bool rejectSparseFlashVariantFromCache(OpenCLRuntime* runtime, bool legacyOpenCL, int batch, int kvHeads,
+                                       int headDim, int activeLen, int kvLen, bool queryRowsAreFull,
+                                       uint32_t variant, bool variantIsKVImage, uint32_t laterQ4K8Variant);
+bool rejectSparseFlashScheduleFromCache(OpenCLRuntime* runtime, bool legacyOpenCL, int batch, int kvHeads,
+                                        int headDim, int activeLen, int kvLen, bool queryRowsAreFull,
+                                        uint32_t schedule, uint32_t rangeQ128Schedule);
+bool disableStaticSparseFlashWorkspace(OpenCLRuntime* runtime, bool legacyOpenCL, int numHeads, int kvHeads,
+                                       int headDim, int activeLen, int kvLen, bool queryRowsAreFull);
 
 } // namespace PagedAttentionAdreno
 } // namespace OpenCL

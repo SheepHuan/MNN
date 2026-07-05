@@ -117,6 +117,15 @@ void Profiler::end(const OperatorInfo* info) {
     mTotalTime += cost;
 }
 
+void Profiler::reset() {
+    mStartTime = 0;
+    mEndTime = 0;
+    mTotalTime = 0.0f;
+    mTotalMFlops = 0.0f;
+    mMapByType.clear();
+    mMapByName.clear();
+}
+
 static void printTable(const char* title, const std::vector<std::string>& header,
                        const std::vector<std::vector<std::string>>& data) {
     MNN_PRINT("%s\n", title);
@@ -176,21 +185,36 @@ void Profiler::printTimeByType(int loops) {
     MNN_PRINT("total time : %f ms, total mflops : %f \n", totalAvgTime, mTotalMFlops / loops);
 }
 
-void Profiler::printTimeByName(int loops) {
+void Profiler::printTimeByName(int loops, int topK, bool sortByCost) {
     const std::vector<std::string> header = {"Node Name", "Op Type", "Avg(ms)", "%", "Flops Rate"};
     std::vector<std::vector<std::string>> rows;
-    // sort by name
-    for (auto iter: mMapByName) {
-        auto record = iter.second;
+    std::vector<Record> records;
+    records.reserve(mMapByName.size());
+    for (auto iter : mMapByName) {
+        records.emplace_back(iter.second);
+    }
+    if (sortByCost) {
+        std::sort(records.begin(), records.end(), [](const Record& left, const Record& right) {
+            return left.costTime > right.costTime;
+        });
+    } else {
+        std::sort(records.begin(), records.end(), [](const Record& left, const Record& right) {
+            return left.name < right.name;
+        });
+    }
+    if (topK > 0 && static_cast<size_t>(topK) < records.size()) {
+        records.resize(topK);
+    }
+    for (auto record : records) {
         std::vector<std::string> columns;
-        columns.push_back(iter.first);
+        columns.push_back(record.name);
         columns.push_back(record.type);
         columns.push_back(toString(record.costTime / (float)loops));
         columns.push_back(toString((record.costTime / (float)mTotalTime) * 100));
         columns.push_back(toString((record.flops / (float)mTotalMFlops) * 100));
         rows.emplace_back(columns);
     }
-    printTable("Sort by node name !", header, rows);
+    printTable(sortByCost ? "Sort by node time cost !" : "Sort by node name !", header, rows);
 }
 void Profiler::printSlowOp(const std::string& type, int topK, float rate) {
     MNN_PRINT("Print <=%d slowest Op for %s, larger than %.2f\n", topK, type.c_str(), rate * 100.0f);

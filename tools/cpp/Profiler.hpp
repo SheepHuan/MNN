@@ -45,7 +45,11 @@ public:
      * print profiler time result, grouped and sorter by op name.
      * @param loops     loop count.
      */
-    void printTimeByName(int loops = 1);
+    void printTimeByName(int loops = 1, int topK = 0, bool sortByCost = false);
+    /**
+     * clear all accumulated profile records.
+     */
+    void reset();
 
     /**
      * print op that flops / time is slow

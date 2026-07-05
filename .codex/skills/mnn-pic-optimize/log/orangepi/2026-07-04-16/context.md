@@ -766,3 +766,224 @@ Conclusions for the next engineering step:
    needs attention kernel work: shared K load across q_tile, record queue/fixed
    dispatch, or a better fused append+attention variant. The earlier fused-append
    A/B regressed and should remain explicit A/B only.
+
+## Mali rows<=8 direct C4 GEMV for decode-only graph
+
+### Code change
+
+Touched:
+
+```text
+source/backend/opencl/execution/buffer/ConvBufLowMemoryExecution.cpp
+```
+
+Added a Mali-only shape predicate for low-memory INT4 1x1 Conv:
+
+```text
+gpu=MALI
+quantBit=4
+rows > 1 && rows <= 8
+inputChannels >= 1024
+outputChannels >= 256
+```
+
+When the predicate matches, `onResize()` selects the existing direct C4 GEMV compact
+kernel family and marks the decision as:
+
+```text
+compact_mode=adreno_direct_c4_gemv
+decision_source=mali_decode_tiny_direct_c4_gemv
+```
+
+The enum/kernel name still contains `Adreno` because the implementation reuses the
+existing direct C4 GEMV family; the route itself is Mali-gated. x0 rows=1 remains on
+the previous path.
+
+### Build and sync
+
+OrangePi artifact was rebuilt with:
+
+```bash
+JOBS=<half-cpus> MNN_TARGET_DEVICE=orangepi5plus BUILD_TARGET=pic_server \
+  BUILD_MNNCONVERT=0 INSTALL_AFTER_BUILD=1 \
+  bash .codex/skills/mnn-build-artifacts/scripts/build_artifacts.sh
+```
+
+Installed outputs were confirmed as aarch64 ELF and synced to:
+
+```text
+orangepi@192.168.101.113:/mnt/ssd/code/.cache/mnn_opencl_pic/artifacts/orangepi5plus/
+```
+
+### Profile smoke
+
+Command:
+
+```bash
+RUN_ID=profile_mali_direct_c4gemv_qwen_ctx1024_x35_orangepi_20260704_2305
+PIC_SWEEP_SERVER_ENV_EXTRA='MNN_PIC_GRAPH_PROFILE=1 MNN_PIC_GRAPH_PROFILE_SCOPE=decode MNN_PIC_GRAPH_PROFILE_TOP=1000 MNN_PAGED_ATTENTION_PROFILE=1 MNN_PAGED_ATTENTION_PROFILE_DETAIL=1 MNN_PIC_DECODE_REPAIR_PROFILE=1 MNN_PIC_REQUEST_PROFILE=1 MNN_PIC_DECODE_DEBUG=1' \
+python3 .cache/mnn-pic-benchmark/decode_experiment/run_decode_experiment.py \
+  --devices orangepi \
+  --models qwen3-4b \
+  --contexts 1024 \
+  --pic-repair-tokens 3,5 \
+  --pic-max-tokens 2 \
+  --pic-suffix-from-cache-tokens 1 \
+  --repeats 1 \
+  --warm-repeats 0 \
+  --skip-normal \
+  --run-id "$RUN_ID"
+```
+
+P0 grep was clean for:
+
+```text
+decode_prepare_inside_decode=1
+ERROR
+target unavailable
+async persistent PIC cache read failed
+Cache invalid
+Empty reply from server
+Connection refused
+```
+
+Route evidence:
+
+```text
+use_decode_graph=1
+pic_decode_repair_decode_graph=1
+ordinary_q1=0
+repair=1
+repair_qtile_route=1
+decode_prepare_inside_decode=0
+```
+
+Conv route evidence:
+
+```text
+batch=4 direct lines=252 fallback=0
+batch=6 direct lines=252 fallback=0
+decision_source=mali_decode_tiny_direct_c4_gemv
+selected_pic_kernel=1
+execute_fallback=0
+```
+
+Qwen3-4B ctx1024 profile summary:
+
+```text
+x3:
+  PagedAttention 233.030 ms
+  Convolution    210.650 ms
+  Raster          59.186 ms
+  MLP            134.559 ms
+  attn_proj       63.509 ms
+  lm_head         12.770 ms
+
+x5:
+  PagedAttention 240.826 ms
+  Convolution    369.368 ms
+  Raster          57.565 ms
+  MLP            253.006 ms
+  attn_proj      103.750 ms
+  lm_head         12.946 ms
+```
+
+### Explicit generic-vs-direct A/B
+
+Forced generic:
+
+```text
+decode_mali_tiny_generic_ab_qwen_ctx1024_x035_orangepi_20260704_2315
+PIC_SWEEP_SERVER_ENV_EXTRA='MNN_BENCH_OPENCL_COMPACT_DENSE_FORCE_FAMILY=generic_quant'
+```
+
+Default direct:
+
+```text
+decode_mali_tiny_direct_default_qwen_ctx1024_x035_orangepi_20260704_2320
+```
+
+Both ran Qwen3-4B ctx1024, x0/x3/x5, 16 decode tokens, 1 warm, 2 measure repeats,
+PIC-only. P0 grep was clean for both.
+
+Measure deltas:
+
+```text
+x0 decode_tpot_ms: 173.729 -> 155.062  delta -18.667
+x0 wall_tpot_ms:   203.771 -> 184.814  delta -18.957
+
+x3 decode_tpot_ms: 286.298 -> 254.388  delta -31.910
+x3 wall_tpot_ms:   306.858 -> 278.160  delta -28.698
+
+x5 decode_tpot_ms: 482.644 -> 414.905  delta -67.740
+x5 wall_tpot_ms:   492.549 -> 427.591  delta -64.958
+```
+
+The forced-generic env is an explicit A/B tool and affects broader compact dense
+selection. It should not be mixed into default formal rows.
+
+### Formal OrangePi PIC-only matrix
+
+Command:
+
+```bash
+RUN_ID=decode_mali_tiny_direct_formal_orangepi_ctx512_1024_20260704_2330
+python3 .cache/mnn-pic-benchmark/decode_experiment/run_decode_experiment.py \
+  --devices orangepi \
+  --models minicpm5-1b,llama3.2-3b,qwen3-4b \
+  --contexts 512,1024 \
+  --pic-repair-tokens 0,1,3,5,7 \
+  --pic-max-tokens 16 \
+  --pic-suffix-from-cache-tokens 1 \
+  --repeats 2 \
+  --warm-repeats 1 \
+  --skip-normal \
+  --run-id "$RUN_ID"
+```
+
+P0 grep was clean, no `failures.csv` was produced, and all 30 PIC rows were `ok`.
+
+Measure rows:
+
+```text
+model,ctx,x0,x1,x3,x5,x7
+Llama3.2 3B,512,118.221,163.466,172.280,291.323,304.447
+Llama3.2 3B,1024,127.898,177.963,197.185,314.994,323.847
+MiniCPM5-1B,512,42.441,69.482,76.776,101.057,107.489
+MiniCPM5-1B,1024,46.784,88.133,101.960,120.431,126.281
+Qwen3-4B,512,157.524,212.310,225.743,380.039,401.170
+Qwen3-4B,1024,177.703,238.532,261.706,415.678,442.416
+```
+
+Average delta versus `decode_repair_record_formal_orangepi_ctx512_1024_20260704_135242`:
+
+```text
+x0 +0.93 ms
+x1 -13.85 ms
+x3 -10.36 ms
+x5 -30.11 ms
+x7 -17.63 ms
+```
+
+Detailed deltas:
+
+```text
+model,ctx,dx0,dx1,dx3,dx5,dx7
+Llama3.2 3B,512,+1.295,-11.813,-11.129,-34.947,-20.865
+Llama3.2 3B,1024,-7.808,-16.415,-11.189,-36.991,-32.710
+MiniCPM5-1B,512,+0.727,-7.119,-6.922,-10.686,-3.702
+MiniCPM5-1B,1024,+0.847,-7.861,-5.366,-12.051,-3.351
+Qwen3-4B,512,+6.426,-21.823,-16.676,-43.233,-26.053
+Qwen3-4B,1024,+4.064,-18.054,-10.901,-42.773,-19.125
+```
+
+Conclusion:
+
+- The Mali rows<=8 direct C4 GEMV branch is broadly positive for x>0, strongest on
+  x5/x7 and Qwen/Llama larger dense shapes.
+- x0 is not improved by this branch; any x0 movement is noise or another fixed-cost
+  interaction because rows=1 does not enter the new predicate.
+- Remaining x0 optimization should focus on decode-only graph fixed costs:
+  `lm_head + top1`, q1-row PagedAttention scan/append, Raster/elementwise graph tail,
+  and record/replay overhead. Remaining x>0 work should split PagedAttention versus
+  active-row dense, because both are still hundreds of ms on Qwen x5.

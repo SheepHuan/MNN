@@ -113,6 +113,24 @@ static void clearGenerateForwardState(const std::shared_ptr<GenerationParams>& p
     params->validLogitStart = 0;
 }
 
+static void setLastLogitRange(const std::shared_ptr<GenerationParams>& params, const Express::VARP& logits) {
+    if (params == nullptr) {
+        return;
+    }
+    params->validLogitSize = 0;
+    params->validLogitStart = 0;
+    if (logits == nullptr || logits->getInfo() == nullptr || logits->getInfo()->dim.empty()) {
+        return;
+    }
+    const int logitSize = logits->getInfo()->dim.back();
+    if (logitSize <= 0 || logits->getInfo()->size < logitSize) {
+        return;
+    }
+    const int logitsRows = logits->getInfo()->size / logitSize;
+    params->validLogitStart = std::max(0, logitsRows - 1) * logitSize;
+    params->validLogitSize = logitSize;
+}
+
 static MNNForwardType backend_type_convert(const std::string& type_str) {
     if (type_str == "cpu")
         return MNN_FORWARD_CPU;
@@ -159,6 +177,30 @@ static int apply_opencl_tune_level_override(int numThread, MNNForwardType backen
         return numThread;
     }
     return (numThread & ~tuneMask) | tuneFlag;
+}
+
+static int apply_pic_opencl_record_queue_mode(int numThread, MNNForwardType backendType) {
+    if (backendType != MNN_FORWARD_OPENCL) {
+        return numThread;
+    }
+    const int recordMask = MNN_GPU_RECORD_OP | MNN_GPU_RECORD_BATCH;
+    const char* envValue = std::getenv("MNN_PIC_OPENCL_RECORD_QUEUE");
+    if (envValue == nullptr || envValue[0] == '\0') {
+        return (numThread & ~recordMask) | MNN_GPU_RECORD_OP;
+    }
+    std::string mode(envValue);
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (mode == "0" || mode == "off" || mode == "false" || mode == "none") {
+        return numThread & ~recordMask;
+    }
+    if (mode == "op" || mode == "1" || mode == "true") {
+        return (numThread & ~recordMask) | MNN_GPU_RECORD_OP;
+    }
+    if (mode == "batch") {
+        return (numThread & ~recordMask) | MNN_GPU_RECORD_BATCH;
+    }
+    return numThread;
 }
 
 template <typename T>
@@ -308,6 +350,7 @@ std::shared_ptr<Express::Executor::RuntimeManager> Llm::createRuntimeManagerForC
         config.numThread |= 64;
     }
     config.numThread = apply_opencl_tune_level_override(config.numThread, config.type);
+    config.numThread = apply_pic_opencl_record_queue_mode(config.numThread, config.type);
     if (mConfig->power() == "high") {
         cpuBackendConfig.power = BackendConfig::Power_High;
     } else if (mConfig->power() == "low") {
@@ -1807,14 +1850,21 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
            << " outputs=" << outputs.size();
         picRequestProfileLog("forward_raw_validate_outputs", picRequestMonotonicUs() - stageStartUs, os.str());
     }
+    setLastLogitRange(mGenerateParam, outputs[0]);
     const bool deferDecodeRepairLogitsRead =
         mPicDecodeRepair.enabled && inDecode && nullptr != outputs[0] && outputs[0]->getInfo() != nullptr;
-    if (deferDecodeRepairLogitsRead) {
+    const bool deferGreedyLogitsRead =
+        mConfig != nullptr && mConfig->sampler_type() == "greedy" &&
+        !picEnvFlagEnabled("MNN_LLM_GREEDY_CPU_ARGMAX") &&
+        nullptr != outputs[0] && outputs[0]->getInfo() != nullptr;
+    const bool deferLogitsRead = deferDecodeRepairLogitsRead || deferGreedyLogitsRead;
+    if (deferLogitsRead) {
         if (profileForwardRaw) {
             std::ostringstream os;
             auto info = outputs[0]->getInfo();
             os << "seq_len=" << seqLen
-               << " logits_deferred=1";
+               << " logits_deferred=1"
+               << " reason=" << (deferDecodeRepairLogitsRead ? "decode_repair" : "greedy");
             if (info != nullptr) {
                 os << " logits_size=" << info->size;
             }
@@ -1864,7 +1914,7 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
             return outputs;
         }
     }
-    if (!mAsync && !deferDecodeRepairLogitsRead) {
+    if (!mAsync && !deferLogitsRead) {
         stageStartUs = profileForwardRaw ? picRequestMonotonicUs() : 0;
         ((MNN::Tensor*)(outputs[0]->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
         if (profileForwardRaw) {

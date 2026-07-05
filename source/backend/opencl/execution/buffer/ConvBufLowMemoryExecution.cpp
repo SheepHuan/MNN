@@ -164,6 +164,15 @@ static bool _isAdrenoTinyDenseFamilyShape(OpenCLRuntime* runtime, int quantBit, 
            inputChannels >= 1024 && outputChannels >= 256;
 }
 
+static bool _isMaliDecodeTinyDirectC4GemvShape(OpenCLRuntime* runtime, int quantBit, int rows, int inputChannels,
+                                               int outputChannels) {
+    return runtime != nullptr &&
+           runtime->getGpuType() == MALI &&
+           quantBit == 4 &&
+           rows > 1 && rows <= 8 &&
+           inputChannels >= 1024 && outputChannels >= 256;
+}
+
 static bool _pickAdrenoTinyDenseFamilyHeuristic(OpenCLRuntime* runtime, int quantBit, int rows, int inputChannels,
                                                 int outputChannels, uint32_t* family) {
     if (family == nullptr ||
@@ -1810,6 +1819,14 @@ ErrorCode ConvBufLowMemoryExecution::onResize(const std::vector<Tensor *> &input
                     if (!mUseFPWeight) {
                         compactKernelMode = _compactKernelModeForFamily(forcedFamily);
                     }
+                    familyResolved = true;
+                }
+                if (!familyResolved && _isMaliDecodeTinyDirectC4GemvShape(
+                                           runTime, mResource->mNumQuantBit, batch,
+                                           mResource->mInputChannel, mResource->mOutputChannel)) {
+                    mUseFPWeight = false;
+                    compactKernelMode = static_cast<int>(kCompactKernelAdrenoDirectC4Gemv);
+                    compactDecisionSource = "mali_decode_tiny_direct_c4_gemv";
                     familyResolved = true;
                 }
                 const bool adrenoTinyFamilyShape = _isAdrenoTinyDenseFamilyShape(

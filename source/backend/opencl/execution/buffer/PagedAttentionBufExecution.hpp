@@ -50,8 +50,9 @@ private:
     ErrorCode ensureDecodeCausalKernel();
     ErrorCode ensureDecodeCausalKernelHD128Identity();
     ErrorCode ensureDecodeTransposedKKernel();
+    ErrorCode ensureDecodeRepairSlotIdentitySplitKernel();
     ErrorCode ensureDecodeAttentionRankKernel();
-    ErrorCode ensureDecodeTransposedTemps(int kvLen);
+    ErrorCode ensureDecodeTransposedTemps(int kvLen, int rows = 1);
     ErrorCode ensureDecodeKeyReady(int requiredLen, bool insideDecode = false);
     ErrorCode appendDecodeKeyValueHD128(const std::vector<Tensor*>& inputs, int baseLogical,
                                         bool profileDetail, uint64_t* appendUs);
@@ -108,6 +109,9 @@ private:
                                                         const std::vector<Tensor*>& outputs, int kvLen,
                                                         int attnLen, int baseLogical, int layerIndex,
                                                         bool transposedK);
+    ErrorCode runDecodeCausalAttentionHD128SlotIdentitySplit(const std::vector<Tensor*>& inputs,
+                                                             const std::vector<Tensor*>& outputs, int kvLen,
+                                                             int attnLen, int layerIndex);
     ErrorCode runDecodeCausalAttentionHD128TransposedKAppendReadonlyRecord(
         const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
         int baseLogical, int layerIndex, uint32_t lanes, std::shared_ptr<KernelWrap> attentionKernel);
@@ -117,6 +121,9 @@ private:
     ErrorCode runDecodeCausalAttentionHD128TransposedKSparseRecord(
         const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs, int kvLen,
         int attnLen, int layerIndex, uint32_t lanes, int qTile, std::shared_ptr<KernelWrap> kernel);
+    // Negative A/B routes are intentionally undeclared: q1 identity fused-KV,
+    // keycache qtile v2, identity qtile, sparse GQA, and fused-append record all
+    // regressed decode TPOT versus the transposed-K qtile family.
     ErrorCode runDecodeCausalAttentionHD128IdentityRecord(const std::vector<Tensor*>& inputs,
                                                           const std::vector<Tensor*>& outputs, int kvLen, int attnLen,
                                                           int baseLogical, int layerIndex, uint32_t lanes,
@@ -177,8 +184,11 @@ private:
     std::shared_ptr<KernelWrap> mDecodeKeyTransposeKernel;
     std::shared_ptr<KernelWrap> mDecodeKeyAppendKernel;
     std::shared_ptr<KernelWrap> mDecodeKeyAppendSparseKernel;
+    std::shared_ptr<KernelWrap> mDecodeKeyAppendSparseSlotIdentityKernel;
     std::shared_ptr<KernelWrap> mDecodeQKTransposedKernel;
     std::shared_ptr<KernelWrap> mDecodeQKVTransposedKernel;
+    std::shared_ptr<KernelWrap> mDecodeQKRepairSlotIdentityKernel;
+    std::shared_ptr<KernelWrap> mDecodeQKVRepairSlotIdentityKernel;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKFusedKVRow128;
@@ -274,7 +284,9 @@ private:
     int mDecodeCausalKernelGroupSize = 0;
     int mDecodeCausalHD128IdentityKernelGroupSize = 0;
     int mDecodeTransposedKKernelGroupSize = 0;
+    int mDecodeRepairSlotIdentitySplitKernelGroupSize = 0;
     int mDecodeTransposedTempKvLen = 0;
+    int mDecodeTransposedTempRows = 1;
     int mLastDecodeKeyRequiredLen = 0;
     uint64_t mLastDecodeKeyPrepareUs = 0;
     bool mLastDecodeKeyReadyHit = false;
@@ -347,6 +359,8 @@ private:
     int mDecodeTransposedSparseRecordKvLen = 0;
     int mDecodeTransposedSparseRecordMaxSlots = 0;
     float mDecodeTransposedSparseRecordScale = 1.0f;
+    // Dead record state for the negative A/B variants above is not kept here;
+    // the active decode-repair record path only records append + transposed-K qtile.
     int mDecodeAttentionRankKernelGroupSize = 0;
     bool mFastStaticWorkspace = false;
     bool mFastKernelStatic = false;
