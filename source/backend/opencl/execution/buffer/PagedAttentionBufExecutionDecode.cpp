@@ -472,6 +472,10 @@ ErrorCode PagedAttentionBufExecution::ensureDecodeTransposedKKernel() {
         runtime->buildKernel("paged_decode_attention_buf",
                              "decode_causal_attention_hd128_transposed_k_sparse_row128", options,
                              mOpenCLBackend->getPrecision());
+    mDecodeCausalKernelHD128TransposedKSparseDcontigRow128 =
+        runtime->buildKernel("paged_decode_attention_buf",
+                             "decode_causal_attention_hd128_transposed_k_sparse_dcontig_row128", options,
+                             mOpenCLBackend->getPrecision());
     mDecodeCausalKernelHD128TransposedKQTile1Row32 =
         runtime->buildKernel("paged_decode_attention_buf",
                              "decode_causal_attention_hd128_transposed_k_qtile_q1_row32", options,
@@ -2249,7 +2253,18 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
     std::shared_ptr<KernelWrap> kernel;
     const char* kernelName = nullptr;
     const char* profileOpName = "decode_causal_attention_hd128_transposed_k_sparse_qtile";
-    if (q1Row) {
+    // PoC (x0 only): d-continuous K read from key_cache via vload4 instead of
+    // transposed decode_key gathers. Self-gated: only overrides the q1Row 128-lane
+    // path when MNN_PIC_DECODE_SPARSE_DCONTIG_K is set; otherwise falls through to
+    // the original sparse kernel. The dcontig kernel's arg layout is a superset
+    // (extra key_cache arg after decode_key), so setArg below branches on dcontigK.
+    const bool dcontigK = q1Row && lanes == 128u &&
+        _envFlagEnabled("MNN_PIC_DECODE_SPARSE_DCONTIG_K", false);
+    if (dcontigK) {
+        kernel = mDecodeCausalKernelHD128TransposedKSparseDcontigRow128;
+        kernelName = "setArg decode_causal_attention_hd128_transposed_k_sparse_dcontig_row128";
+        profileOpName = "decode_causal_attention_hd128_transposed_k_sparse_dcontig";
+    } else if (q1Row) {
         kernel = lanes == 128u ? mDecodeCausalKernelHD128TransposedKSparseRow128 :
             (lanes == 64u ? mDecodeCausalKernelHD128TransposedKSparseRow64
                           : mDecodeCausalKernelHD128TransposedKSparseRow32);
@@ -2320,7 +2335,10 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
     if (!kernel) {
         return INVALID_VALUE;
     }
-    if (!fusedAppend) {
+    // dcontig PoC bypasses the record queue (its arg layout differs from the
+    // recorded sparse kernel); PoC validates the cache direction first, record
+    // compatibility can follow. Falls through to the plain setArg path below.
+    if (!fusedAppend && !dcontigK) {
         auto recordErr = runDecodeCausalAttentionHD128TransposedKSparseRecord(
             inputs, outputs, kvLen, attnLen, layerIndex, lanes, qTile, kernel);
         if (recordErr == NO_ERROR) {
@@ -2390,6 +2408,10 @@ ErrorCode PagedAttentionBufExecution::runDecodeCausalAttentionHD128TransposedKSp
     }
     ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->value.get()));
     ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->decodeKey.get()));
+    if (dcontigK) {
+        // dcontig kernel takes key_cache (d-continuous K source) after decode_key.
+        ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->key.get()));
+    }
     ret |= kernel->get().setArg(idx++, openCLBuffer(mCache->sparseQuery.get()));
     ret |= kernel->get().setArg(idx++, openCLBuffer(output));
     ret |= kernel->get().setArg(idx++, mScale);

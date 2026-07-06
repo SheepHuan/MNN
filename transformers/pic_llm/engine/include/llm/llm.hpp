@@ -171,6 +171,13 @@ public:
     bool prefillFullReuseExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
                                          const std::vector<MNN::PagedKVExternalSegment>& segments,
                                          int pic_start, int pic_token_count);
+    bool prefillFusionRAGOnlineSelectExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
+                                                     const std::vector<MNN::PagedKVExternalSegment>& segments,
+                                                     int pic_start, int pic_token_count, int capture_layer_idx,
+                                                     double recompute_ratio, int query_tail_tokens,
+                                                     int reduce_mode,
+                                                     std::vector<int>& selected_local_indices,
+                                                     int* selected_query_count = nullptr);
     bool prefillFixedGraphExternalPagedKV(const std::vector<int>& full_prompt_token_ids,
                                           const std::vector<MNN::PagedKVExternalSegment>& segments,
                                           int pic_start, int pic_token_count, int score_layer_idx,
@@ -284,6 +291,7 @@ private:
     bool mForcePrefillForward = false;
     int mBlockSize = 0;
     std::vector<int> mValidBlockSize;
+    bool prefillWithForcedForward(const std::vector<int>& input_ids);
     int pagedRequestCapacity(int pendingInputTokens = 0, int maxNewTokens = -1) const;
     bool beginPagedRequestIfNeeded(int pendingInputTokens = 0, int maxNewTokens = -1);
     void finishPagedRequestIfNeeded();

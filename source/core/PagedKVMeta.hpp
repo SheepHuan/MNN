@@ -59,6 +59,11 @@ struct PagedKVExternalSegment {
 
 struct PagedKVMeta : public KVMeta {
     using DecodePrepareCallback = bool (*)(PagedKVMeta* meta, int maxNewTokens);
+    enum FusionRAGScoreReduceMode {
+        FusionRAGReduceSumQueryMeanHead = 0,
+        FusionRAGReduceMeanQueryMeanHead = 1,
+        FusionRAGReduceMaxQueryMeanHead = 2,
+    };
 
     bool paged_attention = true;
     bool full_causal_attention_mask = false;
@@ -100,6 +105,16 @@ struct PagedKVMeta : public KVMeta {
     int cacheblend_score_top_k = 0;
     std::vector<PagedKVExternalSegment> cacheblend_score_segments;
     std::vector<int> cacheblend_score_selected_local_indices;
+    bool fusionrag_online_score_active = false;
+    bool fusionrag_online_score_ready = false;
+    int fusionrag_online_score_layer_idx = -1;
+    int fusionrag_online_score_pic_start = 0;
+    int fusionrag_online_score_pic_token_count = 0;
+    int fusionrag_online_score_top_k = 0;
+    int fusionrag_online_query_tail_tokens = 0;
+    int fusionrag_online_score_reduce_mode = FusionRAGReduceSumQueryMeanHead;
+    int fusionrag_online_selected_query_count = 0;
+    std::vector<int> fusionrag_online_score_selected_local_indices;
     bool pic_graph_active_plan_ready = false;
     int pic_graph_score_layer_idx = -1;
     int pic_graph_pic_start = 0;
@@ -137,6 +152,7 @@ struct PagedKVMeta : public KVMeta {
         finishPicDecodeAttentionRankCapture();
         clearPicDecodeAttentionRankResult();
         finishCacheBlendScoring();
+        finishFusionRAGOnlineScoring();
         finishPicGraphActivePlan();
     }
 
@@ -175,6 +191,7 @@ struct PagedKVMeta : public KVMeta {
         finishPicDecodeAttentionRankCapture();
         clearPicDecodeAttentionRankResult();
         finishCacheBlendScoring();
+        finishFusionRAGOnlineScoring();
         finishPicGraphActivePlan();
     }
 
@@ -388,6 +405,7 @@ struct PagedKVMeta : public KVMeta {
         pic_decode_recompute_append_count = 0;
         pic_decode_repair_sparse_active = false;
         finishPicDecodeAttentionRankCapture();
+        finishFusionRAGOnlineScoring();
         add = 0;
         remove = 0;
         n_reserve = 0;
@@ -633,6 +651,92 @@ struct PagedKVMeta : public KVMeta {
         cacheblend_score_top_k = 0;
         cacheblend_score_segments.clear();
         cacheblend_score_selected_local_indices.clear();
+    }
+
+    bool beginFusionRAGOnlineScoring(int picStart, int picTokenCount, int scoreLayerIdx, int topK,
+                                     int queryTailTokens, int reduceMode) {
+        if (!request_active || picStart < 0 || picTokenCount < 0 || scoreLayerIdx < 0 || topK < 0) {
+            return false;
+        }
+        fusionrag_online_score_active = true;
+        fusionrag_online_score_ready = picTokenCount == 0 || topK == 0;
+        fusionrag_online_score_layer_idx = scoreLayerIdx;
+        fusionrag_online_score_pic_start = picStart;
+        fusionrag_online_score_pic_token_count = picTokenCount;
+        fusionrag_online_score_top_k = std::min(topK, picTokenCount);
+        fusionrag_online_query_tail_tokens = std::max(0, queryTailTokens);
+        fusionrag_online_score_reduce_mode = reduceMode;
+        fusionrag_online_selected_query_count = 0;
+        fusionrag_online_score_selected_local_indices.clear();
+        return true;
+    }
+
+    bool needsFusionRAGOnlineScoring(int layerIndex) const {
+        return fusionrag_online_score_active && !fusionrag_online_score_ready &&
+            layerIndex == fusionrag_online_score_layer_idx;
+    }
+
+    bool fusionRAGOnlineQueryRows(std::vector<int>& queryRows, std::vector<int>& queryLogicals) const {
+        queryRows.clear();
+        queryLogicals.clear();
+        if (!fusionrag_online_score_active || fusionrag_online_score_pic_token_count <= 0 || !sparse_query_active) {
+            return false;
+        }
+        const int suffixStart = fusionrag_online_score_pic_start + fusionrag_online_score_pic_token_count;
+        for (int row = 0; row < static_cast<int>(sparse_query_logical_indices.size()); ++row) {
+            const int logical = sparse_query_logical_indices[static_cast<size_t>(row)];
+            if (logical >= suffixStart && logical < logical_length) {
+                queryRows.emplace_back(row);
+                queryLogicals.emplace_back(logical);
+            }
+        }
+        if (queryRows.empty()) {
+            return false;
+        }
+        const int tail = fusionrag_online_query_tail_tokens;
+        if (tail > 0 && static_cast<int>(queryRows.size()) > tail) {
+            const size_t keep = static_cast<size_t>(tail);
+            queryRows.erase(queryRows.begin(), queryRows.end() - keep);
+            queryLogicals.erase(queryLogicals.begin(), queryLogicals.end() - keep);
+        }
+        return !queryRows.empty();
+    }
+
+    void setFusionRAGOnlineScoringResult(const std::vector<int>& selectedLocalIndices, int selectedQueryCount) {
+        fusionrag_online_score_selected_local_indices.clear();
+        fusionrag_online_score_selected_local_indices.reserve(selectedLocalIndices.size());
+        std::vector<uint8_t> seen(static_cast<size_t>(std::max(0, fusionrag_online_score_pic_token_count)), 0);
+        for (int local : selectedLocalIndices) {
+            if (local < 0 || local >= fusionrag_online_score_pic_token_count) {
+                continue;
+            }
+            if (!seen.empty() && seen[static_cast<size_t>(local)] != 0) {
+                continue;
+            }
+            if (!seen.empty()) {
+                seen[static_cast<size_t>(local)] = 1;
+            }
+            fusionrag_online_score_selected_local_indices.emplace_back(local);
+            if (static_cast<int>(fusionrag_online_score_selected_local_indices.size()) >=
+                fusionrag_online_score_top_k) {
+                break;
+            }
+        }
+        fusionrag_online_selected_query_count = std::max(0, selectedQueryCount);
+        fusionrag_online_score_ready = true;
+    }
+
+    void finishFusionRAGOnlineScoring() {
+        fusionrag_online_score_active = false;
+        fusionrag_online_score_ready = false;
+        fusionrag_online_score_layer_idx = -1;
+        fusionrag_online_score_pic_start = 0;
+        fusionrag_online_score_pic_token_count = 0;
+        fusionrag_online_score_top_k = 0;
+        fusionrag_online_query_tail_tokens = 0;
+        fusionrag_online_score_reduce_mode = FusionRAGReduceSumQueryMeanHead;
+        fusionrag_online_selected_query_count = 0;
+        fusionrag_online_score_selected_local_indices.clear();
     }
 
     bool ensureLogicalCapacity(size_t required) {

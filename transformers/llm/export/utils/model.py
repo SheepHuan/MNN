@@ -193,6 +193,8 @@ class LlmModel(PreTrainedModel):
         model.blocks = torch.nn.ModuleList([
             Decoder(block, i, config, model.rotary, config.model_map) for i, block in enumerate(model.blocks.children())
         ])
+        if args is not None and getattr(args, 'cacheclip_query_attention', False) and len(model.blocks) > 0:
+            model.blocks[-1].self_attn.return_attn_weights = True
         # Check for final_logit_softcapping (gemma4, gemma2)
         origin_config = config.origin_config
         text_config = origin_config.text_config if hasattr(origin_config, 'text_config') else origin_config
@@ -351,6 +353,7 @@ class LlmModel(PreTrainedModel):
 
         # KV sharing cache (gemma4: layers 15-34 share KV with layers 13/14)
         shared_kv_cache = {}
+        cacheclip_query_attention = None
         for i in range(len(self.blocks)):
             # Set shared KV cache reference on attention
             if hasattr(self.blocks[i].self_attn, 'is_kv_shared_layer'):
@@ -376,7 +379,13 @@ class LlmModel(PreTrainedModel):
             # Set per-layer input for PLE
             if per_layer_inputs is not None:
                 self.blocks[i]._per_layer_input = per_layer_inputs[:, :, i, :]
-            hidden_states = self.blocks[i](hidden_states, layer_rotary, layer_attention_mask)
+            block_result = self.blocks[i](hidden_states, layer_rotary, layer_attention_mask)
+            if isinstance(block_result, tuple):
+                hidden_states = block_result[0]
+                if len(block_result) > 1:
+                    cacheclip_query_attention = block_result[1]
+            else:
+                hidden_states = block_result
             if deepstack_embeds is not None and i in range(deepstack_embeds.shape[0]):
                 hidden_states += deepstack_embeds[i]
 
@@ -405,6 +414,8 @@ class LlmModel(PreTrainedModel):
         if self.args and self.args.eagle_path is not None:
             final_layernorm = torch.cat(eagle_hidden_states, dim=-1)
 
+        if self.args and getattr(self.args, 'cacheclip_query_attention', False):
+            return logits, final_layernorm, talker_embeds, cacheclip_query_attention
         return logits, final_layernorm, talker_embeds
 
     def get_attention_mask(self, seq_len: int, new_tokens: int = 0):

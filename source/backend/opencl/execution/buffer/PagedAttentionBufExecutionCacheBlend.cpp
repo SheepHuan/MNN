@@ -10,6 +10,7 @@
 #include "backend/opencl/execution/buffer/PagedAttentionBufExecutionExternal.hpp"
 #include "backend/opencl/execution/buffer/PagedAttentionAdrenoUtils.hpp"
 #include "backend/opencl/core/OpenCLRunningUtils.hpp"
+#include "half.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -382,6 +383,163 @@ ErrorCode PagedAttentionBufExecution::ensureAdrenoCacheBlendValueImage(int token
     mCacheBlendSourceValueImageWidth = imageWidth;
     mCacheBlendSourceValueImageHeight = imageHeight;
     mCacheBlendSourceValueBytes = mBytes;
+    return NO_ERROR;
+}
+
+static inline float _pagedHostReadOpenCL(const int8_t* ptr, int index, int bytes) {
+    if (bytes == 4) {
+        return reinterpret_cast<const float*>(ptr)[index];
+    }
+    return static_cast<float>(reinterpret_cast<const half_float::half*>(ptr)[index]);
+}
+
+ErrorCode PagedAttentionBufExecution::runFusionRAGOnlineScoring(int layerIndex, int kvLen, const Tensor* query) {
+    if (mMeta == nullptr || !mMeta->needsFusionRAGOnlineScoring(layerIndex)) {
+        return NO_ERROR;
+    }
+    const int picStart = mMeta->fusionrag_online_score_pic_start;
+    const int picTokenCount = mMeta->fusionrag_online_score_pic_token_count;
+    const int topK = mMeta->fusionrag_online_score_top_k;
+    if (picStart < 0 || picTokenCount < 0 || topK < 0 || topK > picTokenCount ||
+        picStart + picTokenCount > kvLen || query == nullptr || mBatch <= 0 || mQuerySeqLen <= 0 ||
+        mNumHead <= 0 || mKvNumHead <= 0 || mHeadDim <= 0 || mNumHead % mKvNumHead != 0 ||
+        mCache == nullptr || !mCache->key) {
+        return INVALID_VALUE;
+    }
+    if (topK == 0 || picTokenCount == 0) {
+        mMeta->setFusionRAGOnlineScoringResult({}, 0);
+        return NO_ERROR;
+    }
+    std::vector<int> queryRows;
+    std::vector<int> queryLogicals;
+    if (!mMeta->fusionRAGOnlineQueryRows(queryRows, queryLogicals)) {
+        mMeta->setFusionRAGOnlineScoringResult({}, 0);
+        return NO_ERROR;
+    }
+    const int queryCount = static_cast<int>(queryRows.size());
+    const size_t queryBytes = static_cast<size_t>(mBatch) * mQuerySeqLen * mNumHead * mHeadDim * mBytes;
+    const size_t keyBytes = static_cast<size_t>(picTokenCount) * mBatch * mKvNumHead * mHeadDim * mBytes;
+    std::vector<int8_t> queryHost(queryBytes);
+    std::vector<int8_t> keyHost(keyBytes);
+    auto& queue = mOpenCLBackend->getOpenCLRuntime()->commandQueue();
+    cl_int ret = queue.enqueueReadBuffer(openCLBuffer(query), CL_TRUE, 0, queryBytes, queryHost.data());
+    MNN_CHECK_CL_SUCCESS(ret, "read fusionrag query");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+    const size_t keyOffsetBytes = static_cast<size_t>(picStart) * mBatch * mKvNumHead * mHeadDim * mBytes;
+    ret = queue.enqueueReadBuffer(openCLBuffer(mCache->key.get()), CL_TRUE, keyOffsetBytes, keyBytes, keyHost.data());
+    MNN_CHECK_CL_SUCCESS(ret, "read fusionrag key cache");
+    if (ret != CL_SUCCESS) {
+        return INVALID_VALUE;
+    }
+
+    const int group = mNumHead / mKvNumHead;
+    const float scale = mMeta->attn_scale > 0 ? mMeta->attn_scale : (1.0f / std::sqrt(static_cast<float>(mHeadDim)));
+    const int reduceMode = mMeta->fusionrag_online_score_reduce_mode;
+    std::vector<float> scores(static_cast<size_t>(picTokenCount), 0.0f);
+    std::vector<float> logits(static_cast<size_t>(picTokenCount), -std::numeric_limits<float>::max());
+    std::vector<float> headMax(static_cast<size_t>(picTokenCount), -std::numeric_limits<float>::max());
+    for (int b = 0; b < mBatch; ++b) {
+        for (int h = 0; h < mNumHead; ++h) {
+            const int kvHead = h / group;
+            if (reduceMode == PagedKVMeta::FusionRAGReduceMaxQueryMeanHead) {
+                std::fill(headMax.begin(), headMax.end(), -std::numeric_limits<float>::max());
+            }
+            for (int qi = 0; qi < queryCount; ++qi) {
+                const int qRow = queryRows[static_cast<size_t>(qi)];
+                const int qLogical = queryLogicals[static_cast<size_t>(qi)];
+                if (qRow < 0 || qRow >= mQuerySeqLen || qLogical < 0 || qLogical >= kvLen) {
+                    continue;
+                }
+                const int qBase = ((b * mQuerySeqLen + qRow) * mNumHead + h) * mHeadDim;
+                float maxLogit = -std::numeric_limits<float>::max();
+                for (int local = 0; local < picTokenCount; ++local) {
+                    const int logical = picStart + local;
+                    if (logical < 0 || logical > qLogical || logical >= mCache->maxSlots) {
+                        logits[static_cast<size_t>(local)] = -std::numeric_limits<float>::max();
+                        continue;
+                    }
+                    const int kBaseLocal = ((local * mBatch + b) * mKvNumHead + kvHead) * mHeadDim;
+                    float dot = 0.0f;
+                    for (int d = 0; d < mHeadDim; ++d) {
+                        dot += _pagedHostReadOpenCL(queryHost.data(), qBase + d, mBytes) *
+                               _pagedHostReadOpenCL(keyHost.data(), kBaseLocal + d, mBytes);
+                    }
+                    const float logit = dot * scale;
+                    logits[static_cast<size_t>(local)] = logit;
+                    if (logit > maxLogit) {
+                        maxLogit = logit;
+                    }
+                }
+                if (!std::isfinite(maxLogit)) {
+                    continue;
+                }
+                float sumExp = 0.0f;
+                for (int local = 0; local < picTokenCount; ++local) {
+                    const float logit = logits[static_cast<size_t>(local)];
+                    if (!std::isfinite(logit)) {
+                        continue;
+                    }
+                    sumExp += std::exp(logit - maxLogit);
+                }
+                if (!(sumExp > 0.0f)) {
+                    continue;
+                }
+                const float queryScale = reduceMode == PagedKVMeta::FusionRAGReduceMeanQueryMeanHead
+                    ? (1.0f / static_cast<float>(queryCount))
+                    : 1.0f;
+                for (int local = 0; local < picTokenCount; ++local) {
+                    const float logit = logits[static_cast<size_t>(local)];
+                    if (!std::isfinite(logit)) {
+                        continue;
+                    }
+                    const float prob = std::exp(logit - maxLogit) / sumExp;
+                    if (reduceMode == PagedKVMeta::FusionRAGReduceMaxQueryMeanHead) {
+                        headMax[static_cast<size_t>(local)] =
+                            std::max(headMax[static_cast<size_t>(local)], prob);
+                    } else {
+                        scores[static_cast<size_t>(local)] += prob * queryScale;
+                    }
+                }
+            }
+            if (reduceMode == PagedKVMeta::FusionRAGReduceMaxQueryMeanHead) {
+                for (int local = 0; local < picTokenCount; ++local) {
+                    const float value = headMax[static_cast<size_t>(local)];
+                    if (std::isfinite(value)) {
+                        scores[static_cast<size_t>(local)] += value;
+                    }
+                }
+            }
+        }
+    }
+    const float denom = static_cast<float>(std::max(1, mBatch * mNumHead));
+    for (float& score : scores) {
+        score /= denom;
+    }
+    std::vector<int> selected;
+    selected.reserve(topK);
+    std::vector<uint8_t> used(static_cast<size_t>(picTokenCount), 0);
+    for (int rank = 0; rank < topK; ++rank) {
+        float best = -std::numeric_limits<float>::max();
+        int bestIndex = -1;
+        for (int i = 0; i < picTokenCount; ++i) {
+            if (used[static_cast<size_t>(i)] != 0) {
+                continue;
+            }
+            const float value = scores[static_cast<size_t>(i)];
+            if (bestIndex < 0 || value > best || (value == best && i < bestIndex)) {
+                best = value;
+                bestIndex = i;
+            }
+        }
+        if (bestIndex < 0) {
+            return INVALID_VALUE;
+        }
+        used[static_cast<size_t>(bestIndex)] = 1;
+        selected.emplace_back(bestIndex);
+    }
+    mMeta->setFusionRAGOnlineScoringResult(selected, queryCount);
     return NO_ERROR;
 }
 

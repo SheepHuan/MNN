@@ -309,6 +309,8 @@ class LlmExporter(torch.nn.Module):
                 "ngram_factor": 1.0
             }
             config['tokenizer_file'] = 'tokenizer.mtok'
+            if self.args.cacheclip_query_attention:
+                config['cacheclip_query_attention'] = True
             if self.args.embed_bit < 16:
                 config['embedding_file'] = f"embeddings_int{self.args.embed_bit}.bin"
             if hasattr(self, 'talker') and self.talker is not None:
@@ -378,6 +380,8 @@ class LlmExporter(torch.nn.Module):
                 # different kv cache shape in different layers
                 # if isinstance(self.config.num_attention_heads, list):
                 self.model.blocks[i].self_attn.export_fused_attn = True
+                if self.args.cacheclip_query_attention and i == len(self.model.blocks) - 1:
+                    self.model.blocks[i].self_attn.export_fused_attn = False
                 is_moe = hasattr(self.model.blocks[i].mlp, 'is_moe') and self.model.blocks[i].mlp.is_moe
                 if is_moe:
                     self.model.blocks[i].mlp.export_moe = True
@@ -458,6 +462,8 @@ class LlmExporter(torch.nn.Module):
             output_names = ['logits', 'hidden_states', 'talker_embeds']
         else:
             output_names = ['logits', 'hidden_states']
+        if self.args.cacheclip_query_attention:
+            output_names.append('cacheclip_query_attention')
 
         # Qwen3-VL
         if self.model_type in ['qwen3_vl', 'qwen3_vl_moe']:
@@ -837,6 +843,11 @@ def build_args(parser):
     parser.add_argument('--quant_config', type=str, default=None, help='path to the JSON file for op-wise quantization configuration.')
     parser.add_argument('--generate_for_npu', action='store_true', help='Whether or not to generate model for NPU deployment, default is False.')
     parser.add_argument('--skip_weight', action='store_true', help='Whether or not to skip loading model weights, useful for testing export flow.')
+    parser.add_argument(
+        '--cacheclip_query_attention',
+        action='store_true',
+        help='Export the last-layer query attention tensor for CacheClip auxiliary selection.',
+    )
     # omni quant
     parser.add_argument('--omni_epochs', type=int, default=20, help='OmniQuant 优化的轮数')
     parser.add_argument('--omni_lr', type=float, default=5e-3, help='OmniQuant 的学习率')

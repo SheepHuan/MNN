@@ -57,6 +57,7 @@ class Attention(torch.nn.Module):
     def __init__(self, attn, layer_id, config, rotary, mapper):
         super().__init__()
         self.export_fused_attn = False
+        self.return_attn_weights = False
         if config is None: return
         self.config = config
         self.kv_cache = True
@@ -282,6 +283,8 @@ class Attention(torch.nn.Module):
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         attn_output = self.o_proj(attn_output)
+        if self.return_attn_weights:
+            return attn_output, attn_weights.to(torch.float32)
         return attn_output
 
 def l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
@@ -1280,12 +1283,17 @@ class Decoder(torch.nn.Module):
         norm_hidden_states = hidden_states
 
         # Self Attention or Linear Attention
+        last_attn_weights = None
         if self.layer_type == 'full_attention':
-            hidden_states = self.self_attn(
+            attn_result = self.self_attn(
                 hidden_states=hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
                 attention_mask=attention_mask,
             )
+            if isinstance(attn_result, tuple):
+                hidden_states, last_attn_weights = attn_result
+            else:
+                hidden_states = attn_result
         elif self.layer_type == 'linear_attention':
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
@@ -1376,6 +1384,8 @@ class Decoder(torch.nn.Module):
         if hasattr(self, 'layer_scalar') and self.layer_scalar is not None:
             hidden_states = hidden_states * self.layer_scalar
 
+        if last_attn_weights is not None:
+            return hidden_states, last_attn_weights
         return hidden_states
 
 class Lm(torch.nn.Module):

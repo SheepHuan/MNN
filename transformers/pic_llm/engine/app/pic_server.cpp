@@ -4,6 +4,7 @@
 //
 
 #include "pic_server.hpp"
+#include "pic_server_internal.hpp"
 
 #include "core/PagedKVMeta.hpp"
 #include "perfetto_c.h"
@@ -149,6 +150,12 @@ std::string traceExecutionModeForAlgorithm(const std::string& algorithm) {
     }
     if (algorithm == "explicit") {
         return "native-explicit-sparse-recompute";
+    }
+    if (algorithm == "cacheclip") {
+        return "native-cacheclip-sparse-recompute";
+    }
+    if (algorithm == "fusionrag_online") {
+        return "native-fusionrag-online-sparse-recompute";
     }
     return algorithm;
 }
@@ -777,61 +784,6 @@ struct PreparedTextCache {
     MNN::PagedKVExternalSegment segment;
 };
 
-struct ExplicitCacheTokenSpan {
-    int promptStart = -1;
-    int sourceStart = 0;
-    int tokenCount = 0;
-};
-
-struct PicDecodeRefineConfig {
-    bool enabled = false;
-    int tokensPerDecodeStep = 1;
-    int topM = 32;
-    double scoreThreshold = 1e-6;
-    double scoreMargin = 0.0;
-    double scoreDecay = 0.8;
-    std::string selector = "top_hkvd";
-    int attentionLayerIdx = -1;
-    std::vector<int> attentionHeadIds;
-};
-
-struct PreparedPicCache {
-    std::string id;
-    std::string cacheName;
-    std::string placeholder = kDefaultPicPlaceholder;
-    std::string selectionAlgorithm = "full-reuse";
-    double recomputeRatio = 0.20;
-    int scoreLayerIdx = 1;
-    std::vector<int> explicitLogicalIndices;
-    std::vector<int> explicitPicLocalIndices;
-    std::vector<int> fullPromptTokenIds;
-    std::vector<ExplicitCacheTokenSpan> promptSpans;
-    std::vector<int> tokenIds;
-    json textCaches = json::array();
-    std::vector<MNN::PagedKVExternalSegment> segments;
-    PicDecodeRefineConfig decodeRefine;
-};
-
-struct PicExecutionPlan {
-    std::string selectionAlgorithm = "full-reuse";
-    std::string plannerName = "FullReusePlanner";
-    std::string executionMode = "native-full-reuse";
-    std::string fallbackReason;
-    int scoreLayerIdx = 0;
-    int recomputeTokenCount = 0;
-    std::vector<int> recomputeLogicalIndices;
-    json recomputeScores = json::object();
-    json metadata = json::object();
-    std::vector<int> prefillPicTokenIds;
-    std::vector<int> externalTokenIds;
-    std::vector<MNN::PagedKVExternalSegment> externalSegments;
-    std::vector<int> sparseLogicalIndices;
-    std::vector<int> sparseTokenIds;
-    bool fullCompute = false;
-    bool sparseRecompute = false;
-    PicDecodeRefineConfig decodeRefine;
-};
-
 KvShape kvShapeFromSegment(const MNN::PagedKVExternalSegment& segment) {
     KvShape shape;
     shape.batch = segment.batch;
@@ -1095,7 +1047,8 @@ bool parseExplicitCacheTokenSpans(const json& request, std::vector<ExplicitCache
 bool isSupportedPicAlgorithm(const std::string& algorithm) {
     return algorithm == "full-reuse" || algorithm == "full-compute" || algorithm == "cacheblend" ||
            algorithm == "epic" || algorithm == "kvshare" || algorithm == "delta-v" ||
-           algorithm == "delta-a" || algorithm == "explicit";
+           algorithm == "delta-a" || isFusionRAGOnlineAlgorithm(algorithm) ||
+           isExternalRequestIndexAlgorithm(algorithm);
 }
 
 std::string textCacheNameFromId(const std::string& id) {
@@ -1672,13 +1625,29 @@ bool preparePicCacheFromRequest(const std::string& kvCacheDir, const std::string
         return false;
     }
     prepared.recomputeRatio = clampDouble(jsonDouble(request, "pic_recompute_ratio", 0.20), 0.0, 1.0);
-    const int defaultScoreLayer = 1;
-    prepared.scoreLayerIdx = std::max(0, jsonInt(request, "pic_recompute_score_layer_idx", defaultScoreLayer));
+    prepared.scoreLayerIdx = std::max(0, jsonInt(request, "pic_recompute_score_layer_idx", 1));
+    if (isFusionRAGOnlineAlgorithm(prepared.selectionAlgorithm)) {
+        prepared.fusionragCaptureLayerIdx = jsonInt(
+            request, "fusionrag_score_layers", jsonInt(request, "fusionrag_score_layer_idx", -1));
+        prepared.fusionragQueryTailTokens = std::max(0, jsonInt(request, "fusionrag_query_tail_tokens", 0));
+        prepared.fusionragScoreReduce = jsonString(request, "fusionrag_score_reduce", "sum_query_mean_head");
+        if (fusionragReduceModeFromString(prepared.fusionragScoreReduce) < 0) {
+            error = "Unsupported fusionrag_score_reduce: " + prepared.fusionragScoreReduce;
+            return false;
+        }
+    }
     if (!parsePicDecodeRefineConfig(request, prepared.decodeRefine, error)) {
         return false;
     }
+    prepared.hasExplicitRecomputeIndices = request.contains("pic_recompute_logical_indices") ||
+                                           request.contains("pic_recompute_pic_local_indices");
     prepared.explicitLogicalIndices = jsonIntVector(request.value("pic_recompute_logical_indices", json::array()));
     prepared.explicitPicLocalIndices = jsonIntVector(request.value("pic_recompute_pic_local_indices", json::array()));
+    if (prepared.selectionAlgorithm == "cacheclip" && !prepared.hasExplicitRecomputeIndices) {
+        error = prepared.selectionAlgorithm +
+                " requires pic_recompute_pic_local_indices or pic_recompute_logical_indices from an external selector";
+        return false;
+    }
     prepared.fullPromptTokenIds = jsonIntVectorAlias(
         request, {"full_prompt_token_ids", "prompt_token_ids", "input_token_ids"});
     if (!parseExplicitCacheTokenSpans(request, prepared.promptSpans, error)) {
@@ -1838,180 +1807,6 @@ bool applyExplicitPicPromptMapping(PreparedPicCache& pic,
     pic.tokenIds = std::move(mappedTokenIds);
     pic.segments = std::move(mappedSegments);
     return true;
-}
-
-PicExecutionPlan buildExecutionPlan(const PreparedPicCache& pic, int preludeTokenCount, int layerCount,
-                                    const std::vector<int>* nativeSelectedLocalIndices = nullptr,
-                                    const json* scoreMetadata = nullptr) {
-    PicExecutionPlan plan;
-    plan.selectionAlgorithm = pic.selectionAlgorithm;
-    plan.decodeRefine = pic.decodeRefine;
-    const int picStart = preludeTokenCount;
-    const int picLength = static_cast<int>(pic.tokenIds.size());
-    const int picEnd = picStart + picLength;
-    const int effectiveScoreLayer = std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-    auto fillAllRecompute = [&]() {
-        plan.recomputeLogicalIndices.clear();
-        for (int i = picStart; i < picEnd; ++i) {
-            plan.recomputeLogicalIndices.emplace_back(i);
-            plan.recomputeScores[std::to_string(i)] = 1.0;
-        }
-        plan.recomputeTokenCount = static_cast<int>(plan.recomputeLogicalIndices.size());
-    };
-    auto fillFullComputeFallback = [&](const std::string& plannerName, const std::string& scoreKind,
-                                       const std::string& reason) {
-        plan.plannerName = plannerName;
-        plan.executionMode = "full-compute-fallback";
-        plan.fullCompute = true;
-        plan.scoreLayerIdx = layerCount;
-        plan.fallbackReason = reason;
-        fillAllRecompute();
-        plan.prefillPicTokenIds = pic.tokenIds;
-        plan.metadata = {
-            {"score_kind", scoreKind},
-            {"pic_token_count", picLength},
-            {"reuse_token_count", 0},
-            {"fallback_reason", plan.fallbackReason},
-            {"native_sparse_recompute", false},
-        };
-    };
-    if (pic.selectionAlgorithm == "full-reuse") {
-        plan.plannerName = "FullReusePlanner";
-        plan.executionMode = "native-full-reuse";
-        plan.scoreLayerIdx = effectiveScoreLayer;
-        plan.externalTokenIds = pic.tokenIds;
-        plan.externalSegments = pic.segments;
-        plan.metadata = {
-            {"score_kind", "none"},
-            {"pic_token_count", picLength},
-            {"reuse_token_count", picLength},
-            {"score_pass", "not_required_full_reuse"},
-            {"suffix_query_source", "current_context"},
-        };
-        return plan;
-    }
-    if (pic.selectionAlgorithm == "full-compute") {
-        plan.plannerName = "FullComputePlanner";
-        plan.executionMode = "native-full-compute";
-        plan.fullCompute = true;
-        plan.scoreLayerIdx = layerCount;
-        fillAllRecompute();
-        plan.prefillPicTokenIds = pic.tokenIds;
-        plan.metadata = {
-            {"score_kind", "none"},
-            {"pic_token_count", picLength},
-            {"reuse_token_count", 0},
-        };
-        return plan;
-    }
-    if (pic.selectionAlgorithm == "epic") {
-        plan.plannerName = "EpicPlanner";
-        plan.executionMode = "native-epic-sparse-recompute";
-        plan.scoreLayerIdx = effectiveScoreLayer;
-        int recompute = picLength <= 0 || pic.recomputeRatio <= 0.0
-            ? 0
-            : std::min(picLength, std::max(1, static_cast<int>(std::ceil(picLength * pic.recomputeRatio))));
-        plan.externalTokenIds = pic.tokenIds;
-        plan.externalSegments = pic.segments;
-        for (int i = 0; i < recompute; ++i) {
-            int logical = picStart + i;
-            plan.recomputeLogicalIndices.emplace_back(logical);
-            plan.sparseLogicalIndices.emplace_back(logical);
-            plan.sparseTokenIds.emplace_back(pic.tokenIds[i]);
-            plan.recomputeScores[std::to_string(logical)] = static_cast<double>(recompute - i);
-        }
-        plan.recomputeTokenCount = recompute;
-        plan.sparseRecompute = recompute > 0;
-        plan.metadata = {
-            {"score_kind", "pic_head_fixed_ratio"},
-            {"score_source", "fixed_pic_head_contiguous_tokens"},
-            {"score_pass", "not_required_fixed_pic_head"},
-            {"pic_token_count", picLength},
-            {"reuse_token_count", picLength - recompute},
-            {"native_sparse_recompute", true},
-            {"native_sparse_recompute_scope", "python_prefill_layer_plan"},
-            {"pre_score_compute_layers", plan.scoreLayerIdx},
-            {"pre_score_kv_source", "none_fixed_pic_head_selection"},
-            {"post_score_reuse_kv_source", "cached_pic_kv"},
-        };
-        return plan;
-    }
-    plan.plannerName = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
-        ? "CacheBlendPlanner"
-        : (pic.selectionAlgorithm == "explicit" ? "ExplicitPlanner" : "KvsharePlanner");
-    if (nativeSelectedLocalIndices != nullptr || pic.selectionAlgorithm == "explicit") {
-        plan.executionMode = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
-            ? "native-cacheblend-sparse-recompute"
-            : (pic.selectionAlgorithm == "explicit" ? "native-explicit-sparse-recompute"
-                                                     : "native-kvshare-sparse-recompute");
-        plan.scoreLayerIdx = effectiveScoreLayer;
-        plan.externalTokenIds = pic.tokenIds;
-        plan.externalSegments = pic.segments;
-        std::vector<int> localIndices;
-        if (pic.selectionAlgorithm == "explicit") {
-            for (int index : pic.explicitPicLocalIndices) {
-                if (index >= 0 && index < picLength) {
-                    localIndices.emplace_back(index);
-                }
-            }
-            for (int logical : pic.explicitLogicalIndices) {
-                int local = logical - picStart;
-                if (local >= 0 && local < picLength) {
-                    localIndices.emplace_back(local);
-                }
-            }
-            std::sort(localIndices.begin(), localIndices.end());
-            localIndices.erase(std::unique(localIndices.begin(), localIndices.end()), localIndices.end());
-        } else {
-            localIndices = *nativeSelectedLocalIndices;
-            std::sort(localIndices.begin(), localIndices.end());
-            localIndices.erase(std::unique(localIndices.begin(), localIndices.end()), localIndices.end());
-        }
-        for (size_t rank = 0; rank < localIndices.size(); ++rank) {
-            int local = localIndices[rank];
-            if (local < 0 || local >= picLength) {
-                continue;
-            }
-            int logical = picStart + local;
-            plan.recomputeLogicalIndices.emplace_back(logical);
-            plan.sparseLogicalIndices.emplace_back(logical);
-            plan.sparseTokenIds.emplace_back(pic.tokenIds[local]);
-            plan.recomputeScores[std::to_string(logical)] = static_cast<double>(localIndices.size() - rank);
-        }
-        plan.recomputeTokenCount = static_cast<int>(plan.recomputeLogicalIndices.size());
-        plan.sparseRecompute = plan.recomputeTokenCount > 0;
-        std::string scoreKind = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
-            ? "layer_value_delta_mean_abs"
-            : (pic.selectionAlgorithm == "explicit" ? "explicit_request_indices"
-                                                     : "key_value_delta_influence_proxy");
-        plan.metadata = {
-            {"score_kind", scoreKind},
-            {"pic_token_count", picLength},
-            {"reuse_token_count", picLength - plan.recomputeTokenCount},
-            {"native_sparse_recompute", true},
-            {"native_sparse_recompute_scope", "python_prefill_layer_plan"},
-            {"pre_score_compute_layers", plan.scoreLayerIdx},
-            {"pre_score_kv_source", scoreMetadata != nullptr && plan.scoreLayerIdx > 0
-                                         ? "request_full_reference_pagedcache_no_disk_write"
-                                         : "none"},
-            {"post_score_reuse_kv_source", "cached_pic_kv"},
-        };
-        if (scoreMetadata != nullptr) {
-            plan.metadata["score_metadata"] = *scoreMetadata;
-        }
-        if (pic.selectionAlgorithm == "kvshare" || pic.selectionAlgorithm == "delta-a") {
-            plan.metadata["python_reference"] =
-                "hf_pic_runtime kvshare uses attention_output gradient influence; MNN C++ currently uses a native K/V delta influence proxy because exported MNN modules do not expose score-layer query/attention-output autograd.";
-        }
-        return plan;
-    }
-    const std::string scoreKind = pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v"
-        ? "layer_value_delta_mean_abs_gpu_topk_unavailable"
-        : "attention_output_error_kv_first_order_influence_gpu_topk_unavailable";
-    fillFullComputeFallback(
-        plan.plannerName, scoreKind,
-        "Native CUDA/OpenCL score + GPU top-k is not implemented; legacy scratch .k/.v CPU scoring is disabled");
-    return plan;
 }
 
 json precisionRecoverySummary(const PicExecutionPlan& plan, double ratio, int requestedScoreLayerIdx,
@@ -2849,218 +2644,18 @@ bool PicServer::completeChatBatchItem(const json& request, json& response, std::
         bool hasNativeSelectedLocalIndices = false;
         {
             MnnLlmPerfettoSlice prefillSlice("prefill", traceInfo);
-            json scoreMetadata = json::object();
-            bool graphBoundaryPrefillDone = false;
-            bool fullReusePrefillDone = false;
-            bool nativePicPrefillDone = false;
-            const bool graphBoundaryEnabled =
-                jsonBool(modelConfig(), "pic_recompute_budget", false) &&
-                (pic.selectionAlgorithm == "cacheblend" || pic.selectionAlgorithm == "delta-v" ||
-                 pic.selectionAlgorithm == "epic");
-            if (pic.selectionAlgorithm == "full-reuse") {
-                nativeSelectedLocalIndices.clear();
-                mLlm->reset();
-                mLlm->generate_init(&sink, "");
-                stageUs = monotonicUs();
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " prelude_tokens=" << preludeTokenIds.size()
-                       << " pic_tokens=" << pic.tokenIds.size()
-                       << " suffix_tokens=" << suffixTokenIds.size();
-                    picRequestProfileBegin("prefill_full_reuse_external_pagedkv", os.str());
-                }
-                if (!mLlm->prefillFullReuseExternalPagedKV(
-                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
-                        static_cast<int>(pic.tokenIds.size()))) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Native full-reuse hydrate+suffix prefill failed on backend " + runtimeBackend() +
-                            llmContextSuffix(mLlm.get());
-                    return false;
-                }
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " prelude_tokens=" << preludeTokenIds.size()
-                       << " pic_tokens=" << pic.tokenIds.size()
-                       << " suffix_tokens=" << suffixTokenIds.size();
-                    picRequestProfileLog("prefill_full_reuse_external_pagedkv", monotonicUs() - stageUs, os.str());
-                }
-                fullReusePrefillDone = true;
-                nativePicPrefillDone = true;
-                scoreMetadata = {
-                    {"score_source", "none"},
-                    {"score_kind", "none"},
-                    {"score_pass", "not_required_full_reuse_hydrate_suffix"},
-                    {"graph_boundary", "none_full_reuse_hydrate_suffix"},
-                    {"selected_count", 0},
-                };
-            } else if (graphBoundaryEnabled && pic.selectionAlgorithm == "epic") {
-                const int effectiveScoreLayer =
-                    std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-                const int recompute = picTraceTokens <= 0 || pic.recomputeRatio <= 0.0
-                    ? 0
-                    : std::min(picTraceTokens,
-                               std::max(1, static_cast<int>(std::ceil(picTraceTokens * pic.recomputeRatio))));
-                nativeSelectedLocalIndices.clear();
-                for (int i = 0; i < recompute; ++i) {
-                    nativeSelectedLocalIndices.emplace_back(i);
-                }
-                mLlm->reset();
-                mLlm->generate_init(&sink, "");
-                stageUs = monotonicUs();
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " effective_score_layer=" << effectiveScoreLayer
-                       << " selected_count=" << nativeSelectedLocalIndices.size();
-                    picRequestProfileBegin("prefill_fixed_graph_external_pagedkv", os.str());
-                }
-                if (!mLlm->prefillFixedGraphExternalPagedKV(
-                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
-                        static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, nativeSelectedLocalIndices)) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Native graph-level epic prefill failed on backend " + runtimeBackend() +
-                            llmContextSuffix(mLlm.get());
-                    return false;
-                }
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " effective_score_layer=" << effectiveScoreLayer
-                       << " selected_count=" << nativeSelectedLocalIndices.size();
-                    picRequestProfileLog("prefill_fixed_graph_external_pagedkv", monotonicUs() - stageUs, os.str());
-                }
-                graphBoundaryPrefillDone = true;
-                nativePicPrefillDone = true;
-                scoreMetadata = {
-                    {"score_layer_idx", effectiveScoreLayer},
-                    {"score_source", "fixed_pic_head_contiguous_tokens"},
-                    {"score_kind", "pic_head_fixed_ratio"},
-                    {"score_pass", "not_required_graph_boundary"},
-                    {"graph_boundary", "score_layer_pic_score_attention"},
-                    {"selected_count", nativeSelectedLocalIndices.size()},
-                };
-            } else if (graphBoundaryEnabled) {
-                const int effectiveScoreLayer =
-                    std::min(std::max(0, pic.scoreLayerIdx), std::max(0, layerCount - 1));
-                mLlm->reset();
-                mLlm->generate_init(&sink, "");
-                stageUs = monotonicUs();
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " effective_score_layer=" << effectiveScoreLayer
-                       << " recompute_ratio=" << pic.recomputeRatio
-                       << " prompt_tokens=" << fullPromptTokenIds.size()
-                       << " pic_tokens=" << pic.tokenIds.size();
-                    picRequestProfileBegin("prefill_cacheblend_graph_external_pagedkv", os.str());
-                }
-                if (!mLlm->prefillCacheBlendGraphExternalPagedKV(
-                        fullPromptTokenIds, pic.segments, static_cast<int>(preludeTokenIds.size()),
-                        static_cast<int>(pic.tokenIds.size()), effectiveScoreLayer, pic.recomputeRatio,
-                        nativeSelectedLocalIndices)) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Native graph-level cacheblend score/top-k failed on backend " + runtimeBackend() +
-                            llmContextSuffix(mLlm.get());
-                    return false;
-                }
-                {
-                    std::ostringstream os;
-                    os << "selection_algorithm=" << pic.selectionAlgorithm
-                       << " effective_score_layer=" << effectiveScoreLayer
-                       << " selected_count=" << nativeSelectedLocalIndices.size()
-                       << " recompute_ratio=" << pic.recomputeRatio;
-                    picRequestProfileLog("prefill_cacheblend_graph_external_pagedkv", monotonicUs() - stageUs, os.str());
-                }
-                graphBoundaryPrefillDone = true;
-                nativePicPrefillDone = true;
-                hasNativeSelectedLocalIndices = true;
-                scoreMetadata = {
-                    {"score_layer_idx", effectiveScoreLayer},
-                    {"score_source", "request_full_reference_pagedcache_minus_cached_pic_value"},
-                    {"score_kind", "layer_value_delta_mean_abs"},
-                    {"score_pass", "request_full_prompt_graph_boundary"},
-                    {"topk_location", "backend_device"},
-                    {"host_transfer", "selected_local_indices_only"},
-                    {"graph_boundary", "score_layer_pic_score_attention"},
-                    {"selected_count", nativeSelectedLocalIndices.size()},
-                };
+            PicPrefillResult prefillResult;
+            if (!runPicPrefill(
+                    mLlm.get(), sink, runtimeBackend(), pic, fullPromptTokenIds,
+                    static_cast<int>(preludeTokenIds.size()), layerCount,
+                    jsonBool(cfg, "pic_recompute_budget", false), prefillResult, error)) {
+                return false;
             }
-            stageUs = monotonicUs();
-            picRequestProfileBegin("build_execution_plan");
-            plan = buildExecutionPlan(
-                pic, static_cast<int>(preludeTokenIds.size()), layerCount,
-                hasNativeSelectedLocalIndices ? &nativeSelectedLocalIndices : nullptr,
-                hasNativeSelectedLocalIndices ? &scoreMetadata : nullptr);
-            {
-                std::ostringstream os;
-                const int reuseTokenCount = plan.metadata.contains("reuse_token_count") &&
-                        plan.metadata["reuse_token_count"].is_number_integer()
-                    ? plan.metadata["reuse_token_count"].get<int>()
-                    : -1;
-                os << "full_compute=" << (plan.fullCompute ? 1 : 0)
-                   << " sparse_recompute=" << (plan.sparseRecompute ? 1 : 0)
-                   << " recompute_tokens=" << plan.recomputeTokenCount
-                   << " reuse_tokens=" << reuseTokenCount
-                   << " score_layer=" << plan.scoreLayerIdx
-                   << " execution_mode=" << plan.executionMode;
-                picRequestProfileLog("build_execution_plan", monotonicUs() - stageUs, os.str());
-            }
-            if (fullReusePrefillDone) {
-                plan.executionMode = "native-full-reuse-hydrate-suffix";
-                plan.sparseRecompute = false;
-                plan.recomputeTokenCount = 0;
-                plan.metadata["native_sparse_recompute"] = false;
-                plan.metadata["score_pass"] = "not_required_full_reuse_hydrate_suffix";
-                plan.metadata["graph_boundary"] = "none_full_reuse_hydrate_suffix";
-                plan.metadata["graph_level_boundary"] = false;
-                plan.metadata["full_reuse_dataflow"] =
-                    "persistent_pic_cache_source_to_current_request_pagedcache_then_suffix_prefill";
-            } else if (graphBoundaryPrefillDone) {
-                if (pic.selectionAlgorithm == "epic") {
-                    plan.executionMode = "native-epic-graph-boundary";
-                } else {
-                    plan.executionMode = "native-cacheblend-graph-boundary";
-                }
-                plan.sparseRecompute = false;
-                plan.metadata["native_sparse_recompute_scope"] = "exported_graph_score_layer_boundary";
-                plan.metadata["graph_level_boundary"] = true;
-            }
+            plan = std::move(prefillResult.plan);
+            nativeSelectedLocalIndices = std::move(prefillResult.nativeSelectedLocalIndices);
+            hasNativeSelectedLocalIndices = prefillResult.hasNativeSelectedLocalIndices;
             traceInfo.executionMode = plan.executionMode;
             traceInfo.recomputeBudgetTokens = plan.recomputeTokenCount;
-            if (!nativePicPrefillDone && plan.sparseRecompute && plan.scoreLayerIdx > 0) {
-                error = "PIC sparse prefill score_layer_idx=" + std::to_string(plan.scoreLayerIdx) +
-                        " requires a graph-boundary PIC model with pic_recompute_budget; "
-                        "legacy forwardVec(selected_tokens) sparse recompute from layer 0 has been removed";
-                return false;
-            }
-
-            if (!nativePicPrefillDone) {
-                mLlm->reset();
-                mLlm->generate_init(&sink, "");
-            }
-            if (!nativePicPrefillDone && plan.fullCompute) {
-                picRequestProfileBegin("prefill_full_compute_pic_chat");
-                if (!mLlm->prefill(fullPromptTokenIds)) {
-                    mLlm->finishExternalPagedKVRequest();
-                    error = "Failed to prefill full-compute PIC chat request" + llmContextSuffix(mLlm.get());
-                    return false;
-                }
-                if (std::getenv("MNN_PIC_DECODE_DEBUG") != nullptr) {
-                    auto context = mLlm->getContext();
-                    std::fprintf(stderr, "PIC server prefill debug step=full_compute status=%d all_seq=%d\n",
-                                 context != nullptr ? static_cast<int>(context->status) : -999,
-                                 context != nullptr ? context->all_seq_len : -1);
-                    std::fflush(stderr);
-                }
-            } else if (!nativePicPrefillDone) {
-                mLlm->finishExternalPagedKVRequest();
-                error = "PIC " + pic.selectionAlgorithm +
-                        " requires a graph-boundary PIC model with pic_recompute_budget; "
-                        "legacy split prefix/append/suffix prefill has been removed";
-                return false;
-            }
         }
         if (pic.decodeRefine.enabled && maxTokens != 0) {
             std::vector<int> seedSelectedPicLocalIndices;

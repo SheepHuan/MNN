@@ -108,6 +108,7 @@ if (MNN_PIC_BUILD_SERVER)
     add_executable(pic_server
         ${CMAKE_CURRENT_LIST_DIR}/app/pic_server_main.cpp
         ${CMAKE_CURRENT_LIST_DIR}/app/pic_server.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/app/pic_server_prefill.cpp
     )
     target_include_directories(pic_server PRIVATE
         ${MNN_INCLUDES}

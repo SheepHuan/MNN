@@ -64,6 +64,7 @@ private:
     ErrorCode syncDecodeAttentionHeadIds();
     ErrorCode hydrateExternalSegments(int layerIndex, int kvLen);
     ErrorCode runCacheBlendScoring(int layerIndex, int kvLen);
+    ErrorCode runFusionRAGOnlineScoring(int layerIndex, int kvLen, const Tensor* query);
     bool canUseFastPrefill(const Tensor* mask, int baseLogical, int attnLen, int kvLen, bool sparseQuery,
                            bool externalHydrated, int* maskKeyLen) const;
     bool canUseSparseFastPrefill(const Tensor* mask, int attnLen, int kvLen, bool externalHydrated,
@@ -201,6 +202,9 @@ private:
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseRow128;
+    // PoC (x0 only, env MNN_PIC_DECODE_SPARSE_DCONTIG_K): d-continuous K read
+    // from key_cache via vload4 instead of transposed decode_key gathers.
+    std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKSparseDcontigRow128;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile1Row32;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile1Row64;
     std::shared_ptr<KernelWrap> mDecodeCausalKernelHD128TransposedKQTile1Row128;

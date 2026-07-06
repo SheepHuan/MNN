@@ -530,6 +530,7 @@ install_runtime_artifacts() {
     install_if_exists "${BUILD_DIR}/tools/converter/libMNNConvertDeps.so" "${lib_dir}"
 
     install_if_exists "${BUILD_DIR}/llm_demo" "${bin_dir}"
+    install_if_exists "${BUILD_DIR}/cacheclip_selector" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/pic_llm_demo" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/llm_bench" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/pic_llm_bench" "${bin_dir}"

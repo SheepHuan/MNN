@@ -317,6 +317,9 @@ bool Llm::load() {
     if (needHiddenState) {
         outputNames.emplace_back("hidden_states");
     }
+    if (mConfig->config_.value("cacheclip_query_attention", false)) {
+        outputNames.emplace_back("cacheclip_query_attention");
+    }
 
     mRuntimeManager->setExternalFile(weight_path);
     if (mConfig->has_deepstack()) {

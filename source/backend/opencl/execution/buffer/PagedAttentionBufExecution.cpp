@@ -1360,6 +1360,14 @@ ErrorCode PagedAttentionBufExecution::onExecute(const std::vector<Tensor*>& inpu
         }
         return err;
     }
+    err = runFusionRAGOnlineScoring(layerIndex, kvLen, query);
+    if (err != NO_ERROR) {
+        if (_picOpenCLDebug()) {
+            MNN_PRINT("PIC OpenCL PA exec fail fusionrag scoring layer=%d err=%d kv_len=%d\n",
+                      layerIndex, static_cast<int>(err), kvLen);
+        }
+        return err;
+    }
     if ((scoreAttention || picDecodeRecompute) && outputs.size() > 1) {
         err = picDecodeRecompute ? _emitDecodeRecomputeIndicesOpenCL(mMeta, attnLen, outputs[1], mOpenCLBackend)
                                  : _emitActiveIndicesOpenCL(mMeta, layerIndex, kvLen, outputs[1], mOpenCLBackend);

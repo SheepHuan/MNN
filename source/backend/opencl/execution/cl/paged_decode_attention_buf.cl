@@ -1146,6 +1146,149 @@ DEFINE_DECODE_CAUSAL_TRANSPOSED_K_SPARSE_HD128(decode_causal_attention_hd128_tra
 DEFINE_DECODE_CAUSAL_TRANSPOSED_K_SPARSE_HD128(decode_causal_attention_hd128_transposed_k_sparse_row64, 64)
 DEFINE_DECODE_CAUSAL_TRANSPOSED_K_SPARSE_HD128(decode_causal_attention_hd128_transposed_k_sparse_row128, 128)
 
+// ============================================================================
+// d-continuous K variant (PoC, x0 only). Same fused QK+softmax+QKV body as the
+// sparse row128 macro above, but K is read from key_cache ([max_slots,batch,
+// kvh,128], head_dim stride-1) via vload4 instead of decode_key ([b,kvh,128,
+// max_slots], head_dim striding across key_max_len rows). The sparse kernel's
+// parallel shape scatters slots across lanes and sweeps d contiguously, which
+// is the opposite of decode_key's transposed layout — so decode_key forces 4
+// non-coalesced 16B gathers per K-tile while key_cache is one coalesced vload4.
+// key_cache is already written by append_sparse_decode_key_value_hd128, so this
+// only changes the read path. decode_key stays in the signature (unused) so the
+// host arg order is a superset of the original sparse kernel and append still
+// writes it for the other (qtile/readonly/fused_kv) paths. Gated host-side by
+// MNN_PIC_DECODE_SPARSE_DCONTIG_K (default off); slot_identity assumed
+// (slot == logical), matching the V read below.
+// ============================================================================
+__kernel void decode_causal_attention_hd128_transposed_k_sparse_dcontig_row128(GLOBAL_SIZE_3_DIMS
+                              __global const FLOAT *query,
+                              __global const FLOAT *value_cache,
+                              __global const FLOAT *decode_key,
+                              __global const FLOAT *key_cache,
+                              __global const int *sparse_query,
+                              __global FLOAT *output,
+                              __private const float scale,
+                              __private const int batch,
+                              __private const int query_seq_len,
+                              __private const int output_seq_len,
+                              __private const int key_seq_len,
+                              __private const int key_max_len,
+                              __private const int head_num,
+                              __private const int kv_head_num,
+                              __private const int head_dim) {
+    const int x = get_global_id(0);
+    const int y = get_global_id(1);
+    int z = get_global_id(2);
+    DEAL_NON_UNIFORM_DIM3(x, y, z);
+    const int lid = get_local_id(0);
+    if (get_local_size(0) != 128 || lid >= 128 || head_dim != 128) {
+        return;
+    }
+    const int q_index = y;
+    if (q_index >= output_seq_len) {
+        return;
+    }
+    const int b = z / head_num;
+    const int h = z - b * head_num;
+    if (b >= batch) {
+        return;
+    }
+    const int kvh = h / NUMHEAD_GROUP_SIZE;
+    if (kvh >= kv_head_num) {
+        return;
+    }
+    const int q_logical = sparse_query[q_index];
+    const int q_row = q_index;
+    if (q_row < 0 || q_row >= query_seq_len || q_logical < 0 || q_logical >= key_seq_len ||
+        q_logical >= key_max_len) {
+        return;
+    }
+    const int active_kv_seq_len = min(clamp(q_logical + 1, 0, key_seq_len), key_max_len);
+    COMPUTE_FLOAT local local_q[128];
+    COMPUTE_FLOAT local score_tile[128];
+    COMPUTE_FLOAT local reduce[128];
+    const int out_d4 = lid << 2;
+    COMPUTE_FLOAT4 out4 = (COMPUTE_FLOAT4)0;
+    for (int d = lid; d < 128; d += 128) {
+        const int query_offset = ((b * query_seq_len + q_row) * head_num + h) * 128 + d;
+        local_q[d] = (COMPUTE_FLOAT)query[query_offset];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    COMPUTE_FLOAT running_m = (COMPUTE_FLOAT)-FLT_MAX;
+    COMPUTE_FLOAT running_l = (COMPUTE_FLOAT)0;
+    for (int k_start = 0; k_start < active_kv_seq_len; k_start += 128) {
+        const int tile_count = min(128, active_kv_seq_len - k_start);
+        COMPUTE_FLOAT score = (COMPUTE_FLOAT)-FLT_MAX;
+        if (lid < tile_count) {
+            const int k = k_start + lid;
+            score = (COMPUTE_FLOAT)0;
+            for (int d4 = 0; d4 < 128; d4 += 4) {
+                COMPUTE_FLOAT4 qv = (COMPUTE_FLOAT4)(local_q[d4], local_q[d4 + 1], local_q[d4 + 2], local_q[d4 + 3]);
+                // d-continuous K read: key_cache [max_slots, batch, kvh, 128], d stride-1.
+                const int key_offset = ((k * batch + b) * kv_head_num + kvh) * 128 + d4;
+                COMPUTE_FLOAT4 kv = CONVERT_COMPUTE_FLOAT4(vload4(0, key_cache + key_offset));
+                score += dot(qv, kv);
+            }
+            score *= (COMPUTE_FLOAT)scale;
+        }
+        score_tile[lid] = score;
+        reduce[lid] = score;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int stride = 128 >> 1; stride > 0; stride >>= 1) {
+            if (lid < stride) {
+                reduce[lid] = fmax(reduce[lid], reduce[lid + stride]);
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        const COMPUTE_FLOAT tile_m = reduce[0];
+        COMPUTE_FLOAT tile_l_part = (COMPUTE_FLOAT)0;
+        if (lid < tile_count && tile_m != (COMPUTE_FLOAT)-FLT_MAX) {
+            tile_l_part = exp(score_tile[lid] - tile_m);
+        }
+        score_tile[lid] = tile_l_part;
+        reduce[lid] = tile_l_part;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int stride = 128 >> 1; stride > 0; stride >>= 1) {
+            if (lid < stride) {
+                reduce[lid] += reduce[lid + stride];
+            }
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        const COMPUTE_FLOAT tile_l = reduce[0];
+        if (tile_l > (COMPUTE_FLOAT)0) {
+            const COMPUTE_FLOAT new_m = running_l > (COMPUTE_FLOAT)0 ? fmax(running_m, tile_m) : tile_m;
+            const COMPUTE_FLOAT old_scale = running_l > (COMPUTE_FLOAT)0 ? exp(running_m - new_m) : (COMPUTE_FLOAT)0;
+            const COMPUTE_FLOAT tile_scale = exp(tile_m - new_m);
+            if (lid < 32) {
+                COMPUTE_FLOAT4 tile_out4 = (COMPUTE_FLOAT4)0;
+                for (int kk = 0; kk < tile_count; ++kk) {
+                    const COMPUTE_FLOAT tile_weight = score_tile[kk];
+                    if (tile_weight == (COMPUTE_FLOAT)0) {
+                        continue;
+                    }
+                    const int value_logical = k_start + kk;
+                    const int value_slot = value_logical;
+                    if (value_slot < 0 || value_slot >= key_max_len) {
+                        continue;
+                    }
+                    const int value_offset = ((b * kv_head_num + kvh) * key_max_len + value_slot) * 128 + out_d4;
+                    tile_out4 += (COMPUTE_FLOAT4)tile_weight * CONVERT_COMPUTE_FLOAT4(vload4(0, value_cache + value_offset));
+                }
+                out4 = out4 * (COMPUTE_FLOAT4)old_scale + tile_out4 * (COMPUTE_FLOAT4)tile_scale;
+            }
+            running_l = running_l * old_scale + tile_l * tile_scale;
+            running_m = new_m;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const COMPUTE_FLOAT inv_l = running_l > (COMPUTE_FLOAT)0 ? (COMPUTE_FLOAT)1 / running_l : (COMPUTE_FLOAT)0;
+    const int output_offset = ((b * output_seq_len + q_index) * head_num + h) * 128;
+    if (lid < 32) {
+        vstore4(CONVERT_FLOAT4(out4 * (COMPUTE_FLOAT4)inv_l), 0, output + output_offset + out_d4);
+    }
+}
+
 // Disabled after Rhino/Adreno A/B on 2026-07-05. Sharing one workgroup across a
 // GQA group reduced parallelism and regressed every tested x0 model/context.
 

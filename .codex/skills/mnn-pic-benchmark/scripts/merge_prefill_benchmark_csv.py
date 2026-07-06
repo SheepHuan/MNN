@@ -35,6 +35,8 @@ MODE_ORDER = {
     "full-reuse": 2,
     "cacheblend": 3,
     "epic": 4,
+    "fusionrag_online": 5,
+    "cacheclip": 6,
 }
 
 
