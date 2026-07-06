@@ -382,6 +382,7 @@ jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,4.829271,530.1007129233377
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,6.467203,395.8434581379307
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,1.7016567559097209,300.88324112478267
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.102892,4976.09143568013
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.302362,1693.3344798618873
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.10,0.391561,1307.5868127826827
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.20,0.634136,807.3977821792171
@@ -407,6 +408,7 @@ jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheclip,0
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheclip,0.40,4.150293,123.36478412487988
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheclip,0.50,4.42684,115.65812182053112
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-full-recompute,full,5.823444276550116,175.8409544886434
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,full-reuse,0,0.11882,8618.07776468608
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.05,0.775139,1321.0533852638043
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.10,1.104753,926.9040228901845
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheblend,0.20,1.919621,533.4386318966087
@@ -432,6 +434,7 @@ jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheclip,
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheclip,0.40,8.721908,117.40550347469842
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,cacheclip,0.50,8.938035,114.56656860260674
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-full-recompute,full,12.607065867748426,121.83643808266417
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,full-reuse,0,0.133098,11540.368750845242
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.05,1.488172,1032.1387581542992
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.10,2.284385,672.3910374126954
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheblend,0.20,3.817427,402.3652580651837
@@ -457,6 +460,7 @@ jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheclip,
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheclip,0.40,14.158771,108.48399200749839
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,cacheclip,0.50,15.025907,102.2234464781394
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-full-recompute,full,21.260777424024127,96.32761583242075
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,full-reuse,0,0.154641,13243.577059124036
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.05,2.289911,894.3579029927364
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.10,3.843947,532.7857017799673
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,cacheblend,0.20,6.514661,314.3678542904995
