@@ -18,6 +18,7 @@ MNN 专属 Codex skills 由本目录维护：
 .codex/skills/mnn-pic-benchmark/SKILL.md  本机交叉编译 MNN PIC server 产物、推到 Jetson/OrangePi/AidLux 启服务，并从本机跑数据集 benchmark
 .codex/skills/mnn-support-new-llm/SKILL.md  在 transformers/pic_llm 中适配新 LLM 模型
 .codex/skills/mnn-git-commit-message/SKILL.md  从当前工作区 diff 起草准确的 MNN commit message
+.codex/skills/mnn-kvshare-io-overlap-bench/SKILL.md  在设备上测 KVShare 异步 layer-wise hydrate、IO/compute overlap、prefill 上升阈值和隐藏 IO 延迟
 ```
 
 上游 MNN 原生 skills 仍保留在 `skills/`，不要和 Codex skills 混放。Codex 不打开、不阅读、不引用 `skills/` 下的内容；即使任务看起来匹配，也不要读取 `skills/*/SKILL.md` 或把其中内容作为依据。需要新增或调整工作流时，在 `.codex/skills/` 中维护对应 Codex skill。
@@ -49,6 +50,7 @@ git status --short
 - 从 ModelScope 或 Hugging Face/Transformers 格式模型导出 MNN LLM、PIC LLM PagedAttention 或 PrefixLLM/PrefixAttention 模型：读 `.codex/skills/mnn-llm-export/SKILL.md`。
 - 运行 `llm_bench` / `llm_demo` / `pic_llm_bench` / `pic_llm_demo`、测试 CUDA/OpenCL/Vulkan/CPU LLM 推理、比较普通 MNN LLM 与 PIC/PagedAttention LLM 输出、确认 GPU 后端注册、检查 execution class 日志、排查后端回退，或围绕 LLM bench 采集 DF power / Jetson `tegrastats` 功耗：读 `.codex/skills/mnn-llm-bench/SKILL.md`。
 - 本机交叉编译 MNN `pic_server` / `libpic_llm` / CUDA/OpenCL artifact，推送到 Jetson、Orange Pi 5 Plus 或 AidLux/Adreno，远端启动 MNN PIC server，并从本机运行 `impl/pic_bench/cli.py` 数据集 benchmark 向目标设备发请求：读 `.codex/skills/mnn-pic-benchmark/SKILL.md`。
+- 在 Jetson、Orange Pi 5 Plus、AidLux/Adreno 等设备上做 KVShare / PIC PagedAttention 异步 layer-wise hydrate、磁盘 KV cache 读取与 GPU/OpenCL/CUDA sparse compute overlap 实验，绘制 IO timeline / latency breakdown，计算 overlap ratio、hidden IO latency、future 阻塞时间、prefill 上升阈值或不同模型/设备/上下文的 KV cache 加载阈值表：读 `.codex/skills/mnn-kvshare-io-overlap-bench/SKILL.md`。
 - 新增、适配或诊断一个尚未支持的 Hugging Face/ModelScope LLM 或多模态 LLM 模型，并修改 `transformers/pic_llm` 的 mapper/config/model/vision/audio/export 流程：读 `.codex/skills/mnn-support-new-llm/SKILL.md`。
 - 从当前工作区 staged/unstaged diff 起草准确的 MNN commit message：读 `.codex/skills/mnn-git-commit-message/SKILL.md`。
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MNN KVShare IO Overlap Bench"
+  short_description: "Benchmark KVShare IO overlap"
+  default_prompt: "Use $mnn-kvshare-io-overlap-bench to design or run a KVShare IO overlap experiment across MNN devices."

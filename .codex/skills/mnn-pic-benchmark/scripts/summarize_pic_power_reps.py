@@ -24,6 +24,8 @@ OUTPUT_FIELDS = [
     "model_key",
     "model",
     "context_tokens",
+    "generated_tokens",
+    "step_tokens",
     "algorithm",
     "case_label",
     "budget",
@@ -59,6 +61,12 @@ OUTPUT_FIELDS = [
     "prefill_latency_s",
     "kept_prefill_latency_s",
     "kept_prefill_tps",
+    "decode_tpot_ms",
+    "decode_tps",
+    "kept_decode_tpot_ms",
+    "kept_decode_tps",
+    "load_kv_time_s",
+    "kept_load_kv_time_s",
     "detected_rep_windows_s",
     "selected_rep_windows_s",
     "power_csv",
@@ -759,9 +767,9 @@ def selected_rep_indices(rep_total: int, drop_first: int, drop_last: int) -> lis
 def summarize_repetition_results(
     repetition_results: list[dict[str, Any]],
     selected_indices: list[int],
-) -> tuple[float, float]:
+) -> tuple[float, float, float, float, float]:
     if not repetition_results or not selected_indices:
-        return math.nan, math.nan
+        return math.nan, math.nan, math.nan, math.nan, math.nan
     selected = []
     selected_set = set(selected_indices)
     for item in repetition_results:
@@ -770,11 +778,47 @@ def summarize_repetition_results(
             selected.append(item)
     latencies = [to_float(item.get("prefill_latency_s")) for item in selected]
     tps_values = [to_float(item.get("prefill_tps")) for item in selected]
+    decode_tpot_values = [to_float(item.get("decode_tpot_ms")) for item in selected]
+    decode_tps_values = [to_float(item.get("decode_tps")) for item in selected]
+    load_kv_values = [to_float(item.get("load_kv_time_s")) for item in selected]
     latencies = [item for item in latencies if math.isfinite(item)]
     tps_values = [item for item in tps_values if math.isfinite(item)]
+    decode_tpot_values = [item for item in decode_tpot_values if math.isfinite(item)]
+    decode_tps_values = [item for item in decode_tps_values if math.isfinite(item)]
+    load_kv_values = [item for item in load_kv_values if math.isfinite(item)]
     latency = sum(latencies) / len(latencies) if latencies else math.nan
     tps = sum(tps_values) / len(tps_values) if tps_values else math.nan
-    return latency, tps
+    decode_tpot = sum(decode_tpot_values) / len(decode_tpot_values) if decode_tpot_values else math.nan
+    decode_tps = sum(decode_tps_values) / len(decode_tps_values) if decode_tps_values else math.nan
+    load_kv = sum(load_kv_values) / len(load_kv_values) if load_kv_values else math.nan
+    return latency, tps, decode_tpot, decode_tps, load_kv
+
+
+def decode_wall_seconds_by_rep(repetition_results: list[dict[str, Any]]) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for item in repetition_results:
+        rep_index = to_int(item.get("rep_index"), 0)
+        value = to_float(item.get("decode_wall_s"))
+        if rep_index > 0 and math.isfinite(value) and value > 0:
+            out[rep_index] = value
+    return out
+
+
+def extend_windows_to_decode_wall(
+    rep_windows: list[tuple[float, float]],
+    repetition_results: list[dict[str, Any]],
+    capture_end_s: float,
+) -> list[tuple[float, float]]:
+    decode_wall_by_rep = decode_wall_seconds_by_rep(repetition_results)
+    if not decode_wall_by_rep:
+        return rep_windows
+    adjusted: list[tuple[float, float]] = []
+    for index, (start, end) in enumerate(rep_windows, start=1):
+        decode_wall_s = decode_wall_by_rep.get(index, math.nan)
+        if math.isfinite(decode_wall_s) and decode_wall_s > 0 and end - start < decode_wall_s:
+            end = min(capture_end_s, start + decode_wall_s)
+        adjusted.append((start, end))
+    return adjusted
 
 
 def base_output(meta: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -788,6 +832,8 @@ def base_output(meta: dict[str, Any], args: argparse.Namespace) -> dict[str, Any
         "model_key": meta.get("model_key", ""),
         "model": meta.get("model", ""),
         "context_tokens": meta.get("context_tokens", ""),
+        "generated_tokens": meta.get("generated_tokens", ""),
+        "step_tokens": meta.get("step_tokens", ""),
         "algorithm": meta.get("algorithm", ""),
         "case_label": meta.get("case_label", ""),
         "budget": meta.get("budget", ""),
@@ -797,6 +843,9 @@ def base_output(meta: dict[str, Any], args: argparse.Namespace) -> dict[str, Any
         "drop_first": str(max(args.drop_first, 0)),
         "drop_last": str(max(args.drop_last, 0)),
         "prefill_latency_s": meta.get("prefill_latency_s", ""),
+        "decode_tpot_ms": meta.get("decode_tpot_ms", ""),
+        "decode_tps": meta.get("decode_tps", ""),
+        "load_kv_time_s": meta.get("load_kv_time_s", ""),
         "power_csv": meta.get("power_csv", ""),
         "power_txt": meta.get("power_txt", ""),
         "power_png": meta.get("power_png", ""),
@@ -864,7 +913,8 @@ def summarize_case(row: dict[str, Any], args: argparse.Namespace) -> dict[str, A
         out["error"] = f"detected {len(rep_windows)} rep windows for expected {rep_total}"
         return out
 
-    rep_windows = rep_windows[:rep_total]
+    rep_windows = extend_windows_to_decode_wall(rep_windows[:rep_total], repetition_results, samples[-1][0])
+    out["detected_rep_windows_s"] = json_windows(rep_windows)
     selected_windows = [rep_windows[index - 1] for index in selected_indices]
     base_power, base_method = identify_base_power(
         samples,
@@ -892,7 +942,10 @@ def summarize_case(row: dict[str, Any], args: argparse.Namespace) -> dict[str, A
         if math.isfinite(energy_per_inference_j) and token_count > 0
         else math.nan
     )
-    kept_latency_s, kept_tps = summarize_repetition_results(repetition_results, selected_indices)
+    kept_latency_s, kept_tps, kept_decode_tpot_ms, kept_decode_tps, kept_load_kv_time_s = summarize_repetition_results(
+        repetition_results,
+        selected_indices,
+    )
 
     out.update(
         {
@@ -916,6 +969,9 @@ def summarize_case(row: dict[str, Any], args: argparse.Namespace) -> dict[str, A
             "mj_per_token": fmt_float(mj_per_token, 6),
             "kept_prefill_latency_s": fmt_float(kept_latency_s, 6),
             "kept_prefill_tps": fmt_float(kept_tps, 6),
+            "kept_decode_tpot_ms": fmt_float(kept_decode_tpot_ms, 6),
+            "kept_decode_tps": fmt_float(kept_decode_tps, 6),
+            "kept_load_kv_time_s": fmt_float(kept_load_kv_time_s, 6),
             "selected_rep_windows_s": json_selected_windows(rep_windows, selected_indices),
         }
     )

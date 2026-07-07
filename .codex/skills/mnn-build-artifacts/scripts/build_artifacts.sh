@@ -531,6 +531,7 @@ install_runtime_artifacts() {
 
     install_if_exists "${BUILD_DIR}/llm_demo" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/cacheclip_selector" "${bin_dir}"
+    install_if_exists "${BUILD_DIR}/normal_decode_kv_bench" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/pic_llm_demo" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/llm_bench" "${bin_dir}"
     install_if_exists "${BUILD_DIR}/pic_llm_bench" "${bin_dir}"

@@ -1,1 +1,121 @@
 device,device_display,model,backend,frequency_profile,context_tokens,mode,budget,decode_selector,repair_tokens,generated_tokens,decode_latency_s,decode_tpot_ms,decode_tps,benchmark_status
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,20.821742,162.669859,6.147420,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,11.688096,91.313250,10.951313,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,6.329192,49.446813,20.223751,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,6.620083,51.719398,19.335105,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,5.172536,40.410438,24.746082,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,15.771874,123.217766,8.115713,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,12.430698,97.114828,10.297089,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,6.433088,50.258500,19.897132,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,7.081048,55.320687,18.076420,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,5.472760,42.755938,23.388564,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv,128,true-normal-llm,0,128,16.414189,128.235852,7.798131,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,13.809044,107.883156,9.269288,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,7.145632,55.825250,17.913041,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,7.591896,59.311687,16.860083,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,5.841589,45.637414,21.911846,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,16.928087,132.250680,7.561398,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,15.143351,118.307430,8.452555,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,7.804541,60.972977,16.400708,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,8.086968,63.179437,15.827935,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,6.205951,48.483992,20.625364,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,5.267748,41.154281,24.298809,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,4.870051,38.047273,26.283092,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.085739,24.107336,41.481149,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,2.450856,19.147313,52.226651,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.880446,14.690984,68.068958,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,5.680865,44.381758,22.531780,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,6.222588,48.613969,20.570219,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.189146,24.915203,40.136137,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,2.925305,22.853945,43.756121,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.229564,17.418469,57.410328,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv,128,true-normal-llm,0,128,6.069868,47.420844,21.087773,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,7.575229,59.181477,16.897179,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.890020,30.390781,32.904715,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.407937,26.624508,37.559380,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.578519,20.144680,49.640899,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,6.399284,49.994406,20.002238,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,8.892025,69.468945,14.394921,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,4.521737,35.326070,28.307706,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.860031,30.156492,33.160355,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.915513,22.777445,43.903080,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,24.787616,193.653250,5.163869,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,14.780923,115.475961,8.659811,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,8.024971,62.695086,15.950213,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,8.482333,66.268227,15.090188,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,6.609279,51.634992,19.366712,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,20.013058,156.352016,6.395824,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,15.832095,123.688242,8.084843,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,8.198887,64.053805,15.611875,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,9.083880,70.967812,14.090895,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.034266,54.955203,18.196639,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv,128,true-normal-llm,0,128,20.798559,162.488742,6.154273,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,17.490263,136.642680,7.318358,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,9.043443,70.651898,14.153901,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,9.665411,75.511023,13.243100,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.483122,58.461891,17.105160,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,21.539783,168.279555,5.942493,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,19.124169,149.407570,6.693101,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,9.875588,77.153031,12.961254,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,10.266349,80.205852,12.467918,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.944836,62.069031,16.111094,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,10.708106,83.657078,11.953561,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,6.247310,48.807109,20.488818,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.669306,28.666453,34.883981,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.659782,28.592047,34.974761,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.888122,22.563453,44.319457,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,7.213029,56.351789,17.745666,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,5.776909,45.132102,22.157178,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.062583,23.926430,41.794786,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.325768,25.982563,38.487351,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.512331,19.627586,50.948701,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv,128,true-normal-llm,0,128,7.676289,59.971008,16.674724,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,6.091562,47.590328,21.012673,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.299830,25.779922,38.789877,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.521785,27.513945,36.345206,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.686077,20.984977,47.653139,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,7.942236,62.048719,16.116368,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,6.636948,51.851156,19.285973,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.533488,27.605375,36.224829,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.817574,29.824797,33.529147,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.894385,22.612383,44.223557,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,6.558934,51.241672,19.515366,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,3.452528,26.972875,37.074283,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.026740,15.833906,63.155610,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.813974,14.171672,70.563305,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.468323,11.471273,87.174280,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,3.064271,23.939617,41.771762,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,2.886769,22.552883,44.340230,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,1.576033,12.312758,81.216574,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.447396,11.307781,88.434679,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.088378,8.502953,117.606199,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv,128,true-normal-llm,0,128,3.386369,26.456008,37.798598,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,3.340440,26.097188,38.318305,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,1.773291,13.853836,72.182174,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.636302,12.783609,78.225169,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.216133,9.501039,105.251646,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,3.712358,29.002797,34.479433,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,3.850612,30.082906,33.241469,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.015480,15.745938,63.508445,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.796272,14.033375,71.258696,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.351105,10.555508,94.737271,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,12.809761,100.076258,9.992380,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,10.678625,83.426758,11.986562,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,5.947712,46.466500,21.520881,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,5.626229,43.954914,22.750585,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,4.348263,33.970805,29.437042,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,9.211977,71.968570,13.894954,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,13.144194,102.689016,9.738140,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,6.790806,53.053172,18.849014,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,6.191357,48.369977,20.673981,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,4.643684,36.278781,27.564322,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv,128,true-normal-llm,0,128,9.944846,77.694109,12.870989,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,16.485760,128.795000,7.764277,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,8.538334,66.705734,14.991215,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,7.422258,57.986391,17.245426,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,5.551283,43.369398,23.057733,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,10.345104,80.821125,12.373003,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,19.634023,153.390805,6.519296,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,10.251834,80.092453,12.485571,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,8.641045,67.508164,14.813023,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,6.377296,49.822625,20.071203,ok
