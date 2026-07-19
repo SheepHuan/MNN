@@ -381,6 +381,20 @@ jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,3.411563,750.3891911126952
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,4.829271,530.1007129233377
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,6.467203,395.8434581379307
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,26.97767820998775,113.8719194471923
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.234139,13120.41137956513
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,3.063095,1002.9071902765013
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,4.895356,627.5335236089061
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,8.21089,374.13727379126993
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,11.095618,276.8660564918511
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,13.270152,231.49697154938391
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,15.432737,199.05736746501933
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,1.259734,2438.6100557736795
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,1.551167,1980.4444008930052
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,2.042241,1504.2299121406336
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,3.197212,960.8371293489453
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,4.29779,714.7859713946004
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,5.456932,562.9536889959413
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,1.7016567559097209,300.88324112478267
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.102892,4976.09143568013
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.302362,1693.3344798618873
@@ -1103,6 +1117,20 @@ rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,2.
 rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,3.512661,728.7922176378535
 rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,4.379194,584.5824596946379
 rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,5.553464,460.97354732109545
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,10.218818784985144,300.62182964960624
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.875815,3507.5900732460623
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,1.946568,1578.1621808228635
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,2.594392,1184.0924578860865
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,3.650493,841.530171404246
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,5.114945,600.5929682528356
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,6.166621,498.16585128225
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,7.917041,388.02375786610173
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,1.644146,1868.4472060267153
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,2.154676,1425.7363984190663
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,3.042286,1009.7669975801092
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,4.499537,682.7369127090187
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,5.740568,535.1386831407624
+rhino,Rhino Pi X1,Llama3.2 1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,7.549628,406.90746616919404
 rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,1.1390839904817882,449.4839750872488
 rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.289987,1765.596388803636
 rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.378844,1351.4797647580533
@@ -1221,6 +1249,20 @@ rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,1.
 rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,2.963322,863.8953174849038
 rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,3.895751,657.1261869662615
 rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,5.038198,508.1181803494027
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,10.386522356562665,295.7679090787278
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,0.58814,5223.2461658788725
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,1.880772,1633.3718281641793
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,2.318573,1324.9528912826984
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,3.34822,917.502434129179
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,5.006259,613.631855643106
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,5.929868,518.0553766120933
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,6.973143,440.5473973500902
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,1.422316,2159.857584390529
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,1.753569,1751.8557866841852
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,2.591328,1185.4925351016932
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,4.001178,767.7738905892214
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,5.251035,585.027523145437
+rhino,Rhino Pi X1,MiniCPM5-1B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,6.991828,439.3700760373396
 rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,4.38106414234266,116.86658386293823
 rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.633926,807.6652479942454
 rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,0.862891,593.3542011679343
@@ -1339,6 +1381,20 @@ rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.20,5.
 rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.30,8.544156,299.6199975749507
 rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.40,10.609695,241.28874581220288
 rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",2560,epic,0.50,13.36293,191.57475194437149
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,normal-full-recompute,full,28.223089057258235,108.84705050420278
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,full-reuse,0,1.085495,2830.0452788819844
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.05,4.21366,729.0573990307713
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.10,5.660091,542.7474575938796
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.20,8.45276,363.43158920873185
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.30,12.583083,244.13730720841625
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.40,14.583167,210.65383122884077
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,cacheblend,0.50,17.358201,176.97686528690386
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.05,3.349471,917.159754480633
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.10,4.529027,678.2913857656401
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.20,6.707933,457.9652181976177
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.30,10.574244,290.51722279153006
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.40,13.401542,229.22735309115922
+rhino,Rhino Pi X1,Llama3.2 3B,OpenCL,"cpu=max,gpu=max,ddr=max",3072,epic,0.50,17.410342,176.44684980915366
 rhino,Rhino Pi X1,Qwen3-4B,OpenCL,"cpu=max,gpu=max,ddr=max",512,normal-full-recompute,full,5.322436495453034,96.19654465345006
 rhino,Rhino Pi X1,Qwen3-4B,OpenCL,"cpu=max,gpu=max,ddr=max",512,full-reuse,0,0.847626,604.0399893349189
 rhino,Rhino Pi X1,Qwen3-4B,OpenCL,"cpu=max,gpu=max,ddr=max",512,cacheblend,0.05,1.138201,449.83267454518136
