@@ -2457,6 +2457,45 @@ def prefill_text_cache(
     return status, response, elapsed
 
 
+def evict_document_kv_from_page_cache(device: dict[str, Any], doc_id: str) -> dict[str, Any]:
+    """Evict only this request's persistent .k/.v files after warmup."""
+    cache_root = shared_kv_dir(device)
+    script = f"""
+set -e
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path({cache_root!r})
+doc_id = {doc_id!r}
+cache_object_id = "doc_" + doc_id
+paths = sorted(
+    path for path in root.glob(f"objects/**/{{cache_object_id}}/layers/*")
+    if path.is_file() and path.suffix in {{".k", ".v"}}
+)
+if not paths:
+    raise SystemExit(f"no persistent KV files found for {{cache_object_id}} under {{root}}")
+os.sync()
+evicted_bytes = 0
+for path in paths:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
+    evicted_bytes += path.stat().st_size
+print(json.dumps({{"doc_id": doc_id, "cache_object_id": cache_object_id, "file_count": len(paths), "evicted_bytes": evicted_bytes}}))
+PY
+""".strip()
+    result = ssh(device, script, timeout=120)
+    for line in reversed((result.stdout or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            return json.loads(line)
+    raise RuntimeError(f"failed to parse persistent KV eviction result: {result.stdout!r}")
+
+
 def tail_server_log(device: dict[str, Any], run_id: str, label: str, local_raw: Path) -> str:
     remote_run = f"{device['remote_cache_root']}/{run_id}"
     log = ""
@@ -2664,7 +2703,7 @@ def run_device(
                                         error=warm_response.get("error", warm_response.get("error_body", "")),
                                     ),
                                 )
-                            elif str(device.get("backend", "")).lower() == "opencl":
+                            else:
                                 tune_status, tune_response, tune_elapsed = post_json(base_url, "/v1/tune/update_cache", {}, timeout=120)
                                 write_json(
                                     local_raw / f"update_runtime_cache_ctx{ctx}_{mode}_{budget.replace('.', 'p')}.json",
@@ -2673,6 +2712,11 @@ def run_device(
                         if not warm_ok:
                             continue
 
+                        if args.evict_document_kv_before_measure:
+                            write_json(
+                                local_raw / f"evict_kv_ctx{ctx}_{mode}_{budget.replace('.', 'p')}.json",
+                                evict_document_kv_from_page_cache(device, doc_id),
+                            )
                         print(f"[measure] {device_name} ctx={ctx} {mode} {budget}", flush=True)
                         measure_status, measure_response, row = run_with_power_capture(
                             args,
@@ -2781,7 +2825,7 @@ def run_device(
                                 ),
                             )
                     measure_specs = warm_success
-                    if str(device.get("backend", "")).lower() == "opencl" and warm_success:
+                    if warm_success:
                         tune_status, tune_response, tune_elapsed = post_json(base_url, "/v1/tune/update_cache", {}, timeout=120)
                         write_json(
                             local_raw / f"update_runtime_cache_ctx{ctx}.json",
@@ -2789,6 +2833,11 @@ def run_device(
                         )
 
                 for mode, budget, ratio in measure_specs:
+                    if args.evict_document_kv_before_measure:
+                        write_json(
+                            local_raw / f"evict_kv_ctx{ctx}_{mode}_{budget.replace('.', 'p')}.json",
+                            evict_document_kv_from_page_cache(device, doc_id),
+                        )
                     print(f"[measure] {device_name} ctx={ctx} {mode} {budget}", flush=True)
                     measure_status, measure_response, row = run_with_power_capture(
                         args,
@@ -2924,6 +2973,11 @@ def main() -> int:
     parser.add_argument("--no-warm", action="store_true")
     parser.add_argument("--restart-server-each-spec", action="store_true")
     parser.add_argument("--force-cache-build", action="store_true")
+    parser.add_argument(
+        "--evict-document-kv-before-measure",
+        action="store_true",
+        help="After warmup, evict only the selected persistent .k/.v files from the OS page cache before each measured PIC request.",
+    )
     parser.add_argument("--normal-rep", type=int, default=3)
     parser.add_argument(
         "--power-capture",
@@ -3120,6 +3174,7 @@ def main() -> int:
                 for device in device_contexts
             },
             "force_cache_build": bool(args.force_cache_build),
+            "evict_document_kv_before_measure": bool(args.evict_document_kv_before_measure),
             "restart_server_each_spec": bool(args.restart_server_each_spec),
             "benchmark_csv": args.benchmark_csv,
             "only_benchmark_csv_rows": bool(args.only_benchmark_csv_rows),

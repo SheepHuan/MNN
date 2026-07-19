@@ -52,6 +52,22 @@ static uint64_t _nowUs() {
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+static bool _ioTraceExternal() {
+    return _envFlagEnabled("MNN_PAGED_ATTENTION_IO_TRACE", false);
+}
+
+static void _traceExternalLayerEvent(const PagedKVMeta* meta, const char* event, int layerIndex, int kvLen,
+                                     int asyncRead, int futureReady, int direct, size_t bytes, uint64_t us) {
+    if (!_ioTraceExternal()) {
+        return;
+    }
+    const auto generation = meta != nullptr ? static_cast<unsigned long long>(meta->request_generation) : 0ULL;
+    MNN_PRINT("MNNKVIO backend=opencl event=%s generation=%llu layer=%d kv_len=%d async=%d ready=%d "
+              "direct=%d bytes=%llu us=%llu\n",
+              event, generation, layerIndex, kvLen, asyncRead, futureReady, direct,
+              static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(us));
+}
+
 static bool _allowDirectPagedCacheOpenCL() {
     if (_legacyB863976OpenCL()) {
         return false;
@@ -767,6 +783,9 @@ static bool _readExternalLayerSegmentOpenCL(const PagedKVMeta* meta, const Paged
 static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
     const PagedKVMeta* meta, std::string requestKey, std::vector<PagedKVExternalSegment> segments, int layerIndex,
     int batch, int kvHeads, int headDim, int bytes, int kvLen, ExternalLayerMappedTarget target) {
+    const bool ioTrace = _ioTraceExternal();
+    const uint64_t readStartUs = ioTrace ? _nowUs() : 0;
+    size_t readBytes = 0;
     auto result = std::make_shared<ExternalLayerReadResult>();
     result->requestKey = std::move(requestKey);
     result->layerIndex = layerIndex;
@@ -775,6 +794,7 @@ static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
         target, batch, kvHeads, headDim, bytes, _externalLayerRequiredSlots(meta, kvLen));
     int sourceSlotCursor = _picCacheSourceSlotBase(meta, kvLen);
     for (size_t i = 0; i < segments.size(); ++i) {
+        readBytes += 2 * segments[i].tokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
         sourceSlotCursor = _alignPicCacheSourceSlots(sourceSlotCursor);
         const int sourceSlotStart = sourceSlotCursor;
         sourceSlotCursor += static_cast<int>(segments[i].tokenCount);
@@ -785,6 +805,14 @@ static std::shared_ptr<ExternalLayerReadResult> _readExternalLayerOpenCL(
             result->error = result->segments[i].error;
             break;
         }
+    }
+    if (ioTrace) {
+        bool direct = result->ok;
+        for (const auto& segment : result->segments) {
+            direct = direct && segment.directWritten;
+        }
+        _traceExternalLayerEvent(meta, "read", layerIndex, kvLen, 1, -1, direct ? 1 : 0, readBytes,
+                                 _nowUs() - readStartUs);
     }
     return result;
 }
@@ -874,7 +902,14 @@ static std::shared_ptr<ExternalLayerReadResult> _takeExternalLayerRead(const Pag
     if (!future.valid()) {
         return nullptr;
     }
-    return future.get();
+    const bool ready = future.wait_for(std::chrono::microseconds(0)) == std::future_status::ready;
+    const uint64_t waitStartUs = _ioTraceExternal() ? _nowUs() : 0;
+    auto result = future.get();
+    if (_ioTraceExternal()) {
+        _traceExternalLayerEvent(meta, "wait", layerIndex, kvLen, 1, ready ? 1 : 0, -1, 0,
+                                 _nowUs() - waitStartUs);
+    }
+    return result;
 }
 
 
@@ -913,7 +948,9 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         return NO_ERROR;
     }
     const bool profile = _profilePagedAttention();
+    const bool ioTrace = _ioTraceExternal();
     const uint64_t startUs = profile ? _nowUs() : 0;
+    uint64_t hydrateStartUs = 0;
     size_t totalTokens = 0;
     size_t directTokens = 0;
     size_t fallbackTokens = 0;
@@ -924,6 +961,10 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         _registerExternalLayerMappedTarget(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes,
                                            mCache->maxSlots, mCache->key, mCache->value, queue,
                                            _useAdrenoSourceSlotValueHydrate(mOpenCLBackend->getOpenCLRuntime()));
+    }
+    // Keep the asynchronous read window moving as each layer consumes its cache source.
+    if (!legacy) {
+        _scheduleExternalLayerReadsFrom(mMeta, layerIndex + 1, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
     }
     auto prefetched = legacy ? nullptr
                              : _takeExternalLayerRead(mMeta, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes, kvLen);
@@ -1000,14 +1041,24 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
                 return INVALID_VALUE;
             }
         } else {
+            const uint64_t readStartUs = ioTrace ? _nowUs() : 0;
             if (!_readExternalLayerSegmentOpenCL(mMeta, segment, layerIndex, mBatch, mKvNumHead, mHeadDim, mBytes,
                                                 kvLen, sourceSlotStart,
                                                 hasDirectTarget ? &directTarget : nullptr, syncRead)) {
+                if (ioTrace) {
+                    _traceExternalLayerEvent(mMeta, "read", layerIndex, kvLen, 0, -1, 0,
+                                             keySegmentBytes + valueSegmentBytes, _nowUs() - readStartUs);
+                }
                 MNN_ERROR("OpenCLPagedAttention failed to read persistent PIC cache files for layer %d: %s\n",
                           layerIndex, syncRead.error.c_str());
                 return INVALID_VALUE;
             }
             loadedSegment = &syncRead;
+            if (ioTrace) {
+                _traceExternalLayerEvent(mMeta, "read", layerIndex, kvLen, 0, -1,
+                                         loadedSegment->directWritten ? 1 : 0, keySegmentBytes + valueSegmentBytes,
+                                         _nowUs() - readStartUs);
+            }
         }
 
         cl::Buffer* sourceKeyBuffer = nullptr;
@@ -1073,6 +1124,9 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
             return INVALID_VALUE;
         }
         const int total = static_cast<int>(totalElements);
+        if (ioTrace && hydrateStartUs == 0) {
+            hydrateStartUs = _nowUs();
+        }
         uint32_t idx = 0;
         cl_int ret = CL_SUCCESS;
         if (loadedSegment != nullptr && loadedSegment->directWritten) {
@@ -1132,8 +1186,15 @@ ErrorCode PagedAttentionBufExecution::hydrateExternalSegments(int layerIndex, in
         }
     }
     mMeta->markExternalLayerLoaded(layerIndex);
-    if (profile) {
+    if (profile || ioTrace) {
         queue.finish();
+    }
+    if (ioTrace) {
+        _traceExternalLayerEvent(mMeta, "hydrate", layerIndex, kvLen, prefetched != nullptr ? 1 : 0, -1,
+                                 directSegments > 0 ? 1 : 0, 0,
+                                 hydrateStartUs > 0 ? _nowUs() - hydrateStartUs : 0);
+    }
+    if (profile) {
         MNN_PRINT("OpenCLPagedAttention profile op=hydrate layer=%d tokens=%d kv_len=%d async_read=%d "
                   "direct_segments=%d direct_tokens=%d fallback_tokens=%d us=%llu\n",
                   layerIndex, static_cast<int>(totalTokens), kvLen, prefetched != nullptr ? 1 : 0,

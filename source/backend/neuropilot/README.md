@@ -20,7 +20,7 @@ make -j4
         
 eg: 
 ```
-python3 llmexport.py --path /Users/xtjiang/.cache/modelscope/hub/models/Qwen/Qwen3-4B --export mnn --smooth --act_bit=16 --quant_block=0 --lm_quant_bit=16 --seperate_embed --quant_bit=4 --sym
+python3 llmexport.py --path /Users/xtjiang/.cache/modelscope/hub/models/Qwen/Qwen3-4B-Instruct-2507 --export mnn --smooth --act_bit=16 --quant_block=0 --lm_quant_bit=16 --seperate_embed --quant_bit=4 --sym
 ```
             
 ### 两步量化（相比前者快很多，但目前效果较差）

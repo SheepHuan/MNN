@@ -13,9 +13,19 @@ from typing import Any
 
 
 REPO = Path(__file__).resolve().parents[4]
-NO_PROXY_TARGETS = "192.168.101.113,192.168.101.227,127.0.0.1,localhost"
+NO_PROXY_TARGETS = "192.168.101.192,192.168.101.113,192.168.101.227,127.0.0.1,localhost"
 
 DEVICES: dict[str, dict[str, Any]] = {
+    "jetson": {
+        "display": "Jetson AGX Xavier",
+        "ssh": "jetson@192.168.101.192",
+        "artifact": "/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda",
+        "ld_library_path": "/home/jetson/code/kvshare-edge/impl/MNN/.cache/output/mnn/artifacts/jetson_cross_cuda/lib:/usr/local/cuda-12.2/targets/aarch64-linux/lib",
+        "bench_env": "",
+        "backend": "cuda",
+        "remote_cache_root": "/home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-pic-benchmark/normal_decode_chunk",
+        "remote_run_root": "/home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-pic-benchmark/normal_decode_chunk",
+    },
     "orangepi": {
         "display": "Orange Pi 5 Plus",
         "ssh": "orangepi@192.168.101.113",
@@ -42,6 +52,9 @@ MODELS: dict[str, dict[str, Any]] = {
     "llama3.2-3b": {
         "name": "Llama3.2 3B",
         "normal_config": {
+            "jetson": [
+                "/home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-llm-export/AI-ModelScope__Llama-3___2-3B-Instruct/config_cuda_greedy.json",
+            ],
             "orangepi": [
                 "/mnt/ssd/code/.cache/mnn_opencl_pic/models/normal/AI-ModelScope__Llama-3___2-3B-Instruct/config_opencl_greedy.json",
                 "/mnt/ssd/code/.cache/mnn_opencl_pic/models/normal/AI-ModelScope__Llama-3.2-3B-Instruct/config_opencl_greedy.json",
@@ -55,6 +68,9 @@ MODELS: dict[str, dict[str, Any]] = {
     "minicpm5-1b": {
         "name": "MiniCPM5-1B",
         "normal_config": {
+            "jetson": [
+                "/home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-llm-export/OpenBMB__MiniCPM5-1B/config_cuda_greedy.json",
+            ],
             "orangepi": ["/mnt/ssd/code/.cache/mnn_opencl_pic/models/normal/OpenBMB__MiniCPM5-1B/config_opencl_greedy.json"],
             "rhino": ["/mnt/nvme/mnn_pic_opencl/models/normal/OpenBMB__MiniCPM5-1B/config_opencl_greedy.json"],
         },
@@ -62,6 +78,9 @@ MODELS: dict[str, dict[str, Any]] = {
     "qwen3-4b": {
         "name": "Qwen3-4B",
         "normal_config": {
+            "jetson": [
+                "/home/jetson/code/kvshare-edge/impl/MNN/.cache/mnn-llm-export/Qwen__Qwen3-4B/config_cuda_greedy.json",
+            ],
             "orangepi": ["/mnt/ssd/code/.cache/mnn_opencl_pic/models/normal/Qwen__Qwen3-4B/config_opencl_greedy.json"],
             "rhino": ["/mnt/nvme/mnn_pic_opencl/models/normal/Qwen__Qwen3-4B/config_opencl_greedy.json"],
         },

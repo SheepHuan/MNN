@@ -2,6 +2,7 @@
 #include "core/Macro.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <future>
 #include <limits>
@@ -126,6 +127,28 @@ struct ExternalLayerReadTask {
     std::shared_future<std::shared_ptr<ExternalLayerReadResult>> future;
 };
 
+bool ioTraceExternalCUDA() {
+    const char* value = ::getenv("MNN_PAGED_ATTENTION_IO_TRACE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+uint64_t externalNowUsCUDA() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void traceExternalLayerEventCUDA(const PagedKVMeta* meta, const char* event, int layerIndex, int kvLen,
+                                 int asyncRead, int futureReady, int direct, size_t bytes, uint64_t us) {
+    if (!ioTraceExternalCUDA()) {
+        return;
+    }
+    const auto generation = meta != nullptr ? static_cast<unsigned long long>(meta->request_generation) : 0ULL;
+    MNN_PRINT("MNNKVIO backend=cuda event=%s generation=%llu layer=%d kv_len=%d async=%d ready=%d "
+              "direct=%d bytes=%llu us=%llu\n",
+              event, generation, layerIndex, kvLen, asyncRead, futureReady, direct,
+              static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(us));
+}
+
 std::mutex gExternalLayerReadMutex;
 std::unordered_map<std::string, ExternalLayerReadTask> gExternalLayerReadTasks;
 
@@ -206,9 +229,9 @@ int lastExternalLayerIndex(const PagedKVMeta* meta) {
 int externalLayerReadWindow() {
     const char* value = ::getenv("MNN_PAGED_ATTENTION_PREFETCH_WINDOW");
     if (value == nullptr || value[0] == '\0') {
-        return 0;
+        return -1;
     }
-    return std::max(0, std::atoi(value));
+    return std::atoi(value);
 }
 
 std::string externalLayerRequestKey(const PagedKVMeta* meta, int batch, int kvHeads, int headDim, int bytes,
@@ -313,6 +336,9 @@ bool readExternalLayerSegmentCUDA(const PagedKVExternalSegment& segment, int lay
 std::shared_ptr<ExternalLayerReadResult> readExternalLayerCUDA(
     const PagedKVMeta* meta, std::string requestKey, std::vector<PagedKVExternalSegment> segments, int layerIndex,
     int batch, int kvHeads, int headDim, int bytes, int kvLen, ExternalLayerMappedTarget target) {
+    const bool ioTrace = ioTraceExternalCUDA();
+    const uint64_t readStartUs = ioTrace ? externalNowUsCUDA() : 0;
+    size_t readBytes = 0;
     ScopedNvtxRange nvtx(nvtxLayerRangeName("pic_async_read_from_disk", layerIndex, -1, -1, kvLen),
                          nvtxPagedAttention());
     auto result = std::make_shared<ExternalLayerReadResult>();
@@ -322,12 +348,21 @@ std::shared_ptr<ExternalLayerReadResult> readExternalLayerCUDA(
     const bool hasTarget = externalLayerTargetReadyCUDA(
         target, batch, kvHeads, headDim, bytes, externalLayerRequiredSlotsCUDA(meta, kvLen));
     for (size_t i = 0; i < segments.size(); ++i) {
+        readBytes += 2 * segments[i].tokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
         if (!readExternalLayerSegmentCUDA(segments[i], layerIndex, batch, kvHeads, headDim, bytes, kvLen,
                                           hasTarget ? &target : nullptr, result->segments[i])) {
             result->ok = false;
             result->error = result->segments[i].error;
             break;
         }
+    }
+    if (ioTrace) {
+        bool direct = result->ok;
+        for (const auto& segment : result->segments) {
+            direct = direct && segment.directWritten;
+        }
+        traceExternalLayerEventCUDA(meta, "read", layerIndex, kvLen, 1, -1, direct ? 1 : 0, readBytes,
+                                    externalNowUsCUDA() - readStartUs);
     }
     return result;
 }
@@ -343,6 +378,9 @@ void scheduleExternalLayerReadsFrom(const PagedKVMeta* meta, int startLayer, int
     }
     const int requiredSlots = externalLayerRequiredSlotsCUDA(meta, kvLen);
     const int window = externalLayerReadWindow();
+    if (window == 0) {
+        return;
+    }
     const int endLayer = window > 0 ? std::min(lastLayer, startLayer + window - 1) : lastLayer;
     const std::string requestKey = externalLayerRequestKey(meta, batch, kvHeads, headDim, bytes, kvLen);
     const std::string requestPrefix = requestKey + "\n";
@@ -410,7 +448,14 @@ std::shared_ptr<ExternalLayerReadResult> takeExternalLayerRead(const PagedKVMeta
     if (!future.valid()) {
         return nullptr;
     }
-    return future.get();
+    const bool ready = future.wait_for(std::chrono::microseconds(0)) == std::future_status::ready;
+    const uint64_t waitStartUs = ioTraceExternalCUDA() ? externalNowUsCUDA() : 0;
+    auto result = future.get();
+    if (ioTraceExternalCUDA()) {
+        traceExternalLayerEventCUDA(meta, "wait", layerIndex, kvLen, 1, ready ? 1 : 0, -1, 0,
+                                    externalNowUsCUDA() - waitStartUs);
+    }
+    return result;
 }
 
 int ropeTypeCode(const PagedKVExternalSegment& segment) {
@@ -446,6 +491,7 @@ ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, int bat
         return NO_ERROR;
     }
     const bool profile = profilePagedAttention();
+    const bool ioTrace = ioTraceExternalCUDA();
     const bool nvtx = nvtxPagedAttention();
     auto directTarget = lookupExternalLayerMappedTarget(meta, layerIndex, batch, kvHeads, headDim, bytes);
     const bool hasDirectTarget = directTarget.key != nullptr && directTarget.value != nullptr;
@@ -456,6 +502,7 @@ ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, int bat
         return INVALID_VALUE;
     }
     const uint64_t startUs = profile ? nowUs() : 0;
+    uint64_t hydrateStartUs = 0;
     size_t totalTokens = 0;
     size_t directTokens = 0;
     int directSegments = 0;
@@ -515,13 +562,25 @@ ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, int bat
                 return INVALID_VALUE;
             }
         } else {
+            const uint64_t readStartUs = ioTrace ? externalNowUsCUDA() : 0;
             if (!readExternalLayerSegmentCUDA(segment, layerIndex, batch, kvHeads, headDim, bytes, kvLen,
                                               hasDirectTarget ? &directTarget : nullptr, syncRead)) {
+                if (ioTrace) {
+                    const size_t layerBytes = 2 * segment.tokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
+                    traceExternalLayerEventCUDA(meta, "read", layerIndex, kvLen, 0, -1, 0, layerBytes,
+                                                externalNowUsCUDA() - readStartUs);
+                }
                 MNN_ERROR("CUDAPagedAttention failed to read external PIC KV files for layer %d: %s\n",
                           layerIndex, syncRead.error.c_str());
                 return INVALID_VALUE;
             }
             loadedSegment = &syncRead;
+            if (ioTrace) {
+                const size_t layerBytes = 2 * segment.tokenCount * static_cast<size_t>(batch) * kvHeads * headDim * bytes;
+                traceExternalLayerEventCUDA(meta, "read", layerIndex, kvLen, 0, -1,
+                                            loadedSegment->directWritten ? 1 : 0, layerBytes,
+                                            externalNowUsCUDA() - readStartUs);
+            }
         }
         if (loadedSegment == nullptr || !loadedSegment->directWritten) {
             MNN_ERROR("CUDAPagedAttention external PIC KV requires direct mapped PagedCache at layer %d\n",
@@ -570,6 +629,9 @@ ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, int bat
         const int totalKey = static_cast<int>(totalElements);
         const int threads = 256;
         const int blocks = UP_DIV(totalKey, threads);
+        if (ioTrace && hydrateStartUs == 0) {
+            hydrateStartUs = externalNowUsCUDA();
+        }
         const char* keyRopeOp = "pic_apply_rope_to_mapped_key_cache";
         {
             ScopedNvtxRange keyRopeNvtx(nvtxLayerRangeName(keyRopeOp, layerIndex, -1, -1, kvLen), nvtx);
@@ -601,8 +663,15 @@ ErrorCode restoreExternalSegmentsCUDA(PagedKVMeta* meta, int layerIndex, int bat
         }
     }
     meta->markExternalLayerLoaded(layerIndex);
-    if (profile) {
+    if (profile || ioTrace) {
         cudaDeviceSynchronize();
+    }
+    if (ioTrace) {
+        traceExternalLayerEventCUDA(meta, "hydrate", layerIndex, kvLen, prefetched != nullptr ? 1 : 0, -1,
+                                    directSegments > 0 ? 1 : 0, 0,
+                                    hydrateStartUs > 0 ? externalNowUsCUDA() - hydrateStartUs : 0);
+    }
+    if (profile) {
         MNN_PRINT("CUDAPagedAttention profile op=%s layer=%d tokens=%d kv_len=%d async_read=%d "
                   "direct_segments=%d direct_tokens=%d us=%llu\n",
                   restoreOp, layerIndex, static_cast<int>(totalTokens), kvLen, prefetched != nullptr ? 1 : 0,

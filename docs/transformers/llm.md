@@ -902,7 +902,7 @@ llmexport脚本导出在NPU上运行的模型时，必须使用的选项有：
 
 eg:
 ```
-python3 llmexport.py --path /YouPath/Dowload/models/Qwen/Qwen3-4B --export mnn --smooth --act_bit=16 --quant_block=0 --lm_quant_bit=16 --seperate_embed --quant_bit=4 --sym --act_sym
+python3 llmexport.py --path /YouPath/Dowload/models/Qwen/Qwen3-4B-Instruct-2507 --export mnn --smooth --act_bit=16 --quant_block=0 --lm_quant_bit=16 --seperate_embed --quant_bit=4 --sym --act_sym
 ```
 或者你也可以自定义校准数据集，并使用Omni算法提高量化精度：
 ```
