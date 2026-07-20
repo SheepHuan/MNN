@@ -175,6 +175,12 @@ def parse_json(text: str) -> dict[str, Any]:
     return json.loads(text[start:])
 
 
+def decode_labels(step_tokens: int) -> tuple[str, str]:
+    if step_tokens <= 1:
+        return "normal-decode-load-kv", "true-normal-llm"
+    return "normal-decode-load-kv-chunk-input", f"true-normal-llm-input{step_tokens}"
+
+
 def run_case(args: argparse.Namespace, device: dict[str, Any], model_key: str, ctx: int, step_tokens: int) -> dict[str, str]:
     device["model_key"] = model_key
     config = first_existing_config(device, model_key)
@@ -185,9 +191,19 @@ def run_case(args: argparse.Namespace, device: dict[str, Any], model_key: str, c
         timeout=args.remote_timeout_sec,
     )
     result = parse_json(proc.stdout)
+    reported_step = int(result.get("step_tokens") or step_tokens)
+    if reported_step != step_tokens:
+        raise RuntimeError(f"step_tokens mismatch: requested={step_tokens} reported={reported_step}")
     generated = int(result.get("generated_tokens") or args.generated_tokens)
+    if generated != args.generated_tokens:
+        raise RuntimeError(
+            f"incomplete generation: requested={args.generated_tokens} measured={generated}"
+        )
     tpot = float(result.get("decode_tpot_ms") or 0.0)
     tps = float(result.get("decode_tps") or 0.0)
+    if tpot <= 0.0 or tps <= 0.0:
+        raise RuntimeError(f"invalid decode metrics: tpot_ms={tpot} tps={tps}")
+    mode, selector = decode_labels(step_tokens)
     return {
         "device": str(device["device_key"]),
         "device_display": str(device["display"]),
@@ -195,9 +211,9 @@ def run_case(args: argparse.Namespace, device: dict[str, Any], model_key: str, c
         "backend": str(device["backend"]).upper(),
         "frequency_profile": "cpu=max,gpu=max,ddr=max",
         "context_tokens": str(ctx),
-        "mode": "normal-decode-load-kv-chunk-input",
+        "mode": mode,
         "budget": str(args.generated_tokens),
-        "decode_selector": f"true-normal-llm-input{step_tokens}",
+        "decode_selector": selector,
         "repair_tokens": str(max(0, step_tokens - 1)),
         "generated_tokens": str(generated),
         "decode_latency_s": f"{tpot * generated / 1000.0:.6f}",

@@ -1,8 +1,10 @@
 device,device_display,model,backend,frequency_profile,context_tokens,mode,budget,decode_selector,repair_tokens,generated_tokens,decode_latency_s,decode_tpot_ms,decode_tps,benchmark_status
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,8.454900,66.053906,15.139150,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,4.383748,34.248031,29.198759,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.917209,30.603195,32.676326,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.408819,26.631398,37.549662,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.382644,18.614406,53.721832,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,11.121846,86.889422,11.508881,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,5.743659,44.872336,22.285446,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,5.242393,40.956195,24.416330,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,4.249605,33.200039,30.120446,ok
@@ -11,18 +13,22 @@ jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,6.563110,51.274297,19.502949,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,5.080654,39.692609,25.193607,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,4.417454,34.511359,28.975967,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,16.262057,127.047320,7.871083,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,8.346951,65.210555,15.334941,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,7.902193,61.735883,16.198035,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,5.986224,46.767375,21.382427,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,5.425577,42.387320,23.591961,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv,128,true-normal-llm,0,128,21.478896,167.803875,5.959338,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,11.015361,86.057508,11.620137,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,10.595451,82.776961,12.080656,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,7.859890,61.405391,16.285215,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.495622,58.559547,17.076635,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,4.720384,36.878000,27.116438,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,2.599738,20.310453,49.235731,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,1.504177,11.751383,85.096368,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.563980,12.218594,81.842479,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.024315,8.002461,124.961560,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,6.950551,54.301180,18.415806,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,3.465134,27.071359,36.939408,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.250597,17.582789,56.873798,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,2.385150,18.633984,53.665388,ok
@@ -31,18 +37,22 @@ jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.895264,22.619250,44.210131,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.158530,24.676016,40.525181,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.217302,17.322672,57.727815,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,11.396067,89.031773,11.231945,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,5.740988,44.851469,22.295814,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.194356,24.955906,40.070675,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.917748,30.607406,32.671831,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.806678,21.927172,45.605517,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv,128,true-normal-llm,0,128,15.879927,124.061930,8.060490,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,7.963426,62.214266,16.073484,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,4.346551,33.957430,29.448636,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,5.441236,42.509656,23.524067,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,3.954841,30.897195,32.365397,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,10.969115,85.696211,11.669127,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,5.671394,44.307766,22.569407,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,5.081902,39.702359,25.187420,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,4.901660,38.294219,26.113602,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,3.803434,29.714328,33.653798,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv,128,true-normal-llm,0,128,14.407872,112.561500,8.884032,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,7.461833,58.295570,17.153962,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,6.838161,53.423133,18.718483,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1024,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,6.658576,52.020125,19.223329,ok
@@ -51,10 +61,12 @@ jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-dec
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,8.542911,66.741492,14.983183,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,8.389500,65.542969,15.257167,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",1536,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.271560,56.809063,17.602825,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv,128,true-normal-llm,0,128,21.371700,166.966406,5.989229,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,10.917835,85.295586,11.723936,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,10.317514,80.605578,12.406089,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,10.152072,79.313063,12.608264,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,9.024853,70.506664,14.183056,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv,128,true-normal-llm,0,128,28.196531,220.285398,4.539566,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,14.635215,114.337617,8.746028,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,13.815437,107.933102,9.264998,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,13.680001,106.875008,9.356724,ok
