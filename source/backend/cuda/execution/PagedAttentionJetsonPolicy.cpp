@@ -92,13 +92,11 @@ bool useWideSparseTile(int attnLen) {
 }
 
 int prefillQSplitNum(int attnLen) {
-    if (attnLen > 1024) {
-        return (attnLen + 1023) / 1024;
-    }
-    if (attnLen > 256) {
-        return (attnLen + 255) / 256;
-    }
-    return 1;
+    // Each PagedAttention execution owns QK and softmax workspaces sized as
+    // max_q_piece * kv_len. Keeping a 1024-row piece at 3072 context would
+    // replicate roughly 768 MiB per layer on Xavier. Bound the piece at 256
+    // rows so all layers can coexist without exhausting Xavier unified memory.
+    return attnLen > 256 ? (attnLen + 255) / 256 : 1;
 }
 
 } // namespace PagedAttentionJetsonPolicy
