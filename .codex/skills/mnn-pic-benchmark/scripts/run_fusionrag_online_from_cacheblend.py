@@ -218,6 +218,7 @@ def make_args(
         power_process_id=str(base.power_process_id),
         benchmark_csv=str(base.benchmark_csv),
         only_benchmark_csv_rows=True,
+        evict_document_kv_before_measure=False,
         allow_high_risk_contexts=bool(base.allow_high_risk_contexts),
     )
 

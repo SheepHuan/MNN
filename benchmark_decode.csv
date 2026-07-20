@@ -15,6 +15,10 @@ jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,7.902193,61.735883,16.198035,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,5.986224,46.767375,21.382427,ok
 jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,5.425577,42.387320,23.591961,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,11.015361,86.057508,11.620137,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,10.595451,82.776961,12.080656,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,7.859890,61.405391,16.285215,ok
+jetson,Jetson AGX Xavier,Llama3.2 3B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.495622,58.559547,17.076635,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,2.599738,20.310453,49.235731,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,1.504177,11.751383,85.096368,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.563980,12.218594,81.842479,ok
@@ -31,6 +35,10 @@ jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.194356,24.955906,40.070675,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.917748,30.607406,32.671831,ok
 jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.806678,21.927172,45.605517,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,7.963426,62.214266,16.073484,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,4.346551,33.957430,29.448636,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,5.441236,42.509656,23.524067,ok
+jetson,Jetson AGX Xavier,MiniCPM5-1B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,3.954841,30.897195,32.365397,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,5.671394,44.307766,22.569407,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,5.081902,39.702359,25.187420,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,4.901660,38.294219,26.113602,ok
@@ -47,6 +55,10 @@ jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-dec
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,10.317514,80.605578,12.406089,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,10.152072,79.313063,12.608264,ok
 jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,9.024853,70.506664,14.183056,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,14.635215,114.337617,8.746028,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,13.815437,107.933102,9.264998,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,13.680001,106.875008,9.356724,ok
+jetson,Jetson AGX Xavier,Qwen3-4B,CUDA,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,12.500821,97.662664,10.239327,ok
 orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,20.821742,162.669859,6.147420,ok
 orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,11.688096,91.313250,10.951313,ok
 orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,6.329192,49.446813,20.223751,ok
@@ -67,6 +79,10 @@ orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,norm
 orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,7.804541,60.972977,16.400708,ok
 orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,8.086968,63.179437,15.827935,ok
 orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,6.205951,48.483992,20.625364,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,17.787851,138.967586,7.195923,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,9.149840,71.483125,13.989316,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,9.032658,70.567641,14.170801,ok
+orangepi,Orange Pi 5 Plus,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,6.915863,54.030180,18.508175,ok
 orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,5.267748,41.154281,24.298809,ok
 orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,4.870051,38.047273,26.283092,ok
 orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.085739,24.107336,41.481149,ok
@@ -87,6 +103,10 @@ orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,norm
 orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,4.521737,35.326070,28.307706,ok
 orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.860031,30.156492,33.160355,ok
 orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.915513,22.777445,43.903080,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,11.583237,90.494039,11.050452,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,5.884361,45.971570,21.752574,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,4.815468,37.620844,26.581009,ok
+orangepi,Orange Pi 5 Plus,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,3.615922,28.249391,35.398994,ok
 orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,24.787616,193.653250,5.163869,ok
 orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,14.780923,115.475961,8.659811,ok
 orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,8.024971,62.695086,15.950213,ok
@@ -107,6 +127,10 @@ orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-
 orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,9.875588,77.153031,12.961254,ok
 orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,10.266349,80.205852,12.467918,ok
 orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,7.944836,62.069031,16.111094,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,22.376370,174.815391,5.720320,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,11.545203,90.196898,11.086856,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,11.689524,91.324406,10.949975,ok
+orangepi,Orange Pi 5 Plus,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,8.811535,68.840117,14.526413,ok
 rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,10.708106,83.657078,11.953561,ok
 rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,6.247310,48.807109,20.488818,ok
 rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.669306,28.666453,34.883981,ok
@@ -127,6 +151,10 @@ rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decod
 rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.533488,27.605375,36.224829,ok
 rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.817574,29.824797,33.529147,ok
 rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.894385,22.612383,44.223557,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,7.443167,58.149742,17.196981,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,3.884792,30.349937,32.948997,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,3.989330,31.166641,32.085588,ok
+rhino,Rhino Pi X1,Llama3.2 3B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,2.992976,23.382625,42.766798,ok
 rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,6.558934,51.241672,19.515366,ok
 rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,3.452528,26.972875,37.074283,ok
 rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.026740,15.833906,63.155610,ok
@@ -147,6 +175,10 @@ rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decod
 rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.015480,15.745938,63.508445,ok
 rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,1.796272,14.033375,71.258696,ok
 rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.351105,10.555508,94.737271,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,4.780999,37.351555,26.772647,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,2.515807,19.654742,50.878307,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,2.148947,16.788648,59.564056,ok
+rhino,Rhino Pi X1,MiniCPM5-1B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,1.609585,12.574883,79.523604,ok
 rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv,128,true-normal-llm,0,128,12.809761,100.076258,9.992380,ok
 rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,10.678625,83.426758,11.986562,ok
 rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",512,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,5.947712,46.466500,21.520881,ok
@@ -167,3 +199,7 @@ rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-l
 rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,10.251834,80.092453,12.485571,ok
 rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,8.641045,67.508164,14.813023,ok
 rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",2048,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,6.377296,49.822625,20.071203,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input2,1,128,26.199907,204.686773,4.885514,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input4,3,128,13.359917,104.374352,9.580898,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input6,5,128,10.786733,84.271352,11.866429,ok
+rhino,Rhino Pi X1,Qwen3-4B,OPENCL,"cpu=max,gpu=max,ddr=max",3072,normal-decode-load-kv-chunk-input,128,true-normal-llm-input8,7,128,8.227323,64.275961,15.557916,ok
