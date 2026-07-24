@@ -29,8 +29,8 @@ Supported workload families:
 - Texture: `sampler_t` reads with nearest and linear filtering, normalized and
   unnormalized coordinates, local sampling, cross-row sampling, and random
   sampling.
-- Compute: integer, FP16, FP32, vector arithmetic, local-memory use, barriers,
-  and atomics when supported.
+- Compute: integer, FP16, FP32, vector arithmetic, local/private/constant
+  memory, barriers, and atomics when supported.
 - Extensions: detect and run extension-specific cases only when the device
   advertises the required extension; skipped cases include the extension and
   reason in the report.
@@ -65,10 +65,18 @@ Add a focused benchmark component under `replay_benchmark/`:
 
 ```text
 replay_benchmark/
+├── README.md
 ├── OpenCLPmuBenchmark.hpp
 ├── OpenCLPmuBenchmark.cpp
 └── OpenCLPmuKernels.hpp
 ```
+
+`replay_benchmark/README.md` documents the OpenCL concepts exercised by the
+suite: global, local, private, and constant address spaces; work-items,
+work-groups, sub-groups, barriers, atomics, memory ordering, buffer/image
+objects, samplers, texture filtering, cache locality, and optional
+extensions. Each benchmark case links its workload to the concept and the
+PMU signal it is intended to probe.
 
 `OpenCLPmuBenchmark` owns case discovery, device capability checks, buffer and
 image allocation, kernel compilation, execution, synchronization, PMU
