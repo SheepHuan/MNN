@@ -205,7 +205,7 @@ static void _setTensorStack(std::vector<Tensor *> &result, const std::vector<Ten
 }
 
 LoopExecution::LoopExecution(const LoopParam *loop, const MNN::Op *op, Backend *bn)
-: CommonExecution(bn, op) {
+: CommonExecution(bn, op, __FUNCTION__) {
     mLoop = loop;
     mTensors.resize(mLoop->tensorNumber());
 }

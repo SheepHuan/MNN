@@ -67,7 +67,7 @@ struct Unit {
 
 class CommonExecution : public Execution {
 public:
-    CommonExecution(Backend *backend, const MNN::Op *Op);
+    CommonExecution(Backend *backend, const MNN::Op *Op, const char* executionName = nullptr);
     virtual ~CommonExecution(){
         if(mRecording != NULL){
 #ifdef MNN_USE_LIB_WRAPPER
@@ -80,11 +80,15 @@ public:
     }
     virtual ErrorCode onResize(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
     virtual ErrorCode onExecute(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs) override;
+    virtual const char* getExecutionName() const override {
+        return mExecutionName.c_str();
+    }
 
 protected:
     std::vector<Unit> mUnits;
     const MNN::Op *mOp;
     OpType mOpType;
+    std::string mExecutionName;
     cl_recording_qcom mRecording{NULL};
     std::vector<RecordUpdateInfo*> mOpRecordUpdateInfo;
 };

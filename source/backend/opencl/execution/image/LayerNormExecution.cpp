@@ -13,7 +13,7 @@ namespace MNN {
 namespace OpenCL {
 
 LayerNormExecution::LayerNormExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mUnits.resize(1);
     auto &unit = mUnits[0];
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
@@ -94,7 +94,7 @@ LayerNormExecution::LayerNormExecution(const std::vector<Tensor *> &inputs, cons
     }
 }
 
-LayerNormExecution::LayerNormExecution(std::shared_ptr<LayernormResource> resource, const Op* op, Backend* backend) : CommonExecution(backend, op) {
+LayerNormExecution::LayerNormExecution(std::shared_ptr<LayernormResource> resource, const Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     mOpenCLBackend = (OpenCLBackend *)backend;
 }

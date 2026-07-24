@@ -44,7 +44,7 @@ static void addLinearAttentionLayoutOptions(const std::vector<Tensor*>& inputs, 
 }
 
 LinearAttentionBufExecution::LinearAttentionBufExecution(const MNN::Op* op, Backend* backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     mMeta = (KVMeta*)(backend->getMetaPtr());
     auto param = op->main_as_LinearAttentionParam();

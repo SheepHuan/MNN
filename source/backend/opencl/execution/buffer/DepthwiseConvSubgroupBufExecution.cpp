@@ -17,7 +17,7 @@ namespace MNN {
 namespace OpenCL {
 
 DepthwiseConvSubgroupBufExecution::DepthwiseConvSubgroupBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : ConvBufCommonExecution(op->main_as_Convolution2D(), backend), CommonExecution(backend, op) {
+    : ConvBufCommonExecution(op->main_as_Convolution2D(), backend), CommonExecution(backend, op, __FUNCTION__) {
     if (!mConvComValid) {
         mValid = false;
         return;
@@ -153,7 +153,7 @@ DepthwiseConvSubgroupBufExecution::~DepthwiseConvSubgroupBufExecution() {
 }
 
 
-DepthwiseConvSubgroupBufExecution::DepthwiseConvSubgroupBufExecution(std::shared_ptr<ConvBufResource> resource, const MNN::Op* op, Backend *backend) : ConvBufCommonExecution(backend), CommonExecution(backend, op) {
+DepthwiseConvSubgroupBufExecution::DepthwiseConvSubgroupBufExecution(std::shared_ptr<ConvBufResource> resource, const MNN::Op* op, Backend *backend) : ConvBufCommonExecution(backend), CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     const auto *conv2dParams       = op->main_as_Convolution2D();

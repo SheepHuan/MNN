@@ -14,7 +14,7 @@
 namespace MNN {
 namespace OpenCL {
 
-RoiPooling::RoiPooling(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op) {
+RoiPooling::RoiPooling(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__) {
 #ifdef LOG_VERBOSE
     MNN_PRINT("start RoiPooling init !\n");
 #endif

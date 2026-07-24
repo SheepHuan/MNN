@@ -28,7 +28,7 @@ static string swapComputeIn0In1(const string& computeOrigin) {
 }
 
 EltwiseExecution::EltwiseExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const std::string &compute, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op), mCompute(compute) {
+    : CommonExecution(backend, op, __FUNCTION__), mCompute(compute) {
     MNN_ASSERT(inputs.size() >= 2);
     mUnits.resize(inputs.size() - 1);
     mMaxWorkGroupSize.resize(inputs.size() - 1);

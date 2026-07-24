@@ -63,6 +63,13 @@ public:
     virtual bool onClone(Backend* bn, const Op* op, Execution** dst) {
         return false;
     }
+
+    /**
+     * @brief return an optional backend implementation name for diagnostics.
+     */
+    virtual const char* getExecutionName() const {
+        return nullptr;
+    }
 public:
     /**
      * @brief designed for plugin system. not ready yet.

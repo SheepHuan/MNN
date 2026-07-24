@@ -74,7 +74,7 @@ static std::pair<int, int> GetTuningParams(const std::vector<Tensor *> &inputs, 
 
 ConvSubgroupBuf::ConvSubgroupBuf(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs,
                                  const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
 #ifdef LOG_VERBOSE
     MNN_PRINT("Start ConvSubgroupBuf init !\n");
 #endif
@@ -228,7 +228,7 @@ ConvSubgroupBuf::~ConvSubgroupBuf() {
     // Do nothing
 }
 
-ConvSubgroupBuf::ConvSubgroupBuf(std::shared_ptr<ConvSubgroupBufResource> resource, const MNN::Op* op, Backend *backend) : CommonExecution(backend, op) {
+ConvSubgroupBuf::ConvSubgroupBuf(std::shared_ptr<ConvSubgroupBufResource> resource, const MNN::Op* op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     const auto *conv2dParams       = op->main_as_Convolution2D();

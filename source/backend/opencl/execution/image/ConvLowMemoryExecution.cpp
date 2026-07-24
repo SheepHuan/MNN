@@ -476,7 +476,7 @@ void ConvLowMemoryExecution::tuneGemmLowMemory(Tensor * input, Tensor * output) 
     return;
 }
 ConvLowMemoryExecution::ConvLowMemoryExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op *op, Backend *backend)
-    : ConvCommonExecution(op->main_as_Convolution2D(), backend), CommonExecution(backend, op) {
+    : ConvCommonExecution(op->main_as_Convolution2D(), backend), CommonExecution(backend, op, __FUNCTION__) {
     if (!mConvComValid) {
         mValid = false;
         return;
@@ -530,7 +530,7 @@ ConvLowMemoryExecution::ConvLowMemoryExecution(const std::vector<Tensor *> &inpu
 }
 
 ConvLowMemoryExecution::ConvLowMemoryExecution(std::shared_ptr<ConvResource> resource, const MNN::Op* op, Backend *backend)
-    : ConvCommonExecution(backend), CommonExecution(backend, op) {
+    : ConvCommonExecution(backend), CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     const auto *conv2dParams       = op->main_as_Convolution2D();
     const auto *conv2dCommonParams = conv2dParams->common();

@@ -14,7 +14,7 @@ namespace MNN {
 namespace OpenCL {
 
 MatMulBufExecution::MatMulBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend,
-                                 bool transposeA, bool transposeB) : CommonExecution(backend, op)
+                                 bool transposeA, bool transposeB) : CommonExecution(backend, op, __FUNCTION__)
                                  , mTransposeA(transposeA), mTransposeB(transposeB){
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
 }

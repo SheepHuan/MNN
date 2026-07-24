@@ -69,9 +69,11 @@ struct ScheduleConfig {
 
 class Session;
 struct Content;
+struct Op;
 class Tensor;
 class Backend;
 class Runtime;
+class Execution;
 
 class MNN_PUBLIC OperatorInfo {
     struct Info;
@@ -82,6 +84,15 @@ public:
 
     /** Operator's type*/
     const std::string& type() const;
+
+    /** Internal execution identity used by backend execution records. */
+    const Execution* execution() const;
+
+    /** Internal graph Op used by backend execution records. */
+    const Op* op() const;
+
+    /** Internal setter used while the Pipeline materializes an Execution. */
+    void setExecution(const Execution* execution);
 
     /** Operator's flops, in M*/
     float flops() const;
@@ -94,7 +105,7 @@ protected:
 
 typedef std::function<bool(const std::vector<Tensor*>&, const std::string& /*opName*/)> TensorCallBack;
 typedef std::function<bool(const std::vector<Tensor*>&, const OperatorInfo*)> TensorCallBackWithInfo;
-typedef std::pair< std::map<MNNForwardType, std::shared_ptr<Runtime>>,  std::shared_ptr<Runtime>> RuntimeInfo;
+typedef std::pair<std::map<MNNForwardType, std::shared_ptr<Runtime>>, std::shared_ptr<Runtime>> RuntimeInfo;
 
 /**
  * @brief get mnn version info.
@@ -149,20 +160,20 @@ public:
         Session_Resize_Defer = 7,
 
         /** Determine the Execution's forward type is determine by user or auto determine */
-        Session_Backend_Fix = 8, // Use the backend user set, when not support use default backend
+        Session_Backend_Fix = 8,  // Use the backend user set, when not support use default backend
         Session_Backend_Auto = 9, // Auto Determine the Op type by MNN
 
         /** Determine static memory whether recyle in resizeSession or just cache the memory */
         Session_Memory_Collect = 10, // Recycle static memory when session resize in case memory explosion
-        Session_Memory_Cache = 11, // Cache the static memory for next forward usage
+        Session_Memory_Cache = 11,   // Cache the static memory for next forward usage
 
         /** Determine whether use codegen function */
         Session_Codegen_Disable = 12, // Disable codegen in case extra build codegen cost
-        Session_Codegen_Enable = 13, // Enable codegen
+        Session_Codegen_Enable = 13,  // Enable codegen
 
         /** Dynamic Reisze Optimization */
         Session_Resize_Check = 14, // Open Trace for resize
-        Session_Resize_Fix = 15, // Apply Resize Optimization
+        Session_Resize_Fix = 15,   // Apply Resize Optimization
 
         /** Set for Module's traceOrOptimize API.
          Module_Forward_Seperate:
@@ -202,7 +213,7 @@ public:
      * @param flag   Protected param, not used now
      */
 
-    ErrorCode updateCacheFile(Session *session, int flag = 0);
+    ErrorCode updateCacheFile(Session* session, int flag = 0);
 
     enum HintMode {
         // Max Op number for async tuning
@@ -210,7 +221,8 @@ public:
         // Strictly check model file or not, default 1. if set 0, will not check model file valid/invalid
         STRICT_CHECK_MODEL = 1,
         MEM_ALLOCATOR_TYPE = 2,
-        // Winograd unit candidates count, default 3. if set 0, will use less unit candidates for less memory at the expense of performance.
+        // Winograd unit candidates count, default 3. if set 0, will use less unit candidates for less memory at the
+        // expense of performance.
         WINOGRAD_MEMORY_LEVEL = 3,
 
         // Geometry Compute option, default is 0xFFFF
@@ -221,7 +233,8 @@ public:
         // 2: use block-quant for input data.
         DYNAMIC_QUANT_OPTIONS = 5,
 
-        // For Mobile CPU with big-litter core, set decrease rate to let MNN divide task differential by CPU's performance
+        // For Mobile CPU with big-litter core, set decrease rate to let MNN divide task differential by CPU's
+        // performance
         // 0-100, 50 means litter core has 50% capacity of large core
         // Default is 50
         CPU_LITTLECORE_DECREASE_RATE = 6,
@@ -299,7 +312,8 @@ public:
         // Support Geometry Cache, if shape changed, will try recompute, and then run compute if failed
         GEOMETRCOMPUTEMASK_OPENCACHE = 1 << 3,
 
-        // Full option open mask, for example, if want to close useloop, can set mask as (GEOMETRCOMPUTEMASK_ALL - GEOMETRCOMPUTEMASK_USELOOP)
+        // Full option open mask, for example, if want to close useloop, can set mask as (GEOMETRCOMPUTEMASK_ALL -
+        // GEOMETRCOMPUTEMASK_USELOOP)
         GEOMETRCOMPUTEMASK_ALL = 0xFFFF,
     };
 
@@ -311,6 +325,7 @@ public:
      */
     void setSessionHint(HintMode hint, int value);
     void setSessionHint(HintMode hint, int* value, size_t size);
+
 public:
     /**
      * @brief create runtimeInfo separately with schedule config.
@@ -368,7 +383,6 @@ public:
      * @param needRelloc, 1 means need realloc.
      */
     void resizeSession(Session* session, int needRelloc);
-
 
     /**
      * @brief call this function if don't need resize or create session any more, it will save a few memory that equal
@@ -531,7 +545,7 @@ private:
     Content* mNet = nullptr;
     Interpreter(Content* net);
 
-    Interpreter(const Interpreter&)  = delete;
+    Interpreter(const Interpreter&) = delete;
     Interpreter(const Interpreter&&) = delete;
     Interpreter& operator=(const Interpreter&) = delete;
     Interpreter& operator=(const Interpreter&&) = delete;

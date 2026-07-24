@@ -15,7 +15,7 @@ namespace OpenCL {
 
 BinaryBufExecution::BinaryBufExecution(const std::vector<Tensor*>& inputs, const std::string& compute,
                                        const MNN::Op* op, Backend* backend)
-    : CommonExecution(backend, op), mCompute(compute) {
+    : CommonExecution(backend, op, __FUNCTION__), mCompute(compute) {
     if (op->type() == OpType_BinaryOp && op->main_as_BinaryOp()->opType() == BinaryOpOperation_MOD &&
         (inputs[0]->getType().code == halide_type_int || inputs[0]->getType().code == halide_type_uint)) {
         mBuildOptions.emplace("-DINT_COMPUTE_MOD");

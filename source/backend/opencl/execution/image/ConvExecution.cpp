@@ -102,7 +102,7 @@ ConvCommonExecution::~ConvCommonExecution() {
 }
 
 ConvExecution::ConvExecution(std::shared_ptr<ConvResource> resource, const MNN::Op* op, Backend *backend)
-    : CommonExecution(backend, op), ConvCommonExecution(backend) {
+    : CommonExecution(backend, op, __FUNCTION__), ConvCommonExecution(backend) {
     mResource = resource;
     const auto *conv2dParams       = op->main_as_Convolution2D();
     const auto *conv2dCommonParams = conv2dParams->common();
@@ -122,7 +122,7 @@ bool ConvExecution::onClone(Backend* bn, const Op* op, Execution** dst) {
 }
 
 ConvExecution::ConvExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op *op, Backend *backend, bool isExtra)
-: CommonExecution(backend, op), ConvCommonExecution(op, backend, isExtra) {
+: CommonExecution(backend, op, __FUNCTION__), ConvCommonExecution(op, backend, isExtra) {
     if (!mConvComValid) {
         mValid = false;
         return;

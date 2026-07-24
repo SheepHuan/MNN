@@ -53,7 +53,7 @@ static bool validRopeC4Input(const Tensor* q, const Tensor* k, int numHead, int 
     return q->length(1) == numHead * headDim && k->length(1) == kvNumHead * headDim;
 }
 
-RopeBufExecution::RopeBufExecution(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+RopeBufExecution::RopeBufExecution(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
 
     auto param = op == nullptr ? nullptr : op->main_as_RoPEParam();
@@ -78,7 +78,7 @@ RopeBufExecution::RopeBufExecution(const MNN::Op* op, Backend* backend) : Common
 RopeBufExecution::RopeBufExecution(const MNN::Op* op, Backend* backend, int ropeCutHeadDim, int numHead, int kvNumHead,
                                    int headDim, std::shared_ptr<cl::Buffer> qGamma, float qEps,
                                    std::shared_ptr<cl::Buffer> kGamma, float kEps)
-    : CommonExecution(backend, op),
+    : CommonExecution(backend, op, __FUNCTION__),
       mRopeCutHeadDim(ropeCutHeadDim),
       mNumHead(numHead),
       mKvNumHead(kvNumHead),

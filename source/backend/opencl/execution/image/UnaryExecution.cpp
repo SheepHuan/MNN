@@ -11,7 +11,7 @@
 namespace MNN {
 namespace OpenCL {
 
-UnaryExecution::UnaryExecution(const std::string& compute, const MNN::Op *op, Backend* backend) : CommonExecution(backend, op) {
+UnaryExecution::UnaryExecution(const std::string& compute, const MNN::Op *op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mBuildOptions.emplace(" -DOPERATOR=" + compute);
 }
 ErrorCode UnaryExecution::onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {

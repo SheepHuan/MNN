@@ -163,7 +163,7 @@ void ConvBufExecution::_generateFilterConvertRegion(Tensor* virtualFilter, Tenso
 }
 
 ConvBufExecution::ConvBufExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op *op, Backend *backend, bool isExtra)
-    : ConvBufCommonExecution(op, backend, isExtra), CommonExecution(backend, op) {
+    : ConvBufCommonExecution(op, backend, isExtra), CommonExecution(backend, op, __FUNCTION__) {
     if (!mConvComValid) {
         mValid = false;
         return;
@@ -328,7 +328,7 @@ ConvBufExecution::~ConvBufExecution() {
 }
 
 ConvBufExecution::ConvBufExecution(std::shared_ptr<ConvBufResource> resource, const MNN::Op* op, Backend *backend)
-    : ConvBufCommonExecution(backend), CommonExecution(backend, op) {
+    : ConvBufCommonExecution(backend), CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     const auto *conv2dParams       = op->main_as_Convolution2D();
     const auto *conv2dCommonParams = conv2dParams->common();

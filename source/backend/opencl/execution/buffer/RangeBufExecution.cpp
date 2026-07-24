@@ -12,7 +12,7 @@
 namespace MNN {
 namespace OpenCL {
 
-RangeBufExecution::RangeBufExecution(const std::string &compute, const MNN::Op *Op, Backend* backend) : CommonExecution(backend, Op) {
+RangeBufExecution::RangeBufExecution(const std::string &compute, const MNN::Op *Op, Backend* backend) : CommonExecution(backend, Op, __FUNCTION__) {
     mBuildOptions.emplace(compute);
     // Do nothing
 }

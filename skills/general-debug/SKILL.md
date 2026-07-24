@@ -171,7 +171,21 @@ MNN_PRINT("[MyOp] cos=%p sin=%p qTmp=%p kTmp=%p out=%p\n",
 
 **避坑要点**：这个 bug 无法通过 review 逻辑代码发现 —— 代码逻辑完全正确，`cosFloat[j] = c` 也确实写到了 `cosFloat` 指向的地址，只是这个地址恰好也是 `sinFloat`。**必须靠"打印地址、找相等对"这一步来揭穿**。
 
-### 1.6 相关文件索引
+### 1.6 参考案例：直接 Execution 回放的 CPU 延迟 buffer 与跨 Command region
+
+**症状**：完整 Session 执行正常，但直接创建 CPU Backend 回放单个 Convolution 时，im2col 或 CPU kernel 收到空指针；回放带 Raster region 的后续 Op 时提示 region origin 缺失。
+
+**根因**：CPU 的 `DYNAMIC` / `DYNAMIC_SEPERATE` allocator 可能延迟到 resize 生命周期结束后才提交 host buffer。脱离 Pipeline 直接执行时，手工创建的输入输出 Tensor 可能仍然没有 `buffer.host`。此外，某个 Command 的 Tensor region 可能引用前一个 Command 的 Tensor，不能把这个跨 Command 指针原样写入单 Op record。
+
+**排查与修复**：
+
+1. 在 `onResizeEnd` 和 `onExecute` 前分别打印输入、输出的 `buffer.host`，不要只检查 `onAcquireBuffer` 的返回值；
+2. 直接 CPU Execution 回放的输入输出使用 `Backend::STATIC`，或把分配纳入完整的 `onResizeBegin/onResizeEnd` 生命周期；
+3. record 已保存完整逻辑输入快照时，无法在当前 Command 内解析的 region 应跳过指针恢复，按快照构造线性 Tensor；当前 Command 内可解析的 Raster region 仍然恢复。
+
+**验证标准**：先用一个带卷积、Raster、Pooling 的静态图执行完整 record，再逐 `op_id` 回放，所有输出与记录快照一致；不能只验证首个 Op。
+
+### 1.7 相关文件索引
 
 | 文件 | 作用 |
 |------|------|

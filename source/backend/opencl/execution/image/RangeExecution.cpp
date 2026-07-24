@@ -14,7 +14,7 @@
 namespace MNN {
 namespace OpenCL {
 
-RangeExecution::RangeExecution(const std::string &compute, const MNN::Op *op, Backend* backend) : CommonExecution(backend, op) {
+RangeExecution::RangeExecution(const std::string &compute, const MNN::Op *op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mBuildOptions.emplace(compute);
     // Do nothing
 }

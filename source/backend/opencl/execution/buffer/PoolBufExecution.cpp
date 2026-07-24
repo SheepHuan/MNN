@@ -14,7 +14,7 @@ namespace MNN {
 namespace OpenCL {
 
 PoolBufExecution::PoolBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
     mPoolParams    = op->main_as_Pool();
     mPoolType      = mPoolParams->type();

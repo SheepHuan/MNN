@@ -17,7 +17,9 @@ namespace MNN {
 struct OperatorInfo::Info {
     std::string name;
     std::string type;
+    const Op* op = nullptr;
     float flops = 0.0f;
+    const Execution* execution = nullptr;
 };
 class SizeComputer;
 /** pipeline. one session may contains multiple pipeline, and one pipeline may contains more than one unit. */
@@ -27,17 +29,19 @@ public:
         bool autoSetOpType;
         int maxTuningNumber;
     };
-    Pipeline(const std::string& externalFile, Schedule::PipelineInfo&& info, bool allocInput, bool outputStatic, const TuningAttr& tune, const Runtime* rt, const Runtime* cpuRt, int geometryMask);
+    Pipeline(const std::string& externalFile, Schedule::PipelineInfo&& info, bool allocInput, bool outputStatic,
+             const TuningAttr& tune, const Runtime* rt, const Runtime* cpuRt, int geometryMask);
     ~Pipeline();
     ErrorCode fixResizeCache();
     void openResizeCheck();
 
     class UnitInfo : public OperatorInfo {
     public:
-        UnitInfo()          = default;
+        UnitInfo() = default;
         virtual ~UnitInfo() = default;
         void setUp(const Command& cmd, int index, const Op* originOp, int totalIndex);
     };
+
 public:
     /** encode :
        1. compute shape for every op's inputs and outputs;
@@ -51,18 +55,15 @@ public:
     /** execute this pipline */
     ErrorCode execute();
     ErrorCode executeCallBack(const TensorCallBackWithInfo& before, const TensorCallBackWithInfo& after);
-    Schedule::PipelineInfo& getPipelineInfo() {
-        return mInfo;
-    }
+    Schedule::PipelineInfo& getPipelineInfo() { return mInfo; }
 
-    float flops() const {
-        return mFlops;
-    }
+    float flops() const { return mFlops; }
     friend class Session;
-    MNNForwardType getMainForwardType() const  {
-        return mInfo.first.cache.first->type();
-    }
-    typedef std::map<std::pair<Tensor::InsideDescribe::NativeInsideDescribe*, Backend*>, std::pair<std::weak_ptr<Tensor::InsideDescribe::NativeInsideDescribe>, std::shared_ptr<Tensor>>> WrapTensorCache;
+    MNNForwardType getMainForwardType() const { return mInfo.first.cache.first->type(); }
+    typedef std::map<std::pair<Tensor::InsideDescribe::NativeInsideDescribe*, Backend*>,
+                     std::pair<std::weak_ptr<Tensor::InsideDescribe::NativeInsideDescribe>, std::shared_ptr<Tensor>>>
+        WrapTensorCache;
+
 private:
     ErrorCode _allocForTensor(int index, bool allocInput);
     ErrorCode _enterExecute();

@@ -41,7 +41,7 @@ std::vector<uint32_t> PoolExecution::poolLocalWS(const std::vector<uint32_t> &gw
 }
 
 PoolExecution::PoolExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mUnits.resize(1);
     auto &unit = mUnits[0];
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);

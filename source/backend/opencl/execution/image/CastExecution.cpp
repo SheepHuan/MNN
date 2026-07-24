@@ -11,7 +11,7 @@
 namespace MNN {
 namespace OpenCL {
 
-CastExecution::CastExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const std::string& compute, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+CastExecution::CastExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const std::string& compute, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mBuildOptions.emplace(compute);
     auto openCLBackend = static_cast<OpenCLBackend*>(backend);
     auto runtime       = openCLBackend->getOpenCLRuntime();

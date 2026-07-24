@@ -66,7 +66,8 @@ struct TuneInfo{
 
 class KernelWrap {
 public:
-    KernelWrap(std::shared_ptr<cl::Kernel> k, KernelPool* recycle) : mKernel(k), mRecycle(recycle) {
+    KernelWrap(std::shared_ptr<cl::Kernel> k, KernelPool* recycle, const std::string& programName = "", const std::string& kernelName = "")
+        : mKernel(k), mRecycle(recycle), mProgramName(programName), mKernelName(kernelName) {
         // Do nothing
     }
     ~ KernelWrap() {
@@ -77,9 +78,17 @@ public:
     cl::Kernel& get() {
         return *mKernel;
     }
+    const std::string& programName() const {
+        return mProgramName;
+    }
+    const std::string& kernelName() const {
+        return mKernelName;
+    }
     KernelPool* mRecycle;
 private:
     std::shared_ptr<cl::Kernel> mKernel;
+    std::string mProgramName;
+    std::string mKernelName;
 };
 class OpenCLRuntime {
 public:

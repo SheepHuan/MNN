@@ -15,7 +15,7 @@ namespace MNN {
 namespace OpenCL {
 
 FuseExecution::FuseExecution(const std::vector<Tensor *> &inputs, Backend *backend, const Op* op)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mUnits.resize(1);
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
     auto runtime = mOpenCLBackend->getOpenCLRuntime();

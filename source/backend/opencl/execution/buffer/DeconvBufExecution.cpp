@@ -19,7 +19,7 @@ namespace MNN {
 namespace OpenCL {
 
 DeconvBufExecution::DeconvBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : ConvBufCommonExecution(op->main_as_Convolution2D(), backend), CommonExecution(backend, op) {
+    : ConvBufCommonExecution(op->main_as_Convolution2D(), backend), CommonExecution(backend, op, __FUNCTION__) {
     if (!mConvComValid) {
         mValid = false;
         return;
@@ -81,7 +81,7 @@ DeconvBufExecution::~DeconvBufExecution() {
 }
 
 DeconvBufExecution::DeconvBufExecution(std::shared_ptr<ConvBufResource> resource, const MNN::Op* op, Backend *backend)
-    : ConvBufCommonExecution(backend), CommonExecution(backend, op) {
+    : ConvBufCommonExecution(backend), CommonExecution(backend, op, __FUNCTION__) {
     if (!mConvComValid) {
         mValid = false;
         return;

@@ -13,7 +13,7 @@
 namespace MNN {
 namespace OpenCL {
 GridSampleBufExecution::GridSampleBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
     mMode = op->main_as_GridSample()->mode();
     mPaddingMode = op->main_as_GridSample()->paddingMode();

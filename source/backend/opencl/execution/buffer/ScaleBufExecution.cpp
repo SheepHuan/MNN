@@ -14,7 +14,7 @@ namespace MNN {
 namespace OpenCL {
 
 ScaleBufExecution::ScaleBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
 #ifdef LOG_VERBOSE
     MNN_PRINT("Start ScaleBufExecution init !\n");
 #endif

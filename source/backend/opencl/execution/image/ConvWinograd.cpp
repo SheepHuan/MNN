@@ -50,7 +50,7 @@ bool ConvWinograd::valid(const Convolution2DCommon* common, const Tensor* input,
 }
 
 
-ConvWinograd::ConvWinograd(const MNN::Op *op, Backend* backend) : CommonExecution(backend, op) {
+ConvWinograd::ConvWinograd(const MNN::Op *op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     mResource.reset(new ConvWinoResource);
     auto conv2D  = op->main_as_Convolution2D();
@@ -145,7 +145,7 @@ ConvWinograd::ConvWinograd(const MNN::Op *op, Backend* backend) : CommonExecutio
     }
 }
 
-ConvWinograd::ConvWinograd(std::shared_ptr<ConvWinoResource> resource, const MNN::Op* op, Backend *backend) : CommonExecution(backend, op) {
+ConvWinograd::ConvWinograd(std::shared_ptr<ConvWinoResource> resource, const MNN::Op* op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     auto conv2D  = op->main_as_Convolution2D();

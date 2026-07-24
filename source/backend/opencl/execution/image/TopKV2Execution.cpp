@@ -16,7 +16,7 @@ static const int kTopKThreadNumber = 128;
 static const int kTopKLocalK = 8;
 static const int kTopKCandidateNumber = kTopKThreadNumber * kTopKLocalK;
 
-TopKV2Execution::TopKV2Execution(const MNN::Op* op, Backend* backend, int k) : CommonExecution(backend, op) {
+TopKV2Execution::TopKV2Execution(const MNN::Op* op, Backend* backend, int k) : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     mK = k;
     mLargest = true;

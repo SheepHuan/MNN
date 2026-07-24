@@ -13,7 +13,7 @@
 namespace MNN {
 namespace OpenCL {
 
-GroupNormBufExecution::GroupNormBufExecution(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+GroupNormBufExecution::GroupNormBufExecution(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     auto group_norm_param = op->main_as_GroupNorm();
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
     auto runtime = mOpenCLBackend->getOpenCLRuntime();

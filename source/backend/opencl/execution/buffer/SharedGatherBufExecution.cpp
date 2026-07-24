@@ -11,7 +11,7 @@ namespace OpenCL {
 
 SharedGatherBufExecution::SharedGatherBufExecution(std::shared_ptr<ConvBufResource> resource, const Op* op,
                                                    Backend* backend)
-    : CommonExecution(backend, op),
+    : CommonExecution(backend, op, __FUNCTION__),
       mOpenCLBackend(static_cast<OpenCLBackend*>(backend)),
       mResource(std::move(resource)) {}
 

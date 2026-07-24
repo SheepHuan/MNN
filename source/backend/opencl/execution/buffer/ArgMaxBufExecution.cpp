@@ -12,7 +12,7 @@
 namespace MNN {
 namespace OpenCL {
 
-ArgMaxBufExecution::ArgMaxBufExecution(const std::string &compute, const MNN::Op* op, Backend* backend, const int axis) : CommonExecution(backend, op) {
+ArgMaxBufExecution::ArgMaxBufExecution(const std::string &compute, const MNN::Op* op, Backend* backend, const int axis) : CommonExecution(backend, op, __FUNCTION__) {
     mBuildOptions.emplace(compute);
     mAxis = axis;
     // Do nothing

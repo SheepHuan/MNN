@@ -545,11 +545,11 @@ ErrorCode SelfAttentionBufImpl::onExecute(Backend *backend, const std::vector<Te
     return NO_ERROR;
 }
 
-SelfAttentionBufExecution::SelfAttentionBufExecution(const MNN::Op *op, Backend* backend) : CommonExecution(backend, op) {
+SelfAttentionBufExecution::SelfAttentionBufExecution(const MNN::Op *op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mImpl.reset(new SelfAttentionBufImpl(op, backend));
 }
 
-SelfAttentionBufExecution::SelfAttentionBufExecution(std::shared_ptr<SelfAttentionBufImpl> impl, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op), mImpl(impl) {}
+SelfAttentionBufExecution::SelfAttentionBufExecution(std::shared_ptr<SelfAttentionBufImpl> impl, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__), mImpl(impl) {}
 
 ErrorCode SelfAttentionBufExecution::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
     return mImpl->onResize(backend(), inputs, outputs);

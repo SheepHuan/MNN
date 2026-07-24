@@ -2068,7 +2068,7 @@ ErrorCode AttentionBufExecution::onExecute(const std::vector<Tensor*>& inputs, c
 }
 
 AttentionBufExecution::AttentionBufExecution(const MNN::Op* op, Backend* backend, bool outputC4)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mMeta = (KVMeta*)(backend->getMetaPtr());
     mOutputC4 = outputC4;
     mAttnScale = op->main_as_AttentionParam()->attnScale();
@@ -2082,7 +2082,7 @@ AttentionBufExecution::AttentionBufExecution(const MNN::Op* op, Backend* backend
 
 AttentionBufExecution::AttentionBufExecution(std::shared_ptr<KVCacheCLManager> manager, const MNN::Op* op,
                                              Backend* backend)
-    : CommonExecution(backend, op), mKVCacheCLManager(manager) {
+    : CommonExecution(backend, op, __FUNCTION__), mKVCacheCLManager(manager) {
     mMeta = (KVMeta*)(backend->getMetaPtr());
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     auto param = op->main_as_AttentionParam();

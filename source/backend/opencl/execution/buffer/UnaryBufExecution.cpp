@@ -12,7 +12,7 @@
 namespace MNN {
 namespace OpenCL {
 
-UnaryBufExecution::UnaryBufExecution(const std::string& compute, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+UnaryBufExecution::UnaryBufExecution(const std::string& compute, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mBuildOptions.emplace(" -DOPERATOR=" + compute);
 }
 ErrorCode UnaryBufExecution::onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {

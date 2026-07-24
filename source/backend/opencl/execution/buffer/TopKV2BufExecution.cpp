@@ -19,7 +19,7 @@ static const int kTopKLocalK = 8;
 static const int kTopKCandidateNumber = kTopKThreadNumber * kTopKLocalK;
 
 TopKV2BufExecution::TopKV2BufExecution(const MNN::Op *op, Backend *backend, int k)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
     mK = k;
     

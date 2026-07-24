@@ -13,7 +13,7 @@
 namespace MNN {
 namespace OpenCL {
 
-ReductionExecution::ReductionExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+ReductionExecution::ReductionExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
 #ifdef LOG_VERBOSE
     MNN_PRINT("start ReductionExecution init !\n");
 #endif

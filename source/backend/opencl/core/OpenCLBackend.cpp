@@ -738,6 +738,7 @@ Execution* OpenCLBackend::onCreate(const std::vector<Tensor*>& inputs, const std
 }
 
 void OpenCLBackend::onResizeBegin() {
+    clearReplayExecutionInfo();
 #ifndef ENABLE_OPENCL_TIME_PROFILER
     mOpenCLRuntime->setCommandQueueProfileEnable();
 #endif
@@ -775,6 +776,44 @@ void OpenCLBackend::onExecuteEnd() const {
     // Runtime::onGetLastGpuTimeMs() without parsing printed output.
     mCLRuntime->mLastGpuTimeMs = (float)mOpenCLRuntime->mKernelTime / 1000.0f;
 #endif
+}
+
+void OpenCLBackend::clearReplayExecutionInfo() {
+    mReplayExecutionInfo.clear();
+    mReplayCurrentExecution = nullptr;
+    mReplayCurrentIndex = -1;
+}
+
+void OpenCLBackend::onExecutionResizeBegin(const Op* op, const Execution* execution) {
+    mReplayCurrentExecution = execution;
+    mReplayCurrentIndex = -1;
+    for (int i = 0; i < static_cast<int>(mReplayExecutionInfo.size()); ++i) {
+        if (mReplayExecutionInfo[i].execution == execution) {
+            mReplayCurrentIndex = i;
+            break;
+        }
+    }
+    if (mReplayCurrentIndex < 0) {
+        ReplayExecutionInfo info;
+        info.execution = execution;
+        mReplayExecutionInfo.emplace_back(std::move(info));
+        mReplayCurrentIndex = static_cast<int>(mReplayExecutionInfo.size()) - 1;
+    }
+    auto& info = mReplayExecutionInfo[mReplayCurrentIndex];
+    info.kernels.clear();
+    info.op = op;
+    info.opName = op != nullptr && op->name() != nullptr ? op->name()->str() : "";
+    info.opType = op != nullptr ? op->type() : OpType(0);
+    info.executionName = execution != nullptr && execution->getExecutionName() != nullptr
+                             ? execution->getExecutionName()
+                             : "";
+}
+
+void OpenCLBackend::onExecutionResizeEnd(const Op* op, const Execution* execution) {
+    if (mReplayCurrentExecution == execution) {
+        mReplayCurrentExecution = nullptr;
+        mReplayCurrentIndex = -1;
+    }
 }
 
 
@@ -1502,6 +1541,14 @@ void OpenCLBackend::addRecord(cl_recording_qcom &record, std::vector<RecordUpdat
 }
 
 void OpenCLBackend::recordKernel2d(const std::shared_ptr<KernelWrap> &kernelW, const std::vector<uint32_t> &gws, const std::vector<uint32_t> &lws, RecordUpdateInfo *updateInfo) {
+    if (mReplayCurrentIndex >= 0 && kernelW != nullptr) {
+        ReplayKernelInfo info;
+        info.programName = kernelW->programName();
+        info.kernelName = kernelW->kernelName();
+        info.globalWorkSize = gws;
+        info.localWorkSize = lws;
+        mReplayExecutionInfo[mReplayCurrentIndex].kernels.emplace_back(std::move(info));
+    }
 #if !defined(ENABLE_OPENCL_TIME_PROFILER) && defined(MNN_USE_LIB_WRAPPER)
     if(!mUseRecordQueue){
         return;
@@ -1568,6 +1615,14 @@ void OpenCLBackend::recordKernel2d(const std::shared_ptr<KernelWrap> &kernelW, c
 }
 
 void OpenCLBackend::recordKernel3d(const std::shared_ptr<KernelWrap> &kernelW, const std::vector<uint32_t> &gws, const std::vector<uint32_t> &lws, RecordUpdateInfo *updateInfo) {
+    if (mReplayCurrentIndex >= 0 && kernelW != nullptr) {
+        ReplayKernelInfo info;
+        info.programName = kernelW->programName();
+        info.kernelName = kernelW->kernelName();
+        info.globalWorkSize = gws;
+        info.localWorkSize = lws;
+        mReplayExecutionInfo[mReplayCurrentIndex].kernels.emplace_back(std::move(info));
+    }
 #if !defined(ENABLE_OPENCL_TIME_PROFILER) && defined(MNN_USE_LIB_WRAPPER)
     if(!mUseRecordQueue){
         return;

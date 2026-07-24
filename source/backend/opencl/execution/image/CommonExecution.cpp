@@ -10,8 +10,8 @@
 namespace MNN {
 namespace OpenCL {
 
-CommonExecution::CommonExecution(Backend *backend, const MNN::Op *Op)
-    : Execution(backend), mOp(Op) {
+CommonExecution::CommonExecution(Backend *backend, const MNN::Op *Op, const char* executionName)
+    : Execution(backend), mOp(Op), mExecutionName(executionName == nullptr ? "CommonExecution" : executionName) {
     mOpType = Op->type();
 }
 

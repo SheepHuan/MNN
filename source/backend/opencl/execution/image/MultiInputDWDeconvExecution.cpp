@@ -13,7 +13,7 @@
 namespace MNN {
 namespace OpenCL {
 
-MultiInputDWDeconvExecution::MultiInputDWDeconvExecution(const MNN::Op *op, Backend *backend) : CommonExecution(backend, op) {
+MultiInputDWDeconvExecution::MultiInputDWDeconvExecution(const MNN::Op *op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__) {
     auto common = op->main_as_Convolution2D()->common();
 
     mStrides = {common->strideY(), common->strideX()};

@@ -14,7 +14,7 @@ namespace MNN {
 namespace OpenCL {
 
 ReluBufExecution::ReluBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend       = static_cast<OpenCLBackend *>(backend);
     auto mPreluParamPtr       = op->main_as_PRelu();
     int preluSize             = mPreluParamPtr->slopeCount();

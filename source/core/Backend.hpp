@@ -183,6 +183,14 @@ public:
      */
     virtual void onExecuteEnd() const = 0;
 
+    // Optional execution lifecycle hooks used by backend replay diagnostics.
+    virtual void onExecutionResizeBegin(const Op* op, const Execution* execution) {
+        // nothing to do
+    }
+    virtual void onExecutionResizeEnd(const Op* op, const Execution* execution) {
+        // nothing to do
+    }
+
     virtual const Runtime* getRuntime() {
         return nullptr;
     }

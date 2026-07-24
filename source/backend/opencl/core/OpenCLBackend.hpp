@@ -44,6 +44,23 @@ struct RecordInfo{
     cl_recording_qcom record;
     std::vector<RecordUpdateInfo*> updateInfo;
 };
+
+struct ReplayKernelInfo {
+    std::string programName;
+    std::string kernelName;
+    std::vector<uint32_t> globalWorkSize;
+    std::vector<uint32_t> localWorkSize;
+};
+
+struct ReplayExecutionInfo {
+    const Execution* execution = nullptr;
+    const Op* op = nullptr;
+    std::string opName;
+    OpType opType = OpType(0);
+    std::string executionName;
+    std::vector<ReplayKernelInfo> kernels;
+};
+
 class CLRuntime : public Runtime {
 public:
     CLRuntime(const Backend::Info& info);
@@ -100,6 +117,8 @@ public:
 
     virtual void onExecuteBegin() const override;
     virtual void onExecuteEnd() const override;
+    virtual void onExecutionResizeBegin(const Op* op, const Execution* execution) override;
+    virtual void onExecutionResizeEnd(const Op* op, const Execution* execution) override;
 
     virtual int onSync(Tensor::MapType mtype, bool toCpu, const Tensor* dstTensor) override;
 
@@ -159,6 +178,11 @@ public:
     virtual bool onUnmapTensor(Tensor::MapType mtype, Tensor::DimensionType dtype, const Tensor* dstTensor, void* mapPtr) override;
     virtual const Runtime* getRuntime() override;
 
+    void clearReplayExecutionInfo();
+    const std::vector<ReplayExecutionInfo>& getReplayExecutionInfo() const {
+        return mReplayExecutionInfo;
+    }
+
 private:
     void copyFromDevice(const Tensor* srcTensor, const Tensor* dstTensor) const;
     void copyToDevice(const Tensor* srcTensor, const Tensor* dstTensor) const;
@@ -188,6 +212,9 @@ private:
     BackendConfig::MemoryMode mMemory;
     bool mIsCreateError{false};
     mutable std::vector<RecordInfo> mRecordings;
+    std::vector<ReplayExecutionInfo> mReplayExecutionInfo;
+    const Execution* mReplayCurrentExecution = nullptr;
+    int mReplayCurrentIndex = -1;
     bool mUseRecordQueue = false;
     bool mDivideOpRecord = false;
     uint32_t mRecordNums = 0;

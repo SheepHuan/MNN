@@ -680,7 +680,7 @@ std::shared_ptr<KernelWrap> OpenCLRuntime::buildKernelWithCache(const std::strin
         kernel = kiter->second.recycle.front();
         kiter->second.recycle.pop();
     }
-    std::shared_ptr<KernelWrap> kw(new KernelWrap(kernel, &kiter->second));
+    std::shared_ptr<KernelWrap> kw(new KernelWrap(kernel, &kiter->second, programName, kernelName));
     return kw;
 }
 
@@ -716,7 +716,7 @@ std::shared_ptr<KernelWrap> OpenCLRuntime::buildKernelFromSource(const std::stri
     std::shared_ptr<cl::Kernel> kernel;
     kernel.reset(new cl::Kernel(program, kernelName.c_str(), &res));
     MNN_CHECK_CL_SUCCESS(res, "getKernel");
-    std::shared_ptr<KernelWrap> kw(new KernelWrap(kernel, nullptr));
+    std::shared_ptr<KernelWrap> kw(new KernelWrap(kernel, nullptr, "source", kernelName));
     return kw;
 }
 

@@ -70,7 +70,7 @@ void ConvBufWinograd::convertWeightFormat(cl::Buffer& buffer, const int alignK, 
     return;
 }
 
-ConvBufWinograd::ConvBufWinograd(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+ConvBufWinograd::ConvBufWinograd(const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
     mResource.reset(new ConvBufWinoResource);
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     auto conv2D  = op->main_as_Convolution2D();
@@ -248,7 +248,7 @@ ConvBufWinograd::~ConvBufWinograd() {
     // Do nothing
 }
 
-ConvBufWinograd::ConvBufWinograd(std::shared_ptr<ConvBufWinoResource> resource, const MNN::Op* op, Backend *backend) : CommonExecution(backend, op) {
+ConvBufWinograd::ConvBufWinograd(std::shared_ptr<ConvBufWinoResource> resource, const MNN::Op* op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__) {
     mResource = resource;
     mOpenCLBackend = static_cast<OpenCLBackend*>(backend);
     auto conv2D  = op->main_as_Convolution2D();

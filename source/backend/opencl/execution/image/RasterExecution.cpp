@@ -17,7 +17,7 @@ namespace OpenCL {
 
 
 RasterExecution::RasterExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mOpenCLBackend = (OpenCLBackend *)backend;
     //nothing to do
 }

@@ -15,7 +15,7 @@
 namespace MNN {
 namespace OpenCL {
 
-SelectBufExecution::SelectBufExecution(Backend* backend, const MNN::Op* Op) : CommonExecution(backend, Op) {
+SelectBufExecution::SelectBufExecution(Backend* backend, const MNN::Op* Op) : CommonExecution(backend, Op, __FUNCTION__) {
     // Do nothing
 }
 ErrorCode SelectBufExecution::onEncode(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {

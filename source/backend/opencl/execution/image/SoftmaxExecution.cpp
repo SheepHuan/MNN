@@ -14,7 +14,7 @@ namespace MNN {
 namespace OpenCL {
 
 SoftmaxExecution::SoftmaxExecution(const std::vector<Tensor *> &inputs, int axis, const MNN::Op *op, Backend *backend)
-    : CommonExecution(backend, op) {
+    : CommonExecution(backend, op, __FUNCTION__) {
     mAxis          = axis;
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);
     auto kernel = mOpenCLBackend->getOpenCLRuntime()->buildKernel("softmax", "softmax_channel", {"-DSOFTMAX_LOCAL_SIZE=512"}, mOpenCLBackend->getPrecision());

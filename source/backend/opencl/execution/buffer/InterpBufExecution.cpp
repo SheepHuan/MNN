@@ -13,7 +13,7 @@
 namespace MNN {
 namespace OpenCL {
 
-InterpBufExecution::InterpBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op) {
+InterpBufExecution::InterpBufExecution(const std::vector<Tensor *> &inputs, const MNN::Op *op, Backend *backend) : CommonExecution(backend, op, __FUNCTION__) {
     mUnits.resize(1);
     auto &unit = mUnits[0];
     mOpenCLBackend = static_cast<OpenCLBackend *>(backend);

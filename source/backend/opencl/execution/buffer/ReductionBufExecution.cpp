@@ -15,7 +15,7 @@
 namespace MNN {
 namespace OpenCL {
 
-ReductionBufExecution::ReductionBufExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op) {
+ReductionBufExecution::ReductionBufExecution(const std::vector<Tensor *> &inputs, const std::vector<Tensor *> &outputs, const MNN::Op* op, Backend* backend) : CommonExecution(backend, op, __FUNCTION__) {
 #ifdef LOG_VERBOSE
     MNN_PRINT("start ReductionBufExecution init !\n");
 #endif
