@@ -49,6 +49,15 @@ struct Options {
     std::string opType;
     std::string execution;
     std::string variant;
+    std::string perfCounterOutput;
+    std::string perfCounterEvents;
+    bool openclPmuBench = false;
+    std::string openclPmuCase = "all";
+    int openclPmuIterations = 100;
+    int openclPmuWorkloadRuns = 1;
+    int openclPmuWarmupRuns = 2;
+    size_t openclPmuSize = 0;
+    size_t openclPmuLocalSize = 0;
 };
 
 struct TensorRecord {

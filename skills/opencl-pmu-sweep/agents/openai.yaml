@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenCL PMU Sweep"
+  short_description: "Sweep one GPU PMU event and write CSV results"
+  default_prompt: "Run a single-event OpenCL PMU sweep for the requested cases and device, preserving raw JSON and writing the fixed CSV schema."

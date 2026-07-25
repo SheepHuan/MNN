@@ -61,7 +61,7 @@ struct ReplayExecutionInfo {
     std::vector<ReplayKernelInfo> kernels;
 };
 
-class CLRuntime : public Runtime {
+class MNN_PUBLIC CLRuntime : public Runtime {
 public:
     CLRuntime(const Backend::Info& info);
     virtual ~CLRuntime();
@@ -100,7 +100,7 @@ private:
 };
 
 
-class OpenCLBackend : public Backend {
+class MNN_PUBLIC OpenCLBackend : public Backend {
 public:
     OpenCLBackend(BackendConfig::PrecisionMode precision, BackendConfig::MemoryMode memory, int gpuMode, const CLRuntime *runtime);
     ~OpenCLBackend();

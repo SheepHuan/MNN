@@ -162,6 +162,12 @@ downloads/
 eggs/
 .eggs/
 lib/
+# Vendored Google HardwarePerfCounter sources intentionally contain a `lib/`
+# directory and must remain tracked with MNNPerfCounter.
+!3rd_party/MNNPerfCounter/upstream/hardware_perfcounter/
+!3rd_party/MNNPerfCounter/upstream/hardware_perfcounter/lib/
+!3rd_party/MNNPerfCounter/upstream/hardware_perfcounter/lib/gpu/
+!3rd_party/MNNPerfCounter/upstream/hardware_perfcounter/lib/gpu/**
 lib64/
 parts/
 sdist/
@@ -223,6 +229,9 @@ target/
 # IPython
 profile_default/
 ipython_config.py
+
+# Local replay_benchmark / OpenCL PMU sweep reports and raw JSON artifacts.
+/records/
 
 # pyenv
 .python-version

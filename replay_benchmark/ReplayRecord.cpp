@@ -171,6 +171,8 @@ std::string forwardName(int forward) {
     switch (static_cast<MNNForwardType>(forward)) {
         case MNN_FORWARD_CPU:
             return "CPU";
+        case MNN_FORWARD_CPU_EXTENSION:
+            return "CPU_EXTENSION";
         case MNN_FORWARD_OPENCL:
             return "OPENCL";
         case MNN_FORWARD_VULKAN:

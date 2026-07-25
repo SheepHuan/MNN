@@ -10,6 +10,7 @@
 
 #include "ReplayRecord.hpp"
 #include "ReplayRunner.hpp"
+#include "OpenCLPmuBenchmark.hpp"
 #include "core/Backend.hpp"
 #include "revertMNNModel.hpp"
 
@@ -140,6 +141,52 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
                 return false;
             }
             options.replay = true;
+        } else if (arg == "--perf-counter-output") {
+            if (!requireValue(options.perfCounterOutput)) {
+                return false;
+            }
+            options.replay = true;
+        } else if (arg == "--perf-counter-events") {
+            if (!requireValue(options.perfCounterEvents)) {
+                return false;
+            }
+            options.replay = true;
+        } else if (arg == "--opencl-pmu-bench") {
+            options.openclPmuBench = true;
+        } else if (arg == "--opencl-pmu-case") {
+            if (!requireValue(options.openclPmuCase)) {
+                return false;
+            }
+        } else if (arg == "--opencl-pmu-iterations") {
+            std::string value;
+            if (!requireValue(value)) {
+                return false;
+            }
+            options.openclPmuIterations = std::atoi(value.c_str());
+        } else if (arg == "--opencl-pmu-workload-runs") {
+            std::string value;
+            if (!requireValue(value)) {
+                return false;
+            }
+            options.openclPmuWorkloadRuns = std::max(1, std::atoi(value.c_str()));
+        } else if (arg == "--opencl-pmu-warmup-runs") {
+            std::string value;
+            if (!requireValue(value)) {
+                return false;
+            }
+            options.openclPmuWarmupRuns = std::max(0, std::atoi(value.c_str()));
+        } else if (arg == "--opencl-pmu-size") {
+            std::string value;
+            if (!requireValue(value)) {
+                return false;
+            }
+            options.openclPmuSize = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
+        } else if (arg == "--opencl-pmu-local-size") {
+            std::string value;
+            if (!requireValue(value)) {
+                return false;
+            }
+            options.openclPmuLocalSize = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
         } else if (arg == "--replay") {
             options.replay = true;
         } else {
@@ -191,7 +238,17 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
         }
     }
 
+    if (options.openclPmuBench) {
+        options.replay = false;
+        options.record = false;
+        return true;
+    }
     if (options.model.empty()) {
+        return false;
+    }
+    if (!options.perfCounterOutput.empty() &&
+        (options.recordDir.empty() ||
+         (options.opId < 0 && options.opType.empty() && options.execution.empty() && options.variant.empty()))) {
         return false;
     }
     if (options.replay || options.record) {
@@ -206,6 +263,12 @@ static void printUsage(const char* program) {
               << " model_or_dir [loop] [warmup] [forward] [gpu_mode] [precision] [sparsity] [sparse_block] [quantized] "
                  "[kleidiai] [--record dir | --args config.json]\n"
               << "  " << program << " --model model.mnn --record dir --op-id N [--execution Name] [--variant Name]\n"
+              << "      [--perf-counter-output path.json] [--perf-counter-events name1,name2,...]\n"
+              << "  " << program << " --opencl-pmu-bench [--opencl-pmu-case name|all]\n"
+                 "      [--opencl-pmu-iterations N] [--opencl-pmu-workload-runs N]\n"
+                 "      [--opencl-pmu-warmup-runs N] [--opencl-pmu-size bytes]\n"
+                 "      [--opencl-pmu-local-size 32|64|128|256]\n"
+                 "      [--perf-counter-events name1,name2,...|auto] [--perf-counter-output path.json]\n"
               << "\n"
               << "forward: 0 CPU, 3 OpenCL; precision: 0 normal, 1 high, 2 low FP16, 3 low BF16\n";
 }
@@ -238,7 +301,10 @@ static bool recordModel(const ModelFile& model, const Options& options, bool mul
     }
     net->setSessionHint(Interpreter::CPU_ENABLE_KLEIDIAI, options.enableKleidiAI ? 1 : 0);
     const auto* backend = net->getBackend(session, net->getSessionInput(session, nullptr));
-    if (backend == nullptr || backend->type() != static_cast<MNNForwardType>(options.forward)) {
+    const auto requestedForward = static_cast<MNNForwardType>(options.forward);
+    const bool cpuExtension = requestedForward == MNN_FORWARD_CPU &&
+                              backend != nullptr && backend->type() == MNN_FORWARD_CPU_EXTENSION;
+    if (backend == nullptr || (backend->type() != requestedForward && !cpuExtension)) {
         std::cerr << "The model did not create the requested backend: " << forwardName(options.forward) << std::endl;
         return false;
     }
@@ -372,6 +438,9 @@ int main(int argc, const char* argv[]) {
     if (!parseOptions(argc, argv, options)) {
         printUsage(argv[0]);
         return 1;
+    }
+    if (options.openclPmuBench) {
+        return runOpenCLPmuBenchmark(options) ? 0 : 1;
     }
     if (options.replay) {
         return replayOp(options) ? 0 : 1;

@@ -14,7 +14,7 @@
 
 - Create: `replay_benchmark/OpenCLPmuBenchmark.hpp` — benchmark options, case metadata, result/report types, and runner entry point.
 - Create: `replay_benchmark/OpenCLPmuBenchmark.cpp` — OpenCL device setup, capability detection, kernel execution, PMU sampling, classification, and JSON output.
-- Create: `replay_benchmark/OpenCLPmuKernels.hpp` — embedded OpenCL C source and kernel names for buffer/image/texture/compute cases.
+- Modify: `replay_benchmark/OpenCLPmuBenchmark.cpp` — embed OpenCL C source as constant strings alongside the runner.
 - Create: `replay_benchmark/README.md` — OpenCL concepts, benchmark matrix, PMU interpretation, and device validation commands.
 - Create: `replay_benchmark/OpenCLPmuBenchmarkTest.cpp` — host-only metadata, parser, and synthetic classification tests.
 - Modify: `replay_benchmark/ReplayRecord.hpp` — add explicit PMU benchmark options without coupling them to model replay selectors.
@@ -111,12 +111,11 @@ Expected: exit code 0 and all metadata/classification assertions pass.
 ### Task 3: Add embedded OpenCL kernels and capability-filtered case definitions
 
 **Files:**
-- Create: `replay_benchmark/OpenCLPmuKernels.hpp`
 - Modify: `replay_benchmark/OpenCLPmuBenchmark.cpp`
 
-- [ ] **Step 1: Add buffer kernels.**
+- [ ] **Step 1: Add buffer kernels directly in the C++ implementation.**
 
-Embed kernels for sequential read, sequential write, read-modify-write,
+Embed directly in `OpenCLPmuBenchmark.cpp` kernels for sequential read, sequential write, read-modify-write,
 small-set reuse, L2-sized reuse, strided access, random access, and large
 streaming. Each kernel accepts a loop count and uses an output sink so the
 compiler cannot remove the memory operation.

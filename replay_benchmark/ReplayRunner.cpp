@@ -1,6 +1,12 @@
 // MNN single Execution replay implementation.
 #include "ReplayRunner.hpp"
+#include "PerfCounterReport.hpp"
 
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+#include "MNNPerfCounter.hpp"
+#endif
+
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -13,6 +19,47 @@
 
 namespace MNN {
 namespace Replay {
+
+namespace {
+
+static uint64_t monotonicNs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+static std::vector<std::string> splitCounterNames(const std::string& text) {
+    std::vector<std::string> names;
+    size_t begin = 0;
+    while (begin < text.size()) {
+        const size_t end = text.find(',', begin);
+        const size_t length = end == std::string::npos ? text.size() - begin : end - begin;
+        if (length != 0) {
+            names.emplace_back(text.substr(begin, length));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    if (names.empty()) {
+        names = {"gpu_active_cycles", "compute_active_cycles", "compute_tasks", "l2_any_lookup",
+                 "l2_ext_read", "l2_ext_write"};
+    }
+    return names;
+}
+
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+static const char* perfVendorName(MNN::PerfCounter::GpuVendor vendor) {
+    switch (vendor) {
+        case MNN::PerfCounter::GpuVendor::Mali: return "Mali";
+        case MNN::PerfCounter::GpuVendor::Adreno: return "Adreno";
+        default: return "Unknown";
+    }
+}
+#endif
+
+} // namespace
 
 bool replayOp(const Options& options) {
     RecordReader reader;
@@ -50,6 +97,17 @@ bool replayOp(const Options& options) {
         return false;
     }
 
+    PerfCounterReport perfReport;
+    perfReport.status = "unavailable";
+    perfReport.model = options.model;
+    perfReport.opId = opSpec->id;
+    perfReport.opName = opSpec->name;
+    perfReport.opType = opSpec->type;
+    perfReport.execution = opSpec->execution;
+    perfReport.variant = opSpec->variant;
+    perfReport.backend = forwardName(replayOptions.forward);
+    const bool perfRequested = !options.perfCounterOutput.empty();
+
     std::vector<uint8_t> modelBytes;
     if (!readBytes(options.model, modelBytes)) {
         std::cerr << "Can't read model: " << options.model << std::endl;
@@ -84,7 +142,11 @@ bool replayOp(const Options& options) {
     info.type = static_cast<MNNForwardType>(replayOptions.forward);
     info.numThread = replayOptions.gpuMode;
     info.user = &backendConfig;
-    const auto* creator = MNN::MNNGetExtraRuntimeCreator(info.type);
+    const MNNForwardType runtimeType = replayOptions.forward == MNN_FORWARD_CPU_EXTENSION
+                                           ? MNN_FORWARD_CPU
+                                           : static_cast<MNNForwardType>(replayOptions.forward);
+    info.type = runtimeType;
+    const auto* creator = MNN::MNNGetExtraRuntimeCreator(runtimeType);
     if (creator == nullptr) {
         std::cerr << "Requested runtime is not available: " << forwardName(replayOptions.forward) << std::endl;
         return false;
@@ -102,8 +164,9 @@ bool replayOp(const Options& options) {
     std::vector<std::unique_ptr<Tensor>> deviceInputs;
     std::vector<Tensor*> inputPointers;
     std::map<std::string, Tensor*> tensorsById;
-    const auto replayTensorStorage =
-        replayOptions.forward == MNN_FORWARD_CPU ? Backend::STATIC : Backend::DYNAMIC_SEPERATE;
+    const bool cpuBackend = replayOptions.forward == MNN_FORWARD_CPU ||
+                            replayOptions.forward == MNN_FORWARD_CPU_EXTENSION;
+    const auto replayTensorStorage = cpuBackend ? Backend::STATIC : Backend::DYNAMIC_SEPERATE;
     for (const auto& spec : opSpec->inputs) {
         const auto type = typeFromName(spec.dtype);
         std::unique_ptr<Tensor> host(Tensor::create(spec.shape, type, nullptr, Tensor::CAFFE));
@@ -116,9 +179,6 @@ bool replayOp(const Options& options) {
         std::memcpy(host->buffer().host, bytes.data(), bytes.size());
         std::unique_ptr<Tensor> device(Tensor::createDevice(spec.shape, type, storageDimensionType(spec)));
         MNN::TensorUtils::setTensorChannelPack(device.get(), spec.channelPack);
-        if (!backend->onAcquireBuffer(device.get(), replayTensorStorage) || !device->copyFromHostTensor(host.get())) {
-            return false;
-        }
         inputPointers.emplace_back(device.get());
         tensorsById[spec.id] = device.get();
         hostInputs.emplace_back(std::move(host));
@@ -131,9 +191,6 @@ bool replayOp(const Options& options) {
         const auto type = typeFromName(spec.dtype);
         std::unique_ptr<Tensor> device(Tensor::createDevice(spec.shape, type, storageDimensionType(spec)));
         MNN::TensorUtils::setTensorChannelPack(device.get(), spec.channelPack);
-        if (!backend->onAcquireBuffer(device.get(), replayTensorStorage)) {
-            return false;
-        }
         outputPointers.emplace_back(device.get());
         tensorsById[spec.id] = device.get();
         deviceOutputs.emplace_back(std::move(device));
@@ -151,9 +208,33 @@ bool replayOp(const Options& options) {
     }
 
     std::unique_ptr<Execution> execution(backend->onCreate(inputPointers, outputPointers, op));
+    if ((execution == nullptr || !execution->valid()) && replayOptions.forward == MNN_FORWARD_CPU_EXTENSION) {
+        // ARM82 intentionally delegates unsupported low-precision ops to the
+        // generic CPU backend in a normal Session. Mirror that fallback when
+        // replaying an isolated recorded Execution.
+        BackendConfig fallbackConfig = backendConfig;
+        fallbackConfig.precision = BackendConfig::Precision_Normal;
+        std::unique_ptr<Backend> fallbackBackend(runtime->onCreate(&fallbackConfig, nullptr));
+        if (fallbackBackend != nullptr) {
+            backend = std::move(fallbackBackend);
+            execution.reset(backend->onCreate(inputPointers, outputPointers, op));
+        }
+    }
     if (execution == nullptr || !execution->valid()) {
         std::cerr << "Backend::onCreate failed for op " << opSpec->id << std::endl;
         return false;
+    }
+
+    for (size_t i = 0; i < opSpec->inputs.size(); ++i) {
+        if (!backend->onAcquireBuffer(inputPointers[i], replayTensorStorage) ||
+            !inputPointers[i]->copyFromHostTensor(hostInputs[i].get())) {
+            return false;
+        }
+    }
+    for (auto* output : outputPointers) {
+        if (!backend->onAcquireBuffer(output, replayTensorStorage)) {
+            return false;
+        }
     }
 
 #if defined(MNN_REPLAY_HAS_OPENCL)
@@ -169,6 +250,36 @@ bool replayOp(const Options& options) {
         std::cerr << "Execution resize failed" << std::endl;
         return false;
     }
+
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    std::unique_ptr<MNN::PerfCounter::Session> perfSession;
+    std::vector<std::string> counterNames;
+    std::vector<MNN::PerfCounter::CounterSpec> counterSpecs;
+    std::vector<MNN::PerfCounter::CounterValue> counterValues;
+    MNN::PerfCounter::DeviceInfo perfDevice;
+    if (perfRequested) {
+        counterNames = splitCounterNames(options.perfCounterEvents);
+        counterSpecs.resize(counterNames.size());
+        for (size_t i = 0; i < counterNames.size(); ++i) {
+            counterSpecs[i].name = counterNames[i].c_str();
+        }
+        const char* perfError = nullptr;
+        perfSession.reset(MNN::PerfCounter::Session::create(counterSpecs.data(), counterSpecs.size(), &perfDevice,
+                                                            &perfError));
+        if (perfSession == nullptr) {
+            perfReport.error = perfError == nullptr ? "Performance counter session creation failed" : perfError;
+        } else {
+            perfReport.vendor = perfVendorName(perfDevice.vendor);
+            perfReport.productId = perfDevice.productId;
+            perfReport.productName = perfDevice.productName == nullptr ? "" : perfDevice.productName;
+            perfReport.driver = perfDevice.driverName == nullptr ? "" : perfDevice.driverName;
+        }
+    }
+#else
+    if (perfRequested) {
+        perfReport.error = "MNNPerfCounter was not compiled into replay_benchmark";
+    }
+#endif
 
     if (!opSpec->execution.empty() && execution->getExecutionName() != nullptr &&
         opSpec->execution != execution->getExecutionName()) {
@@ -193,17 +304,70 @@ bool replayOp(const Options& options) {
     }
 #endif
 
+    bool replayOk = true;
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    bool perfStarted = false;
+    if (perfSession != nullptr) {
+        if (!perfSession->start()) {
+            perfReport.error = perfSession->error();
+            perfSession.reset();
+        } else {
+            perfStarted = true;
+            perfReport.startNs = monotonicNs();
+        }
+    }
+#endif
     backend->onExecuteBegin();
     const auto executeCode = execution->onExecute(inputPointers, outputPointers);
     backend->onExecuteEnd();
     if (executeCode != MNN::NO_ERROR) {
         std::cerr << "Execution failed: " << executeCode << std::endl;
-        return false;
+        replayOk = false;
+        perfReport.error = "Execution failed";
     }
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    if (perfStarted) {
+        bool synchronized = true;
+        for (auto* output : outputPointers) {
+            if (output == nullptr || output->wait(Tensor::MAP_TENSOR_READ, true) != 0) {
+                synchronized = false;
+                break;
+            }
+        }
+        perfReport.synchronized = synchronized;
+        counterValues.resize(counterSpecs.size());
+        if (!synchronized || !perfSession->stop(counterValues.data(), counterValues.size())) {
+            perfReport.error = synchronized ? perfSession->error() : "OpenCL output synchronization failed";
+            replayOk = false;
+        } else {
+            perfReport.status = "ok";
+            for (size_t i = 0; i < counterValues.size(); ++i) {
+                PerfCounterValueRecord value;
+                value.name = counterNames[i];
+                value.value = counterValues[i].value;
+                perfReport.counters.emplace_back(std::move(value));
+            }
+        }
+        perfReport.endNs = monotonicNs();
+    }
+#endif
     for (int i = 0; i < static_cast<int>(outputPointers.size()); ++i) {
         if (!compareTensor(outputPointers[i], joinPath(recordRoot, opSpec->outputs[i].logicalFile))) {
-            return false;
+            replayOk = false;
+            if (perfRequested && perfReport.error.empty()) {
+                perfReport.error = "Output comparison failed";
+            }
         }
+    }
+    if (perfRequested && perfReport.status != "ok" && perfReport.error.empty()) {
+        perfReport.error = "Performance counter collection was unavailable";
+    }
+    if (perfRequested && !perfReport.write(options.perfCounterOutput)) {
+        std::cerr << "Can't write performance counter report: " << options.perfCounterOutput << std::endl;
+        replayOk = false;
+    }
+    if (!replayOk) {
+        return false;
     }
     std::cout << "Replay succeeded: op_id=" << opSpec->id << " type=" << opSpec->type
               << " execution=" << (execution->getExecutionName() == nullptr ? "" : execution->getExecutionName())

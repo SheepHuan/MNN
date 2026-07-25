@@ -67,8 +67,7 @@ Add a focused benchmark component under `replay_benchmark/`:
 replay_benchmark/
 ├── README.md
 ├── OpenCLPmuBenchmark.hpp
-├── OpenCLPmuBenchmark.cpp
-└── OpenCLPmuKernels.hpp
+└── OpenCLPmuBenchmark.cpp
 ```
 
 `replay_benchmark/README.md` documents the OpenCL concepts exercised by the
@@ -80,9 +79,9 @@ PMU signal it is intended to probe.
 
 `OpenCLPmuBenchmark` owns case discovery, device capability checks, buffer and
 image allocation, kernel compilation, execution, synchronization, PMU
-session lifecycle, and report assembly. Kernel source is compiled into the
-executable as constant character data so the diagnostic mode does not depend
-on external files.
+session lifecycle, and report assembly. Kernel source is embedded as constant
+character data directly in `OpenCLPmuBenchmark.cpp` so the diagnostic mode
+does not depend on external files.
 
 The component reuses the existing OpenCL symbol-loading path and
 `MNNPerfCounter::Session`. It must not add a dependency from the normal MNN

@@ -49,7 +49,7 @@ namespace MNN {
 void LoadOpenCLSymbols();
 void UnLoadOpenCLSymbols();
 
-class OpenCLSymbols {
+class MNN_PUBLIC OpenCLSymbols {
 public:
     bool LoadOpenCLLibrary();
     bool UnLoadOpenCLLibrary();
@@ -99,6 +99,8 @@ public:
                                                        void(CL_CALLBACK *)( // NOLINT(readability/casting)
                                                            const char *, const void *, size_t, void *),
                                                        void *, cl_int *);
+    using clCreateSamplerFunc         = cl_sampler (CL_API_CALL *)(cl_context, cl_bool, cl_addressing_mode, cl_filter_mode, cl_int *);
+    using clReleaseSamplerFunc        = cl_int (CL_API_CALL *)(cl_sampler);
     using clReleaseContextFunc        = cl_int (CL_API_CALL *)(cl_context);
     using clWaitForEventsFunc         = cl_int (CL_API_CALL *)(cl_uint, const cl_event *);
     using clReleaseEventFunc          = cl_int (CL_API_CALL *)(cl_event);
@@ -222,6 +224,8 @@ public:
     MNN_CL_DEFINE_FUNC_PTR(clReleaseEvent);
     MNN_CL_DEFINE_FUNC_PTR(clCreateContext);
     MNN_CL_DEFINE_FUNC_PTR(clCreateContextFromType);
+    MNN_CL_DEFINE_FUNC_PTR(clCreateSampler);
+    MNN_CL_DEFINE_FUNC_PTR(clReleaseSampler);
     MNN_CL_DEFINE_FUNC_PTR(clReleaseContext);
     MNN_CL_DEFINE_FUNC_PTR(clRetainCommandQueue);
     MNN_CL_DEFINE_FUNC_PTR(clEnqueueUnmapMemObject);
@@ -277,7 +281,7 @@ private:
     bool mIsSupportAhardwareBuffer{false};
 };
 
-class OpenCLSymbolsOperator {
+class MNN_PUBLIC OpenCLSymbolsOperator {
 public:
     static OpenCLSymbolsOperator *createOpenCLSymbolsOperatorSingleInstance();
 

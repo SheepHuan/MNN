@@ -112,4 +112,5 @@ Public skills are listed below. Environment-dependent skills may exist under `sk
 | Metal optimization | `skills/metal-optimize/SKILL.md` | Optimize op performance on Metal |
 | Bugfix / debugging | `skills/general-debug/SKILL.md` | Diagnose correctness bugs / regressions in MNN — organized by bug category. |
 | Run tests / CI | `skills/test-ci/SKILL.md` | Run the regression / CI suite (host or on-device), or add / select / retune a test stage |
+| Replay benchmark cross-compile | `skills/replay-benchmark-cross-compile/SKILL.md` | Cross-compile `replay_benchmark` with the ARM GNU Toolchain 11.3 archive |
 | Retrospective | `skills/retrospective/SKILL.md` | After non-trivial tasks with reusable lessons |

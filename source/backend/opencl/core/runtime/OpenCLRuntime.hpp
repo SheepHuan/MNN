@@ -90,7 +90,7 @@ private:
     std::string mProgramName;
     std::string mKernelName;
 };
-class OpenCLRuntime {
+class MNN_PUBLIC OpenCLRuntime {
 public:
     OpenCLRuntime(int platformSize, int platformId, int deviceId, void *contextPtr, const RuntimeHint& hint);
     ~OpenCLRuntime();

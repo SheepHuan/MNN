@@ -1,0 +1,15 @@
+MNNPerfCounter contains wrapper code under the MNN Apache License 2.0 and
+vendored Google HardwarePerfCounter sources under their original Apache License
+2.0 copyright headers.
+
+The vendored Adreno ioctl definitions are derived from Linux kernel driver
+interfaces. Their upstream GPL-2.0 and Linux syscall-note files are retained at
+`upstream/hardware_perfcounter/third_party/linux/`.
+
+The vendored ARM libGPUCounters/HWCpipe device and counter database are
+Copyright Arm Limited and distributed under the MIT license. The MIT license
+and original notices are retained in `upstream/libgpucounters/`.
+
+The A7xx event database is derived from Mesa Freedreno register metadata. The
+original Mesa files retain their copyright and SPDX notices under
+`upstream/mesa/`; the referenced Freedreno sources are MIT-licensed.

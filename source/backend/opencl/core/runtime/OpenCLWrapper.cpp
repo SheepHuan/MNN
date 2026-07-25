@@ -269,6 +269,8 @@ bool OpenCLSymbols::LoadLibraryFromPath(const std::string &library_path) {
     MNN_LOAD_FUNCTION_PTR(clReleaseEvent);
     MNN_LOAD_FUNCTION_PTR(clCreateContext);
     MNN_LOAD_FUNCTION_PTR(clCreateContextFromType);
+    MNN_LOAD_FUNCTION_PTR(clCreateSampler);
+    MNN_LOAD_FUNCTION_PTR(clReleaseSampler);
     MNN_LOAD_FUNCTION_PTR(clReleaseContext);
     MNN_LOAD_FUNCTION_PTR(clRetainCommandQueue);
     MNN_LOAD_FUNCTION_PTR(clEnqueueUnmapMemObject);
@@ -365,6 +367,10 @@ OpenCLSymbolsOperator::~OpenCLSymbolsOperator() {
 
 } // namespace MNN
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(default)
+#endif
+
 cl_int CL_API_CALL clGetPlatformIDs(cl_uint num_entries, cl_platform_id *platforms, cl_uint *num_platforms) {
     auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clGetPlatformIDs;
     MNN_CHECK_NOTNULL(func);
@@ -406,6 +412,19 @@ cl_context CL_API_CALL clCreateContextFromType(const cl_context_properties *prop
     auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clCreateContextFromType;
     MNN_CHECK_NOTNULL(func);
     return func(properties, device_type, pfn_notify, user_data, errcode_ret);
+}
+
+cl_sampler CL_API_CALL clCreateSampler(cl_context context, cl_bool normalized_coords, cl_addressing_mode addressing_mode,
+                                       cl_filter_mode filter_mode, cl_int *errcode_ret) {
+    auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clCreateSampler;
+    MNN_CHECK_NOTNULL(func);
+    return func(context, normalized_coords, addressing_mode, filter_mode, errcode_ret);
+}
+
+cl_int CL_API_CALL clReleaseSampler(cl_sampler sampler) {
+    auto func = MNN::OpenCLSymbolsOperator::getOpenclSymbolsPtr()->clReleaseSampler;
+    MNN_CHECK_NOTNULL(func);
+    return func(sampler);
 }
 
 cl_int CL_API_CALL clRetainContext(cl_context context) {
@@ -823,6 +842,10 @@ void MNN::MNNAHardwareBuffer_describe(const AHardwareBuffer* buffer, AHardwareBu
     MNN_CHECK_NOTNULL(func);
     func(buffer, outDesc);
 }
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
 #endif
 
 #endif // MNN_USE_LIB_WRAPPER

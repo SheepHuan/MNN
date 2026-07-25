@@ -1,0 +1,4 @@
+interface:
+  display_name: "Replay Benchmark Cross-Compile"
+  short_description: "Build and replay-test on Rhino Pi-X1."
+  default_prompt: "Use $replay-benchmark-cross-compile to build MNN replay_benchmark with ARM GNU 11.3 and test it on the Rhino Pi-X1."
