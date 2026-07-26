@@ -133,73 +133,126 @@ python3 replay_benchmark/kernel_corpus/extract_operator_kernels.py \
   --output replay_benchmark/kernel_corpus/operators.json
 ```
 
-## 步骤 3: 实现 OpAdapter
+## 步骤 3: 实现 OpAdapter（强制：逐个变体写专用 adapter）
 
-### 专用 adapter vs 通用 adapter
+> **强制规则**：每个 `(op_type, variant)` 必须写专用 adapter，精确控制每个参数的类型、值和顺序。**禁止使用 GenericBufAdapter 自动解析签名的方式**——它低效且容易出错，每个都需要反复调试。
 
-**专用 adapter**：参数布局复杂或需要特定 validator 的算子。每个 `(op_type, variant)` 一个类。
+### 为什么不用通用 adapter
 
-**通用 adapter (GenericBufAdapter)**：参数布局相同的一类变体共用一个 adapter。通过 `TagSpec` 表声明每个 tag 下的参数布局（entry、buffer 数、scalar 数、sizeConst 数、int2 数、dispatch 维度、validator）。
+- kernel 参数顺序是交错的（buf, int2, buf, int, int4...），通用模板无法覆盖
+- 每个参数的语义值不同（shape 的 w/h/c、stride 的 x/y、activationType 等）
+- 通用 adapter 的 arg 顺序猜测导致 `CL_INVALID_ARG_SIZE`(-51) 和 `CL_INVALID_ARG_VALUE`(-49)
+- 逐个写虽然代码量大，但每个都确定正确，不需要反复调试
 
+### 专用 adapter 模板
+
+每个变体一个 `.hpp` + `.cpp` 文件，放在 `mnn/ops/` 或 `ncnn/ops/` 下。
+
+**BinaryOp.hpp**（示例）：
 ```cpp
-// GenericBufAdapter 用法示例
-add({"cast", "cast_buf_fp32", {
-    TS{"3.6.0", "cast_buf", 1,1, 1,0,2,0, 2, "identity_fp32"},
-}});
-// TagSpec: {tag, entry, numInputBufs, numOutputBufs, numScalarInts, numScalarFloats, numSizeConsts, numInt2s, globalDim, validator}
+class BinaryBufOp : public OpAdapter {
+public:
+    const char* opType() const override { return "binary"; }
+    const char* variant() const override { return "binary_buf_fp32"; }
+    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+};
+void registerBinaryOp();
 ```
 
-**优先用通用 adapter 覆盖多变体**，只有条件严格的才单独写专用 adapter。
+**BinaryOp.cpp**（示例）：
+```cpp
+bool BinaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    ac.entry = "binary_buf";
+    const int elemCount = 256;
+    const int cb = (elemCount + 3) / 4;
+
+    // 1. 准备 input data
+    std::vector<float> in0(elemCount), in1(elemCount);
+    for (int i = 0; i < elemCount; ++i) {
+        in0[i] = 0.1f * (i % 7);
+        in1[i] = 0.1f * (i % 5);
+    }
+
+    // 2. 创建 buffer（按 kernel 参数顺序）
+    AdaptedBuffer buf0; buf0.setFp32(in0); buf0.isOutput = false;
+    AdaptedBuffer buf1; buf1.setFp32(in1); buf1.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = elemCount * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(buf0);
+    ac.buffers.push_back(buf1);
+    ac.buffers.push_back(outBuf);
+
+    // 3. 按 kernel 签名精确顺序设 args
+    if (spec.tag == "1.2.0") {
+        // binary_buf(int dim0, int dim1, FLOAT* in0, FLOAT* in1, FLOAT* out, int4 shape, int2 isFull)
+        ac.args.push_back(AdaptedArg::sizeConst(0));       // dim0
+        ac.args.push_back(AdaptedArg::sizeConst(1));       // dim1
+        ac.args.push_back(AdaptedArg::buffer(0));           // in0
+        ac.args.push_back(AdaptedArg::buffer(1));           // in1
+        ac.args.push_back(AdaptedArg::buffer(2));           // out
+        ac.args.push_back(AdaptedArg::int4(1, 1, 1, cb));  // shape [N,H,W,C4]
+        ac.args.push_back(AdaptedArg::int2(1, 1));          // isFull
+        ac.globalSize[0] = cb; ac.globalSize[1] = 1;
+    } else {
+        // 3.6.0: binary_buf(int dim0, int dim1, INPUT* in0, INPUT* in1, OUTPUT* out, int size, int actType)
+        ac.args.push_back(AdaptedArg::sizeConst(0));
+        ac.args.push_back(AdaptedArg::sizeConst(1));
+        ac.args.push_back(AdaptedArg::buffer(0));
+        ac.args.push_back(AdaptedArg::buffer(1));
+        ac.args.push_back(AdaptedArg::buffer(2));
+        ac.args.push_back(AdaptedArg::scalarInt(elemCount));  // size
+        ac.args.push_back(AdaptedArg::scalarInt(0));          // activationType
+        ac.globalSize[0] = cb; ac.globalSize[1] = 1;
+    }
+    ac.dims = 2;
+
+    // 4. compileMacros（如果需要）
+    ac.compileMacros.push_back("-DOPERATOR=(in0+in1)");
+
+    // 5. validator input
+    ac.validatorInputA = in0;
+    ac.validator = "";  // 无 validator = not_validated
+    return true;
+}
+```
+
+### 实现步骤
+
+1. 读 kernel 源码的 `__kernel void NAME(...)` 签名
+2. 按**精确顺序**逐个参数写 `ac.args.push_back(AdaptedArg::xxx(...))`
+3. 为每个 tag 版本写 `if (spec.tag == "x.y.z")` 分支
+4. 设 `compileMacros`（`-DOPERATOR=...` 等）
+5. 设 `globalSize` / `dims`
+6. 在 `MnnBridge.cpp` / `NcnnBridge.cpp` 注册 `registerXxxOp()`
+7. 更新 `CMakeLists.txt` 加入新 `.cpp` 文件
+8. 本机构建测试 → 设备验证
 
 ### AdaptedArg 类型
 
 | Kind | 用途 | runner 行为 |
 |------|------|------------|
 | `SizeConst(dim)` | OpenCL GLOBAL_SIZE_DIMS 展开的 `__private const int` | `setArg(i, globalSize[dim])` |
-| `Buffer(idx)` | `__global FLOAT*` / `layout(binding) buffer` | `setArg(i, clBuffer)` / `writeBuffer(descSet)` |
-| `Scalar(Int/Float)` | `__private const int` 等标量 | `setArg(i, val)` |
-| `Int2(x,y)` | `int2` 参数（如 pooling shape） | `setArg(i, cl_int2{x,y})` |
+| `Buffer(idx)` | `__global FLOAT*` / `layout(binding) buffer` | `setArg(i, clBuffer)` |
+| `Scalar(Int/Float)` | `__private const int`/`float` 标量 | `setArg(i, val)` |
+| `Int2(x,y)` | `int2` 参数 | `setArg(i, sizeof(cl_int2), &v)` |
+| `Int4(x,y,z,w)` | `int4` 参数 | `setArg(i, sizeof(cl_int4), &v)` |
 
 ### compileMacros
 
-`AdaptedCase.compileMacros` 是 `vector<string>`，runner 拼成 build options 传给 `clBuildProgram`。用于传 `-D` 宏（仅简单宏，非函数式）。
-
-```cpp
-ac.compileMacros.push_back("-DBIAS");
-ac.compileMacros.push_back("-DRELU");
-```
-
-### tag 版本差异
-
-同一 variant 在不同 tag 下参数布局可能不同。`GenericBufAdapter` 用 `TagSpec` 表按 tag 选不同布局：
-
-```cpp
-add({"matmul", "matmul_buf_fp32", {
-    TS{"1.2.0", "matmul_buf", 2,1, 3,0,2,0, 2, "identity_fp32"},
-    TS{"3.6.0", "matmul_buf", 2,1, 3,0,2,0, 2, "identity_fp32"},
-}});
-```
+用于传 `-D` 宏给 `clBuildProgram`（仅简单宏，非函数式）。
 
 ### 注册 adapter
 
 在 `MnnBridge.cpp` 的 `registerMnnBridge()` 里调用 `registerXxxOp()`：
 ```cpp
-MnnOps::registerRasterOp();      // 专用
-MnnOps::registerUnaryOp();        // 专用
-MnnOps::registerGenericOps();     // 通用（覆盖 ~40 变体）
-registerFallbackAdapter();        // 兜底
+MnnOps::registerRasterOp();
+MnnOps::registerUnaryOp();
+MnnOps::registerBinaryOp();     // 新增
+registerFallbackAdapter();      // 兜底
 ```
 
 ### FallbackAdapter
 
-没有专用/通用 adapter 匹配的 operator 走 FallbackAdapter——单 buffer、1D dispatch、identity validator。至少验证编译。
-
-### findAdapter 逻辑
-
-```cpp
-// 1. 精确匹配 (opType, variant)
-// 2. 找不到则走 __fallback__
-```
+**仅用于尚未写专用 adapter 的变体**，作为临时占位。每写一个专用 adapter 就从 fallback 覆盖中移除。最终目标是所有变体都有专用 adapter，FallbackAdapter 不再被触发。
 
 ## 步骤 4: 更新 operator_cases.json
 
