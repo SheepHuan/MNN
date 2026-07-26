@@ -12,7 +12,7 @@ namespace MnnOps {
 // 1.2.0: matmul_buf(GLOBAL_SIZE_2_DIMS, a, b, out, channels=K, channel_blocks=K4, width_blocks=N4)
 class MatmulOp : public OpAdapter {
 public:
-    const char* opType() const override { return "conv"; }
+    const char* opType() const override { return "matmul"; }
     const char* variant() const override { return "matmul_buf_nobias_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };

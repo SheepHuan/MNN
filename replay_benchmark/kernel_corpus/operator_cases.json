@@ -57,7 +57,7 @@
     {
       "name": "matmul_buf_nobias_smoke",
       "backend": "opencl",
-      "op_type": "conv",
+      "op_type": "matmul",
       "framework": "mnn",
       "tag": "1.2.0",
       "variant": "matmul_buf_nobias_fp32",
