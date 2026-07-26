@@ -61,7 +61,13 @@ bool OpenCLSymbols::LoadOpenCLLibrary() {
         "/usr/local/lib/libpocl.so",
         "/usr/lib64/libOpenCL.so",
         "/usr/lib32/libOpenCL.so",
-        "libOpenCL.so"
+        // Debian multi-arch: libOpenCL.so.1 exists even without -dev package
+        "/usr/lib/x86_64-linux-gnu/libOpenCL.so",
+        "/usr/lib/x86_64-linux-gnu/libOpenCL.so.1",
+        "/usr/lib/aarch64-linux-gnu/libOpenCL.so",
+        "/usr/lib/aarch64-linux-gnu/libOpenCL.so.1",
+        "libOpenCL.so",
+        "libOpenCL.so.1"
     /*
      *  0: System32, 1: SysWOW64
      *  --------------------------------------
