@@ -12,11 +12,12 @@
 #include <memory>
 #include <vector>
 #include "core/NonCopyable.hpp"
+#include "core/Macro.h"
 #include "backend/vulkan/component/VulkanInstance.hpp"
 #include "backend/vulkan/vulkan/vulkan_wrapper.h"
 
 namespace MNN {
-class VulkanDevice : public NonCopyable {
+class MNN_PUBLIC VulkanDevice : public NonCopyable {
 public:
     explicit VulkanDevice(std::shared_ptr<VulkanInstance> instance);
     explicit VulkanDevice(std::shared_ptr<VulkanInstance> instance, VkPhysicalDevice physicalDevice, VkDevice device,

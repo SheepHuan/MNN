@@ -8,6 +8,8 @@
 #define MNN_KERNEL_MATMUL_BUF_NOBIAS_FP32_120
 
 typedef float FLOAT;
+typedef float4 FLOAT4;
+#define CONVERT_FLOAT4(x) (FLOAT4)(x)
 
 #define GLOBAL_SIZE_2_DIMS \
 __private const int global_size_dim0, __private const int global_size_dim1,

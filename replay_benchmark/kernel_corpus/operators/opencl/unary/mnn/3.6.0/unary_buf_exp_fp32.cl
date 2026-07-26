@@ -11,7 +11,8 @@
 
 typedef float INPUT_TYPE;
 typedef float OUTPUT_TYPE;
-#define CONVERT_OUTPUT4(x) ((OUTPUT_TYPE)(x))
+typedef float4 OUTPUT_TYPE4;
+#define CONVERT_OUTPUT4(x) ((OUTPUT_TYPE4)(x))
 #define OPERATOR exp(in)
 #define CLAMP(a) a
 

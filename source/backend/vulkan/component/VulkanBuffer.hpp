@@ -8,9 +8,10 @@
 
 #ifndef VulkanBuffer_hpp
 #define VulkanBuffer_hpp
+#include "core/Macro.h"
 #include "VulkanMemoryPool.hpp"
 namespace MNN {
-class VulkanBuffer : public NonCopyable {
+class MNN_PUBLIC VulkanBuffer : public NonCopyable {
 public:
     VulkanBuffer(const VulkanMemoryPool& pool, bool separate, size_t size, const void* hostData = nullptr,
                  VkBufferUsageFlags usage  = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,

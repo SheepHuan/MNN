@@ -32,7 +32,7 @@ auto restemp = (func); MNN_ASSERT(restemp == VK_SUCCESS); \
 /* Initialize the Vulkan function pointer variables declared in this header.
  * Returns 0 if vulkan is not available, non-zero if it is available.
  */
-int InitVulkan(void);
+int MNN_PUBLIC InitVulkan(void);
 #ifdef MNN_USE_LIB_WRAPPER
 // VK_core
 extern PFN_vkCreateInstance vkCreateInstance;

@@ -96,6 +96,24 @@ void VulkanCommandPool::Buffer::barrierSource(VkBuffer source, size_t start, siz
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
                          &barrier, 0, nullptr);
 }
+
+void VulkanCommandPool::Buffer::bindPipeline(VkPipeline pipeline) const {
+    vkCmdBindPipeline(mBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+}
+
+void VulkanCommandPool::Buffer::bindDescriptorSets(VkPipelineLayout layout, uint32_t firstSet,
+                                                    uint32_t setCount, const VkDescriptorSet* sets) const {
+    vkCmdBindDescriptorSets(mBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, firstSet, setCount, sets, 0, nullptr);
+}
+
+void VulkanCommandPool::Buffer::pushConstants(VkPipelineLayout layout, VkShaderStageFlags stage,
+                                               uint32_t size, const void* values) const {
+    vkCmdPushConstants(mBuffer, layout, stage, 0, size, values);
+}
+
+void VulkanCommandPool::Buffer::dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) const {
+    vkCmdDispatch(mBuffer, groupCountX, groupCountY, groupCountZ);
+}
 void VulkanCommandPool::Buffer::begin(VkCommandBufferUsageFlags flag) const {
     VkCommandBufferBeginInfo cmdBufferBeginInfo{
         /* .sType            = */ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,

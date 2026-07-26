@@ -13,6 +13,7 @@
 #include <memory>
 #include <vector>
 #include "core/NonCopyable.hpp"
+#include "core/Macro.h"
 #include "component/VulkanDevice.hpp"
 #include "vulkan/vulkan_wrapper.h"
 #include "core/BufferAllocator.hpp"
@@ -41,7 +42,7 @@ private:
     VkDeviceSize mSize;
 };
 
-class VulkanMemoryPool : public NonCopyable {
+class MNN_PUBLIC VulkanMemoryPool : public NonCopyable {
 public:
     VulkanMemoryPool(const VulkanDevice& dev, bool permitFp16);
     VulkanMemoryPool(const VulkanMemoryPool* parent);

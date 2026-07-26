@@ -5,6 +5,10 @@ add_executable(replay_benchmark.out
     ${CMAKE_CURRENT_LIST_DIR}/PerfCounterReport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/OpenCLPmuBenchmark.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ModelPmuBenchmark.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/KernelCorpusBenchmark.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/Bridge.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/MnnBridge.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/NcnnBridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/revertMNNModel.cpp)
 target_include_directories(replay_benchmark.out PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/
@@ -37,6 +41,19 @@ if(MNN_OPENCL)
     # exported wrapper instead of compiling a second copy with another
     # OpenCLSymbols singleton.
     target_compile_definitions(replay_benchmark.out PRIVATE MNN_USE_LIB_WRAPPER)
+  endif()
+endif()
+
+if(MNN_VULKAN)
+  target_link_libraries(replay_benchmark.out MNN_Vulkan)
+  target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_VULKAN)
+  target_include_directories(replay_benchmark.out PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/vulkan)
+  if(MNN_USE_SYSTEM_LIB)
+    find_package(Vulkan REQUIRED)
+    target_link_libraries(replay_benchmark.out ${Vulkan_LIBRARIES})
+  else()
+    target_link_libraries(replay_benchmark.out ${CMAKE_DL_LIBS})
   endif()
 endif()
 

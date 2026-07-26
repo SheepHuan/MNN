@@ -12,6 +12,7 @@
 #include "ReplayRunner.hpp"
 #include "OpenCLPmuBenchmark.hpp"
 #include "ModelPmuBenchmark.hpp"
+#include "KernelCorpusBenchmark.hpp"
 #include "core/Backend.hpp"
 #include "revertMNNModel.hpp"
 
@@ -217,6 +218,22 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
             options.openclPmuLocalSize = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
         } else if (arg == "--replay") {
             options.replay = true;
+        } else if (arg == "--kernel-corpus-bench") {
+            options.kernelCorpusBench = true;
+        } else if (arg == "--kernel-corpus-root") {
+            if (!requireValue(options.kernelCorpusRoot)) {
+                return false;
+            }
+        } else if (arg == "--kernel-corpus-case") {
+            if (!requireValue(options.kernelCorpusCase)) {
+                return false;
+            }
+        } else if (arg == "--kernel-corpus-runs") {
+            std::string value;
+            if (!requireValue(value)) {
+                return false;
+            }
+            options.kernelCorpusRuns = std::max(1, std::atoi(value.c_str()));
         } else {
             positional.emplace_back(arg);
         }
@@ -271,6 +288,11 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
         options.record = false;
         return true;
     }
+    if (options.kernelCorpusBench) {
+        options.replay = false;
+        options.record = false;
+        return !options.kernelCorpusRoot.empty();
+    }
     if (options.modelPmuBench) {
         options.replay = false;
         options.record = false;
@@ -309,6 +331,9 @@ static void printUsage(const char* program) {
                  "      [--model-pmu-warmup-runs N] [--model-pmu-control-runs N]\n"
                  "      [--model-pmu-forward 3|7] [--model-pmu-prompt text]\n"
               << "  " << program << " --opencl-pmu-list-events\n"
+              << "  " << program << " --kernel-corpus-bench --kernel-corpus-root <dir>\n"
+              << "      [--kernel-corpus-case name] [--kernel-corpus-runs N]\n"
+              << "      [--perf-counter-output path.json] [--perf-counter-events name1,name2]\n"
               << "\n"
               << "forward: 0 CPU, 3 OpenCL, 7 Vulkan; precision: 0 normal, 1 high, 2 low FP16, 3 low BF16\n";
 }
@@ -481,6 +506,15 @@ int main(int argc, const char* argv[]) {
     }
     if (options.openclPmuBench) {
         return runOpenCLPmuBenchmark(options) ? 0 : 1;
+    }
+    if (options.kernelCorpusBench) {
+        MNN::Replay::KernelCorpus::Options kccOptions;
+        kccOptions.corpusRoot = options.kernelCorpusRoot;
+        kccOptions.caseFilter = options.kernelCorpusCase;
+        kccOptions.runs = options.kernelCorpusRuns;
+        kccOptions.perfCounterOutput = options.perfCounterOutput;
+        kccOptions.perfCounterEvents = options.perfCounterEvents;
+        return MNN::Replay::KernelCorpus::runKernelCorpusBenchmark(kccOptions) ? 0 : 1;
     }
     if (options.modelPmuBench) {
         return runModelPmuBenchmark(options) ? 0 : 1;

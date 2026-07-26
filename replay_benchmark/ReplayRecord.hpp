@@ -65,6 +65,10 @@ struct Options {
     int modelPmuControlRuns = 1;
     int modelPmuForward = MNN_FORWARD_OPENCL;
     std::string modelPmuPrompt = "Hello";
+    std::string kernelCorpusRoot;
+    std::string kernelCorpusCase;
+    int kernelCorpusRuns = 1;
+    bool kernelCorpusBench = false;
 };
 
 struct TensorRecord {
