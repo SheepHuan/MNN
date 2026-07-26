@@ -1,6 +1,8 @@
 #include "KernelCorpusBenchmark.hpp"
 #include "ReplayRecord.hpp"
 #include "kernel_corpus_bridge/Bridge.hpp"
+#include "kernel_corpus_bridge/mnn/MnnBridge.hpp"
+#include "kernel_corpus_bridge/ncnn/NcnnBridge.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -42,9 +44,6 @@
 namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
-
-void registerMnnBridge();
-void registerNcnnBridge();
 
 namespace {
 
