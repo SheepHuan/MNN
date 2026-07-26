@@ -591,9 +591,29 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
     }
     report.dispatchStatus = "dispatched";
 
+    // For in-place buffers (sigmoid/tanh), warmup already transformed the
+    // data. Re-write initial data before workload so validation compares
+    // against the original input.
+    for (size_t i = 0; i < ac.buffers.size(); ++i) {
+        if (!ac.buffers[i].initialData.empty() && ac.buffers[i].isOutput) {
+            void* mapped = vkBuffers[i]->map();
+            std::memcpy(mapped, ac.buffers[i].initialData.data(), ac.buffers[i].sizeBytes);
+            vkBuffers[i]->unmap();
+        }
+    }
+
     // workload + PMU
     PmuScope pmu = beginPmu();
     for (int r = 0; r < runs; ++r) {
+        // For in-place buffers, re-write initial data before each dispatch so
+        // the output after N runs equals a single transformation of the input.
+        for (size_t i = 0; i < ac.buffers.size(); ++i) {
+            if (!ac.buffers[i].initialData.empty() && ac.buffers[i].isOutput) {
+                void* mapped = vkBuffers[i]->map();
+                std::memcpy(mapped, ac.buffers[i].initialData.data(), ac.buffers[i].sizeBytes);
+                vkBuffers[i]->unmap();
+            }
+        }
         VulkanCommandPool::Buffer* cmdbuf = cmdPool.allocBuffer();
         cmdbuf->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
         cmdbuf->bindPipeline(pipeline);
