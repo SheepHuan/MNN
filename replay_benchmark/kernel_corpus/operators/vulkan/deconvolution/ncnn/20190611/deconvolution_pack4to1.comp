@@ -30,21 +30,6 @@
 #define buffer_sm1(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define i8buffer_ld4(buf,i) unpackInt4x8(buf[i])
-#define i8buffer_st4(buf,i,v) {buf[i]=packInt4x8(v);}
-#define i8buffer_cp1(buf,i,sbuf,si) {buf[i]=sbuf[si];}
-#define i8buffer_cp4(buf,i,sbuf,si) {buf[i]=sbuf[si];}
-#define i8buffer_ld1(buf,i) int(buf[i])
-#define i8buffer_st1(buf,i,v) {buf[i]=int8_t(v);}
-#define sint8 int8_t
-#define aint8 int
-#define sint8vec4 ivec4
-#define aint8vec4 ivec4
-#define pack32(x) ((x).r | ((x).g << 8) | ((x).b << 16) | ((x).a << 24))
-#define pack16(x) pack32(uvec2(x.r, x.g))
-#define pack8(x) pack32(x)
-#define unpack16(x) uvec4((x) & 0xFF, ((x) >> 8) & 0xFF, ((x) >> 16) & 0xFF, ((x) >> 24) & 0xFF)
-#define unpack8(x) unpack16(x)
 #define sfp2afpmat4(v) v
 #define afp2sfpmat4(v) v
 #define sfp2afpvec4(v) vec4(v)
@@ -60,8 +45,8 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
+#define sint8vec4 int
 #define aint8 int
-#define sint8vec4 ivec4
 #define aint8vec4 ivec4
 #define i8buffer_ld4(buf,i) unpackInt4x8(buf[i])
 #define i8buffer_st4(buf,i,v) {buf[i]=packInt4x8(v);}
