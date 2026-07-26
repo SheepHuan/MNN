@@ -1,0 +1,2146 @@
+{
+  "argmax/3.6.0/argmax_buf_fp32": {
+    "entry": "argmax_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "attention/3.6.0/attention_buf_fp32": {
+    "entry": "rearrange_qkv",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "binary/1.2.0/binary_buf_fp32": {
+    "entry": "binary_buf",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "int4"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int2"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "binary/3.6.0/binary_buf_fp32": {
+    "entry": "binary_buf",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "binary/3.6.0/binary_subgroup_buf_fp32": {
+    "entry": "binary_buf_c4_c4_c4",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "int4"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "buffer_convert_buf/1.2.0/buffer_convert_buf_fp32": {
+    "entry": "nhwc_buffer_to_nc4hw4_buffer",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      }
+    ],
+    "numBuffers": 3
+  },
+  "buffer_convert_buf/3.6.0/buffer_convert_buf_fp32": {
+    "entry": "buffer_convert_to_buffer",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "int4"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      }
+    ],
+    "numBuffers": 2
+  },
+  "buffer_convert_subgroup_buf/3.6.0/buffer_convert_subgroup_buf_fp32": {
+    "entry": "nhwc_buffer_to_nc16hw16_buffer",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "cast/3.6.0/cast_buf_fp32": {
+    "entry": "cast_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "conv/1.2.0/conv_2d_buf_fp32": {
+    "entry": "conv_2d_c4h1w1",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "conv/3.6.0/conv_2d_buf_fp32": {
+    "entry": "conv_2d_1x1_local",
+    "layout": [
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 4
+      }
+    ],
+    "numBuffers": 5
+  },
+  "conv/3.6.0/conv_2d_c16_subgroup_buf_fp32": {
+    "entry": "conv_2d_buf_subgroup_c16_c4_b2",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "conv/3.6.0/conv_2d_c1_subgroup_buf_fp32": {
+    "entry": "conv_2d_buf_subgroup_c1_c4_b2",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "conv/3.6.0/conv_2d_int_buf_fp32": {
+    "entry": "conv_2d_int_c4h1w1",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "buffer",
+        "idx": 4
+      },
+      {
+        "kind": "buffer",
+        "idx": 5
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarFloat"
+      }
+    ],
+    "numBuffers": 6
+  },
+  "depthwise_conv/1.2.0/depthwise_conv2d_buf_fp32": {
+    "entry": "depthwise_conv2d_c4h1w4",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "depthwise_conv/3.6.0/depthwise_conv2d_buf_fp32": {
+    "entry": "depthwise_conv2d_c4h1w4",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "depthwise_conv/3.6.0/depthwise_conv2d_subgroup_buf_fp32": {
+    "entry": "depthwise_conv_2d_buf_c16_c16",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "gemm/1.2.0/gemm_buf_fp32": {
+    "entry": "gemm_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "gemm/3.6.0/gemm_buf_fp32": {
+    "entry": "transpose_pad",
+    "layout": [
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      }
+    ],
+    "numBuffers": 2
+  },
+  "gemm/3.6.0/gemm_conv1x1_buf_fp32": {
+    "entry": "inverse_quant_weight",
+    "layout": [
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarFloat"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "gemv/3.6.0/gemv_conv1x1_buf_fp32": {
+    "entry": "gemv_conv_c8_buf",
+    "layout": [
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "buffer",
+        "idx": 4
+      },
+      {
+        "kind": "buffer",
+        "idx": 5
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarFloat"
+      }
+    ],
+    "numBuffers": 6
+  },
+  "grid_sample/3.6.0/grid_sample_buf_fp32": {
+    "entry": "nearest_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "groupnorm/3.6.0/groupnorm_buf_fp32": {
+    "entry": "groupnorm_plain_buf",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 4
+      },
+      {
+        "kind": "buffer",
+        "idx": 5
+      },
+      {
+        "kind": "scalarFloat"
+      }
+    ],
+    "numBuffers": 6
+  },
+  "input_transe/3.6.0/input_transe_buf_fp32": {
+    "entry": "conv_transe_c4_c1",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "interp/1.2.0/interp_buf_fp32": {
+    "entry": "nearest_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "interp/3.6.0/interp_buf_fp32": {
+    "entry": "nearest_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarFloat"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "layernorm/3.6.0/layernorm_buf_fp32": {
+    "entry": "layernorm_buf",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarFloat"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "linear_attention_buf/3.6.0/linear_attention_buf_fp32": {
+    "entry": "linear_attn_conv_silu",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "matmul/1.2.0/matmul_buf_fp32": {
+    "entry": "matmul_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "matmul/1.2.0/matmul_buf_nobias_fp32": {
+    "entry": "matmul_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "matmul/3.6.0/matmul_buf_fp32": {
+    "entry": "matmul_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "matmul/3.6.0/matmul_local_buf_fp32": {
+    "entry": "matmul_local_buf",
+    "layout": [
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 1
+  },
+  "pooling/1.2.0/pooling_buf_fp32": {
+    "entry": "pooling",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "pooling/1.2.0/pooling_max_fp32": {
+    "entry": "pooling",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "pooling/3.6.0/pooling_buf_fp32": {
+    "entry": "pooling",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "pooling/3.6.0/pooling_subgroup_buf_fp32": {
+    "entry": "pooling_c4_c4",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "int2"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "range/3.6.0/range_buf_fp32": {
+    "entry": "range_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "raster/1.2.0/buffer_set_zero_fp32": {
+    "entry": "buffer_set_zero",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      }
+    ],
+    "numBuffers": 1
+  },
+  "raster/1.2.0/raster_buf_fp32": {
+    "entry": "buffer_set_zero",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      }
+    ],
+    "numBuffers": 1
+  },
+  "raster/3.6.0/buffer_set_zero_fp32": {
+    "entry": "buffer_set_zero",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      }
+    ],
+    "numBuffers": 1
+  },
+  "raster/3.6.0/raster_buf_fp32": {
+    "entry": "buffer_set_zero",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      }
+    ],
+    "numBuffers": 1
+  },
+  "reduction/1.2.0/reduct_buf_sum_fp32": {
+    "entry": "reduct_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "reduction/1.2.0/reduction_buf_fp32": {
+    "entry": "reduct_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "reduction/3.6.0/reduction_buf_fp32": {
+    "entry": "reduct_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "scale/1.2.0/scale_buf_fp32": {
+    "entry": "scale_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "int4"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "scale/1.2.0/scale_nobias_fp32": {
+    "entry": "scale",
+    "layout": [
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 0
+  },
+  "scale/3.6.0/scale_buf_fp32": {
+    "entry": "scale_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "select/3.6.0/select_buf_fp32": {
+    "entry": "select_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      }
+    ],
+    "numBuffers": 4
+  },
+  "self_attention_buf/3.6.0/self_attention_buf_fp32": {
+    "entry": "split_transpose_qkv",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 3
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 4
+  },
+  "softmax/1.2.0/softmax_buf_fp32": {
+    "entry": "softmax_channel",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "int4"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "softmax/3.6.0/softmax_buf_fp32": {
+    "entry": "softmax_in1_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "splitgelu/3.6.0/splitgelu_buf_fp32": {
+    "entry": "splitgelu_buf",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "int4"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "strassen/3.6.0/strassen_binary_buf_fp32": {
+    "entry": "binary_cfunction_buf",
+    "layout": [
+      {
+        "kind": "sizeConst",
+        "dim": 0
+      },
+      {
+        "kind": "sizeConst",
+        "dim": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "topkv2/3.6.0/topkv2_buf_fp32": {
+    "entry": "topkv2_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "buffer",
+        "idx": 2
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 3
+  },
+  "unary/1.2.0/unary_buf_exp_fp32": {
+    "entry": "unary_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "unary/1.2.0/unary_buf_fp32": {
+    "entry": "unary_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "unary/3.6.0/unary_buf_exp_fp32": {
+    "entry": "unary_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "unary/3.6.0/unary_buf_fp32": {
+    "entry": "unary_buf",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "unary/3.6.0/unary_subgroup_buf_fp32": {
+    "entry": "unary_buf_c4_c4",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "winograd/1.2.0/winogradTransform_buf_fp32": {
+    "entry": "winoTransSrcBuf2_3_1",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "winograd/3.6.0/winogradTransform_buf_fp32": {
+    "entry": "winoTransWeightBuf2_3_1",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  },
+  "winograd/3.6.0/winogradTransform_subgroup_buf_fp32": {
+    "entry": "winoTransSrcBuf2_3_1_c16_c16",
+    "layout": [
+      {
+        "kind": "buffer",
+        "idx": 0
+      },
+      {
+        "kind": "buffer",
+        "idx": 1
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      },
+      {
+        "kind": "scalarInt"
+      }
+    ],
+    "numBuffers": 2
+  }
+}

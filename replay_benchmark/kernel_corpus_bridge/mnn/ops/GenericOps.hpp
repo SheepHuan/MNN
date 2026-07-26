@@ -2,17 +2,13 @@
 #define MNN_REPLAY_KERNEL_CORPUS_BRIDGE_MNN_OPS_GENERIC_OPS_HPP
 
 #include "../../OpAdapter.hpp"
-#include <set>
 #include <cstring>
+#include <regex>
 
 namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
-
-// ---- Generic buffer adapter base ----
-// Subclasses declare which variants they support and how many buffers/scalars
-// to create. The adapt() fills deterministic test data.
 
 class GenericBufAdapter : public OpAdapter {
 public:
@@ -21,13 +17,7 @@ public:
         std::string entry;
         int numInputBuffers;
         int numOutputBuffers;
-        int numScalarInts;
-        int numScalarFloats;
-        int numSizeConsts;
-        int numInt2s;
-        int numInt4s;  // number of int4 params
         int globalDim;
-        std::string validator;
     };
     struct Spec {
         const char* op;
@@ -45,7 +35,6 @@ public:
     const char* variant() const override { return mSpec.variant; }
 
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override {
-        // Find matching tag
         const TagSpec* ts = nullptr;
         for (const auto& t : mSpec.tags) {
             if (t.tag == spec.tag) { ts = &t; break; }
@@ -55,26 +44,19 @@ public:
         ac.entry = ts->entry;
         const int elemCount = spec.elementCount > 0 ? spec.elementCount : 64;
 
-        // Operator-specific macros that cannot be in bake preamble.
-        // OPERATOR/OPERATE are operator-specific and must be set per-variant.
+        // Auto-detect compile macros from source
+        const std::string& src = ac.source;
         const std::string op = mSpec.op;
-        const std::string var = mSpec.variant;
-        if (ac.source.find("OPERATOR") != std::string::npos) {
-            if (op == "binary" || op == "buffer_convert_buf") {
-                ac.compileMacros.push_back("-DOPERATOR=(in0+in1)");
-            } else if (op == "strassen") {
+        if (src.find("OPERATOR") != std::string::npos) {
+            if (op == "binary" || op == "buffer_convert_buf" || op == "strassen") {
                 ac.compileMacros.push_back("-DOPERATOR=(in0+in1)");
             } else {
                 ac.compileMacros.push_back("-DOPERATOR=in");
             }
         }
-        if (ac.source.find("OPERATE") != std::string::npos && ac.source.find("OPERATOR") == std::string::npos) {
+        if (src.find("OPERATE") != std::string::npos && src.find("OPERATOR") == std::string::npos) {
             ac.compileMacros.push_back("-DOPERATE=(num+in)");
         }
-
-        // Kernel-specific macros that MNN would pass at runtime via build options.
-        // These are constants for the smoke test configuration.
-        const std::string& src = ac.source;
         if (src.find("IN_C_BLOCK") != std::string::npos) ac.compileMacros.push_back("-DIN_C_BLOCK=4");
         if (src.find("LOCAL_SIZE") != std::string::npos) ac.compileMacros.push_back("-DLOCAL_SIZE=64");
         if (src.find("STRIDE_X") != std::string::npos) ac.compileMacros.push_back("-DSTRIDE_X=1");
@@ -90,52 +72,69 @@ public:
         if (src.find("OPTN") != std::string::npos) ac.compileMacros.push_back("-DOPTN=1");
         if (src.find("INPUT_LINE_SIZE") != std::string::npos) ac.compileMacros.push_back("-DINPUT_LINE_SIZE=4");
 
-        int argIdx = 0;
-        for (int i = 0; i < ts->numSizeConsts; ++i) {
-            ac.args.push_back(AdaptedArg::sizeConst(i));
-            argIdx++;
+        // Parse kernel signature from source to get exact parameter order.
+        std::regex sig_re("__kernel\\s+(?:__attribute__\\s*\\([^)]*\\)\\s+)?void\\s+\\w+\\s*\\(([^)]*\\))");
+        std::smatch sig_match;
+        bool sig_found = std::regex_search(ac.source, sig_match, sig_re);
+
+        int bufIdx = 0;
+        int totalBufs = ts->numInputBuffers + ts->numOutputBuffers;
+
+        if (sig_found) {
+            std::string params = sig_match[1].str();
+            std::vector<std::string> paramList;
+            int depth = 0; std::string cur;
+            for (char c : params) {
+                if (c == '(' || c == '<') depth++;
+                else if (c == ')' || c == '>') depth--;
+                if (c == ',' && depth == 0) { paramList.push_back(cur); cur = ""; }
+                else cur += c;
+            }
+            if (!cur.empty()) paramList.push_back(cur);
+
+            for (const auto& p_raw : paramList) {
+                std::string p = std::regex_replace(p_raw, std::regex("__private\\s+const\\s+"), "");
+                p = std::regex_replace(p, std::regex("__private\\s+"), "");
+                p = std::regex_replace(p, std::regex("const\\s+"), "");
+                p = std::regex_replace(p, std::regex("^\\s+|\\s+$"), "");
+
+                if (std::regex_search(p, std::regex("global_size_dim\\d|global_dim\\d"))) {
+                    std::smatch dm;
+                    std::regex_search(p, dm, std::regex("(\\d)"));
+                    ac.args.push_back(AdaptedArg::sizeConst(std::stoi(dm[1].str())));
+                } else if (p.find("__global") != std::string::npos || p.find("__read_only") != std::string::npos || p.find("__write_only") != std::string::npos) {
+                    bool isOutput = (bufIdx >= ts->numInputBuffers);
+                    if (!isOutput) {
+                        std::vector<float> data(elemCount);
+                        for (int j = 0; j < elemCount; ++j) data[j] = 0.1f * (j % 13);
+                        AdaptedBuffer buf; buf.setFp32(data); buf.isOutput = false;
+                        ac.buffers.push_back(buf);
+                    } else {
+                        AdaptedBuffer buf; buf.sizeBytes = elemCount * sizeof(float); buf.isOutput = true;
+                        ac.buffers.push_back(buf);
+                    }
+                    ac.args.push_back(AdaptedArg::buffer(bufIdx));
+                    bufIdx++;
+                } else if (p.find("int4") != std::string::npos) {
+                    ac.args.push_back(AdaptedArg::int4(1, 8, 8, 4));
+                } else if (p.find("int2") != std::string::npos) {
+                    ac.args.push_back(AdaptedArg::int2(8, 8));
+                } else if (p.find("float") != std::string::npos) {
+                    ac.args.push_back(AdaptedArg::scalarFloat(0.5f));
+                } else if (p.find("int") != std::string::npos) {
+                    ac.args.push_back(AdaptedArg::scalarInt(elemCount));
+                } else {
+                    ac.args.push_back(AdaptedArg::scalarInt(elemCount));
+                }
+            }
         }
-        for (int i = 0; i < ts->numInputBuffers; ++i) {
-            std::vector<float> data(elemCount);
-            for (int j = 0; j < elemCount; ++j) data[j] = 0.1f * (j % 13);
-            AdaptedBuffer buf;
-            buf.setFp32(data);
-            buf.isOutput = false;
-            ac.buffers.push_back(buf);
-            ac.args.push_back(AdaptedArg::buffer(i));
-            argIdx++;
-        }
-        for (int i = 0; i < ts->numOutputBuffers; ++i) {
-            AdaptedBuffer buf;
-            buf.sizeBytes = elemCount * sizeof(float);
-            buf.isOutput = true;
-            ac.buffers.push_back(buf);
-            ac.args.push_back(AdaptedArg::buffer(ts->numInputBuffers + i));
-            argIdx++;
-        }
-        for (int i = 0; i < ts->numScalarInts; ++i) {
-            ac.args.push_back(AdaptedArg::scalarInt(elemCount));
-            argIdx++;
-        }
-        for (int i = 0; i < ts->numScalarFloats; ++i) {
-            ac.args.push_back(AdaptedArg::scalarFloat(0.5f));
-            argIdx++;
-        }
-        // Int4 params first (usually shape before isFull in kernel signatures)
-        for (int i = 0; i < ts->numInt4s; ++i) {
-            ac.args.push_back(AdaptedArg::int4(1, 8, 8, 4));
-            argIdx++;
-        }
-        for (int i = 0; i < ts->numInt2s; ++i) {
-            ac.args.push_back(AdaptedArg::int2(8, 8));
-            argIdx++;
-        }
-        if (ts->numInputBuffers > 0) {
+
+        if (bufIdx > 0) {
             std::vector<float> data(elemCount);
             for (int j = 0; j < elemCount; ++j) data[j] = 0.1f * (j % 13);
             ac.validatorInputA = data;
         }
-        ac.validator = "";  // No validator for generic adapters — semantics unknown
+        ac.validator = "";
         ac.globalSize[0] = (elemCount + 3) / 4;
         ac.globalSize[1] = 1;
         ac.globalSize[2] = 1;
