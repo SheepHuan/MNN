@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace MNN {
 namespace PerfCounter {
@@ -39,6 +41,10 @@ struct CounterBinding {
 // Resolve a normalized counter name without opening a GPU device. This is
 // useful to validate a profile and is also used by the deterministic tests.
 bool resolveCounter(GpuVendor vendor, uint64_t productId, const char* name, CounterBinding* binding);
+
+// Return all normalized counter names supported by the supplied GPU. The
+// result is owned by the caller and contains no duplicate names.
+std::vector<std::string> supportedCounterNames(const DeviceInfo& device);
 
 // Decode the raw Mali GPU_ID register used by the ARM driver family.
 bool identifyMali(uint64_t rawProductId, DeviceInfo* device);

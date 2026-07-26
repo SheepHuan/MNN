@@ -236,6 +236,15 @@ static void setError(std::string* error, const char* message) {
     }
 }
 
+static void appendUnique(std::vector<std::string>* names, const char* name) {
+    if (names == nullptr || name == nullptr || *name == '\0') {
+        return;
+    }
+    if (std::find(names->begin(), names->end(), name) == names->end()) {
+        names->emplace_back(name);
+    }
+}
+
 } // namespace
 
 struct Session::Impl {
@@ -315,6 +324,63 @@ bool resolveCounter(GpuVendor vendor, uint64_t productId, const char* name, Coun
         return true;
     }
     return false;
+}
+
+std::vector<std::string> supportedCounterNames(const DeviceInfo& device) {
+    std::vector<std::string> names;
+    if (device.vendor == GpuVendor::Adreno && isAdrenoA7xx(device.productId)) {
+        size_t count = 0;
+        const auto* events = detail::a7xxEvents(&count);
+        for (size_t i = 0; i < count; ++i) {
+            appendUnique(&names, events[i].name);
+        }
+        static const char* const normalized[] = {
+            "gpu_active_cycles", "compute_active_cycles", "compute_tasks", "l2_any_lookup", "l2_ext_read",
+            "l2_ext_write",
+        };
+        for (const char* name : normalized) {
+            CounterBinding binding;
+            if (resolveCounter(device.vendor, device.productId, name, &binding)) {
+                appendUnique(&names, name);
+            }
+        }
+        return names;
+    }
+    if (device.vendor != GpuVendor::Mali) {
+        return names;
+    }
+
+    hwcpipe::device::product_id product;
+    if (!rawMaliProduct(device.productId, &product)) {
+        return names;
+    }
+    hwcpipe::gpu gpu(0);
+    if (!gpu) {
+        return names;
+    }
+    hwcpipe::counter_database database;
+    for (const auto candidate : database.counters_for_gpu(gpu)) {
+        hwcpipe::counter_metadata metadata;
+        if (database.describe_counter(candidate, metadata) || metadata.name == nullptr) {
+            continue;
+        }
+        hwcpipe::sampler_config config(product, 0);
+        if (config.add_counter(candidate)) {
+            continue;
+        }
+        appendUnique(&names, metadata.name);
+    }
+    static const char* const normalized[] = {
+        "gpu_active_cycles", "compute_active_cycles", "compute_tasks", "l2_any_lookup", "l2_ext_read",
+        "l2_ext_write",
+    };
+    for (const char* name : normalized) {
+        CounterBinding binding;
+        if (resolveCounter(device.vendor, device.productId, name, &binding)) {
+            appendUnique(&names, name);
+        }
+    }
+    return names;
 }
 
 Session::Session() : mImpl(new Impl()) {}

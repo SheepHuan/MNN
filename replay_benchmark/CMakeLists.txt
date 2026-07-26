@@ -4,6 +4,7 @@ add_executable(replay_benchmark.out
     ${CMAKE_CURRENT_LIST_DIR}/ReplayRunner.cpp
     ${CMAKE_CURRENT_LIST_DIR}/PerfCounterReport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/OpenCLPmuBenchmark.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ModelPmuBenchmark.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/revertMNNModel.cpp)
 target_include_directories(replay_benchmark.out PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/
@@ -14,6 +15,15 @@ target_link_libraries(replay_benchmark.out ${MNN_DEPS})
 if(MNN_REPLAY_ENABLE_PERFCOUNTER)
   target_link_libraries(replay_benchmark.out MNNPerfCounter)
   target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_PERFCOUNTER)
+endif()
+
+if(MNN_BUILD_LLM)
+  target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_LLM)
+  target_include_directories(replay_benchmark.out PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/transformers/llm/engine/include)
+  if(MNN_SEP_BUILD)
+    target_link_libraries(replay_benchmark.out llm)
+  endif()
 endif()
 
 if(MNN_OPENCL)
@@ -40,7 +50,10 @@ option(MNN_OPENCL_PMU_BENCH_BUILD_TESTS "Build OpenCL PMU benchmark metadata tes
 if(MNN_OPENCL_PMU_BENCH_BUILD_TESTS)
   add_executable(opencl_pmu_benchmark_test
       ${CMAKE_CURRENT_LIST_DIR}/OpenCLPmuBenchmarkTest.cpp
-      ${CMAKE_CURRENT_LIST_DIR}/OpenCLPmuBenchmark.cpp)
+      ${CMAKE_CURRENT_LIST_DIR}/OpenCLPmuBenchmark.cpp
+      ${CMAKE_CURRENT_LIST_DIR}/ModelPmuBenchmark.cpp
+      ${CMAKE_CURRENT_LIST_DIR}/ReplayRecord.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/revertMNNModel.cpp)
   target_include_directories(opencl_pmu_benchmark_test PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/
       ${CMAKE_CURRENT_SOURCE_DIR}/tools/
@@ -49,6 +62,14 @@ if(MNN_OPENCL_PMU_BENCH_BUILD_TESTS)
   if(MNN_REPLAY_ENABLE_PERFCOUNTER)
     target_link_libraries(opencl_pmu_benchmark_test MNNPerfCounter)
     target_compile_definitions(opencl_pmu_benchmark_test PRIVATE MNN_REPLAY_HAS_PERFCOUNTER)
+  endif()
+  if(MNN_BUILD_LLM)
+    target_compile_definitions(opencl_pmu_benchmark_test PRIVATE MNN_REPLAY_HAS_LLM)
+    target_include_directories(opencl_pmu_benchmark_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/transformers/llm/engine/include)
+    if(MNN_SEP_BUILD)
+      target_link_libraries(opencl_pmu_benchmark_test llm)
+    endif()
   endif()
   if(MNN_OPENCL)
     target_link_libraries(opencl_pmu_benchmark_test MNN_CL)

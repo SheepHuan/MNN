@@ -52,12 +52,19 @@ struct Options {
     std::string perfCounterOutput;
     std::string perfCounterEvents;
     bool openclPmuBench = false;
+    bool openclPmuListEvents = false;
+    bool modelPmuBench = false;
     std::string openclPmuCase = "all";
     int openclPmuIterations = 100;
     int openclPmuWorkloadRuns = 1;
     int openclPmuWarmupRuns = 2;
     size_t openclPmuSize = 0;
     size_t openclPmuLocalSize = 0;
+    int modelPmuWorkloadRuns = 5;
+    int modelPmuWarmupRuns = 2;
+    int modelPmuControlRuns = 1;
+    int modelPmuForward = MNN_FORWARD_OPENCL;
+    std::string modelPmuPrompt = "Hello";
 };
 
 struct TensorRecord {

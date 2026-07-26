@@ -798,6 +798,25 @@ static PmuInterval samplePmuInterval(const PmuBatch& batch, OpenCLPmuRuntime* ru
 
 #endif
 
+static bool writePmuDocument(const Options& options, rapidjson::Document& document) {
+    if (options.perfCounterOutput.empty()) {
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        document.Accept(writer);
+        std::cout << buffer.GetString() << std::endl;
+        return true;
+    }
+    if (!makeParentDirectories(options.perfCounterOutput)) return false;
+    FILE* file = std::fopen(options.perfCounterOutput.c_str(), "wb");
+    if (file == nullptr) return false;
+    char buffer[4096];
+    rapidjson::FileWriteStream stream(file, buffer, sizeof(buffer));
+    rapidjson::Writer<rapidjson::FileWriteStream> writer(stream);
+    const bool ok = document.Accept(writer);
+    std::fclose(file);
+    return ok;
+}
+
 bool runOpenCLPmuBenchmark(const Options& options) {
     rapidjson::Document document;
     document.SetObject();
@@ -824,6 +843,53 @@ bool runOpenCLPmuBenchmark(const Options& options) {
     } else {
         addString(document, "device", runtime.device.getInfo<CL_DEVICE_NAME>(), allocator);
         addString(document, "extensions", runtime.extensions, allocator);
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+        if (options.openclPmuListEvents) {
+            MNN::PerfCounter::DeviceInfo perfDevice;
+            std::string perfError;
+            const bool perfReady = discoverPmuDevice(&perfDevice, &perfError);
+            addString(document, "pmu_vendor",
+                      perfDevice.vendor == MNN::PerfCounter::GpuVendor::Adreno
+                          ? "Adreno"
+                          : (perfDevice.vendor == MNN::PerfCounter::GpuVendor::Mali ? "Mali" : "Unknown"),
+                      allocator);
+            document.AddMember("pmu_product_id", static_cast<uint64_t>(perfDevice.productId), allocator);
+            addString(document, "pmu_product_name", perfDevice.productName == nullptr ? "" : perfDevice.productName,
+                      allocator);
+            addString(document, "pmu_driver", perfDevice.driverName == nullptr ? "" : perfDevice.driverName,
+                      allocator);
+            addString(document, "pmu_status", perfReady ? "available" : "unavailable", allocator);
+            addString(document, "pmu_error", perfError, allocator);
+            std::vector<std::string> names;
+            if (perfReady) {
+                names = MNN::PerfCounter::supportedCounterNames(perfDevice);
+            }
+            rapidjson::Value events(rapidjson::kArrayType);
+            for (const auto& name : names) {
+                events.PushBack(rapidjson::Value(name.c_str(), allocator), allocator);
+            }
+            document.AddMember("pmu_events", events, allocator);
+            document.AddMember("pmu_event_count", static_cast<uint64_t>(names.size()), allocator);
+            if (!perfReady || names.empty()) {
+                rapidjson::Value errors(rapidjson::kArrayType);
+                errors.PushBack(rapidjson::Value(perfError.empty() ? "No supported PMU events" : perfError.c_str(), allocator), allocator);
+                document.AddMember("errors", errors, allocator);
+                document["status"].SetString("unavailable", allocator);
+            } else {
+                rapidjson::Value errors(rapidjson::kArrayType);
+                document.AddMember("errors", errors, allocator);
+                document["status"].SetString("ok", allocator);
+            }
+            return writePmuDocument(options, document);
+        }
+#else
+        if (options.openclPmuListEvents) {
+            rapidjson::Value errors(rapidjson::kArrayType);
+            errors.PushBack(rapidjson::Value("MNNPerfCounter was not compiled into replay_benchmark", allocator), allocator);
+            document.AddMember("errors", errors, allocator);
+            return writePmuDocument(options, document);
+        }
+#endif
         cl::Program program;
         const std::vector<const char*> coreSources = {kOpenCLPmuBufferKernels, kOpenCLPmuComputeKernels};
         if (!buildProgram(runtime, coreSources, &program, &error)) {
@@ -1033,22 +1099,7 @@ bool runOpenCLPmuBenchmark(const Options& options) {
         }
     }
 #endif
-    if (options.perfCounterOutput.empty()) {
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        document.Accept(writer);
-        std::cout << buffer.GetString() << std::endl;
-        return true;
-    }
-    if (!makeParentDirectories(options.perfCounterOutput)) return false;
-    FILE* file = std::fopen(options.perfCounterOutput.c_str(), "wb");
-    if (file == nullptr) return false;
-    char buffer[4096];
-    rapidjson::FileWriteStream stream(file, buffer, sizeof(buffer));
-    rapidjson::Writer<rapidjson::FileWriteStream> writer(stream);
-    const bool ok = document.Accept(writer);
-    std::fclose(file);
-    return ok;
+    return writePmuDocument(options, document);
 }
 
 } // namespace Replay

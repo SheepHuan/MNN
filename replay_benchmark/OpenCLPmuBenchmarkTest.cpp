@@ -1,4 +1,5 @@
 #include "OpenCLPmuBenchmark.hpp"
+#include "ModelPmuBenchmark.hpp"
 #include "ReplayRecord.hpp"
 
 #if defined(MNN_REPLAY_HAS_OPENCL)
@@ -60,6 +61,22 @@ int main() {
     assert(responsive.readable && responsive.responsive && responsive.discriminative && responsive.valid);
     const auto quiet = classifyPmuSignal(10, 12, true, 20);
     assert(quiet.readable && !quiet.responsive && !quiet.valid);
+
+    const auto positiveModelDelta = makeModelPmuDelta(100, 275);
+    assert(positiveModelDelta.control == 100 && positiveModelDelta.workload == 275 &&
+           positiveModelDelta.delta == 175);
+    const auto negativeModelDelta = makeModelPmuDelta(275, 100);
+    assert(negativeModelDelta.delta == -175);
+    ModelPmuRunConfig validModelConfig;
+    validModelConfig.model = "model.mnn";
+    validModelConfig.event = "gpu_active_cycles";
+    validModelConfig.output = "/tmp/model-pmu.json";
+    std::string modelConfigError;
+    assert(validateModelPmuRunConfig(validModelConfig, &modelConfigError));
+    validModelConfig.forward = MNN_FORWARD_VULKAN;
+    assert(validateModelPmuRunConfig(validModelConfig, &modelConfigError));
+    validModelConfig.event = "gpu_active_cycles,compute_tasks";
+    assert(!validateModelPmuRunConfig(validModelConfig, &modelConfigError));
 
 #if defined(MNN_REPLAY_HAS_OPENCL)
     // This crosses the replay executable -> MNN_CL shared-library boundary.

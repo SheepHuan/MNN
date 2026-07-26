@@ -125,3 +125,7 @@ JSON 和 metadata 测试，不能证明移动 GPU 的 cache 或 PMU 语义。
 
 两台设备都使用同一套 `replay_benchmark.out`、`libMNN.so`、`libMNN_Express.so` 和
 `libMNN_CL.so`，通过 `LD_LIBRARY_PATH` 指向设备工作目录的 `lib/`。
+
+多个 MNN/ncnn tag 的 GPU kernel 源码快照位于
+[`kernel_corpus/`](kernel_corpus/)，归档范围、版本矩阵和校验方式见其 README；该
+目录当前只作为源码参考库，不参与 replay_benchmark 编译或运行时链接。

@@ -1,8 +1,10 @@
 #include "MNNPerfCounter.hpp"
 
 #include <cassert>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 using namespace MNN::PerfCounter;
 
@@ -18,6 +20,12 @@ static void testA7xxMesaBindings() {
     assert(resolveCounter(GpuVendor::Adreno, 740, "uche_vbif_read_beats_sp", &binding));
     assert(binding.group == 8);
     assert(binding.selector == 8);
+
+    const std::vector<std::string> names = supportedCounterNames({GpuVendor::Adreno, GpuFamily::AdrenoA7xx, 740});
+    assert(names.size() >= 885);
+    assert(std::find(names.begin(), names.end(), "sp_cs_instructions") != names.end());
+    assert(std::find(names.begin(), names.end(), "gpu_active_cycles") != names.end());
+    assert(std::adjacent_find(names.begin(), names.end()) == names.end());
 }
 
 static void testMaliProductFamiliesAndCounters() {

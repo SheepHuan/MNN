@@ -11,6 +11,7 @@
 #include "ReplayRecord.hpp"
 #include "ReplayRunner.hpp"
 #include "OpenCLPmuBenchmark.hpp"
+#include "ModelPmuBenchmark.hpp"
 #include "core/Backend.hpp"
 #include "revertMNNModel.hpp"
 
@@ -153,6 +154,33 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
             options.replay = true;
         } else if (arg == "--opencl-pmu-bench") {
             options.openclPmuBench = true;
+        } else if (arg == "--model-pmu-bench") {
+            options.modelPmuBench = true;
+        } else if (arg == "--model-pmu-workload-runs") {
+            std::string value;
+            if (!requireValue(value)) return false;
+            options.modelPmuWorkloadRuns = std::max(1, std::atoi(value.c_str()));
+        } else if (arg == "--model-pmu-warmup-runs") {
+            std::string value;
+            if (!requireValue(value)) return false;
+            options.modelPmuWarmupRuns = std::max(0, std::atoi(value.c_str()));
+        } else if (arg == "--model-pmu-control-runs") {
+            std::string value;
+            if (!requireValue(value)) return false;
+            options.modelPmuControlRuns = std::max(1, std::atoi(value.c_str()));
+        } else if (arg == "--model-pmu-forward") {
+            std::string value;
+            if (!requireValue(value)) return false;
+            options.modelPmuForward = std::atoi(value.c_str());
+        } else if (arg == "--model-pmu-precision") {
+            std::string value;
+            if (!requireValue(value)) return false;
+            options.precision = std::atoi(value.c_str());
+        } else if (arg == "--model-pmu-prompt") {
+            if (!requireValue(options.modelPmuPrompt)) return false;
+        } else if (arg == "--opencl-pmu-list-events") {
+            options.openclPmuBench = true;
+            options.openclPmuListEvents = true;
         } else if (arg == "--opencl-pmu-case") {
             if (!requireValue(options.openclPmuCase)) {
                 return false;
@@ -243,6 +271,13 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
         options.record = false;
         return true;
     }
+    if (options.modelPmuBench) {
+        options.replay = false;
+        options.record = false;
+        options.forward = options.modelPmuForward;
+        return !options.model.empty() && !options.perfCounterOutput.empty() &&
+               !options.perfCounterEvents.empty() && options.perfCounterEvents.find(',') == std::string::npos;
+    }
     if (options.model.empty()) {
         return false;
     }
@@ -269,8 +304,13 @@ static void printUsage(const char* program) {
                  "      [--opencl-pmu-warmup-runs N] [--opencl-pmu-size bytes]\n"
                  "      [--opencl-pmu-local-size 32|64|128|256]\n"
                  "      [--perf-counter-events name1,name2,...|auto] [--perf-counter-output path.json]\n"
+              << "  " << program << " --model-pmu-bench --model model.mnn --perf-counter-events event\n"
+                 "      --perf-counter-output path.json [--model-pmu-workload-runs N]\n"
+                 "      [--model-pmu-warmup-runs N] [--model-pmu-control-runs N]\n"
+                 "      [--model-pmu-forward 3|7] [--model-pmu-prompt text]\n"
+              << "  " << program << " --opencl-pmu-list-events\n"
               << "\n"
-              << "forward: 0 CPU, 3 OpenCL; precision: 0 normal, 1 high, 2 low FP16, 3 low BF16\n";
+              << "forward: 0 CPU, 3 OpenCL, 7 Vulkan; precision: 0 normal, 1 high, 2 low FP16, 3 low BF16\n";
 }
 
 static bool recordModel(const ModelFile& model, const Options& options, bool multipleModels) {
@@ -441,6 +481,9 @@ int main(int argc, const char* argv[]) {
     }
     if (options.openclPmuBench) {
         return runOpenCLPmuBenchmark(options) ? 0 : 1;
+    }
+    if (options.modelPmuBench) {
+        return runModelPmuBenchmark(options) ? 0 : 1;
     }
     if (options.replay) {
         return replayOp(options) ? 0 : 1;
