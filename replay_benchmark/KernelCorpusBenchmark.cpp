@@ -304,6 +304,13 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
         ac.source.find("intel_reqd_sub_group_size") != std::string::npos) {
         buildOptions += " -cl-std=CL2.0";
     }
+    // Intel subgroup extension is not available on non-Intel GPUs
+    if (ac.source.find("INTEL_SUB_GROUP") != std::string::npos ||
+        ac.source.find("intel_sub_group_block") != std::string::npos) {
+        report.compileStatus = "unsupported";
+        report.error = "Intel subgroup extension not supported on this device";
+        return report;
+    }
     status = program.build(std::vector<cl::Device>(1, holder->device), buildOptions.c_str());
     if (status != CL_SUCCESS) {
         std::string log;
