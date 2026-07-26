@@ -61,6 +61,7 @@ static const char* kPortableCounters[] = {
     "gpu_active_cycles", "compute_active_cycles", "compute_tasks",
 };
 
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
 static bool discoverPmuDevice(MNN::PerfCounter::DeviceInfo* device, std::string* error) {
     MNN::PerfCounter::CounterSpec spec;
     spec.name = "gpu_active_cycles";
@@ -73,7 +74,9 @@ static bool discoverPmuDevice(MNN::PerfCounter::DeviceInfo* device, std::string*
     }
     return true;
 }
+#endif
 
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
 static std::vector<std::string> selectPmuCounters(const MNN::PerfCounter::DeviceInfo& device) {
     if (device.vendor == MNN::PerfCounter::GpuVendor::Adreno) {
         return std::vector<std::string>(kAdrenoCounters,
@@ -86,12 +89,15 @@ static std::vector<std::string> selectPmuCounters(const MNN::PerfCounter::Device
     return std::vector<std::string>(kPortableCounters,
         kPortableCounters + sizeof(kPortableCounters) / sizeof(kPortableCounters[0]));
 }
+#endif
 
 struct PmuScope {
     bool started = false;
     std::vector<std::string> names;
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     std::unique_ptr<MNN::PerfCounter::Session> session;
     std::vector<MNN::PerfCounter::CounterValue> values;
+#endif
     uint64_t workloadDelta = 0;
     std::string status = "unavailable";
 };
@@ -136,9 +142,7 @@ static void endPmu(PmuScope& s) {
         s.status = "stop_failed";
     }
 #endif
-}
-
-static bool makeParentDirectories(const std::string& path) {
+}static bool makeParentDirectories(const std::string& path) {
     const std::string::size_type slash = path.find_last_of("/\\");
     if (slash == std::string::npos) return true;
     const std::string parent = path.substr(0, slash);
