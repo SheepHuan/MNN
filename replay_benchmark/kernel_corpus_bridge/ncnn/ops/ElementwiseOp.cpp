@@ -6,9 +6,7 @@ namespace KernelCorpus {
 namespace NcnnOps {
 
 void adaptElementwise(const CaseSpec& spec, AdaptedCase& ac) {
-    const int w = spec.w > 0 ? spec.w : 64;
-    const int h = spec.h > 0 ? spec.h : 1;
-    const int c = spec.c > 0 ? spec.c : 1;
+    const int w = spec.w(), h = spec.h(), c = spec.c();
     const int cstep = w * h;
     const int total = c * cstep;
 
@@ -39,9 +37,7 @@ void adaptElementwise(const CaseSpec& spec, AdaptedCase& ac) {
 }
 
 bool PermuteOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    const int w = spec.w > 0 ? spec.w : 16;
-    const int h = spec.h > 0 ? spec.h : 16;
-    const int c = spec.c > 0 ? spec.c : 4;
+    const int w = spec.w(), h = spec.h(), c = spec.c();
     const int cstep = w * h;
     const int total = c * cstep;
 
@@ -67,7 +63,7 @@ bool PermuteOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.pushConstants.resize(sizeof(pp));
     std::memcpy(ac.pushConstants.data(), &pp, sizeof(pp));
 
-    ac.specConstants.push_back({0, static_cast<uint32_t>(spec.orderType)});
+    ac.specConstants.push_back({0, static_cast<uint32_t>(spec.orderType())});
     ac.globalSize[0] = w;
     ac.globalSize[1] = h;
     ac.globalSize[2] = c;

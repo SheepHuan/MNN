@@ -7,7 +7,7 @@ namespace MnnOps {
 
 bool UnaryBufExpOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "unary_buf";
-    const int count = spec.elementCount > 0 ? spec.elementCount : 1024;
+    const int count = spec.intParam("size", 1024);
     std::vector<float> input(count);
     for (int i = 0; i < count; ++i) input[i] = 0.1f * (i % 10);
     AdaptedBuffer inBuf;

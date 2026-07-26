@@ -13,7 +13,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "attention_buf_fp32_smoke",
@@ -26,7 +28,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binary_buf_fp32_smoke",
@@ -39,7 +43,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binary_buf_fp32_smoke",
@@ -52,7 +58,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binary_subgroup_buf_fp32_smoke",
@@ -65,7 +73,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "buffer_convert_buf_fp32_smoke",
@@ -78,7 +88,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "buffer_convert_buf_fp32_smoke",
@@ -91,7 +103,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "buffer_convert_subgroup_buf_fp32_smoke",
@@ -104,7 +118,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_buf_fp32_smoke",
@@ -117,7 +133,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "conv_2d_buf_fp32_smoke",
@@ -130,7 +148,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "conv_2d_buf_fp32_smoke",
@@ -143,7 +163,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "conv_2d_c16_subgroup_buf_fp32_smoke",
@@ -156,7 +178,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "conv_2d_c1_subgroup_buf_fp32_smoke",
@@ -169,7 +193,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "conv_2d_int_buf_fp32_smoke",
@@ -182,7 +208,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "depthwise_conv2d_buf_fp32_smoke",
@@ -195,7 +223,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "depthwise_conv2d_buf_fp32_smoke",
@@ -208,7 +238,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "depthwise_conv2d_subgroup_buf_fp32_smoke",
@@ -221,7 +253,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemm_buf_fp32_smoke",
@@ -234,7 +268,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemm_buf_fp32_smoke",
@@ -247,7 +283,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemm_conv1x1_buf_fp32_smoke",
@@ -260,7 +298,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemv_conv1x1_buf_fp32_smoke",
@@ -273,7 +313,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "grid_sample_buf_fp32_smoke",
@@ -286,7 +328,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_buf_fp32_smoke",
@@ -299,7 +343,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "input_transe_buf_fp32_smoke",
@@ -312,7 +358,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_buf_fp32_smoke",
@@ -325,7 +373,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_buf_fp32_smoke",
@@ -338,7 +388,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_buf_fp32_smoke",
@@ -351,7 +403,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "linear_attention_buf_fp32_smoke",
@@ -364,7 +418,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "matmul_buf_fp32_smoke",
@@ -377,7 +433,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "matmul_buf_nobias_fp32_smoke",
@@ -390,7 +448,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "matmul_buf_fp32_smoke",
@@ -403,7 +463,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "matmul_local_buf_fp32_smoke",
@@ -416,7 +478,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_buf_fp32_smoke",
@@ -429,7 +493,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_max_fp32_smoke",
@@ -442,7 +508,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_buf_fp32_smoke",
@@ -455,7 +523,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_subgroup_buf_fp32_smoke",
@@ -468,7 +538,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "range_buf_fp32_smoke",
@@ -481,7 +553,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "buffer_set_zero_fp32_smoke",
@@ -494,7 +568,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "raster_buf_fp32_smoke",
@@ -507,7 +583,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "buffer_set_zero_fp32_smoke",
@@ -520,7 +598,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "raster_buf_fp32_smoke",
@@ -533,7 +613,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reduct_buf_sum_fp32_smoke",
@@ -546,7 +628,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reduction_buf_fp32_smoke",
@@ -559,7 +643,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reduction_buf_fp32_smoke",
@@ -572,7 +658,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_buf_fp32_smoke",
@@ -585,7 +673,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_nobias_fp32_smoke",
@@ -598,7 +688,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_buf_fp32_smoke",
@@ -611,7 +703,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "select_buf_fp32_smoke",
@@ -624,7 +718,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "self_attention_buf_fp32_smoke",
@@ -637,7 +733,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_buf_fp32_smoke",
@@ -650,7 +748,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_buf_fp32_smoke",
@@ -663,7 +763,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "splitgelu_buf_fp32_smoke",
@@ -676,7 +778,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "strassen_binary_buf_fp32_smoke",
@@ -689,7 +793,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "topkv2_buf_fp32_smoke",
@@ -702,7 +808,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unary_buf_exp_fp32_smoke",
@@ -715,7 +823,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unary_buf_fp32_smoke",
@@ -728,7 +838,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unary_buf_exp_fp32_smoke",
@@ -741,7 +853,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unary_buf_fp32_smoke",
@@ -754,7 +868,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unary_subgroup_buf_fp32_smoke",
@@ -767,7 +883,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "winogradTransform_buf_fp32_smoke",
@@ -780,7 +898,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "winogradTransform_buf_fp32_smoke",
@@ -793,7 +913,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "winogradTransform_subgroup_buf_fp32_smoke",
@@ -806,7 +928,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "absval_smoke",
@@ -819,7 +943,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "absval_pack4_smoke",
@@ -832,7 +958,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "absval_smoke",
@@ -845,7 +973,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "absval_pack4_fp32_smoke",
@@ -858,7 +988,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "batchnorm_smoke",
@@ -871,7 +1003,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "batchnorm_pack4_smoke",
@@ -884,7 +1018,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "batchnorm_smoke",
@@ -897,7 +1033,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "batchnorm_pack4_smoke",
@@ -910,7 +1048,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_smoke",
@@ -923,7 +1063,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_pack4_smoke",
@@ -936,7 +1078,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_smoke",
@@ -949,7 +1093,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_pack4_smoke",
@@ -962,7 +1108,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_broadcast_smoke",
@@ -975,7 +1123,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_broadcast_pack1to4_smoke",
@@ -988,7 +1138,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "binaryop_broadcast_pack4_smoke",
@@ -1001,7 +1153,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp16_to_fp32_smoke",
@@ -1014,7 +1168,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp16_to_fp32_pack4_smoke",
@@ -1027,7 +1183,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp16_to_fp32_smoke",
@@ -1040,7 +1198,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp16_to_fp32_pack4_smoke",
@@ -1053,7 +1213,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp32_to_fp16_smoke",
@@ -1066,7 +1228,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp32_to_fp16_pack4_smoke",
@@ -1079,7 +1243,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp32_to_fp16_smoke",
@@ -1092,7 +1258,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "cast_fp32_to_fp16_pack4_smoke",
@@ -1105,7 +1273,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "celu_smoke",
@@ -1118,7 +1288,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "clip_smoke",
@@ -1131,7 +1303,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "clip_pack4_smoke",
@@ -1144,7 +1318,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "clip_smoke",
@@ -1157,7 +1333,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_smoke",
@@ -1170,7 +1348,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_pack4_smoke",
@@ -1183,7 +1363,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_pack4to1_smoke",
@@ -1196,7 +1378,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_smoke",
@@ -1209,7 +1393,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_axis0_fp32_smoke",
@@ -1222,7 +1408,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_pack4_smoke",
@@ -1235,7 +1423,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "concat_pack4to1_smoke",
@@ -1248,7 +1438,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_smoke",
@@ -1261,7 +1453,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack1to4_smoke",
@@ -1274,7 +1468,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_smoke",
@@ -1287,7 +1483,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4to1_smoke",
@@ -1300,7 +1498,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution1d_1x1s1d1_cm_smoke",
@@ -1313,7 +1513,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution1d_gemm_cm_smoke",
@@ -1326,7 +1528,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution1d_packed_smoke",
@@ -1339,7 +1543,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution1d_packed_1x1s1d1_smoke",
@@ -1352,7 +1558,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution1d_packed_gemm_smoke",
@@ -1365,7 +1573,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_1x1s1d1_smoke",
@@ -1378,7 +1588,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_1x1s1d1_cm_smoke",
@@ -1391,7 +1603,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_3x3s1d1_winograd23_transform_input_smoke",
@@ -1404,7 +1618,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_3x3s1d1_winograd23_transform_output_smoke",
@@ -1417,7 +1633,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_3x3s1d1_winograd43_transform_input_smoke",
@@ -1430,7 +1648,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_3x3s1d1_winograd43_transform_output_smoke",
@@ -1443,7 +1663,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_3x3s1d1_winograd_gemm_smoke",
@@ -1456,7 +1678,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_gemm_cm_smoke",
@@ -1469,7 +1693,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack1to4_3x3s1d1_winograd_gemm_smoke",
@@ -1482,7 +1708,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_1x1s1d1_smoke",
@@ -1495,7 +1723,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_lds_8_8_2_smoke",
@@ -1508,7 +1738,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd23_gemm_smoke",
@@ -1521,7 +1753,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd23_transform_input_smoke",
@@ -1534,7 +1768,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd23_transform_input_smoke",
@@ -1547,7 +1783,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd23_transform_output_smoke",
@@ -1560,7 +1798,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd23_transform_output_smoke",
@@ -1573,7 +1813,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd43_transform_input_smoke",
@@ -1586,7 +1828,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd43_transform_output_smoke",
@@ -1599,7 +1843,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4_3x3s1d1_winograd_gemm_smoke",
@@ -1612,7 +1858,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_pack4to1_3x3s1d1_winograd_gemm_smoke",
@@ -1625,7 +1873,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_packed_smoke",
@@ -1638,7 +1888,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_packed_1x1s1d1_smoke",
@@ -1651,7 +1903,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_packed_gemm_smoke",
@@ -1664,7 +1918,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolution_winograd_gemm_cm_smoke",
@@ -1677,7 +1933,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_smoke",
@@ -1690,7 +1948,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_pack4_smoke",
@@ -1703,7 +1963,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_smoke",
@@ -1716,7 +1978,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_pack4_smoke",
@@ -1729,7 +1993,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_smoke",
@@ -1742,7 +2008,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_pack1to4_smoke",
@@ -1755,7 +2023,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_pack4_smoke",
@@ -1768,7 +2038,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_pack4to1_smoke",
@@ -1781,7 +2053,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_smoke",
@@ -1794,7 +2068,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_pack1to4_smoke",
@@ -1807,7 +2083,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_pack4_smoke",
@@ -1820,7 +2098,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "convolutiondepthwise_group_pack4to1_smoke",
@@ -1833,7 +2113,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "crop_smoke",
@@ -1846,7 +2128,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "crop_pack4_smoke",
@@ -1859,7 +2143,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "crop_smoke",
@@ -1872,7 +2158,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "crop_pack1to4_smoke",
@@ -1885,7 +2173,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "crop_pack4_smoke",
@@ -1898,7 +2188,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "crop_pack4to1_smoke",
@@ -1911,7 +2203,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_smoke",
@@ -1924,7 +2218,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_pack1to4_smoke",
@@ -1937,7 +2233,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_pack4_smoke",
@@ -1950,7 +2248,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_pack4to1_smoke",
@@ -1963,7 +2263,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_col2im_smoke",
@@ -1976,7 +2278,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_gemm_cm_smoke",
@@ -1989,7 +2293,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_gemm_packed_smoke",
@@ -2002,7 +2308,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_pack4_col2im_smoke",
@@ -2015,7 +2323,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolution_packed_smoke",
@@ -2028,7 +2338,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_smoke",
@@ -2041,7 +2353,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_pack4_smoke",
@@ -2054,7 +2368,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_smoke",
@@ -2067,7 +2383,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_pack4_smoke",
@@ -2080,7 +2398,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_smoke",
@@ -2093,7 +2413,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_pack1to4_smoke",
@@ -2106,7 +2428,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_pack4_smoke",
@@ -2119,7 +2443,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_pack4to1_smoke",
@@ -2132,7 +2458,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_smoke",
@@ -2145,7 +2473,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_pack1to4_smoke",
@@ -2158,7 +2488,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_pack4_smoke",
@@ -2171,7 +2503,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deconvolutiondepthwise_group_pack4to1_smoke",
@@ -2184,7 +2518,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deepcopy_smoke",
@@ -2197,7 +2533,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "deepcopy_pack4_smoke",
@@ -2210,7 +2548,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "dequantize_smoke",
@@ -2223,7 +2563,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "dequantize_pack4_smoke",
@@ -2236,7 +2578,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "dropout_smoke",
@@ -2249,7 +2593,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "dropout_pack4_smoke",
@@ -2262,7 +2608,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "dropout_smoke",
@@ -2275,7 +2623,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "eltwise_smoke",
@@ -2288,7 +2638,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "eltwise_pack4_smoke",
@@ -2301,7 +2653,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "eltwise_smoke",
@@ -2314,7 +2668,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "elu_smoke",
@@ -2327,7 +2683,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "erf_smoke",
@@ -2340,7 +2698,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "flatten_smoke",
@@ -2353,7 +2713,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "flatten_pack1to4_smoke",
@@ -2366,7 +2728,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "flatten_pack4_smoke",
@@ -2379,7 +2743,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "flatten_smoke",
@@ -2392,7 +2758,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "flatten_pack1to4_smoke",
@@ -2405,7 +2773,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "flatten_pack4_smoke",
@@ -2418,7 +2788,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gelu_smoke",
@@ -2431,7 +2803,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemm_smoke",
@@ -2444,7 +2818,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemm_cm_smoke",
@@ -2457,7 +2833,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "gemm_sg_smoke",
@@ -2470,7 +2848,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_coeffs_smoke",
@@ -2483,7 +2863,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_coeffs_pack4_smoke",
@@ -2496,7 +2878,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_norm_smoke",
@@ -2509,7 +2893,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_norm_pack4_smoke",
@@ -2522,7 +2908,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_reduce_mean_smoke",
@@ -2535,7 +2923,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_reduce_mean_pack4_smoke",
@@ -2548,7 +2938,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_reduce_sum4_fp16_to_fp32_smoke",
@@ -2561,7 +2953,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_reduce_sum4_fp16_to_fp32_pack4_smoke",
@@ -2574,7 +2968,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_reduce_sum4_fp32_smoke",
@@ -2587,7 +2983,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_reduce_sum4_fp32_pack4_smoke",
@@ -2600,7 +2998,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_sub_mean_square_smoke",
@@ -2613,7 +3013,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "groupnorm_sub_mean_square_pack4_smoke",
@@ -2626,7 +3028,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "hardsigmoid_smoke",
@@ -2639,7 +3043,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "hardswish_smoke",
@@ -2652,7 +3058,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_smoke",
@@ -2665,7 +3073,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack1to4_smoke",
@@ -2678,7 +3088,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack4_smoke",
@@ -2691,7 +3103,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack4to1_smoke",
@@ -2704,7 +3118,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_smoke",
@@ -2717,7 +3133,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack1to4_smoke",
@@ -2730,7 +3148,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack4_smoke",
@@ -2743,7 +3163,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack4to1_smoke",
@@ -2756,7 +3178,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_gemm_smoke",
@@ -2769,7 +3193,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_gemm_wp1to4_smoke",
@@ -2782,7 +3208,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_gemm_wp4_smoke",
@@ -2795,7 +3223,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_gemm_wp4to1_smoke",
@@ -2808,7 +3238,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_pack4_lds_64_smoke",
@@ -2821,7 +3253,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_reduce_sum8_smoke",
@@ -2834,7 +3268,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_reduce_sum8_pack4_smoke",
@@ -2847,7 +3283,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_sum8_smoke",
@@ -2860,7 +3298,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_sum8_pack1to4_smoke",
@@ -2873,7 +3313,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_sum8_pack4_smoke",
@@ -2886,7 +3328,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "innerproduct_sum8_pack4to1_smoke",
@@ -2899,7 +3343,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_coeffs_smoke",
@@ -2912,7 +3358,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_coeffs_pack4_smoke",
@@ -2925,7 +3373,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_norm_smoke",
@@ -2938,7 +3388,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_norm_pack4_smoke",
@@ -2951,7 +3403,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_reduce_mean_smoke",
@@ -2964,7 +3418,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_reduce_mean_pack4_smoke",
@@ -2977,7 +3433,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_reduce_sum4_fp16_to_fp32_smoke",
@@ -2990,7 +3448,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_reduce_sum4_fp16_to_fp32_pack4_smoke",
@@ -3003,7 +3463,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_reduce_sum4_fp32_smoke",
@@ -3016,7 +3478,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_reduce_sum4_fp32_pack4_smoke",
@@ -3029,7 +3493,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_sub_mean_square_smoke",
@@ -3042,7 +3508,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "instancenorm_sub_mean_square_pack4_smoke",
@@ -3055,7 +3523,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_smoke",
@@ -3068,7 +3538,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_pack4_smoke",
@@ -3081,7 +3553,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_smoke",
@@ -3094,7 +3568,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_pack4_smoke",
@@ -3107,7 +3583,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_bicubic_smoke",
@@ -3120,7 +3598,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_bicubic_pack4_smoke",
@@ -3133,7 +3613,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_bicubic_smoke",
@@ -3146,7 +3628,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_bicubic_pack4_smoke",
@@ -3159,7 +3643,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_bicubic_coeffs_smoke",
@@ -3172,7 +3658,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "interp_bicubic_coeffs_smoke",
@@ -3185,7 +3673,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_coeffs_smoke",
@@ -3198,7 +3688,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_coeffs_pack4_smoke",
@@ -3211,7 +3703,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_norm_smoke",
@@ -3224,7 +3718,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_norm_pack4_smoke",
@@ -3237,7 +3733,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_reduce_mean_smoke",
@@ -3250,7 +3748,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_reduce_mean_pack4_smoke",
@@ -3263,7 +3763,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_reduce_sum4_fp16_to_fp32_smoke",
@@ -3276,7 +3778,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_reduce_sum4_fp16_to_fp32_pack4_smoke",
@@ -3289,7 +3793,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_reduce_sum4_fp32_smoke",
@@ -3302,7 +3808,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_reduce_sum4_fp32_pack4_smoke",
@@ -3315,7 +3823,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_sub_mean_square_smoke",
@@ -3328,7 +3838,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "layernorm_sub_mean_square_pack4_smoke",
@@ -3341,7 +3853,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_norm_smoke",
@@ -3354,7 +3868,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_norm_smoke",
@@ -3367,7 +3883,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_norm_across_channel_pack4_smoke",
@@ -3380,7 +3898,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_norm_across_channel_pack4_smoke",
@@ -3393,7 +3913,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_norm_within_channel_pack4_smoke",
@@ -3406,7 +3928,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_norm_within_channel_pack4_smoke",
@@ -3419,7 +3943,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_square_pad_smoke",
@@ -3432,7 +3958,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_square_pad_smoke",
@@ -3445,7 +3973,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_square_pad_across_channel_pack4_smoke",
@@ -3458,7 +3988,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_square_pad_across_channel_pack4_smoke",
@@ -3471,7 +4003,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_square_pad_within_channel_pack4_smoke",
@@ -3484,7 +4018,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "lrn_square_pad_within_channel_pack4_smoke",
@@ -3497,7 +4033,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "mish_smoke",
@@ -3510,7 +4048,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qk_cross_smoke",
@@ -3523,7 +4063,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qk_cross_pack1to4_smoke",
@@ -3536,7 +4078,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qk_cross_pack4_smoke",
@@ -3549,7 +4093,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qk_cross_pack4to1_smoke",
@@ -3562,7 +4108,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qkv_cross_smoke",
@@ -3575,7 +4123,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qkv_cross_pack1to4_smoke",
@@ -3588,7 +4138,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qkv_cross_pack4_smoke",
@@ -3601,7 +4153,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "multiheadattention_qkv_cross_pack4to1_smoke",
@@ -3614,7 +4168,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_coeffs_smoke",
@@ -3627,7 +4183,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_coeffs_pack4_smoke",
@@ -3640,7 +4198,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_norm_smoke",
@@ -3653,7 +4213,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_norm_pack4_smoke",
@@ -3666,7 +4228,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_reduce_sum4_fp16_to_fp32_smoke",
@@ -3679,7 +4243,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_reduce_sum4_fp16_to_fp32_pack4_smoke",
@@ -3692,7 +4258,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_reduce_sum4_fp32_smoke",
@@ -3705,7 +4273,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "normalize_reduce_sum4_fp32_pack4_smoke",
@@ -3718,7 +4288,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_smoke",
@@ -3731,7 +4303,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_pack1to4_smoke",
@@ -3744,7 +4318,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_pack4to1_smoke",
@@ -3757,7 +4333,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_1to4_smoke",
@@ -3770,7 +4348,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_4to1_smoke",
@@ -3783,7 +4363,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_int8_smoke",
@@ -3796,7 +4378,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_pack1to4_int8_smoke",
@@ -3809,7 +4393,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "packing_pack4to1_int8_smoke",
@@ -3822,7 +4408,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_smoke",
@@ -3835,7 +4423,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_pack4_smoke",
@@ -3848,7 +4438,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_smoke",
@@ -3861,7 +4453,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_pack1to4_smoke",
@@ -3874,7 +4468,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_pack4_smoke",
@@ -3887,7 +4483,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_pack4to1_smoke",
@@ -3900,7 +4498,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_3d_smoke",
@@ -3913,7 +4513,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "padding_3d_pack4_smoke",
@@ -3926,7 +4528,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_smoke",
@@ -3939,7 +4543,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_order0_fp32_smoke",
@@ -3952,7 +4558,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_pack4to1_smoke",
@@ -3965,7 +4573,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_smoke",
@@ -3978,7 +4588,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_pack1to4_smoke",
@@ -3991,7 +4603,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_pack4_smoke",
@@ -4004,7 +4618,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "permute_pack4to1_smoke",
@@ -4017,7 +4633,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pixelshuffle_smoke",
@@ -4030,7 +4648,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pixelshuffle_pack4_smoke",
@@ -4043,7 +4663,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pixelshuffle_pack4to1_smoke",
@@ -4056,7 +4678,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_smoke",
@@ -4069,7 +4693,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_pack4_smoke",
@@ -4082,7 +4708,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_smoke",
@@ -4095,7 +4723,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_pack4_smoke",
@@ -4108,7 +4738,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_adaptive_smoke",
@@ -4121,7 +4753,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_adaptive_pack4_smoke",
@@ -4134,7 +4768,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_smoke",
@@ -4147,7 +4783,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_pack4_smoke",
@@ -4160,7 +4798,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_max_smoke",
@@ -4173,7 +4813,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_max_pack4_smoke",
@@ -4186,7 +4828,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_max_first_smoke",
@@ -4199,7 +4843,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_max_first_pack4_smoke",
@@ -4212,7 +4858,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_max_last_smoke",
@@ -4225,7 +4873,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_max_last_pack4_smoke",
@@ -4238,7 +4888,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_sum_smoke",
@@ -4251,7 +4903,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_sum_pack4_smoke",
@@ -4264,7 +4918,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_sum_first_smoke",
@@ -4277,7 +4933,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_sum_first_pack4_smoke",
@@ -4290,7 +4948,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_sum_last_smoke",
@@ -4303,7 +4963,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "pooling_global_reduce_sum_last_pack4_smoke",
@@ -4316,7 +4978,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "prelu_smoke",
@@ -4329,7 +4993,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "prelu_pack4_smoke",
@@ -4342,7 +5008,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "prelu_smoke",
@@ -4355,7 +5023,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "prelu_pack4_smoke",
@@ -4368,7 +5038,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "priorbox_smoke",
@@ -4381,7 +5053,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "priorbox_smoke",
@@ -4394,7 +5068,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "priorbox_mxnet_smoke",
@@ -4407,7 +5083,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "priorbox_mxnet_smoke",
@@ -4420,7 +5098,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "quantize_smoke",
@@ -4433,7 +5113,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "quantize_pack4_smoke",
@@ -4446,7 +5128,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reduction_smoke",
@@ -4459,7 +5143,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "relu_smoke",
@@ -4472,7 +5158,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "relu_pack4_smoke",
@@ -4485,7 +5173,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "relu_smoke",
@@ -4498,7 +5188,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "relu_pack4_fp32_slope0_smoke",
@@ -4511,7 +5203,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reorg_smoke",
@@ -4524,7 +5218,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reorg_pack1to4_smoke",
@@ -4537,7 +5233,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reorg_pack4_smoke",
@@ -4550,7 +5248,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reorg_smoke",
@@ -4563,7 +5263,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reorg_pack1to4_smoke",
@@ -4576,7 +5278,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reorg_pack4_smoke",
@@ -4589,7 +5293,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "requantize_smoke",
@@ -4602,7 +5308,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "requantize_pack4_smoke",
@@ -4615,7 +5323,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_smoke",
@@ -4628,7 +5338,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_pack1to4_smoke",
@@ -4641,7 +5353,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_pack4_smoke",
@@ -4654,7 +5368,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_pack4to1_smoke",
@@ -4667,7 +5383,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_smoke",
@@ -4680,7 +5398,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_pack1to4_smoke",
@@ -4693,7 +5413,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_pack4_smoke",
@@ -4706,7 +5428,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "reshape_pack4to1_smoke",
@@ -4719,7 +5443,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rmsnorm_coeffs_smoke",
@@ -4732,7 +5458,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rmsnorm_coeffs_pack4_smoke",
@@ -4745,7 +5473,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rmsnorm_norm_smoke",
@@ -4758,7 +5488,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rmsnorm_norm_pack4_smoke",
@@ -4771,7 +5503,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rmsnorm_square_smoke",
@@ -4784,7 +5518,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rmsnorm_square_pack4_smoke",
@@ -4797,7 +5533,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rotaryembed_smoke",
@@ -4810,7 +5548,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "rotaryembed_pack4_smoke",
@@ -4823,7 +5563,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_smoke",
@@ -4836,7 +5578,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_pack4_smoke",
@@ -4849,7 +5593,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_smoke",
@@ -4862,7 +5608,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "scale_pack4_smoke",
@@ -4875,7 +5623,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sdpa_cross_smoke",
@@ -4888,7 +5638,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sdpa_cross_cm_smoke",
@@ -4901,7 +5653,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sdpa_fa_smoke",
@@ -4914,7 +5668,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sdpa_fa_cm_smoke",
@@ -4927,7 +5683,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "selu_smoke",
@@ -4940,7 +5698,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "shrink_smoke",
@@ -4953,7 +5713,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "shufflechannel_smoke",
@@ -4966,7 +5728,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "shufflechannel_pack4_smoke",
@@ -4979,7 +5743,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "shufflechannel_smoke",
@@ -4992,7 +5758,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "shufflechannel_pack4_smoke",
@@ -5005,7 +5773,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sigmoid_smoke",
@@ -5018,7 +5788,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sigmoid_fp32_smoke",
@@ -5031,7 +5803,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sigmoid_pack4_smoke",
@@ -5044,7 +5818,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sigmoid_smoke",
@@ -5057,7 +5833,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "sigmoid_pack4_fp32_smoke",
@@ -5070,7 +5848,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "slice_smoke",
@@ -5083,7 +5863,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "slice_pack1to4_smoke",
@@ -5096,7 +5878,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "slice_pack4_smoke",
@@ -5109,7 +5893,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_div_sum_smoke",
@@ -5122,7 +5908,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_div_sum_pack4_smoke",
@@ -5135,7 +5923,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_div_sum_smoke",
@@ -5148,7 +5938,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_div_sum_pack4_smoke",
@@ -5161,7 +5953,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_exp_sub_max_smoke",
@@ -5174,7 +5968,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_exp_sub_max_pack4_smoke",
@@ -5187,7 +5983,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_exp_sub_max_smoke",
@@ -5200,7 +5998,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_exp_sub_max_pack4_smoke",
@@ -5213,7 +6013,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_max_smoke",
@@ -5226,7 +6028,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_max_pack4_smoke",
@@ -5239,7 +6043,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_max_smoke",
@@ -5252,7 +6058,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_max_pack4_smoke",
@@ -5265,7 +6073,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_sum_smoke",
@@ -5278,7 +6088,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_sum_pack4_smoke",
@@ -5291,7 +6103,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_sum_smoke",
@@ -5304,7 +6118,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softmax_reduce_sum_pack4_smoke",
@@ -5317,7 +6133,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "softplus_smoke",
@@ -5330,7 +6148,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "swish_smoke",
@@ -5343,7 +6163,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "tanh_smoke",
@@ -5356,7 +6178,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "tanh_fp32_smoke",
@@ -5369,7 +6193,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "tanh_pack4_smoke",
@@ -5382,7 +6208,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "tanh_smoke",
@@ -5395,7 +6223,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "tanh_pack4_fp32_smoke",
@@ -5408,7 +6238,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unaryop_smoke",
@@ -5421,7 +6253,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unaryop_pack4_smoke",
@@ -5434,7 +6268,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unaryop_smoke",
@@ -5447,7 +6283,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unfold_im2col_smoke",
@@ -5460,7 +6298,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unfold_im2col_pack1to4_smoke",
@@ -5473,7 +6313,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unfold_im2col_pack4_smoke",
@@ -5486,7 +6328,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     },
     {
       "name": "unfold_im2col_pack4to1_smoke",
@@ -5499,7 +6343,9 @@
       "validator": "identity_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
-      "element_count": 64
+      "int_params": {
+        "element_count": 64
+      }
     }
   ]
 }

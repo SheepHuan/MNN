@@ -789,14 +789,18 @@ bool runKernelCorpusBenchmark(const Options& options) {
         spec.validator = v.HasMember("validator") && v["validator"].IsString() ? v["validator"].GetString() : "";
         spec.warmupRuns = v.HasMember("warmup_runs") && v["warmup_runs"].IsInt() ? v["warmup_runs"].GetInt() : 2;
         spec.workloadRuns = v.HasMember("workload_runs") && v["workload_runs"].IsInt() ? v["workload_runs"].GetInt() : 5;
-        spec.elementCount = v.HasMember("element_count") && v["element_count"].IsInt() ? v["element_count"].GetInt() : 0;
-        spec.m = v.HasMember("m") && v["m"].IsInt() ? v["m"].GetInt() : 0;
-        spec.n = v.HasMember("n") && v["n"].IsInt() ? v["n"].GetInt() : 0;
-        spec.k = v.HasMember("k") && v["k"].IsInt() ? v["k"].GetInt() : 0;
-        spec.w = v.HasMember("w") && v["w"].IsInt() ? v["w"].GetInt() : 0;
-        spec.h = v.HasMember("h") && v["h"].IsInt() ? v["h"].GetInt() : 0;
-        spec.c = v.HasMember("c") && v["c"].IsInt() ? v["c"].GetInt() : 0;
-        spec.orderType = v.HasMember("order_type") && v["order_type"].IsInt() ? v["order_type"].GetInt() : 0;
+        // Load int_params and float_params from JSON
+        if (v.HasMember("int_params") && v["int_params"].IsObject()) {
+            for (auto it = v["int_params"].MemberBegin(); it != v["int_params"].MemberEnd(); ++it) {
+                if (it->value.IsInt()) spec.intParams[it->name.GetString()] = it->value.GetInt();
+            }
+        }
+        if (v.HasMember("float_params") && v["float_params"].IsObject()) {
+            for (auto it = v["float_params"].MemberBegin(); it != v["float_params"].MemberEnd(); ++it) {
+                if (it->value.IsFloat()) spec.floatParams[it->name.GetString()] = it->value.GetFloat();
+                else if (it->value.IsDouble()) spec.floatParams[it->name.GetString()] = (float)it->value.GetDouble();
+            }
+        }
 
         if (!options.caseFilter.empty() && spec.name != options.caseFilter) continue;
 

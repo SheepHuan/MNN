@@ -5,10 +5,11 @@
 #include "ops/MatmulOp.hpp"
 #include "ops/ReductionOp.hpp"
 #include "ops/PoolingOp.hpp"
-#include "ops/GenericOps.hpp"
 #include "ops/BinaryOp.hpp"
 #include "ops/ElementwiseOps.hpp"
 #include "ops/NormConvOps.hpp"
+#include "ops/ConvOps.hpp"
+#include "ops/ArgmaxOp.hpp"
 
 namespace MNN {
 namespace Replay {
@@ -35,10 +36,10 @@ AdaptedCase MnnBridge::adapt(const CaseSpec& spec,
     ac.validator = spec.validator;
     ac.warmupRuns = spec.warmupRuns;
     ac.workloadRuns = spec.workloadRuns;
-    ac.elementCount = spec.elementCount;
-    ac.m = spec.m; ac.n = spec.n; ac.k = spec.k;
-    ac.w = spec.w; ac.h = spec.h; ac.c = spec.c;
-    ac.orderType = spec.orderType;
+    ac.elementCount = spec.intParam("size", 0);
+    ac.m = spec.m(); ac.n = spec.n(); ac.k = spec.k();
+    ac.w = spec.w(); ac.h = spec.h(); ac.c = spec.c();
+    ac.orderType = spec.orderType();
     ac.source = sourceText;
 
     const OpAdapter* adapter = findAdapter(spec, ac);
@@ -57,10 +58,11 @@ void registerMnnBridge() {
             MnnOps::registerMatmulOp();
             MnnOps::registerReductionOp();
             MnnOps::registerPoolingOp();
-            MnnOps::registerGenericOps();
             MnnOps::registerBinaryOp();
             MnnOps::registerElementwiseOps();
             MnnOps::registerNormConvOps();
+            MnnOps::registerConvOps();
+            MnnOps::registerArgmaxOp();
             registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new MnnBridge()));
         }

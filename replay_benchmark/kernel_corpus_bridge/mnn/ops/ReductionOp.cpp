@@ -7,9 +7,7 @@ namespace MnnOps {
 
 bool ReductionOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "reduct_buf";
-    const int batch = spec.m > 0 ? spec.m : 1;
-    const int height = spec.h > 0 ? spec.h : 8;
-    const int width = spec.w > 0 ? spec.w : 16;
+    const int batch = spec.batch(), height = spec.h(), width = spec.w();
     const int count = batch * width * 4;  // output: batch * width * FLOAT4
 
     std::vector<float> input(batch * height * width * 4);

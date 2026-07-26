@@ -17,7 +17,7 @@ bool FallbackAdapter::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     // Minimal fallback: single in/out buffer, 1D dispatch, no validation.
     // These kernels perform real computation that identity validator
     // cannot verify. Mark as not_validated rather than failing.
-    const int elemCount = spec.elementCount > 0 ? spec.elementCount : 64;
+    const int elemCount = spec.intParam("size", 64);
     std::vector<float> input(elemCount);
     for (int i = 0; i < elemCount; ++i) input[i] = 0.1f * (i % 13);
     AdaptedBuffer buf;

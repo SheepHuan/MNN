@@ -8,7 +8,7 @@ namespace MnnOps {
 
 bool BinaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "binary_buf";
-    const int elemCount = spec.elementCount > 0 ? spec.elementCount : 256;
+    const int elemCount = spec.intParam("size", 256);
     const int cb = (elemCount + 3) / 4;  // channel blocks
 
     // Input data

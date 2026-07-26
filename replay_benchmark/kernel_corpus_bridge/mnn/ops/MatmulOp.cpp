@@ -7,9 +7,7 @@ namespace MnnOps {
 
 bool MatmulOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "matmul_buf";
-    const int M = spec.m > 0 ? spec.m : 16;
-    const int N = spec.n > 0 ? spec.n : 16;
-    const int K = spec.k > 0 ? spec.k : 16;
+    const int M = spec.m(), N = spec.n(), K = spec.k();
     const int M4 = (M + 3) / 4;
     const int N4 = (N + 3) / 4;
     const int K4 = (K + 3) / 4;

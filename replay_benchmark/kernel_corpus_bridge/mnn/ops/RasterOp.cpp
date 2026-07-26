@@ -7,7 +7,7 @@ namespace MnnOps {
 
 bool RasterOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "buffer_set_zero";
-    const int count = spec.elementCount > 0 ? spec.elementCount : 1024;
+    const int count = spec.intParam("size", 1024);
     AdaptedBuffer outBuf;
     outBuf.sizeBytes = count * sizeof(float);
     outBuf.isOutput = true;

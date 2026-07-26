@@ -15,7 +15,8 @@ static void fillInput(std::vector<float>& v, int n) {
 // pooling 3.6.0: same but + FLOAT* rediceOutput
 bool PoolingBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "pooling";
-    const int ih = 8, iw = 8, channel = 4, kh = 2, kw = 2, stride = 2;
+    const int ih = spec.h(), iw = spec.w(), channel = spec.c();
+    const int kh = spec.kernelSize(), kw = spec.kernelSize(), stride = spec.stride();
     const int cb = (channel + 3) / 4;
     const int oh = (ih - kh) / stride + 1;
     const int ow = (iw - kw) / stride + 1;
@@ -54,7 +55,7 @@ bool PoolingBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // scale_buf 3.6.0: (dim0,dim1, FLOAT* in, FLOAT* scale, FLOAT* out, int channelBlock, int ohw, int offset)
 bool ScaleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "scale_buf";
-    const int cb = 4, hw = 16;
+    const int cb = spec.c(), hw = spec.w() * spec.h();
     const int n = cb * hw * 4;
     std::vector<float> in, scale; fillInput(in, n); fillInput(scale, cb * 4);
     AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
@@ -87,7 +88,8 @@ bool ScaleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // grid_sample 3.6.0: (dim0,dim1,dim2, FLOAT* in, FLOAT* grid, FLOAT* out, int inH, int inW, int outH, int outW, int batch, int channel, ...)
 bool GridSampleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "nearest_buf";
-    const int inH = 8, inW = 8, outH = 4, outW = 4, batch = 1, channel = 4;
+    const int inH = spec.h(), inW = spec.w(), batch = spec.batch(), channel = spec.c();
+    const int outH = spec.intParam("out_h", inH / 2), outW = spec.intParam("out_w", inW / 2);
     const int cb = (channel + 3) / 4;
     const int inN = batch * cb * inH * inW * 4;
     const int outN = batch * cb * outH * outW * 4;
@@ -118,7 +120,7 @@ bool GridSampleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // Simplified — exact layout depends on #ifdef
 bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "groupnorm_plain_buf";
-    const int hw = 16, channel = 4, groups = 2;
+    const int hw = spec.w() * spec.h(), channel = spec.c(), groups = spec.groups();
     const int cb = (channel + 3) / 4;
     const int n = cb * hw * 4;
     std::vector<float> in; fillInput(in, n);
@@ -141,7 +143,7 @@ bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.args.push_back(AdaptedArg::scalarInt(groups));
     ac.args.push_back(AdaptedArg::scalarInt(cb));
     ac.args.push_back(AdaptedArg::scalarInt(0));
-    ac.args.push_back(AdaptedArg::scalarFloat(1e-5f));
+    ac.args.push_back(AdaptedArg::scalarFloat(spec.epsilon()));
     ac.globalSize[0] = cb; ac.globalSize[1] = 1; ac.globalSize[2] = 1; ac.dims = 3;
     ac.validatorInputA = in;
     return true;
@@ -150,7 +152,7 @@ bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // layernorm 3.6.0: (dim0,dim1, FLOAT* in, FLOAT* out, int inside, FLOAT* gamma, FLOAT* beta, float eps)
 bool LayernormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "layernorm_buf";
-    const int inside = 64, outside = 4;
+    const int inside = spec.intParam("inside", 64), outside = spec.intParam("outside", 4);
     const int n = inside * outside;
     std::vector<float> in; fillInput(in, n);
     std::vector<float> gamma(inside), beta(inside);
@@ -168,7 +170,7 @@ bool LayernormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.args.push_back(AdaptedArg::scalarInt(inside));
     ac.args.push_back(AdaptedArg::buffer(2));  // gamma
     ac.args.push_back(AdaptedArg::buffer(3));  // beta
-    ac.args.push_back(AdaptedArg::scalarFloat(1e-5f));
+    ac.args.push_back(AdaptedArg::scalarFloat(spec.epsilon()));
     ac.globalSize[0] = outside; ac.globalSize[1] = 1; ac.dims = 2;
     ac.validatorInputA = in;
     return true;
@@ -177,7 +179,7 @@ bool LayernormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // splitgelu 3.6.0: (dim0,dim1, FLOAT* in, FLOAT* out, int4 shape)
 bool SplitgeluBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "splitgelu_buf";
-    const int hw = 16, cb = 4;
+    const int hw = spec.w() * spec.h(), cb = spec.c();
     const int n = cb * hw * 4;
     std::vector<float> in; fillInput(in, n);
     AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
@@ -196,7 +198,7 @@ bool SplitgeluBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // topkv2 3.6.0: (dim0,dim1,dim2, DTYPE* outValue, int* outIndex, DTYPE* inValue, int rowSize, int k, int numRows)
 bool Topkv2BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "topkv2_buf";
-    const int rowSize = 16, k = 4, numRows = 4;
+    const int rowSize = spec.intParam("row_size", 16), k = spec.intParam("k", 4), numRows = spec.intParam("num_rows", 4);
     std::vector<float> in; fillInput(in, rowSize * numRows);
     AdaptedBuffer outValBuf; outValBuf.sizeBytes = k * numRows * sizeof(float); outValBuf.isOutput = true;
     AdaptedBuffer outIdxBuf; outIdxBuf.sizeBytes = k * numRows * sizeof(float); outIdxBuf.isOutput = true;
@@ -219,7 +221,7 @@ bool Topkv2BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // strassen 3.6.0: (dim0,dim1, FLOAT* in0, int offsetC, int strideC, FLOAT* in1, FLOAT* out, int width, int height)
 bool StrassenBinaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "binary_cfunction_buf";
-    const int width = 4, height = 4;
+    const int width = spec.w(), height = spec.h();
     const int n = width * height * 4;
     std::vector<float> in0, in1; fillInput(in0, n); fillInput(in1, n);
     AdaptedBuffer in0Buf; in0Buf.setFp32(in0); in0Buf.isOutput = false;

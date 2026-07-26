@@ -30,9 +30,9 @@ AdaptedCase NcnnBridge::adapt(const CaseSpec& spec,
     ac.validator = spec.validator;
     ac.warmupRuns = spec.warmupRuns;
     ac.workloadRuns = spec.workloadRuns;
-    ac.elementCount = spec.elementCount;
-    ac.w = spec.w; ac.h = spec.h; ac.c = spec.c;
-    ac.orderType = spec.orderType;
+    ac.elementCount = spec.intParam("size", 0);
+    ac.w = spec.w(); ac.h = spec.h(); ac.c = spec.c();
+    ac.orderType = spec.orderType();
     ac.source = sourceText;
     ac.entry = "main";
 

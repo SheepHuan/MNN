@@ -14,7 +14,7 @@ static void fillInput(std::vector<float>& v, int n) {
 // cast_buf 3.6.0: (dim0, dim1, INPUT* in, OUTPUT* out, int size)
 bool CastBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "cast_buf";
-    const int n = 256;
+    const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
     std::vector<float> in; fillInput(in, n);
     AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
@@ -34,7 +34,7 @@ bool CastBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // select_buf 3.6.0: (dim0, dim1, int* select, FLOAT* in0, FLOAT* in1, FLOAT* out)
 bool SelectBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "select_buf";
-    const int n = 256;
+    const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
     std::vector<float> in0, in1; fillInput(in0, n); fillInput(in1, n);
     std::vector<int> sel(n, 0);
@@ -57,7 +57,7 @@ bool SelectBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // range_buf 3.6.0: (dim0, dim1, INPUT* start, INPUT* step, OUTPUT* out, int size)
 bool RangeBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "range_buf";
-    const int n = 256;
+    const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
     std::vector<float> start(n, 0.0f), step(n, 1.0f);
     AdaptedBuffer startBuf; startBuf.setFp32(start); startBuf.isOutput = false;
@@ -79,7 +79,7 @@ bool RangeBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // unary_buf_fp32 3.6.0: (dim0, dim1, INPUT* in, OUTPUT* out, int size)
 bool UnaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "unary_buf";
-    const int n = 256;
+    const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
     std::vector<float> in; fillInput(in, n);
     AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
@@ -110,7 +110,7 @@ bool UnaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // reduction_buf_fp32 3.6.0: (dim0, dim1, dim2, INPUT* in, OUTPUT* out, int inside, int outside, int dim)
 bool ReductionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "reduct_buf";
-    const int batch = 1, height = 8, width = 16;
+    const int batch = spec.batch(), height = spec.h(), width = spec.w();
     const int n = batch * height * width * 4;
     std::vector<float> in; fillInput(in, n);
     AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
@@ -145,7 +145,7 @@ bool ReductionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // raster_buf_fp32: (dim0, dim1, FLOAT* output) — same as buffer_set_zero
 bool RasterBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "buffer_set_zero";
-    const int n = 1024;
+    const int n = spec.intParam("size", 1024);
     AdaptedBuffer outBuf; outBuf.sizeBytes = n * sizeof(float); outBuf.isOutput = true;
     ac.buffers.push_back(outBuf);
     ac.args.push_back(AdaptedArg::sizeConst(0));   // dim0 = n
@@ -158,7 +158,7 @@ bool RasterBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 // softmax_buf_fp32 1.2.0: (dim0, dim1, dim2, FLOAT* in, FLOAT* out, int outCh, int remainCh, int4 shape)
 // softmax_buf_fp32 3.6.0: (dim0, dim1, dim2, FLOAT* in, FLOAT* out, int inside, int outside, int dim)
 bool SoftmaxBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    const int channels = 16, w = 4, h = 4;
+    const int channels = spec.c(), w = spec.w(), h = spec.h();
     const int cb = (channels + 3) / 4;
     const int n = cb * w * h * 4;
     std::vector<float> in; fillInput(in, n);

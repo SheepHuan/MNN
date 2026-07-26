@@ -7,7 +7,7 @@ namespace NcnnOps {
 
 static bool adaptPack4Elementwise(const CaseSpec& spec, AdaptedCase& ac) {
     if (spec.tag != "20260526") return false;
-    const int elemCount = spec.elementCount > 0 ? spec.elementCount : 64;
+    const int elemCount = spec.intParam("size", 64);
     // pack4: elements stored as vec4, so n = elemCount / 4 (rounded up)
     const int n = (elemCount + 3) / 4;
     const int totalFloats = n * 4;
@@ -51,9 +51,7 @@ PACK4_ELEMENTWISE_OPS(DEFINE_PACK4_OP)
 
 bool ConcatOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "20260526") return false;
-    const int w = spec.w > 0 ? spec.w : 8;
-    const int h = spec.h > 0 ? spec.h : 8;
-    const int c = spec.c > 0 ? spec.c : 4;
+    const int w = spec.w(), h = spec.h(), c = spec.c();
     const int cstep = w * h;
     const int total = c * cstep;
 

@@ -7,13 +7,10 @@ namespace MnnOps {
 
 bool PoolingOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "pooling";
-    const int ih = spec.h > 0 ? spec.h : 8;
-    const int iw = spec.w > 0 ? spec.w : 8;
-    const int channel = spec.c > 0 ? spec.c : 4;
+    const int ih = spec.h(), iw = spec.w(), channel = spec.c();
     const int channel_block = (channel + 3) / 4;
-    const int kh = spec.k > 0 ? spec.k : 2;
-    const int kw = spec.k > 0 ? spec.k : 2;
-    const int stride = 2;
+    const int kh = spec.kernelSize(), kw = spec.kernelSize();
+    const int stride = spec.stride();
     const int oh = (ih - kh) / stride + 1;
     const int ow = (iw - kw) / stride + 1;
     const int batch = 1;

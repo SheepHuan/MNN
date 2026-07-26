@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -148,10 +149,37 @@ struct CaseSpec {
     std::string validator;
     int warmupRuns = 2;
     int workloadRuns = 5;
-    int elementCount = 0;
-    int m = 0, n = 0, k = 0;
-    int w = 0, h = 0, c = 0;
-    int orderType = 0;
+    // Each adapter declares which params it needs; case json provides values.
+    // Adapters read via spec.intParam("key", default) / spec.floatParam("key", default).
+    std::map<std::string, int> intParams;
+    std::map<std::string, float> floatParams;
+
+    int intParam(const std::string& key, int fallback = 0) const {
+        auto it = intParams.find(key);
+        return it != intParams.end() ? it->second : fallback;
+    }
+    float floatParam(const std::string& key, float fallback = 0.0f) const {
+        auto it = floatParams.find(key);
+        return it != floatParams.end() ? it->second : fallback;
+    }
+    // Legacy convenience accessors (read from intParams)
+    int m() const { return intParam("m", 16); }
+    int n() const { return intParam("n", 16); }
+    int k() const { return intParam("k", 16); }
+    int w() const { return intParam("w", 8); }
+    int h() const { return intParam("h", 8); }
+    int c() const { return intParam("c", 4); }
+    int batch() const { return intParam("batch", 1); }
+    int stride() const { return intParam("stride", 1); }
+    int kernelSize() const { return intParam("kernel_size", 3); }
+    int pad() const { return intParam("pad", 1); }
+    int dilation() const { return intParam("dilation", 1); }
+    int groups() const { return intParam("groups", 1); }
+    int outChannels() const { return intParam("out_channels", 4); }
+    int orderType() const { return intParam("order_type", 0); }
+    float alpha() const { return floatParam("alpha", 0.0f); }
+    float beta() const { return floatParam("beta", 0.0f); }
+    float epsilon() const { return floatParam("epsilon", 1e-5f); }
 };
 
 class Bridge {
