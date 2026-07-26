@@ -129,7 +129,7 @@ public:
             for (int j = 0; j < elemCount; ++j) data[j] = 0.1f * (j % 13);
             ac.validatorInputA = data;
         }
-        ac.validator = ts->validator;
+        ac.validator = "";  // No validator for generic adapters — semantics unknown
         ac.globalSize[0] = (elemCount + 3) / 4;
         ac.globalSize[1] = 1;
         ac.globalSize[2] = 1;

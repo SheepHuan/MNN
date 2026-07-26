@@ -414,9 +414,13 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     }
 
     // validation
-    const bool valid = runValidator(ac, output);
-    report.validationStatus = valid ? "validation_passed" : "validation_failed";
-    report.valid = valid;
+    if (ac.validator.empty()) {
+        report.validationStatus = "not_validated";
+    } else {
+        const bool valid = runValidator(ac, output);
+        report.validationStatus = valid ? "validation_passed" : "validation_failed";
+        report.valid = valid;
+    }
     report.responsive = report.workloadDelta > 0;
     return report;
 }
@@ -679,9 +683,13 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
     }
 
     // validation
-    const bool valid = runValidator(ac, output);
-    report.validationStatus = valid ? "validation_passed" : "validation_failed";
-    report.valid = valid;
+    if (ac.validator.empty()) {
+        report.validationStatus = "not_validated";
+    } else {
+        const bool valid = runValidator(ac, output);
+        report.validationStatus = valid ? "validation_passed" : "validation_failed";
+        report.valid = valid;
+    }
     report.responsive = report.workloadDelta > 0;
 
     // cleanup

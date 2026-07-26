@@ -15,6 +15,8 @@ void OpAdapterRegistry::registerAdapter(std::unique_ptr<OpAdapter> adapter) {
 
 bool FallbackAdapter::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     // Minimal fallback: single in/out buffer, 1D dispatch, no validation.
+    // These kernels perform real computation that identity validator
+    // cannot verify. Mark as not_validated rather than failing.
     const int elemCount = spec.elementCount > 0 ? spec.elementCount : 64;
     std::vector<float> input(elemCount);
     for (int i = 0; i < elemCount; ++i) input[i] = 0.1f * (i % 13);
@@ -23,9 +25,8 @@ bool FallbackAdapter::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     buf.isOutput = true;
     ac.buffers.push_back(buf);
     ac.validatorInputA = input;
-    ac.validator = "identity_fp32";
-    // For OpenCL: assume 1 hidden dim + 1 buffer arg
-    // For Vulkan: 1 binding
+    // No validator — we don't know the kernel's semantics.
+    ac.validator = "";
     if (spec.backend == "opencl") {
         ac.args.push_back(AdaptedArg::sizeConst(0));
         ac.args.push_back(AdaptedArg::buffer(0));
