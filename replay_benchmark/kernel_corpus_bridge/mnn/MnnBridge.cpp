@@ -7,6 +7,8 @@
 #include "ops/PoolingOp.hpp"
 #include "ops/GenericOps.hpp"
 #include "ops/BinaryOp.hpp"
+#include "ops/ElementwiseOps.hpp"
+#include "ops/NormConvOps.hpp"
 
 namespace MNN {
 namespace Replay {
@@ -57,6 +59,8 @@ void registerMnnBridge() {
             MnnOps::registerPoolingOp();
             MnnOps::registerGenericOps();
             MnnOps::registerBinaryOp();
+            MnnOps::registerElementwiseOps();
+            MnnOps::registerNormConvOps();
             registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new MnnBridge()));
         }
