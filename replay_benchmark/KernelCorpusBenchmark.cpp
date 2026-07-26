@@ -367,9 +367,17 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
                 status |= kernel.setArg(i, v);
                 break;
             }
+            case AdaptedArg::Int4: {
+                const cl_int4 v = {{a.int4Val[0], a.int4Val[1], a.int4Val[2], a.int4Val[3]}};
+                status |= kernel.setArg(i, sizeof(cl_int4), &v);
+                break;
+            }
         }
     }
-    if (status != CL_SUCCESS) { report.error = "OpenCL arg setup failed"; return report; }
+    if (status != CL_SUCCESS) {
+        report.error = "OpenCL arg setup failed (code " + std::to_string(status) + ")";
+        return report;
+    }
 
     // warmup (outside PMU)
     for (int i = 0; i < ac.warmupRuns; ++i) {

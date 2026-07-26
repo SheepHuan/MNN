@@ -15,7 +15,7 @@ namespace KernelCorpus {
 // A single kernel argument slot. The runner sets args[i] via setArg(i, value)
 // in array order. Kind determines how the value is derived.
 struct AdaptedArg {
-    enum Kind { SizeConst, Buffer, Scalar, Int2 } kind = SizeConst;
+    enum Kind { SizeConst, Buffer, Scalar, Int2, Int4 } kind = SizeConst;
     // SizeConst: which component of globalSize to use as the const int value.
     int whichDim = 0;
     // Buffer: index into AdaptedCase.buffers.
@@ -26,6 +26,8 @@ struct AdaptedArg {
     float floatVal = 0.0f;
     // Int2: two ints packed (for OpenCL int2 params like int2 shape).
     int int2Val[2] = {0, 0};
+    // Int4: four ints packed (for OpenCL int4 params).
+    int int4Val[4] = {0, 0, 0, 0};
 
     static AdaptedArg sizeConst(int dim) {
         AdaptedArg a;
@@ -58,6 +60,15 @@ struct AdaptedArg {
         a.kind = Int2;
         a.int2Val[0] = x;
         a.int2Val[1] = y;
+        return a;
+    }
+    static AdaptedArg int4(int x, int y, int z, int w) {
+        AdaptedArg a;
+        a.kind = Int4;
+        a.int4Val[0] = x;
+        a.int4Val[1] = y;
+        a.int4Val[2] = z;
+        a.int4Val[3] = w;
         return a;
     }
 };

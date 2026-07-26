@@ -25,6 +25,7 @@ public:
         int numScalarFloats;
         int numSizeConsts;
         int numInt2s;
+        int numInt4s;  // number of int4 params
         int globalDim;
         std::string validator;
     };
@@ -122,6 +123,10 @@ public:
         }
         for (int i = 0; i < ts->numInt2s; ++i) {
             ac.args.push_back(AdaptedArg::int2(8, 8));
+            argIdx++;
+        }
+        for (int i = 0; i < ts->numInt4s; ++i) {
+            ac.args.push_back(AdaptedArg::int4(1, 8, 8, 4));
             argIdx++;
         }
         if (ts->numInputBuffers > 0) {
