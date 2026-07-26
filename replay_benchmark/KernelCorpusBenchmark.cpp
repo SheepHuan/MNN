@@ -293,7 +293,13 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     sources.emplace_back(ac.source.c_str(), ac.source.size());
     cl::Program program(opencl->context(), sources, &status);
     if (status != CL_SUCCESS) { report.error = "OpenCL program creation failed"; return report; }
-    status = program.build(std::vector<cl::Device>(1, holder->device));
+    // Build with macros from AdaptedCase (e.g. -DOPERATOR=(a+b) -DINPUT_TYPE=float)
+    std::string buildOptions;
+    for (const auto& macro : ac.compileMacros) {
+        if (!buildOptions.empty()) buildOptions += " ";
+        buildOptions += macro;
+    }
+    status = program.build(std::vector<cl::Device>(1, holder->device), buildOptions.c_str());
     if (status != CL_SUCCESS) {
         std::string log;
         program.getBuildInfo(holder->device, CL_PROGRAM_BUILD_LOG, &log);
