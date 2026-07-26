@@ -1,0 +1,52 @@
+// Historical shader: sigmoid (FP32, pack4)
+// Origin: sources/ncnn/20260526/src/layer/vulkan/shader/sigmoid.comp
+// Macro branches baked (FP32 pure path, no fp16/bf16/packed):
+//   sfp=float, sfpvec4=vec4, afp=float, afpvec4=vec4
+//   buffer_ld4(buf,i)=buf[i], buffer_st4(buf,i,v)={buf[i]=v;}
+//   psc(x)=(x==0?p.x:x)
+// Entry: main
+#version 450
+
+layout(constant_id = 0) const uint n = 0;
+
+layout(binding = 0) buffer bottom_top_blob { vec4 bottom_top_blob_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    uint n;
+} p;
+
+#define sfp float
+#define sfpvec4 vec4
+#define afp float
+#define afpvec2 vec2
+#define afpvec4 vec4
+#define afpmat4 mat4
+#define sfp2afp(v) (v)
+#define afp2sfp(v) (v)
+#define lfp float
+#define lfp2afp(v) float(v)
+#define lfp2afpvec4(v) vec4(v)
+#define buffer_ld1(buf,i) float(buf[i])
+#define buffer_ld2(buf,i) vec2(buf[i])
+#define buffer_ld4(buf,i) buf[i]
+#define buffer_st1(buf,i,v) {buf[i]=float(v);}
+#define buffer_st2(buf,i,v) {buf[i]=vec2(v);}
+#define buffer_st4(buf,i,v) {buf[i]=v;}
+#define buffer_cp1(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define buffer_cp4(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define psc(x) (x==0?p.x:x)
+
+void main()
+{
+    const uint gi = gl_GlobalInvocationID.x;
+
+    if (gi >= psc(n))
+        return;
+
+    vec4 v = buffer_ld4(bottom_top_blob_data, gi);
+
+    v = vec4(1.f) / (vec4(1.f) + exp(-v));
+
+    buffer_st4(bottom_top_blob_data, gi, v);
+}

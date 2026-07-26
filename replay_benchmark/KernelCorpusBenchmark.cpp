@@ -211,6 +211,15 @@ static bool runValidator(const AdaptedCase& ac, const std::vector<float>& output
     if (ac.validator == "permute_identity_fp32") {
         return validatePermuteIdentityFp32(ac.w, ac.h, ac.c, ac.validatorInputA, output);
     }
+    if (ac.validator == "reduction_sum_fp32") {
+        return validateReductionSumFp32(ac.m, ac.h, ac.w, ac.validatorInputA, output);
+    }
+    if (ac.validator == "pooling_max_fp32") {
+        return validatePoolingMaxFp32(ac.h, ac.w, ac.c, ac.k, ac.k, 2, ac.validatorInputA, output);
+    }
+    if (ac.validator == "absval_fp32") return validateAbsvalFp32(ac.validatorInputA, output);
+    if (ac.validator == "relu_fp32") return validateReluFp32(ac.validatorInputA, output);
+    if (ac.validator == "concat_identity_fp32") return validateConcatIdentityFp32(ac.validatorInputA, output);
     return false;
 }
 
@@ -328,6 +337,11 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
             case AdaptedArg::Scalar: {
                 if (a.scalarType == AdaptedArg::Int) status |= kernel.setArg(i, a.intVal);
                 else status |= kernel.setArg(i, a.floatVal);
+                break;
+            }
+            case AdaptedArg::Int2: {
+                const cl_int2 v = {{a.int2Val[0], a.int2Val[1]}};
+                status |= kernel.setArg(i, v);
                 break;
             }
         }

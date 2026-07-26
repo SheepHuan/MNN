@@ -1,6 +1,7 @@
 #include "NcnnBridge.hpp"
 #include "../OpAdapter.hpp"
 #include "ops/ElementwiseOp.hpp"
+#include "ops/Pack4Op.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -55,8 +56,8 @@ AdaptedCase NcnnBridge::adapt(const CaseSpec& spec,
         }
     }
 
-    const OpAdapter* adapter = OpAdapterRegistry::instance().find(spec.opType);
-    if (adapter == nullptr || !adapter->adapt(spec, ac)) {
+    const OpAdapter* adapter = findAdapter(spec, ac);
+    if (adapter == nullptr) {
         ac.entry.clear();
         ac.validator.clear();
     }
@@ -68,6 +69,8 @@ void registerNcnnBridge() {
         Reg() {
             NcnnOps::registerElementwiseOp();
             NcnnOps::registerPermuteOp();
+            NcnnOps::registerPack4Ops();
+            NcnnOps::registerConcatOp();
             registerBridge(std::unique_ptr<Bridge>(new NcnnBridge()));
         }
     } r;

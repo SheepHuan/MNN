@@ -5,8 +5,7 @@ namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
 
-bool UnaryOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    if (spec.variant.find("unary_buf") == std::string::npos) return false;
+bool UnaryBufExpOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "unary_buf";
     const int count = spec.elementCount > 0 ? spec.elementCount : 1024;
     std::vector<float> input(count);
@@ -47,7 +46,7 @@ bool UnaryOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 void registerUnaryOp() {
     static struct Reg {
-        Reg() { OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new UnaryOp())); }
+        Reg() { OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new UnaryBufExpOp())); }
     } r;
     (void)r;
 }

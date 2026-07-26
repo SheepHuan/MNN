@@ -3,6 +3,8 @@
 #include "ops/RasterOp.hpp"
 #include "ops/UnaryOp.hpp"
 #include "ops/MatmulOp.hpp"
+#include "ops/ReductionOp.hpp"
+#include "ops/PoolingOp.hpp"
 
 namespace MNN {
 namespace Replay {
@@ -35,8 +37,8 @@ AdaptedCase MnnBridge::adapt(const CaseSpec& spec,
     ac.orderType = spec.orderType;
     ac.source = sourceText;
 
-    const OpAdapter* adapter = OpAdapterRegistry::instance().find(spec.opType);
-    if (adapter == nullptr || !adapter->adapt(spec, ac)) {
+    const OpAdapter* adapter = findAdapter(spec, ac);
+    if (adapter == nullptr) {
         ac.entry.clear();
         ac.validator.clear();
     }
@@ -49,6 +51,8 @@ void registerMnnBridge() {
             MnnOps::registerRasterOp();
             MnnOps::registerUnaryOp();
             MnnOps::registerMatmulOp();
+            MnnOps::registerReductionOp();
+            MnnOps::registerPoolingOp();
             registerBridge(std::unique_ptr<Bridge>(new MnnBridge()));
         }
     } r;

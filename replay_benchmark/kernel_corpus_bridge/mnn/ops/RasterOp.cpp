@@ -6,7 +6,6 @@ namespace KernelCorpus {
 namespace MnnOps {
 
 bool RasterOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    if (spec.variant.find("buffer_set_zero") == std::string::npos) return false;
     ac.entry = "buffer_set_zero";
     const int count = spec.elementCount > 0 ? spec.elementCount : 1024;
     AdaptedBuffer outBuf;

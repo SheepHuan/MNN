@@ -14,6 +14,17 @@
     },
     {
       "backend": "opencl",
+      "entry": "pooling",
+      "execution_spec": "manual",
+      "file": "operators/opencl/pooling/mnn/1.2.0/pooling_max_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "pooling",
+      "tag": "1.2.0",
+      "variant": "pooling_max_fp32"
+    },
+    {
+      "backend": "opencl",
       "entry": "buffer_set_zero",
       "execution_spec": "manual",
       "file": "operators/opencl/raster/mnn/1.2.0/buffer_set_zero_fp32.cl",
@@ -33,6 +44,28 @@
       "op_type": "raster",
       "tag": "3.6.0",
       "variant": "buffer_set_zero_fp32"
+    },
+    {
+      "backend": "opencl",
+      "entry": "reduct_buf",
+      "execution_spec": "manual",
+      "file": "operators/opencl/reduction/mnn/1.2.0/reduct_buf_sum_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "reduction",
+      "tag": "1.2.0",
+      "variant": "reduct_buf_sum_fp32"
+    },
+    {
+      "backend": "opencl",
+      "entry": "scale",
+      "execution_spec": "manual",
+      "file": "operators/opencl/scale/mnn/1.2.0/scale_nobias_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "scale",
+      "tag": "1.2.0",
+      "variant": "scale_nobias_fp32"
     },
     {
       "backend": "opencl",
@@ -58,6 +91,28 @@
     },
     {
       "backend": "vulkan",
+      "entry": "absval_pack4_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/absval/ncnn/20260526/absval_pack4_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "absval",
+      "tag": "20260526",
+      "variant": "absval_pack4_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "concat_axis0_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/concat/ncnn/20260526/concat_axis0_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "concat",
+      "tag": "20260526",
+      "variant": "concat_axis0_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "permute_order0_fp32",
       "execution_spec": "manual",
       "file": "operators/vulkan/permute/ncnn/20190611/permute_order0_fp32.comp",
@@ -66,6 +121,17 @@
       "op_type": "permute",
       "tag": "20190611",
       "variant": "permute_order0_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "relu_pack4_fp32_slope0",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/relu/ncnn/20260526/relu_pack4_fp32_slope0.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "relu",
+      "tag": "20260526",
+      "variant": "relu_pack4_fp32_slope0"
     },
     {
       "backend": "vulkan",
@@ -80,6 +146,17 @@
     },
     {
       "backend": "vulkan",
+      "entry": "sigmoid_pack4_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/sigmoid/ncnn/20260526/sigmoid_pack4_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "sigmoid",
+      "tag": "20260526",
+      "variant": "sigmoid_pack4_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "tanh_fp32",
       "execution_spec": "manual",
       "file": "operators/vulkan/tanh/ncnn/20190611/tanh_fp32.comp",
@@ -88,6 +165,17 @@
       "op_type": "tanh",
       "tag": "20190611",
       "variant": "tanh_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "tanh_pack4_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/tanh/ncnn/20260526/tanh_pack4_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "tanh",
+      "tag": "20260526",
+      "variant": "tanh_pack4_fp32"
     }
   ],
   "version": 1

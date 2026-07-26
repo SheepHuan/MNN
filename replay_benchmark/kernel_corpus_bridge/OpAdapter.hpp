@@ -18,11 +18,14 @@ public:
     virtual ~OpAdapter() = default;
     // Returns the opType this adapter handles (e.g. "raster", "unary", "sigmoid").
     virtual const char* opType() const = 0;
+    // Returns the exact variant name this adapter handles (e.g.
+    // "buffer_set_zero_fp32", "unary_buf_exp_fp32"). An adapter claims exactly
+    // one variant so multiple adapters can share an opType without conflict.
+    virtual const char* variant() const = 0;
     // Fills ac.entry, ac.args, ac.buffers, ac.globalSize, ac.validator inputs,
     // and (for Vulkan) ac.vulkanBindings / ac.pushConstants / ac.specConstants.
     // ac.source / ac.framework / ac.tag / ac.backend / metadata are already set
-    // by the caller. Returns false if the (tag, variant) combination is not
-    // supported by this adapter.
+    // by the caller. Returns false if the tag is not supported by this adapter.
     virtual bool adapt(const CaseSpec& spec, AdaptedCase& ac) const = 0;
 };
 
@@ -31,11 +34,22 @@ class OpAdapterRegistry {
 public:
     static OpAdapterRegistry& instance();
     void registerAdapter(std::unique_ptr<OpAdapter> adapter);
-    const OpAdapter* find(const std::string& opType) const;
+    // Returns all adapters matching opType (multiple may exist for different tags).
+    const std::vector<std::unique_ptr<OpAdapter>>& adapters() const { return mAdapters; }
 private:
     OpAdapterRegistry() = default;
     std::vector<std::unique_ptr<OpAdapter>> mAdapters;
 };
+
+// Find the adapter matching (opType, variant) whose adapt() succeeds.
+inline const OpAdapter* findAdapter(const CaseSpec& spec, AdaptedCase& ac) {
+    for (const auto& a : OpAdapterRegistry::instance().adapters()) {
+        if (spec.opType == a->opType() && spec.variant == a->variant() && a->adapt(spec, ac)) {
+            return a.get();
+        }
+    }
+    return nullptr;
+}
 
 } // namespace KernelCorpus
 } // namespace Replay

@@ -12,8 +12,11 @@ add_executable(replay_benchmark.out
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/RasterOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/UnaryOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/MatmulOp.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ReductionOp.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/PoolingOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/NcnnBridge.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/ops/ElementwiseOp.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/ops/Pack4Op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/revertMNNModel.cpp)
 target_include_directories(replay_benchmark.out PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/

@@ -15,6 +15,7 @@ namespace MnnOps {
 class RasterOp : public OpAdapter {
 public:
     const char* opType() const override { return "raster"; }
+    const char* variant() const override { return "buffer_set_zero_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 

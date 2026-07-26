@@ -13,6 +13,7 @@ namespace MnnOps {
 class MatmulOp : public OpAdapter {
 public:
     const char* opType() const override { return "conv"; }
+    const char* variant() const override { return "matmul_buf_nobias_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 

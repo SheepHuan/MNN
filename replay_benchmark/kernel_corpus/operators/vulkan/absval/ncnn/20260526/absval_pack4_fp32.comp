@@ -1,0 +1,36 @@
+// Historical shader: absval (FP32, pack4)
+// Origin: sources/ncnn/20260526/src/layer/vulkan/shader/absval.comp
+// Macro branches baked (FP32 pure path).
+// Entry: main
+#version 450
+
+layout(constant_id = 0) const uint n = 0;
+
+layout(binding = 0) buffer bottom_top_blob { vec4 bottom_top_blob_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    uint n;
+} p;
+
+#define sfp float
+#define sfpvec4 vec4
+#define afp float
+#define afpvec4 vec4
+#define buffer_ld4(buf,i) buf[i]
+#define buffer_st4(buf,i,v) {buf[i]=v;}
+#define psc(x) (x==0?p.x:x)
+
+void main()
+{
+    const uint gi = gl_GlobalInvocationID.x;
+
+    if (gi >= psc(n))
+        return;
+
+    vec4 v = buffer_ld4(bottom_top_blob_data, gi);
+
+    v = abs(v);
+
+    buffer_st4(bottom_top_blob_data, gi, v);
+}

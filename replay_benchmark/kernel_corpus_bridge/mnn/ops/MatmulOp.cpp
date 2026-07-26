@@ -6,7 +6,6 @@ namespace KernelCorpus {
 namespace MnnOps {
 
 bool MatmulOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    if (spec.variant.find("matmul_buf") == std::string::npos) return false;
     ac.entry = "matmul_buf";
     const int M = spec.m > 0 ? spec.m : 16;
     const int N = spec.n > 0 ? spec.n : 16;

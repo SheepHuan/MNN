@@ -15,7 +15,7 @@ namespace KernelCorpus {
 // A single kernel argument slot. The runner sets args[i] via setArg(i, value)
 // in array order. Kind determines how the value is derived.
 struct AdaptedArg {
-    enum Kind { SizeConst, Buffer, Scalar } kind = SizeConst;
+    enum Kind { SizeConst, Buffer, Scalar, Int2 } kind = SizeConst;
     // SizeConst: which component of globalSize to use as the const int value.
     int whichDim = 0;
     // Buffer: index into AdaptedCase.buffers.
@@ -24,6 +24,8 @@ struct AdaptedArg {
     enum ScalarType { Int, Float } scalarType = Int;
     int intVal = 0;
     float floatVal = 0.0f;
+    // Int2: two ints packed (for OpenCL int2 params like int2 shape).
+    int int2Val[2] = {0, 0};
 
     static AdaptedArg sizeConst(int dim) {
         AdaptedArg a;
@@ -49,6 +51,13 @@ struct AdaptedArg {
         a.kind = Scalar;
         a.scalarType = Float;
         a.floatVal = v;
+        return a;
+    }
+    static AdaptedArg int2(int x, int y) {
+        AdaptedArg a;
+        a.kind = Int2;
+        a.int2Val[0] = x;
+        a.int2Val[1] = y;
         return a;
     }
 };
@@ -162,6 +171,15 @@ bool validateTanhFp32(const std::vector<float>& input, const std::vector<float>&
 bool validatePermuteIdentityFp32(int w, int h, int c,
                                 const std::vector<float>& input,
                                 const std::vector<float>& output);
+bool validateReductionSumFp32(int batch, int height, int width,
+                               const std::vector<float>& input,
+                               const std::vector<float>& output);
+bool validatePoolingMaxFp32(int ih, int iw, int channel, int kh, int kw, int stride,
+                            const std::vector<float>& input,
+                            const std::vector<float>& output);
+bool validateAbsvalFp32(const std::vector<float>& input, const std::vector<float>& output);
+bool validateReluFp32(const std::vector<float>& input, const std::vector<float>& output);
+bool validateConcatIdentityFp32(const std::vector<float>& input, const std::vector<float>& output);
 
 } // namespace KernelCorpus
 } // namespace Replay
