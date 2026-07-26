@@ -180,6 +180,7 @@ bool validatePoolingMaxFp32(int ih, int iw, int channel, int kh, int kw, int str
 bool validateAbsvalFp32(const std::vector<float>& input, const std::vector<float>& output);
 bool validateReluFp32(const std::vector<float>& input, const std::vector<float>& output);
 bool validateConcatIdentityFp32(const std::vector<float>& input, const std::vector<float>& output);
+bool validateIdentityFp32(const std::vector<float>& input, const std::vector<float>& output);
 
 } // namespace KernelCorpus
 } // namespace Replay

@@ -71,6 +71,7 @@ void registerNcnnBridge() {
             NcnnOps::registerPermuteOp();
             NcnnOps::registerPack4Ops();
             NcnnOps::registerConcatOp();
+            registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new NcnnBridge()));
         }
     } r;

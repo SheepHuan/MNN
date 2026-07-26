@@ -42,14 +42,33 @@ private:
 };
 
 // Find the adapter matching (opType, variant) whose adapt() succeeds.
+// Falls back to FallbackAdapter if no dedicated adapter matches.
 inline const OpAdapter* findAdapter(const CaseSpec& spec, AdaptedCase& ac) {
     for (const auto& a : OpAdapterRegistry::instance().adapters()) {
         if (spec.opType == a->opType() && spec.variant == a->variant() && a->adapt(spec, ac)) {
             return a.get();
         }
     }
+    // Fallback: try the generic adapter
+    for (const auto& a : OpAdapterRegistry::instance().adapters()) {
+        if (std::string(a->opType()) == "__fallback__" && a->adapt(spec, ac)) {
+            return a.get();
+        }
+    }
     return nullptr;
 }
+
+// Fallback adapter: tries to compile the kernel with minimal parameters
+// (single in/out buffer, 1D dispatch). Used for operators without a
+// dedicated adapter — at least validates compilation.
+class FallbackAdapter : public OpAdapter {
+public:
+    const char* opType() const override { return "__fallback__"; }
+    const char* variant() const override { return "__fallback__"; }
+    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+};
+
+void registerFallbackAdapter();
 
 } // namespace KernelCorpus
 } // namespace Replay

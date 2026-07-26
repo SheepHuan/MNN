@@ -5,6 +5,7 @@
 #include "ops/MatmulOp.hpp"
 #include "ops/ReductionOp.hpp"
 #include "ops/PoolingOp.hpp"
+#include "ops/GenericOps.hpp"
 
 namespace MNN {
 namespace Replay {
@@ -53,6 +54,8 @@ void registerMnnBridge() {
             MnnOps::registerMatmulOp();
             MnnOps::registerReductionOp();
             MnnOps::registerPoolingOp();
+            MnnOps::registerGenericOps();
+            registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new MnnBridge()));
         }
     } r;

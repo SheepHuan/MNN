@@ -197,6 +197,14 @@ bool validateConcatIdentityFp32(const std::vector<float>& input, const std::vect
     return true;
 }
 
+bool validateIdentityFp32(const std::vector<float>& input, const std::vector<float>& output) {
+    if (input.size() != output.size()) return false;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (std::fabs(output[i] - input[i]) > 1e-5f) return false;
+    }
+    return true;
+}
+
 // Auto-registration guard: ensures bridges are registered exactly once on
 // first lookup. Uses Meyers singleton pattern (function-local static).
 struct RegistryGuard {

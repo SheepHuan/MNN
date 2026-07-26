@@ -220,6 +220,7 @@ static bool runValidator(const AdaptedCase& ac, const std::vector<float>& output
     if (ac.validator == "absval_fp32") return validateAbsvalFp32(ac.validatorInputA, output);
     if (ac.validator == "relu_fp32") return validateReluFp32(ac.validatorInputA, output);
     if (ac.validator == "concat_identity_fp32") return validateConcatIdentityFp32(ac.validatorInputA, output);
+    if (ac.validator == "identity_fp32") return validateIdentityFp32(ac.validatorInputA, output);
     return false;
 }
 
