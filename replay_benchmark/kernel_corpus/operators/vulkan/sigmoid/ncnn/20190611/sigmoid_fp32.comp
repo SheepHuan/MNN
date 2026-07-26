@@ -1,0 +1,43 @@
+// Historical shader: sigmoid (FP32)
+// Origin: sources/ncnn/20190611/src/layer/vulkan/shader/sigmoid.comp
+// Macro branches baked (FP32 storage + arithmetic, no fp16):
+//   sfp=float, afp=float, sfp2afp(v)=(v), afp2sfp(v)=(v)
+//   NCNN_fp16_storage: not defined
+//   NCNN_fp16_arithmetic: not defined
+// Entry: main
+#version 450
+
+layout (local_size_x_id = 233) in;
+layout (local_size_y_id = 234) in;
+layout (local_size_z_id = 235) in;
+
+layout (binding = 0) buffer bottom_top_blob { float bottom_top_blob_data[]; };
+
+layout (push_constant) uniform parameter
+{
+    int dims;
+    int w;
+    int h;
+    int c;
+    int cstep;
+} p;
+
+#define sfp float
+#define afp float
+#define sfp2afp(v) (v)
+#define afp2sfp(v) (v)
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+
+    if (gx >= p.w || gy >= p.h || gz >= p.c)
+        return;
+
+    const int gi = gz * p.cstep + gy * p.w + gx;
+    afp v = sfp2afp(bottom_top_blob_data[gi]);
+    v = afp(1.f) / (afp(1.f) + exp(-v));
+    bottom_top_blob_data[gi] = afp2sfp(v);
+}

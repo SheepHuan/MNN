@@ -1,0 +1,94 @@
+{
+  "format": "mnn-kernel-operator-corpus",
+  "operators": [
+    {
+      "backend": "opencl",
+      "entry": "matmul_buf",
+      "execution_spec": "manual",
+      "file": "operators/opencl/conv/mnn/1.2.0/matmul_buf_nobias_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "conv",
+      "tag": "1.2.0",
+      "variant": "matmul_buf_nobias_fp32"
+    },
+    {
+      "backend": "opencl",
+      "entry": "buffer_set_zero",
+      "execution_spec": "manual",
+      "file": "operators/opencl/raster/mnn/1.2.0/buffer_set_zero_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "buffer_set_zero_fp32"
+    },
+    {
+      "backend": "opencl",
+      "entry": "buffer_set_zero",
+      "execution_spec": "manual",
+      "file": "operators/opencl/raster/mnn/3.6.0/buffer_set_zero_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "buffer_set_zero_fp32"
+    },
+    {
+      "backend": "opencl",
+      "entry": "unary_buf",
+      "execution_spec": "manual",
+      "file": "operators/opencl/unary/mnn/1.2.0/unary_buf_exp_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "unary",
+      "tag": "1.2.0",
+      "variant": "unary_buf_exp_fp32"
+    },
+    {
+      "backend": "opencl",
+      "entry": "unary_buf",
+      "execution_spec": "manual",
+      "file": "operators/opencl/unary/mnn/3.6.0/unary_buf_exp_fp32.cl",
+      "framework": "mnn",
+      "language": "opencl",
+      "op_type": "unary",
+      "tag": "3.6.0",
+      "variant": "unary_buf_exp_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "permute_order0_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/permute/ncnn/20190611/permute_order0_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "permute",
+      "tag": "20190611",
+      "variant": "permute_order0_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "sigmoid_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/sigmoid/ncnn/20190611/sigmoid_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "sigmoid",
+      "tag": "20190611",
+      "variant": "sigmoid_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "tanh_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/tanh/ncnn/20190611/tanh_fp32.comp",
+      "framework": "ncnn",
+      "language": "glsl",
+      "op_type": "tanh",
+      "tag": "20190611",
+      "variant": "tanh_fp32"
+    }
+  ],
+  "version": 1
+}

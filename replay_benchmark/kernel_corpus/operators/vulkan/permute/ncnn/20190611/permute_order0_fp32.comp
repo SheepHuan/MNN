@@ -1,0 +1,97 @@
+// Historical shader: permute (order_type=0, dims=3, FP32)
+// Origin: sources/ncnn/20190611/src/layer/vulkan/shader/permute.comp
+// Macro branches baked:
+//   sfp=float, afp=float, sfp2afp(v)=(v), afp2sfp(v)=(v)
+//   order_type=0 (constant_id 0 baked via specialization constant)
+//   NCNN_fp16_storage: not defined
+//   NCNN_fp16_arithmetic: not defined
+// Entry: main
+//
+// order_type=0 means "w h c" -> output index = gz*cstep + gy*w + gx (identity
+// permute for dims=3). The specialization constant value 0 is supplied at
+// pipeline creation time by the runner.
+#version 450
+
+layout (constant_id = 0) const int order_type = 0;
+
+layout (local_size_x_id = 233) in;
+layout (local_size_y_id = 234) in;
+layout (local_size_z_id = 235) in;
+
+layout (binding = 0) readonly buffer bottom_blob { float bottom_blob_data[]; };
+layout (binding = 1) writeonly buffer top_blob { float top_blob_data[]; };
+
+layout (push_constant) uniform parameter
+{
+    int dims;
+    int w;
+    int h;
+    int c;
+    int cstep;
+
+    int outdims;
+    int outw;
+    int outh;
+    int outc;
+    int outcstep;
+} p;
+
+#define sfp float
+#define afp float
+#define sfp2afp(v) (v)
+#define afp2sfp(v) (v)
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+
+    if (gx >= p.outw || gy >= p.outh || gz >= p.outc)
+        return;
+
+    int v_offset;
+
+    if (p.dims == 2)
+    {
+        // order_type 0 = w h
+        if (order_type == 0)
+        {
+            v_offset = gy * p.w + gx;
+        }
+        if (order_type == 1)
+        {
+            v_offset = gx * p.w + gy;
+        }
+    }
+    else if (p.dims == 3)
+    {
+        // order_type 0 = w h c
+        if (order_type == 0)
+        {
+            v_offset = gz * p.cstep + gy * p.w + gx;
+        }
+        if (order_type == 1)
+        {
+            v_offset = gz * p.cstep + gx * p.w + gy;
+        }
+        if (order_type == 2)
+        {
+            v_offset = gy * p.cstep + gz * p.w + gx;
+        }
+        if (order_type == 3)
+        {
+            v_offset = gx * p.cstep + gz * p.w + gy;
+        }
+        if (order_type == 4)
+        {
+            v_offset = gy * p.cstep + gx * p.w + gz;
+        }
+        if (order_type == 5)
+        {
+            v_offset = gx * p.cstep + gy * p.w + gz;
+        }
+    }
+
+    top_blob_data[gz * p.outcstep + gy * p.outw + gx] = bottom_blob_data[v_offset];
+}
