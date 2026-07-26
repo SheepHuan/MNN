@@ -57,9 +57,8 @@
 #define buffer_sm4(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define PAD 0
-#define UNPACK_N 0
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
 #define aint8 int
 #define sint8vec4 ivec4
@@ -80,6 +79,18 @@
 
 #define buffer_ld4(buf,i) buf[i]
 #define buffer_st4(buf,i,v) {buf[i]=v;}
+#undef NCNN_fp16_storage
+#undef NCNN_fp16_packed
+#undef NCNN_fp16_uniform
+#undef NCNN_fp16_arithmetic
+#undef NCNN_int8_storage
+#undef NCNN_int8_packed
+#undef NCNN_int8_uniform
+#undef NCNN_int8_arithmetic
+#undef NCNN_image_array
+#undef NCNN_moltenvk
+#undef ncnn_VK_KHR_cooperative_matrix
+#undef ncnn_VK_NV_cooperative_matrix
 
 layout(constant_id = 0) const int group = 0;
 layout(constant_id = 1) const int bugihfa = 0;
@@ -144,6 +155,28 @@ void main()
     ivec4 lane4 = z4 % 4;
 
     afpvec4 v;
+#if NCNN_fp16_arithmetic
+    if (bugihfa == 1)
+    {
+        if (lane4.r == 0) v.r = vr.r;
+        if (lane4.r == 1) v.r = vr.g;
+        if (lane4.r == 2) v.r = vr.b;
+        if (lane4.r == 3) v.r = vr.a;
+        if (lane4.g == 0) v.g = vg.r;
+        if (lane4.g == 1) v.g = vg.g;
+        if (lane4.g == 2) v.g = vg.b;
+        if (lane4.g == 3) v.g = vg.a;
+        if (lane4.b == 0) v.b = vb.r;
+        if (lane4.b == 1) v.b = vb.g;
+        if (lane4.b == 2) v.b = vb.b;
+        if (lane4.b == 3) v.b = vb.a;
+        if (lane4.a == 0) v.a = va.r;
+        if (lane4.a == 1) v.a = va.g;
+        if (lane4.a == 2) v.a = va.b;
+        if (lane4.a == 3) v.a = va.a;
+    }
+    else
+#endif
     {
         v = afpvec4(vr[lane4.r], vg[lane4.g], vb[lane4.b], va[lane4.a]);
     }

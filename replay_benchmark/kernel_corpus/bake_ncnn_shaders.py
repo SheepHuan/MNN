@@ -75,12 +75,11 @@ NCNN_FP32_SCALAR_PREAMBLE = r"""
 #define buffer_sm4(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define PAD 0
-#define UNPACK_N 0
 """
 
 # int8 macros for quantize/requantize/packing_int8 path
 NCNN_INT8_PREAMBLE = r"""
+#extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
 #define aint8 int
 #define sint8vec4 ivec4
@@ -166,57 +165,39 @@ def is_pack4(filename):
 
 
 def strip_feature_guards(source):
-    """Remove #if NCNN_fp16_* / #if NCNN_int8_* feature guards.
+    """Remove NCNN_fp16_*/ncnn_VK_* feature guards by undefining them.
 
-    These guards toggle fp16/int8 storage. For FP32 baked path we remove
-    the guard and keep only the #else (FP32) branch, or remove the entire
-    block if no #else.
+    Instead of trying to parse and strip #if/#else/#endif blocks (which
+    breaks on nested guards), we simply #undef the feature macros so the
+    preprocessor naturally evaluates #if NCNN_fp16_storage as false and
+    keeps the #else (FP32) branch. This is safe and preserves all #if/#endif
+    pairing.
     """
-    # Remove #if NCNN_fp16_storage / NCNN_fp16_arithmetic / NCNN_fp16_packed
-    # / NCNN_fp16_uniform / NCNN_int8_* blocks, keeping #else branch.
-    result = []
-    lines = source.split("\n")
-    skip_depth = 0
-    keep_else_depth = -1
-    for line in lines:
-        stripped = line.strip()
-        if skip_depth > 0:
-            if stripped.startswith("#if"):
-                skip_depth += 1
-            elif stripped == "#endif":
-                skip_depth -= 1
-            elif stripped == "#else" and skip_depth == 1:
-                skip_depth = 0
-                keep_else_depth = 1
-            continue
-        if keep_else_depth > 0:
-            if stripped.startswith("#if"):
-                keep_else_depth += 1
-            elif stripped.startswith("#endif"):
-                keep_else_depth -= 1
-                continue
-            elif stripped == "#else":
-                keep_else_depth = 0
-                skip_depth = 1
-                continue
-            result.append(line)
-            continue
-        if re.match(r"#if\s+NCNN_fp16_", stripped) or re.match(r"#if\s+NCNN_int8_", stripped):
-            # Check if there's an #else later
-            skip_depth = 1
-            continue
-        if re.match(r"#if\s+NCNN_image_array", stripped):
-            skip_depth = 1
-            continue
-        if re.match(r"#if\s+NCNN_moltenvk", stripped):
-            skip_depth = 1
-            continue
-        if re.match(r"#if\s+ncnn_VK_", stripped):
-            # Cooperative matrix / other Vulkan extension guards — remove entirely
-            # (keep #elif/#else FP32 fallback if present, otherwise remove block)
-            skip_depth = 1
-            continue
-        result.append(line)
+    # Prepend #undef lines for all NCNN feature macros. Since these macros
+    # are never #defined in our baked preamble, #undef is a no-op but ensures
+    # the preprocessor treats them as undefined (false).
+    undef_block = "\n".join([
+        "#undef NCNN_fp16_storage",
+        "#undef NCNN_fp16_packed",
+        "#undef NCNN_fp16_uniform",
+        "#undef NCNN_fp16_arithmetic",
+        "#undef NCNN_int8_storage",
+        "#undef NCNN_int8_packed",
+        "#undef NCNN_int8_uniform",
+        "#undef NCNN_int8_arithmetic",
+        "#undef NCNN_image_array",
+        "#undef NCNN_moltenvk",
+        "#undef ncnn_VK_KHR_cooperative_matrix",
+        "#undef ncnn_VK_NV_cooperative_matrix",
+    ])
+    # Insert undef block right after #version
+    version_match = re.search(r"^#version\s+\d+", source, re.MULTILINE)
+    if version_match:
+        eol = source.find("\n", version_match.end())
+        if eol == -1:
+            eol = len(source)
+        return source[:eol + 1] + undef_block + "\n" + source[eol + 1:]
+    return undef_block + "\n" + source
     return "\n".join(result)
 
 
@@ -242,13 +223,16 @@ def bake_shader(source_path, output_path, is_pack4):
     version_match = re.search(r"^#version\s+\d+", source, re.MULTILINE)
     if version_match:
         pos = version_match.end()
-        # Find end of line
         eol = source.find("\n", pos)
         if eol == -1:
             eol = len(source)
         result = source[:eol + 1] + preamble + source[eol + 1:]
     else:
         result = preamble + source
+
+    # Files using subgroup ops need SPIR-V 1.3+ (version 460 + extension)
+    if "subgroup" in source.lower():
+        result = result.replace("#version 450", "#version 460\n#extension GL_KHR_shader_subgroup: enable", 1)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(result, encoding="utf-8")
     return True
@@ -278,6 +262,9 @@ def main(argv=None):
         if not shader_dir.is_dir():
             continue
         for comp_file in sorted(shader_dir.glob("*.comp")):
+            # vulkan_activation.comp is an include header, not a compute shader.
+            if comp_file.name == "vulkan_activation.comp":
+                continue
             op_type = get_op_type(comp_file.name)
             pack4 = is_pack4(comp_file.name)
             # Variant name = file stem (without .comp)

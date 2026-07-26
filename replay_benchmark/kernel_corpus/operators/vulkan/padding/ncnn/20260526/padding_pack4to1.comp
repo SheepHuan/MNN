@@ -57,9 +57,8 @@
 #define buffer_sm4(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define PAD 0
-#define UNPACK_N 0
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
 #define aint8 int
 #define sint8vec4 ivec4
@@ -77,6 +76,18 @@
 #define unpack8(x) unpack16(x)
 #define unpackInt4x8(v) ivec4((v) & 0xFF, ((v) >> 8) & 0xFF, ((v) >> 16) & 0xFF, ((v) >> 24) & 0xFF)
 #define packInt4x8(v) (int((uint(v.r) & 0xFF) | ((uint(v.g) & 0xFF) << 8) | ((uint(v.b) & 0xFF) << 16) | ((uint(v.a) & 0xFF) << 24)))
+#undef NCNN_fp16_storage
+#undef NCNN_fp16_packed
+#undef NCNN_fp16_uniform
+#undef NCNN_fp16_arithmetic
+#undef NCNN_int8_storage
+#undef NCNN_int8_packed
+#undef NCNN_int8_uniform
+#undef NCNN_int8_arithmetic
+#undef NCNN_image_array
+#undef NCNN_moltenvk
+#undef ncnn_VK_KHR_cooperative_matrix
+#undef ncnn_VK_NV_cooperative_matrix
 
 layout(constant_id = 0) const int type = 1;
 layout(constant_id = 1) const float value = 0;
@@ -95,7 +106,11 @@ layout(constant_id = shape_constant_id_offset + 7) const int outh = 0;
 layout(constant_id = shape_constant_id_offset + 8) const int outc = 0;
 layout(constant_id = shape_constant_id_offset + 9) const int outcstep = 0;
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+layout(binding = 0) readonly buffer bottom_blob { sfpvec2 bottom_blob_data[]; };
+#else
 layout(binding = 0) readonly buffer bottom_blob { sfp bottom_blob_data[]; };
+#endif
 layout(binding = 1) writeonly buffer top_blob { sfp top_blob_data[]; };
 layout(binding = 2) readonly buffer per_channel_pad_blob { sfp per_channel_pad_blob_data[]; };
 
@@ -135,9 +150,18 @@ void main()
         {
             if (x >= 0 && x < psc(w) * 4)
             {
+#if NCNN_fp16_packed || NCNN_bf16_packed
+                int v_offset = (x / 4) * 2 + (x % 4) / 2;
+                int lane2 = x % 2;
+
+                afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+                buffer_st1(top_blob_data, gx, v[lane2]);
+#else
                 int v_offset = (x / 4) * 4 + x % 4;
 
                 buffer_cp1(top_blob_data, gx, bottom_blob_data, v_offset);
+#endif
             }
             else
             {
@@ -149,9 +173,18 @@ void main()
         {
             x = clamp(x, 0, psc(w) * 4 - 1);
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+            int v_offset = (x / 4) * 2 + (x % 4) / 2;
+            int lane2 = x % 2;
+
+            afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+            buffer_st1(top_blob_data, gx, v[lane2]);
+#else
             int v_offset = (x / 4) * 4 + x % 4;
 
             buffer_cp1(top_blob_data, gx, bottom_blob_data, v_offset);
+#endif
         }
         if (type == 2)
         {
@@ -161,9 +194,18 @@ void main()
             x = (p.w * 4 - 1) - abs(x - (p.w * 4 - 1));
             //             x = (psc(w) * 4 - 1) - abs(x - (psc(w) * 4 - 1));
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+            int v_offset = (x / 4) * 2 + (x % 4) / 2;
+            int lane2 = x % 2;
+
+            afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+            buffer_st1(top_blob_data, gx, v[lane2]);
+#else
             int v_offset = (x / 4) * 4 + x % 4;
 
             buffer_cp1(top_blob_data, gx, bottom_blob_data, v_offset);
+#endif
         }
     }
     else if (psc(dims) == 2)
@@ -177,9 +219,18 @@ void main()
         {
             if (x >= 0 && x < psc(w) && y >= 0 && y < psc(h) * 4)
             {
+#if NCNN_fp16_packed || NCNN_bf16_packed
+                int v_offset = ((y / 4) * psc(w) + x) * 2 + (y % 4) / 2;
+                int lane2 = y % 2;
+
+                afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+                buffer_st1(top_blob_data, gi, v[lane2]);
+#else
                 int v_offset = ((y / 4) * psc(w) + x) * 4 + y % 4;
 
                 buffer_cp1(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
             }
             else
             {
@@ -192,9 +243,18 @@ void main()
             x = clamp(x, 0, psc(w) - 1);
             y = clamp(y, 0, psc(h) * 4 - 1);
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+            int v_offset = ((y / 4) * psc(w) + x) * 2 + (y % 4) / 2;
+            int lane2 = y % 2;
+
+            afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+            buffer_st1(top_blob_data, gi, v[lane2]);
+#else
             int v_offset = ((y / 4) * psc(w) + x) * 4 + y % 4;
 
             buffer_cp1(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
         }
         if (type == 2)
         {
@@ -207,9 +267,18 @@ void main()
             //             x = (psc(w) - 1) - abs(x - (psc(w) - 1));
             //             y = (psc(h) * 4 - 1) - abs(y - (psc(h) * 4 - 1));
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+            int v_offset = ((y / 4) * psc(w) + x) * 2 + (y % 4) / 2;
+            int lane2 = y % 2;
+
+            afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+            buffer_st1(top_blob_data, gi, v[lane2]);
+#else
             int v_offset = ((y / 4) * psc(w) + x) * 4 + y % 4;
 
             buffer_cp1(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
         }
     }
     else // if (psc(dims) == 3)
@@ -224,9 +293,18 @@ void main()
         {
             if (x >= 0 && x < psc(w) && y >= 0 && y < psc(h) && z >= 0 && z < psc(c) * 4)
             {
+#if NCNN_fp16_packed || NCNN_bf16_packed
+                int v_offset = ((z / 4) * psc(cstep) + y * psc(w) + x) * 2 + (z % 4) / 2;
+                int lane2 = z % 2;
+
+                afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+                buffer_st1(top_blob_data, gi, v[lane2]);
+#else
                 int v_offset = ((z / 4) * psc(cstep) + y * psc(w) + x) * 4 + z % 4;
 
                 buffer_cp1(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
             }
             else if (per_channel_pad == 1)
             {
@@ -244,9 +322,18 @@ void main()
             y = clamp(y, 0, psc(h) - 1);
             z = clamp(z, 0, psc(c) * 4 - 1);
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+            int v_offset = ((z / 4) * psc(cstep) + y * psc(w) + x) * 2 + (z % 4) / 2;
+            int lane2 = z % 2;
+
+            afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+            buffer_st1(top_blob_data, gi, v[lane2]);
+#else
             int v_offset = ((z / 4) * psc(cstep) + y * psc(w) + x) * 4 + z % 4;
 
             buffer_cp1(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
         }
         if (type == 2)
         {
@@ -262,9 +349,18 @@ void main()
             //             y = (psc(h) - 1) - abs(y - (psc(h) - 1));
             //             z = (psc(c) * 4 - 1) - abs(z - (psc(c) * 4 - 1));
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+            int v_offset = ((z / 4) * psc(cstep) + y * psc(w) + x) * 2 + (z % 4) / 2;
+            int lane2 = z % 2;
+
+            afpvec2 v = buffer_ld2(bottom_blob_data, v_offset);
+
+            buffer_st1(top_blob_data, gi, v[lane2]);
+#else
             int v_offset = ((z / 4) * psc(cstep) + y * psc(w) + x) * 4 + z % 4;
 
             buffer_cp1(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
         }
     }
 }

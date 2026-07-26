@@ -57,9 +57,8 @@
 #define buffer_sm4(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define PAD 0
-#define UNPACK_N 0
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
 #define aint8 int
 #define sint8vec4 ivec4
@@ -80,6 +79,18 @@
 
 #define buffer_ld4(buf,i) buf[i]
 #define buffer_st4(buf,i,v) {buf[i]=v;}
+#undef NCNN_fp16_storage
+#undef NCNN_fp16_packed
+#undef NCNN_fp16_uniform
+#undef NCNN_fp16_arithmetic
+#undef NCNN_int8_storage
+#undef NCNN_int8_packed
+#undef NCNN_int8_uniform
+#undef NCNN_int8_arithmetic
+#undef NCNN_image_array
+#undef NCNN_moltenvk
+#undef ncnn_VK_KHR_cooperative_matrix
+#undef ncnn_VK_NV_cooperative_matrix
 
 layout(constant_id = 0) const int stride = 0;
 layout(constant_id = 1) const int mode = 0;
@@ -97,7 +108,11 @@ layout(constant_id = shape_constant_id_offset + 7) const int outh = 0;
 layout(constant_id = shape_constant_id_offset + 8) const int outc = 0;
 layout(constant_id = shape_constant_id_offset + 9) const int outcstep = 0;
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+layout(binding = 0) readonly buffer bottom_blob { sfpvec2 bottom_blob_data[]; };
+#else
 layout(binding = 0) readonly buffer bottom_blob { sfp bottom_blob_data[]; };
+#endif
 layout(binding = 1) writeonly buffer top_blob { sfpvec4 top_blob_data[]; };
 
 layout(push_constant) uniform parameter
@@ -143,7 +158,21 @@ void main()
 
     int gi = gz * psc(outcstep) + gy * psc(outw) + gx;
 
+#if NCNN_fp16_packed || NCNN_bf16_packed
+    ivec4 v_offset = ((z4 / 4) * psc(cstep) + y4 * psc(w) + x4) * 2 + (z4 % 4) / 2;
+    ivec4 lane2 = z4 % 2;
+
+    afpvec2 vr = buffer_ld2(bottom_blob_data, v_offset.r);
+    afpvec2 vg = buffer_ld2(bottom_blob_data, v_offset.g);
+    afpvec2 vb = buffer_ld2(bottom_blob_data, v_offset.b);
+    afpvec2 va = buffer_ld2(bottom_blob_data, v_offset.a);
+
+    afpvec4 v = afpvec4(vr[lane2.r], vg[lane2.g], vb[lane2.b], va[lane2.a]);
+
+    buffer_st4(top_blob_data, gi, v);
+#else
     ivec4 v_offset = ((z4 / 4) * psc(cstep) + y4 * psc(w) + x4) * 4 + z4 % 4;
 
     buffer_cp1to4(top_blob_data, gi, bottom_blob_data, v_offset);
+#endif
 }

@@ -57,9 +57,8 @@
 #define buffer_sm4(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define PAD 0
-#define UNPACK_N 0
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
 #define aint8 int
 #define sint8vec4 ivec4
@@ -77,7 +76,25 @@
 #define unpack8(x) unpack16(x)
 #define unpackInt4x8(v) ivec4((v) & 0xFF, ((v) >> 8) & 0xFF, ((v) >> 16) & 0xFF, ((v) >> 24) & 0xFF)
 #define packInt4x8(v) (int((uint(v.r) & 0xFF) | ((uint(v.g) & 0xFF) << 8) | ((uint(v.b) & 0xFF) << 16) | ((uint(v.a) & 0xFF) << 24)))
+#undef NCNN_fp16_storage
+#undef NCNN_fp16_packed
+#undef NCNN_fp16_uniform
+#undef NCNN_fp16_arithmetic
+#undef NCNN_int8_storage
+#undef NCNN_int8_packed
+#undef NCNN_int8_uniform
+#undef NCNN_int8_arithmetic
+#undef NCNN_image_array
+#undef NCNN_moltenvk
+#undef ncnn_VK_KHR_cooperative_matrix
+#undef ncnn_VK_NV_cooperative_matrix
 
+#if NCNN_fp16_storage
+#extension GL_EXT_shader_16bit_storage: require
+#endif
+#if NCNN_fp16_arithmetic
+#extension GL_AMD_gpu_shader_half_float: require
+#endif
 
 layout (constant_id = 0) const int flip = 0;
 layout (constant_id = 1) const int clip = 0;
@@ -95,7 +112,11 @@ layout (local_size_x_id = 233) in;
 layout (local_size_y_id = 234) in;
 layout (local_size_z_id = 235) in;
 
+#if NCNN_fp16_packed
+layout (binding = 0) writeonly buffer top_blob { vec4 top_blob_data[]; };
+#else
 layout (binding = 0) writeonly buffer top_blob { sfpvec4 top_blob_data[]; };
+#endif
 layout (binding = 1) readonly buffer min_sizes { sfp min_sizes_data[]; };
 layout (binding = 2) readonly buffer max_sizes { sfp max_sizes_data[]; };
 layout (binding = 3) readonly buffer aspect_ratios { sfp aspect_ratios_data[]; };
@@ -137,6 +158,12 @@ void main()
 
     afp min_size = sfp2afp(min_sizes_data[gx]);
 
+#if NCNN_fp16_packed
+    vec4 variances = vec4(variances_0, variances_1, variances_2, variances_3);
+#elif !NCNN_fp16_storage
+    // per component assignment makes qcom-adreno driver unhappy :(
+    sfpvec4 variances = sfpvec4(variances_0, variances_1, variances_2, variances_3);
+#endif
 
     // min size box
     box_w = box_h = min_size;
@@ -144,11 +171,19 @@ void main()
     box = (center + afpvec4(-box_w, -box_h, box_w, box_h) * afp(0.5f)) * image_norm;
     box = clip == 1 ? clamp(box, afp(0.f), afp(1.f)) : box;
 
+#if NCNN_fp16_packed
+    top_blob_data[v_offset] = vec4(box);
+#else
     top_blob_data[v_offset] = afp2sfpvec4(box);
+#endif
+#if NCNN_fp16_packed || !NCNN_fp16_storage
+    top_blob_data[var_offset] = variances;
+#else
     top_blob_data[var_offset].r = sfp(variances_0);
     top_blob_data[var_offset].g = sfp(variances_1);
     top_blob_data[var_offset].b = sfp(variances_2);
     top_blob_data[var_offset].a = sfp(variances_3);
+#endif
 
     v_offset += 1;
     var_offset += 1;
@@ -163,11 +198,19 @@ void main()
         box = (center + afpvec4(-box_w, -box_h, box_w, box_h) * afp(0.5f)) * image_norm;
         box = clip == 1 ? clamp(box, afp(0.f), afp(1.f)) : box;
 
+#if NCNN_fp16_packed
+        top_blob_data[v_offset] = vec4(box);
+#else
         top_blob_data[v_offset] = afp2sfpvec4(box);
+#endif
+#if NCNN_fp16_packed || !NCNN_fp16_storage
+        top_blob_data[var_offset] = variances;
+#else
         top_blob_data[var_offset].r = sfp(variances_0);
         top_blob_data[var_offset].g = sfp(variances_1);
         top_blob_data[var_offset].b = sfp(variances_2);
         top_blob_data[var_offset].a = sfp(variances_3);
+#endif
         v_offset += 1;
         var_offset += 1;
     }
@@ -183,11 +226,19 @@ void main()
         box = (center + afpvec4(-box_w, -box_h, box_w, box_h) * afp(0.5f)) * image_norm;
         box = clip == 1 ? clamp(box, afp(0.f), afp(1.f)) : box;
 
+#if NCNN_fp16_packed
+        top_blob_data[v_offset] = vec4(box);
+#else
         top_blob_data[v_offset] = afp2sfpvec4(box);
+#endif
+#if NCNN_fp16_packed || !NCNN_fp16_storage
+        top_blob_data[var_offset] = variances;
+#else
         top_blob_data[var_offset].r = sfp(variances_0);
         top_blob_data[var_offset].g = sfp(variances_1);
         top_blob_data[var_offset].b = sfp(variances_2);
         top_blob_data[var_offset].a = sfp(variances_3);
+#endif
 
         v_offset += 1;
         var_offset += 1;
@@ -197,11 +248,19 @@ void main()
             box = (center + afpvec4(-box_h, -box_w, box_h, box_w) * afp(0.5f)) * image_norm;
             box = clip == 1 ? clamp(box, afp(0.f), afp(1.f)) : box;
 
+#if NCNN_fp16_packed
+            top_blob_data[v_offset] = vec4(box);
+#else
             top_blob_data[v_offset] = afp2sfpvec4(box);
+#endif
+#if NCNN_fp16_packed || !NCNN_fp16_storage
+            top_blob_data[var_offset] = variances;
+#else
             top_blob_data[var_offset].r = sfp(variances_0);
             top_blob_data[var_offset].g = sfp(variances_1);
             top_blob_data[var_offset].b = sfp(variances_2);
             top_blob_data[var_offset].a = sfp(variances_3);
+#endif
 
             v_offset += 1;
             var_offset += 1;

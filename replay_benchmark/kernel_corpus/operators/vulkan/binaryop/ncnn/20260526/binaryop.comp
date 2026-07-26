@@ -57,9 +57,8 @@
 #define buffer_sm4(buf,i) buf[i]
 #define buffer_sm4(buf,i) buf[i]
 #define psc(x) (x==0?p.x:x)
-#define PAD 0
-#define UNPACK_N 0
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int8: enable
 #define sint8 int8_t
 #define aint8 int
 #define sint8vec4 ivec4
@@ -77,6 +76,18 @@
 #define unpack8(x) unpack16(x)
 #define unpackInt4x8(v) ivec4((v) & 0xFF, ((v) >> 8) & 0xFF, ((v) >> 16) & 0xFF, ((v) >> 24) & 0xFF)
 #define packInt4x8(v) (int((uint(v.r) & 0xFF) | ((uint(v.g) & 0xFF) << 8) | ((uint(v.b) & 0xFF) << 16) | ((uint(v.a) & 0xFF) << 24)))
+#undef NCNN_fp16_storage
+#undef NCNN_fp16_packed
+#undef NCNN_fp16_uniform
+#undef NCNN_fp16_arithmetic
+#undef NCNN_int8_storage
+#undef NCNN_int8_packed
+#undef NCNN_int8_uniform
+#undef NCNN_int8_arithmetic
+#undef NCNN_image_array
+#undef NCNN_moltenvk
+#undef ncnn_VK_KHR_cooperative_matrix
+#undef ncnn_VK_NV_cooperative_matrix
 
 layout(constant_id = 0) const int op_type = 0;
 layout(constant_id = 1) const int with_scalar = 0;
@@ -169,6 +180,10 @@ void main()
     if (op_type == 7) res = v2 - v1;
     if (op_type == 8) res = v2 / v1;
     if (op_type == 9) res = pow(v2, v1);
+#if NCNN_moltenvk
+    if (op_type == 10) res = afp(atan(float(v1), float(v2)));
+    if (op_type == 11) res = afp(atan(float(v2), float(v1)));
+#else
 #if ncnn_driverID == 13
     // llvmpipe driver (VK_DRIVER_ID_MESA_LLVMPIPE = 13) workaround for atan(0, 0), match atan2f(0, 0) == 0
     if (op_type == 10)
@@ -181,6 +196,10 @@ void main()
         afp v1_safe = (v1 == afp(0.f) && v2 == afp(0.f)) ? afp(1.f) : v1;
         res = atan(v2, v1_safe);
     }
+#else
+    if (op_type == 10) res = atan(v1, v2);
+    if (op_type == 11) res = atan(v2, v1);
+#endif
 #endif
     if (op_type == 12) res = v1 - trunc(v1 / v2) * v2;
     if (op_type == 13) res = v2 - trunc(v2 / v1) * v1;
