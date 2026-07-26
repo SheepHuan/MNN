@@ -190,16 +190,6 @@ void registerGenericOps() {
                 TS{"3.6.0", "gemv_conv_c8_buf", 6, 0, 2},
             }});
 
-            // binary_buf: 1.2.0 (sizeConst×2, buf×3, int4, int2), 3.6.0 (sizeConst×2, buf×3, int×2)
-            add({"binary", "binary_buf_fp32", {
-                TS{"1.2.0", "binary_buf", 2, 1, 2},
-                TS{"3.6.0", "binary_buf", 2, 1, 2},
-            }});
-
-            // binary_subgroup_buf: (sizeConst×3, buf×3, int4, int2, int×7) — 3.6.0
-            add({"binary", "binary_subgroup_buf_fp32", {
-                TS{"3.6.0", "binary_buf_c4_c4_c4", 3, 1, 2},
-            }});
 
             // buffer_convert_buf: 1.2.0 (sizeConst×2, buf×2, int×3, buf), 3.6.0 (sizeConst×2, buf, int4, buf)
             add({"buffer_convert_buf", "buffer_convert_buf_fp32", {
