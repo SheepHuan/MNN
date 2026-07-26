@@ -19,13 +19,27 @@ void registerGenericOps() {
                 TS{"3.6.0", "cast_buf", 1,1, 1,0,2,0, 2, "identity_fp32"},
             }});
 
-            // unary_buf_fp32: (sizeConst×2/3, buf, buf, scalarInt) — handled by UnaryBufExpOp
-            // Skip — dedicated adapter exists.
+            // unary_buf_fp32: (sizeConst×2/3, buf, buf, scalarInt) — 1.2.0 + 3.6.0
+            // OPERATOR set to "in" (identity) by GenericBufAdapter
+            add({"unary", "unary_buf_fp32", {
+                TS{"1.2.0", "unary_buf", 1,1, 1,0,3,0, 3, "identity_fp32"},
+                TS{"3.6.0", "unary_buf", 1,1, 1,0,2,0, 2, "identity_fp32"},
+            }});
 
-            // reduction_buf_fp32: (sizeConst×2, buf, buf, scalarInt×3) — handled by ReductionOp
-            // Skip — dedicated adapter exists.
+            // reduction_buf_fp32: (sizeConst×2, buf, buf, scalarInt×3) — 1.2.0 + 3.6.0
+            // OPERATE set to "(num+in)" by GenericBufAdapter
+            add({"reduction", "reduction_buf_fp32", {
+                TS{"1.2.0", "reduct_buf", 1,1, 3,0,2,0, 2, "identity_fp32"},
+                TS{"3.6.0", "reduct_buf", 1,1, 3,0,2,0, 2, "identity_fp32"},
+            }});
 
-            // softmax_buf_fp32: 1.2.0 (sizeConst×2,buf,buf,int×2,int4), 3.6.0 (sizeConst×2,buf,buf,int×3)
+            // raster_buf_fp32: (sizeConst×2, buf) — 1.2.0 + 3.6.0 (entry=buffer_set_zero)
+            add({"raster", "raster_buf_fp32", {
+                TS{"1.2.0", "buffer_set_zero", 0,1, 0,0,2,0, 2, "all_zero_fp32"},
+                TS{"3.6.0", "buffer_set_zero", 0,1, 0,0,2,0, 2, "all_zero_fp32"},
+            }});
+
+            // softmax_buf_fp32: 1.2.0 (sizeConst*2, buf, buf, int*2, int4), 3.6.0 (sizeConst*2, buf, buf, int*3)
             add({"softmax", "softmax_buf_fp32", {
                 TS{"1.2.0", "softmax_channel", 1,1, 2,0,2,1, 2, "identity_fp32"},
                 TS{"3.6.0", "softmax_in1_buf", 1,1, 3,0,2,0, 2, "identity_fp32"},
@@ -35,9 +49,6 @@ void registerGenericOps() {
             add({"argmax", "argmax_buf_fp32", {
                 TS{"3.6.0", "argmax_buf", 1,1, 3,0,2,0, 2, "identity_fp32"},
             }});
-
-            // raster_buf_fp32: handled by RasterOp
-            // Skip — dedicated adapter exists.
 
             // matmul_buf_fp32: (sizeConst×2, buf×2, buf, scalarInt×3) — 1.2.0 + 3.6.0
             add({"matmul", "matmul_buf_fp32", {

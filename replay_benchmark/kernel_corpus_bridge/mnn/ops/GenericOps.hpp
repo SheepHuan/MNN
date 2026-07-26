@@ -54,6 +54,41 @@ public:
         ac.entry = ts->entry;
         const int elemCount = spec.elementCount > 0 ? spec.elementCount : 64;
 
+        // Operator-specific macros that cannot be in bake preamble.
+        // OPERATOR/OPERATE are operator-specific and must be set per-variant.
+        const std::string op = mSpec.op;
+        const std::string var = mSpec.variant;
+        if (ac.source.find("OPERATOR") != std::string::npos) {
+            if (op == "binary" || op == "buffer_convert_buf") {
+                ac.compileMacros.push_back("-DOPERATOR=(in0+in1)");
+            } else if (op == "strassen") {
+                ac.compileMacros.push_back("-DOPERATOR=(in0+in1)");
+            } else {
+                ac.compileMacros.push_back("-DOPERATOR=in");
+            }
+        }
+        if (ac.source.find("OPERATE") != std::string::npos && ac.source.find("OPERATOR") == std::string::npos) {
+            ac.compileMacros.push_back("-DOPERATE=(num+in)");
+        }
+
+        // Kernel-specific macros that MNN would pass at runtime via build options.
+        // These are constants for the smoke test configuration.
+        const std::string& src = ac.source;
+        if (src.find("IN_C_BLOCK") != std::string::npos) ac.compileMacros.push_back("-DIN_C_BLOCK=4");
+        if (src.find("LOCAL_SIZE") != std::string::npos) ac.compileMacros.push_back("-DLOCAL_SIZE=64");
+        if (src.find("STRIDE_X") != std::string::npos) ac.compileMacros.push_back("-DSTRIDE_X=1");
+        if (src.find("STRIDE_Y") != std::string::npos) ac.compileMacros.push_back("-DSTRIDE_Y=1");
+        if (src.find("VEC_H") != std::string::npos) ac.compileMacros.push_back("-DVEC_H=4");
+        if (src.find("OPWN") != std::string::npos) ac.compileMacros.push_back("-DOPWN=1");
+        if (src.find("OPWM") != std::string::npos) ac.compileMacros.push_back("-DOPWM=1");
+        if (src.find("K_SIZE") != std::string::npos) ac.compileMacros.push_back("-DK_SIZE=4");
+        if (src.find("CPWK") != std::string::npos) ac.compileMacros.push_back("-DCPWK=1");
+        if (src.find("KERNEL_X") != std::string::npos) ac.compileMacros.push_back("-DKERNEL_X=1");
+        if (src.find("KERNEL_Y") != std::string::npos) ac.compileMacros.push_back("-DKERNEL_Y=1");
+        if (src.find("OPTM") != std::string::npos) ac.compileMacros.push_back("-DOPTM=1");
+        if (src.find("OPTN") != std::string::npos) ac.compileMacros.push_back("-DOPTN=1");
+        if (src.find("INPUT_LINE_SIZE") != std::string::npos) ac.compileMacros.push_back("-DINPUT_LINE_SIZE=4");
+
         int argIdx = 0;
         for (int i = 0; i < ts->numSizeConsts; ++i) {
             ac.args.push_back(AdaptedArg::sizeConst(i));

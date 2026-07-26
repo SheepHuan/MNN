@@ -57,6 +57,9 @@ typedef float16 OUTPUT_TYPE16;
 #define CONVERT_INPUT8(x) ((float8)(x))
 #define CONVERT_OUTPUT3(x) ((float3)(x))
 #define CONVERT_INPUT3(x) ((float3)(x))
+#define AS_INPUT_DATA4(x) ((float4)(x))
+#define AS_INPUT_DATA8(x) ((float8)(x))
+#define AS_INPUT_DATA16(x) ((float16)(x))
 #define CONVERT_COMPUTE_FLOAT8(x) ((float8)(x))
 #define CONVERT_COMPUTE_FLOAT16(x) ((float16)(x))
 #define CONVERT_OUTPUT16(x) ((float16)(x))
@@ -68,7 +71,6 @@ typedef float16 OUTPUT_TYPE16;
 #define CONVERT_FLOAT(x) ((FLOAT)(x))
 #define RI_F(img, smp, coord) read_imagef(img, smp, coord)
 #define WI_F(img, coord, val) write_imagef(img, coord, val)
-#define SAMPLER (CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST)
 #define COMPUTE_FLOAT float
 #define COMPUTE_FLOAT4 float4
 #define CONVERT_COMPUTE_FLOAT4(x) ((float4)(x))
@@ -209,13 +211,9 @@ def bake_kernel(source_path, output_path, tag, is_pack4=False):
         lines.pop(0)
     source = "\n".join(lines)
     # Build full baked source
-    # Add per-kernel OPERATOR/OPERATE macros if needed
-    extra_defs = ""
-    if "OPERATOR" in source and "#define OPERATOR" not in source:
-        extra_defs += "#define OPERATOR in\n"
-    if "OPERATE" in source and "#define OPERATE" not in source and "OPERATOR" not in source:
-        extra_defs += "#define OPERATE (num+in)\n"
-    result = MNN_FP32_PREAMBLE + extra_defs + source
+    # Note: OPERATOR/OPERATE are NOT defined here — they are operator-specific
+    # and must be provided by the adapter via compileMacros (-DOPERATOR=...).
+    result = MNN_FP32_PREAMBLE + source
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(result, encoding="utf-8")
     return True

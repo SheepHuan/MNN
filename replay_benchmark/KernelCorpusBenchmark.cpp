@@ -293,11 +293,16 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     sources.emplace_back(ac.source.c_str(), ac.source.size());
     cl::Program program(opencl->context(), sources, &status);
     if (status != CL_SUCCESS) { report.error = "OpenCL program creation failed"; return report; }
-    // Build with macros from AdaptedCase (e.g. -DOPERATOR=(a+b) -DINPUT_TYPE=float)
+    // Build with macros from AdaptedCase (e.g. -DOPERATOR=in0+in1 -DINPUT_TYPE=float)
     std::string buildOptions;
     for (const auto& macro : ac.compileMacros) {
         if (!buildOptions.empty()) buildOptions += " ";
         buildOptions += macro;
+    }
+    // Subgroup kernels require OpenCL 2.0
+    if (ac.source.find("sub_group") != std::string::npos ||
+        ac.source.find("intel_reqd_sub_group_size") != std::string::npos) {
+        buildOptions += " -cl-std=CL2.0";
     }
     status = program.build(std::vector<cl::Device>(1, holder->device), buildOptions.c_str());
     if (status != CL_SUCCESS) {

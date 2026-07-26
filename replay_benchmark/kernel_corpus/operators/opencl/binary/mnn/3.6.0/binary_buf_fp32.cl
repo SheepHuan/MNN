@@ -35,6 +35,9 @@ typedef float16 OUTPUT_TYPE16;
 #define CONVERT_INPUT8(x) ((float8)(x))
 #define CONVERT_OUTPUT3(x) ((float3)(x))
 #define CONVERT_INPUT3(x) ((float3)(x))
+#define AS_INPUT_DATA4(x) ((float4)(x))
+#define AS_INPUT_DATA8(x) ((float8)(x))
+#define AS_INPUT_DATA16(x) ((float16)(x))
 #define CONVERT_COMPUTE_FLOAT8(x) ((float8)(x))
 #define CONVERT_COMPUTE_FLOAT16(x) ((float16)(x))
 #define CONVERT_OUTPUT16(x) ((float16)(x))
@@ -46,7 +49,6 @@ typedef float16 OUTPUT_TYPE16;
 #define CONVERT_FLOAT(x) ((FLOAT)(x))
 #define RI_F(img, smp, coord) read_imagef(img, smp, coord)
 #define WI_F(img, coord, val) write_imagef(img, coord, val)
-#define SAMPLER (CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST)
 #define COMPUTE_FLOAT float
 #define COMPUTE_FLOAT4 float4
 #define CONVERT_COMPUTE_FLOAT4(x) ((float4)(x))
@@ -60,7 +62,6 @@ typedef float16 OUTPUT_TYPE16;
 #define DEAL_NON_UNIFORM_DIM2(input1, input2) if (input1 >= global_size_dim0 || input2 >= global_size_dim1) { return; }
 #define DEAL_NON_UNIFORM_DIM3(input1, input2, input3) if (input1 >= global_size_dim0 || input2 >= global_size_dim1 || input3 >= global_size_dim2) { return; }
 #endif
-#define OPERATOR in
 #define PI 3.141592653589f
 
 __kernel void binary_buf(__private int global_dim0, __private int global_dim1,
