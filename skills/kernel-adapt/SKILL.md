@@ -216,6 +216,39 @@ existing = json.load(open('replay_benchmark/kernel_corpus/operator_cases.json'))
 
 ## 步骤 5: 验证
 
+### 优先本机测试
+
+本机有 AMD Radeon 核显 + Mesa RADV Vulkan 1.4 + rusticl OpenCL，可以快速验证编译和 dispatch。**优先在本机测试通过后再推送到设备。**
+
+```bash
+# 本机构建（需要 MNN_BUILD_BENCHMARK=ON）
+rm -rf build-host && mkdir build-host && cd build-host
+cmake .. -DMNN_OPENCL=ON -DMNN_VULKAN=ON -DMNN_REPLAY_ENABLE_PERFCOUNTER=OFF \
+  -DMNN_SEP_BUILD=ON -DMNN_BUILD_CONVERTER=OFF -DMNN_BUILD_BENCHMARK=ON \
+  -DMNN_BUILD_TEST=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build . --target replay_benchmark.out -j$(nproc)
+
+# 本机运行
+LD_LIBRARY_PATH=build-host/source/backend/opencl:build-host/source/backend/vulkan:build-host \
+  ./build-host/replay_benchmark.out \
+  --kernel-corpus-bench --kernel-corpus-root replay_benchmark/kernel_corpus \
+  --kernel-corpus-runs 5 --perf-counter-output /tmp/kc_host.json
+
+# 查看结果
+cat /tmp/kc_host.json | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+stats={}
+for c in d['cases']:
+    k=c['compile_status']
+    stats[k]=stats.get(k,0)+1
+print('compile:', stats)
+disp=sum(1 for c in d['cases'] if c['dispatch_status']=='dispatched')
+val=sum(1 for c in d['cases'] if c['validation_status']=='validation_passed')
+print(f'dispatched: {disp}, validation_passed: {val}, total: {len(d[\"cases\"])}')
+"
+```
+
 ### Python 测试
 ```bash
 python3 -m unittest discover -s replay_benchmark/kernel_corpus/tests
