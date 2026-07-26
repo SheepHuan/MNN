@@ -364,7 +364,7 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
             }
             case AdaptedArg::Int2: {
                 const cl_int2 v = {{a.int2Val[0], a.int2Val[1]}};
-                status |= kernel.setArg(i, v);
+                status |= kernel.setArg(i, sizeof(cl_int2), &v);
                 break;
             }
             case AdaptedArg::Int4: {

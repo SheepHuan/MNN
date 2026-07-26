@@ -121,12 +121,13 @@ public:
             ac.args.push_back(AdaptedArg::scalarFloat(0.5f));
             argIdx++;
         }
-        for (int i = 0; i < ts->numInt2s; ++i) {
-            ac.args.push_back(AdaptedArg::int2(8, 8));
-            argIdx++;
-        }
+        // Int4 params first (usually shape before isFull in kernel signatures)
         for (int i = 0; i < ts->numInt4s; ++i) {
             ac.args.push_back(AdaptedArg::int4(1, 8, 8, 4));
+            argIdx++;
+        }
+        for (int i = 0; i < ts->numInt2s; ++i) {
+            ac.args.push_back(AdaptedArg::int2(8, 8));
             argIdx++;
         }
         if (ts->numInputBuffers > 0) {
