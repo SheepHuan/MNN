@@ -1,0 +1,215 @@
+#version 450
+// Baked from ncnn historical shader. SPDX-License-Identifier: BSD-3-Clause.
+// FP32 path: sfp=float, afp=float, macros expanded. See bake_ncnn_shaders.py.
+
+#define sfp float
+#define sfpvec2 vec2
+#define sfpvec4 vec4
+#define sfpmat4 mat4
+#define afp float
+#define afpvec2 vec2
+#define afpvec4 vec4
+#define afpmat4 mat4
+#define sfp2afp(v) (v)
+#define afp2sfp(v) (v)
+#define lfp float
+#define lfp2afp(v) float(v)
+#define lfp2afpvec2(v) vec2(v)
+#define lfp2afpvec4(v) vec4(v)
+#define buffer_ld1(buf,i) float(buf[i])
+#define buffer_ld2(buf,i) vec2(buf[i])
+#define buffer_ld4(buf,i) buf[i]
+#define buffer_st1(buf,i,v) {buf[i]=float(v);}
+#define buffer_st2(buf,i,v) {buf[i]=vec2(v);}
+#define buffer_st4(buf,i,v) {buf[i]=v;}
+#define buffer_cp1(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define buffer_cp2(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define buffer_cp4(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define buffer_cp1to4(buf,i,sbuf,si4) {buf[i].r=sbuf[si4.r];buf[i].g=sbuf[si4.g];buf[i].b=sbuf[si4.b];buf[i].a=sbuf[si4.a];}
+#define buffer_cp4to1(buf,i4,sbuf,si) {buf[i4.r]=sbuf[si].r;buf[i4.g]=sbuf[si].g;buf[i4.b]=sbuf[si].b;buf[i4.a]=sbuf[si].a;}
+#define buffer_sm1(buf,i) buf[i]
+#define buffer_sm4(buf,i) buf[i]
+#define psc(x) (x==0?p.x:x)
+#define i8buffer_ld4(buf,i) unpackInt4x8(buf[i])
+#define i8buffer_st4(buf,i,v) {buf[i]=packInt4x8(v);}
+#define i8buffer_cp1(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define i8buffer_cp4(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define i8buffer_ld1(buf,i) int(buf[i])
+#define i8buffer_st1(buf,i,v) {buf[i]=int8_t(v);}
+#define sint8 int8_t
+#define aint8 int
+#define sint8vec4 ivec4
+#define aint8vec4 ivec4
+#define pack32(x) ((x).r | ((x).g << 8) | ((x).b << 16) | ((x).a << 24))
+#define pack16(x) pack32(uvec2(x.r, x.g))
+#define pack8(x) pack32(x)
+#define unpack16(x) uvec4((x) & 0xFF, ((x) >> 8) & 0xFF, ((x) >> 16) & 0xFF, ((x) >> 24) & 0xFF)
+#define unpack8(x) unpack16(x)
+#define sfp2afpmat4(v) v
+#define afp2sfpmat4(v) v
+#define sfp2afpvec4(v) vec4(v)
+#define afp2sfpvec4(v) v
+#define afp2lfp(v) v
+#define lfp2afpvec2(v) vec2(v)
+#define sfp2afpvec2(v) vec2(v)
+#define afp2sfpvec2(v) v
+#define buffer_sm1(buf,i) buf[i]
+#define buffer_sm4(buf,i) buf[i]
+#define buffer_sm4(buf,i) buf[i]
+#define psc(x) (x==0?p.x:x)
+#define PAD 0
+#define UNPACK_N 0
+
+#define sint8 int8_t
+#define aint8 int
+#define sint8vec4 ivec4
+#define aint8vec4 ivec4
+#define i8buffer_ld4(buf,i) unpackInt4x8(buf[i])
+#define i8buffer_st4(buf,i,v) {buf[i]=packInt4x8(v);}
+#define i8buffer_cp1(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define i8buffer_cp4(buf,i,sbuf,si) {buf[i]=sbuf[si];}
+#define i8buffer_ld1(buf,i) int(buf[i])
+#define i8buffer_st1(buf,i,v) {buf[i]=int8_t(v);}
+#define pack32(x) ((x).r | ((x).g << 8) | ((x).b << 16) | ((x).a << 24))
+#define pack16(x) pack32(uvec2(x.r, x.g))
+#define pack8(x) pack32(x)
+#define unpack16(x) uvec4((x) & 0xFF, ((x) >> 8) & 0xFF, ((x) >> 16) & 0xFF, ((x) >> 24) & 0xFF)
+#define unpack8(x) unpack16(x)
+#define unpackInt4x8(v) ivec4((v) & 0xFF, ((v) >> 8) & 0xFF, ((v) >> 16) & 0xFF, ((v) >> 24) & 0xFF)
+#define packInt4x8(v) (int((uint(v.r) & 0xFF) | ((uint(v.g) & 0xFF) << 8) | ((uint(v.b) & 0xFF) << 16) | ((uint(v.a) & 0xFF) << 24)))
+
+#define buffer_ld4(buf,i) buf[i]
+#define buffer_st4(buf,i,v) {buf[i]=v;}
+
+
+layout (constant_id = 0) const int bias_term = 0;
+layout (constant_id = 1) const int activation_type = 0;
+layout (constant_id = 2) const float activation_param_0 = 0;
+layout (constant_id = 3) const float activation_param_1 = 0;
+
+layout (local_size_x_id = 233) in;
+layout (local_size_y_id = 234) in;
+layout (local_size_z_id = 235) in;
+
+layout (binding = 0) readonly buffer top_tm_blob { sfpvec4 top_tm_blob_data[]; };
+layout (binding = 1) writeonly buffer top_blob { sfpvec4 top_blob_data[]; };
+layout (binding = 2) readonly buffer bias_blob { sfpvec4 bias_data[]; };
+
+layout (push_constant) uniform parameter
+{
+    int c;
+    int cstep;
+
+    int block_x;
+    int block_y;
+
+    int outw;
+    int outh;
+    int outcstep;
+} p;
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+
+    if (gx >= p.block_x || gy >= p.block_y || gz >= p.c)
+        return;
+
+    // load 16
+    int v_tm_offset = gz * p.cstep + (gy * p.block_x + gx) * 16;
+
+    afpvec4 v00 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 0]);
+    afpvec4 v01 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 1]);
+    afpvec4 v02 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 2]);
+    afpvec4 v03 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 3]);
+    afpvec4 v10 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 4]);
+    afpvec4 v11 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 5]);
+    afpvec4 v12 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 6]);
+    afpvec4 v13 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 7]);
+    afpvec4 v20 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 8]);
+    afpvec4 v21 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 9]);
+    afpvec4 v22 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 10]);
+    afpvec4 v23 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 11]);
+    afpvec4 v30 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 12]);
+    afpvec4 v31 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 13]);
+    afpvec4 v32 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 14]);
+    afpvec4 v33 = sfp2afpvec4(top_tm_blob_data[v_tm_offset + 15]);
+
+    // const float itm[2][4] = {
+    //     {1.0f,  1.0f,  1.0f,  0.0f},
+    //     {0.0f,  1.0f, -1.0f,  1.0f}
+    // };
+
+    // implicit transpose
+    afpvec4 m00 = v00 + v01 + v02;
+    afpvec4 m01 = v10 + v11 + v12;
+    afpvec4 m02 = v20 + v21 + v22;
+    afpvec4 m03 = v30 + v31 + v32;
+
+    afpvec4 m10 = v01 - v02 + v03;
+    afpvec4 m11 = v11 - v12 + v13;
+    afpvec4 m12 = v21 - v22 + v23;
+    afpvec4 m13 = v31 - v32 + v33;
+
+    if (bias_term == 1)
+    {
+        const afpvec4 bias_value = sfp2afpvec4(bias_data[gz]);
+
+        v00 = bias_value + m00 + m01 + m02;
+        v10 = bias_value + m10 + m11 + m12;
+
+        v01 = bias_value + m01 - m02 + m03;
+        v11 = bias_value + m11 - m12 + m13;
+    }
+    else
+    {
+        v00 = m00 + m01 + m02;
+        v10 = m10 + m11 + m12;
+
+        v01 = m01 - m02 + m03;
+        v11 = m11 - m12 + m13;
+    }
+
+    if (activation_type == 1)
+    {
+        v00 = max(v00, afp(0.f));
+        v10 = max(v10, afp(0.f));
+        v01 = max(v01, afp(0.f));
+        v11 = max(v11, afp(0.f));
+    }
+    if (activation_type == 2)
+    {
+        const afp slope = afp(activation_param_0);
+        v00 = mix(v00, v00 * afp(slope), lessThan(v00, afpvec4(0.f)));
+        v10 = mix(v10, v10 * afp(slope), lessThan(v10, afpvec4(0.f)));
+        v01 = mix(v01, v01 * afp(slope), lessThan(v01, afpvec4(0.f)));
+        v11 = mix(v11, v11 * afp(slope), lessThan(v11, afpvec4(0.f)));
+    }
+    if (activation_type == 3)
+    {
+        const afp const_min = afp(activation_param_0);
+        const afp const_max = afp(activation_param_1);
+        v00 = clamp(v00, const_min, const_max);
+        v10 = clamp(v10, const_min, const_max);
+        v01 = clamp(v01, const_min, const_max);
+        v11 = clamp(v11, const_min, const_max);
+    }
+    if (activation_type == 4)
+    {
+        v00 = afp(1.f) / (afp(1.f) + exp(-v00));
+        v10 = afp(1.f) / (afp(1.f) + exp(-v10));
+        v01 = afp(1.f) / (afp(1.f) + exp(-v01));
+        v11 = afp(1.f) / (afp(1.f) + exp(-v11));
+    }
+
+    // store 2x2
+    int v_offset_0 = gz * p.outcstep + gy * 2 * p.outw + gx * 2;
+    int v_offset_1 = v_offset_0 + p.outw;
+
+    top_blob_data[v_offset_0 + 0] = afp2sfpvec4(v00);
+    top_blob_data[v_offset_0 + 1] = afp2sfpvec4(v01);
+    top_blob_data[v_offset_1 + 0] = afp2sfpvec4(v10);
+    top_blob_data[v_offset_1 + 1] = afp2sfpvec4(v11);
+}
