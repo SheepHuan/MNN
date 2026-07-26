@@ -54,15 +54,6 @@ public:
         ac.entry = ts->entry;
         const int elemCount = spec.elementCount > 0 ? spec.elementCount : 64;
 
-        // OPERATOR macro: needed by unary/binary kernels. Use identity as default.
-        if (ac.source.find("OPERATOR") != std::string::npos) {
-            ac.compileMacros.push_back("-DOPERATOR=in");
-        }
-        // OPERATE macro: used by reduction_buf (sum). Default: num+in.
-        if (ac.source.find("OPERATE") != std::string::npos && ac.source.find("OPERATOR") == std::string::npos) {
-            ac.compileMacros.push_back("-DOPERATE=(num+in)");
-        }
-
         int argIdx = 0;
         for (int i = 0; i < ts->numSizeConsts; ++i) {
             ac.args.push_back(AdaptedArg::sizeConst(i));
