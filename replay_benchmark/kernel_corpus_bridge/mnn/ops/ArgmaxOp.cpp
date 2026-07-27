@@ -7,7 +7,7 @@ namespace KernelCorpus {
 namespace MnnOps {
 
 // argmax_buf 3.6.0: (dim0, dim1, dim2, FLOAT* in, int* out, int inside, int outside, int dim)
-bool ArgmaxBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLArgmaxKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "argmax_buf";
     const int inside = spec.intParam("inside", 4), outside = spec.intParam("outside", 4), dim = spec.intParam("dim", 16);
     const int inN = inside * outside * dim;
@@ -35,7 +35,7 @@ bool ArgmaxBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 void registerArgmaxOp() {
     static struct Reg {
-        Reg() { OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new ArgmaxBufOp())); }
+        Reg() { OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLArgmaxKernel())); }
     } r;
     (void)r;
 }

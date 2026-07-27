@@ -8,13 +8,37 @@ namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
 
-// Pooling adapter: handles pooling (max variant, 2x2 stride 2 no pad).
-// pooling(GLOBAL_SIZE_3_DIMS, input, int2 input_shape, int2 output_shape,
-//        int2 pad_shape, int2 stride_shape, int2 kernel_shape, output, channel_block)
-class PoolingOp : public OpAdapter {
+// PoolingKernelBase: pure interface contract for the "pooling" op's kernel
+// variants. Input/output use NC4HW4 (FLOAT4) storage on both OpenCL and
+// Vulkan paths. Each subclass fully implements adapt() — data preparation
+// and backend-specific argument layout are the subclass's own concern; the
+// base holds no shared state or shared adapt() body.
+class PoolingKernelBase : public OpAdapter {
+public:
+    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override = 0;
+};
+
+// OpenCL pooling kernel (max variant, 2x2 stride 2 no pad).
+class OpenCLPoolingMaxKernel : public PoolingKernelBase {
 public:
     const char* opType() const override { return "pooling"; }
     const char* variant() const override { return "pooling_max_fp32"; }
+    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+};
+
+// MNN Vulkan maxpool.comp kernel.
+class VulkanPoolingMaxKernel : public PoolingKernelBase {
+public:
+    const char* opType() const override { return "pooling"; }
+    const char* variant() const override { return "vulkan_maxpool_fp32"; }
+    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+};
+
+// MNN Vulkan avgpool.comp kernel.
+class VulkanPoolingAvgKernel : public PoolingKernelBase {
+public:
+    const char* opType() const override { return "pooling"; }
+    const char* variant() const override { return "vulkan_avgpool_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 

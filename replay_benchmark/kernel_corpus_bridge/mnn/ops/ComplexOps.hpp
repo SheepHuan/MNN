@@ -8,70 +8,70 @@ namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
 
-class AttentionBufOp : public OpAdapter {
+class OpenCLAttentionKernel : public OpAdapter {
 public:
     const char* opType() const override { return "attention"; }
     const char* variant() const override { return "attention_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class SelfAttentionBufOp : public OpAdapter {
+class OpenCLSelfAttentionKernel : public OpAdapter {
 public:
     const char* opType() const override { return "self_attention_buf"; }
     const char* variant() const override { return "self_attention_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class GemmConv1x1BufOp : public OpAdapter {
+class OpenCLGemmConv1x1Kernel : public OpAdapter {
 public:
     const char* opType() const override { return "gemm"; }
     const char* variant() const override { return "gemm_conv1x1_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class GemvConv1x1BufOp : public OpAdapter {
+class OpenCLGemvConv1x1Kernel : public OpAdapter {
 public:
     const char* opType() const override { return "gemv"; }
     const char* variant() const override { return "gemv_conv1x1_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class GridSampleBufOp2 : public OpAdapter {
+class OpenCLGridSampleKernel : public OpAdapter {
 public:
     const char* opType() const override { return "grid_sample"; }
     const char* variant() const override { return "grid_sample_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class BufferConvertSubgroupBufOp : public OpAdapter {
+class OpenCLBufferConvertSubgroupKernel : public OpAdapter {
 public:
     const char* opType() const override { return "buffer_convert_subgroup_buf"; }
     const char* variant() const override { return "buffer_convert_subgroup_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class Conv2dIntBufOp : public OpAdapter {
+class OpenCLConv2dIntKernel : public OpAdapter {
 public:
     const char* opType() const override { return "conv"; }
     const char* variant() const override { return "conv_2d_int_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class LinearAttentionBufOp : public OpAdapter {
+class OpenCLLinearAttentionKernel : public OpAdapter {
 public:
     const char* opType() const override { return "linear_attention_buf"; }
     const char* variant() const override { return "linear_attention_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class MatmulLocalBufOp : public OpAdapter {
+class OpenCLMatmulLocalKernel : public OpAdapter {
 public:
     const char* opType() const override { return "matmul"; }
     const char* variant() const override { return "matmul_local_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class ScaleNobiasOp : public OpAdapter {
+class OpenCLScaleNobiasKernel : public OpAdapter {
 public:
     const char* opType() const override { return "scale"; }
     const char* variant() const override { return "scale_nobias_fp32"; }

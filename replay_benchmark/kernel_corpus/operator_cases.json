@@ -6346,6 +6346,106 @@
       "int_params": {
         "element_count": 64
       }
+    },
+    {
+      "name": "vulkan_unary_buf_exp_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "unary",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_unary_buf_exp_fp32",
+      "dtype": "float32",
+      "validator": "exp_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 1024
+      }
+    },
+    {
+      "name": "vulkan_binary_buf_add_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "binary",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_binary_buf_add_fp32",
+      "dtype": "float32",
+      "validator": "binary_add_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_blit_c4_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_blit_c4_fp32",
+      "dtype": "float32",
+      "validator": "identity_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 1024
+      }
+    },
+    {
+      "name": "vulkan_reduce_buf_sum_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_reduce_buf_sum_fp32",
+      "dtype": "float32",
+      "validator": "reduction_sum_scalar_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 2,
+        "h": 8,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_maxpool_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "pooling",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_maxpool_fp32",
+      "dtype": "float32",
+      "validator": "pooling_max_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "h": 8,
+        "w": 8,
+        "c": 4,
+        "kernel_size": 2,
+        "stride": 2
+      }
+    },
+    {
+      "name": "vulkan_avgpool_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "pooling",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_avgpool_fp32",
+      "dtype": "float32",
+      "validator": "pooling_avg_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "h": 8,
+        "w": 8,
+        "c": 4,
+        "kernel_size": 2,
+        "stride": 2
+      }
     }
   ]
 }

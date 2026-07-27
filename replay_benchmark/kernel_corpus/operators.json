@@ -773,6 +773,17 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_binary_buf_add_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/binary/mnn/3.6.0/vulkan_binary_buf_add_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "binary",
+      "tag": "3.6.0",
+      "variant": "vulkan_binary_buf_add_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "binaryop",
       "execution_spec": "manual",
       "file": "operators/vulkan/binaryop/ncnn/20190611/binaryop.comp",
@@ -3435,6 +3446,28 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_avgpool_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/pooling/mnn/3.6.0/vulkan_avgpool_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "pooling",
+      "tag": "3.6.0",
+      "variant": "vulkan_avgpool_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_maxpool_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/pooling/mnn/3.6.0/vulkan_maxpool_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "pooling",
+      "tag": "3.6.0",
+      "variant": "vulkan_maxpool_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "pooling",
       "execution_spec": "manual",
       "file": "operators/vulkan/pooling/ncnn/20190611/pooling.comp",
@@ -3762,6 +3795,28 @@
       "op_type": "quantize",
       "tag": "20260526",
       "variant": "quantize_pack4"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_blit_c4_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/3.6.0/vulkan_blit_c4_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "vulkan_blit_c4_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_reduce_buf_sum_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/reduction/mnn/3.6.0/vulkan_reduce_buf_sum_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "vulkan_reduce_buf_sum_fp32"
     },
     {
       "backend": "vulkan",
@@ -4576,6 +4631,17 @@
       "op_type": "tanh",
       "tag": "20260526",
       "variant": "tanh_pack4_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_unary_buf_exp_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/unary/mnn/3.6.0/vulkan_unary_buf_exp_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "unary",
+      "tag": "3.6.0",
+      "variant": "vulkan_unary_buf_exp_fp32"
     },
     {
       "backend": "vulkan",

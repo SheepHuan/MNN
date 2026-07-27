@@ -12,7 +12,7 @@ static void fillInput(std::vector<float>& v, int n) {
 }
 
 // cast_buf 3.6.0: (dim0, dim1, INPUT* in, OUTPUT* out, int size)
-bool CastBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLCastKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "cast_buf";
     const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
@@ -32,7 +32,7 @@ bool CastBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // select_buf 3.6.0: (dim0, dim1, int* select, FLOAT* in0, FLOAT* in1, FLOAT* out)
-bool SelectBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLSelectKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "select_buf";
     const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
@@ -55,7 +55,7 @@ bool SelectBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // range_buf 3.6.0: (dim0, dim1, INPUT* start, INPUT* step, OUTPUT* out, int size)
-bool RangeBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLRangeKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "range_buf";
     const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
@@ -77,7 +77,7 @@ bool RangeBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // unary_buf_fp32 1.2.0: (dim0, dim1, dim2, FLOAT* in, FLOAT* out, int height)
 // unary_buf_fp32 3.6.0: (dim0, dim1, INPUT* in, OUTPUT* out, int size)
-bool UnaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLUnaryKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "unary_buf";
     const int n = spec.intParam("size", 256);
     const int cb = (n + 3) / 4;
@@ -108,7 +108,7 @@ bool UnaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // reduction_buf_fp32 1.2.0: (dim0, dim1, FLOAT* in, FLOAT* out, int batch, int height, int width)
 // reduction_buf_fp32 3.6.0: (dim0, dim1, dim2, INPUT* in, OUTPUT* out, int inside, int outside, int dim)
-bool ReductionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLReductionKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "reduct_buf";
     const int batch = spec.batch(), height = spec.h(), width = spec.w();
     const int n = batch * height * width * 4;
@@ -143,7 +143,7 @@ bool ReductionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // raster_buf_fp32: (dim0, dim1, FLOAT* output) — same as buffer_set_zero
-bool RasterBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLRasterKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "buffer_set_zero";
     const int n = spec.intParam("size", 1024);
     AdaptedBuffer outBuf; outBuf.sizeBytes = n * sizeof(float); outBuf.isOutput = true;
@@ -157,7 +157,7 @@ bool RasterBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // softmax_buf_fp32 1.2.0: (dim0, dim1, dim2, FLOAT* in, FLOAT* out, int outCh, int remainCh, int4 shape)
 // softmax_buf_fp32 3.6.0: (dim0, dim1, dim2, FLOAT* in, FLOAT* out, int inside, int outside, int dim)
-bool SoftmaxBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLSoftmaxKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int channels = spec.c(), w = spec.w(), h = spec.h();
     const int cb = (channels + 3) / 4;
     const int n = cb * w * h * 4;
@@ -197,13 +197,13 @@ void registerElementwiseOps() {
     static struct Reg {
         Reg() {
             auto& r = OpAdapterRegistry::instance();
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new CastBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new SelectBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new RangeBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new UnaryBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new ReductionBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new RasterBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new SoftmaxBufOp()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLCastKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLSelectKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLRangeKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLUnaryKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLReductionKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLRasterKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLSoftmaxKernel()));
         }
     } r;
     (void)r;

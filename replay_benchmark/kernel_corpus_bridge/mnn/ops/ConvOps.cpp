@@ -15,7 +15,7 @@ static void fillInput(std::vector<float>& v, int n) {
 //   int2 in_hw, int inChannel, int in_c_blocks, int2 out_hw, int2 filter_hw, int2 stride_hw, int2 pad_hw, int2 dilate_hw, int out_w_blocks, int out_c_blocks)
 // conv_2d_1x1_local 3.6.0: (int out_w_blocks, FLOAT* in, FLOAT* kernel, FLOAT* bias, FLOAT* out,
 //   int in_c_block, int batch, int out_h, int out_w, int out_c_block, int out_c_pack)
-bool Conv2dBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLConv2dKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int inC = spec.c(), outC = spec.outChannels(), ih = spec.h(), iw = spec.w();
     const int kh = spec.kernelSize(), kw = spec.kernelSize(), stride = spec.stride();
     const int inCB = (inC + 3) / 4, outCB = (outC + 3) / 4;
@@ -83,7 +83,7 @@ bool Conv2dBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // depthwise_conv2d_c4h1w4: (dim0,dim1, FLOAT* in, FLOAT* filter, FLOAT* bias, FLOAT* out,
 //   int2 in_hw, int channel, int2 out_hw, int2 filter_hw, int2 pad_hw, int2 dilate_hw, int2 stride_hw, int out_w_blocks, int c_blocks)
-bool DepthwiseConv2dBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLDepthwiseConv2dKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "depthwise_conv2d_c4h1w4";
     const int channel = spec.c(), ih = spec.h(), iw = spec.w();
     const int kh = spec.kernelSize(), kw = spec.kernelSize(), stride = spec.stride();
@@ -127,7 +127,7 @@ bool DepthwiseConv2dBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // matmul_buf 1.2.0: (dim0,dim1, FLOAT* a, FLOAT* b, FLOAT* out, int channels, int channel_blocks, int width_blocks)
 // matmul_buf 3.6.0: (dim0,dim1, FLOAT* a, FLOAT* b, FLOAT* out, int M, int N, int K)
-bool MatmulBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLMatmulBufKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "matmul_buf";
     const int M = spec.m(), N = spec.n(), K = spec.k();
     const int M4 = (M + 3) / 4, N4 = (N + 3) / 4, K4 = (K + 3) / 4;
@@ -158,7 +158,7 @@ bool MatmulBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // gemm_buf 1.2.0: (dim0,dim1, FLOAT* in0, FLOAT* in1, FLOAT* out, int width, int height, int srcChannelC4, int alpha2)
 // gemm_buf 3.6.0: (dim0,dim1, int alignM, int alignK, int M, int K, int area, FLOAT* in, FLOAT* out)
-bool GemmBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLGemmKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int M = spec.m(), K = spec.k(), area = spec.w() * spec.h();
     const int M4 = (M + 3) / 4, K4 = (K + 3) / 4;
     if (spec.tag == "1.2.0") {
@@ -204,7 +204,7 @@ bool GemmBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // winogradTransform_buf 1.2.0: winoTransSrcBuf2_3_1 (dim0,dim1, FLOAT* in, FLOAT* out, int unitW, int unitH, int padX, int padY, int srcW, int srcH, int srcChannelC4, int batchOffset)
 // winogradTransform_buf 3.6.0: winoTransWeightBuf2_3_1 (dim0,dim1, FLOAT* in, FLOAT* out, int srcChannel, int dstChannel, int srcChannelPad, int dstChannelPad)
-bool WinogradTransformBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLWinogradTransformKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int cb = spec.c(), hw = spec.w();
     if (spec.tag == "1.2.0") {
         ac.entry = "winoTransSrcBuf2_3_1";
@@ -253,7 +253,7 @@ bool WinogradTransformBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const 
 }
 
 // interp_buf: (dim0,dim1,dim2, FLOAT* in, FLOAT* out, float h_scale, float w_scale, float h_offset, float w_offset, int inH, int inW, int outH, int outW, int channelBlocks)
-bool InterpBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLInterpKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "nearest_buf";
     const int inH = spec.h(), inW = spec.w(), cb = spec.c();
     const int outH = spec.intParam("out_h", inH * 2), outW = spec.intParam("out_w", inW * 2);
@@ -283,7 +283,7 @@ bool InterpBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // input_transe 3.6.0: (dim0,dim1,dim2, FLOAT* in, FLOAT* out, int inW, int inH, int inC, int batch, int channel_blocks, int pad_left, int pad_right)
-bool InputTranseBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLInputTranseKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "conv_transe_c4_c1";
     const int inW = spec.w(), inH = spec.h(), inC = spec.c(), batch = spec.batch();
     const int cb = (inC + 3) / 4;
@@ -312,7 +312,7 @@ bool InputTranseBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // buffer_convert_buf 1.2.0: nhwc_buffer_to_nc4hw4_buffer (dim0,dim1, FLOAT* in, int height, int width, int channels, FLOAT* out)
 // buffer_convert_buf 3.6.0: buffer_convert_to_buffer (dim0,dim1,dim2, INPUT* in, int4 shape, OUTPUT* out)
-bool BufferConvertBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLBufferConvertKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int hw = spec.w(), channel = spec.c();
     const int cb = (channel + 3) / 4;
     if (spec.tag == "1.2.0") {
@@ -355,14 +355,14 @@ void registerConvOps() {
     static struct Reg {
         Reg() {
             auto& r = OpAdapterRegistry::instance();
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new Conv2dBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new DepthwiseConv2dBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new MatmulBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new GemmBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new WinogradTransformBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new InterpBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new InputTranseBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new BufferConvertBufOp()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLConv2dKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLDepthwiseConv2dKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLMatmulBufKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLGemmKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLWinogradTransformKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLInterpKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLInputTranseKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLBufferConvertKernel()));
         }
     } r;
     (void)r;

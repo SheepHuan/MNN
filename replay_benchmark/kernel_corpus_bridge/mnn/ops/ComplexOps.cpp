@@ -13,7 +13,7 @@ static void fillInput(std::vector<float>& v, int n) {
 
 // attention: rearrange_qkv(dim0,dim1,dim2, in_q, in_k, in_v, out_q, out_k, out_v, int4 tile, int4 shape, int4 param, int maxLenKV)
 // No SAVE_KV
-bool AttentionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLAttentionKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "rearrange_qkv";
     const int seqLenQ = 16, seqLenKV = 16, headNum = 4, headDim = 16, group = 2, batch = 1;
     const int tileQ = 16, tileKV = 16, tileHDK = 16, tileHDN = 16;
@@ -42,7 +42,7 @@ bool AttentionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // self_attention: split_transpose_qkv(dim0,dim1,dim2, in, out_q, out_k, out_v, int×7)
-bool SelfAttentionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLSelfAttentionKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "split_transpose_qkv";
     const int seqLen = 16, headNum = 4, headDim = 16, batch = 1;
     const int inN = batch * (seqLen / 4) * headNum * 3 * headDim * 4;
@@ -76,7 +76,7 @@ bool SelfAttentionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // gemm_conv1x1: inverse_quant_weight(dim0,dim1, FLOAT* dequantScaleOffset, FLOAT* out, int×4, float coef)
 // Use buffer path (no USE_IMAGE, QUANT_BIT=8 → char* weight, but we use FLOAT* via -DQUANT_BIT=0)
-bool GemmConv1x1BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLGemmConv1x1Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "inverse_quant_weight";
     const int inC = 4, outC = 4, blockDim = 4;
     const int inC4 = (inC + 3) / 4, outC4 = (outC + 3) / 4;
@@ -105,7 +105,7 @@ bool GemmConv1x1BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // gemv_conv1x1: gemv_conv_c8_buf(dim0,dim1,dim2, FLOAT* in, FLOAT* weight, FLOAT* dequantScaleOffset, FLOAT* bias, FLOAT* out, int×6, float coef)
-bool GemvConv1x1BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLGemvConv1x1Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "gemv_conv_c8_buf";
     const int inC = 4, outC = 4, blockDim = 4;
     const int inC4 = (inC + 3) / 4, outC4 = (outC + 3) / 4;
@@ -144,7 +144,7 @@ bool GemvConv1x1BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // grid_sample: nearest_buf has enum BorderMode param — use int
-bool GridSampleBufOp2::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLGridSampleKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "nearest_buf";
     const int inH = spec.h(), inW = spec.w(), batch = spec.batch(), channel = spec.c();
     const int cb = (channel + 3) / 4;
@@ -176,7 +176,7 @@ bool GridSampleBufOp2::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // buffer_convert_subgroup: nhwc_buffer_to_nc16hw16_buffer(dim0,dim1, INPUT* in, int height, int width, int channels, OUTPUT* out, int pad_l, int pad_r, int out_pad_l, int out_pad_r)
-bool BufferConvertSubgroupBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLBufferConvertSubgroupKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "nhwc_buffer_to_nc16hw16_buffer";
     const int hw = spec.w() * spec.h(), channel = spec.c();
     const int cb16 = (channel + 15) / 16;
@@ -203,7 +203,7 @@ bool BufferConvertSubgroupBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) co
 }
 
 // conv_2d_int: conv_2d_int_c4h1w1(dim0,dim1, FLOAT* in, char* weight, FLOAT* dequant, FLOAT* bias, FLOAT* out, int2 in_hw, int inC, int inCB, int batch, int2 out_hw, int2 filter_hw, int2 stride, int2 pad, int2 dilate, int outWB, int outCB, int outHB, int blockDim, float coef)
-bool Conv2dIntBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLConv2dIntKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "conv_2d_int_c4h1w1";
     const int inC = spec.c(), outC = spec.outChannels(), ih = spec.h(), iw = spec.w();
     const int kh = spec.kernelSize(), stride = spec.stride();
@@ -249,7 +249,7 @@ bool Conv2dIntBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // linear_attention: linear_attn_conv_silu(dim0, qkv, conv_state, conv_weight, conv_out, batch, conv_dim, seq_len, kernel_size, conv_state_size)
-bool LinearAttentionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLLinearAttentionKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "linear_attn_conv_silu";
     const int batch = spec.batch(), convDim = 16, seqLen = 16, ks = spec.kernelSize(), convStateSize = 32;
     const int qkvN = batch * convDim * seqLen * 4;
@@ -281,7 +281,7 @@ bool LinearAttentionBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // matmul_local: matmul_local_buf(int M, int N, int K, FLOAT* A, FLOAT* B, FLOAT* C)
 // No BIAS, no LOW_BIT_WEIGHT
-bool MatmulLocalBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLMatmulLocalKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "matmul_local_buf";
     const int M = spec.m(), N = spec.n(), K = spec.k();
     const int M4 = (M + 3) / 4, N4 = (N + 3) / 4, K4 = (K + 3) / 4;
@@ -309,7 +309,7 @@ bool MatmulLocalBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // scale_nobias: scale(dim0,dim1,dim2, image2d_t input, image2d_t scale, image2d_t output)
 // Uses image2d_t — unsupported on buffer-only runner
-bool ScaleNobiasOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLScaleNobiasKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     // scale_nobias uses image2d_t — runner does not support image args.
     // Return false to let FallbackAdapter handle (will compile but may fail dispatch).
     return false;
@@ -319,16 +319,16 @@ void registerComplexOps() {
     static struct Reg {
         Reg() {
             auto& r = OpAdapterRegistry::instance();
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new AttentionBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new SelfAttentionBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new GemmConv1x1BufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new GemvConv1x1BufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new GridSampleBufOp2()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new BufferConvertSubgroupBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new Conv2dIntBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new LinearAttentionBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new MatmulLocalBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new ScaleNobiasOp()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLAttentionKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLSelfAttentionKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLGemmConv1x1Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLGemvConv1x1Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLGridSampleKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLBufferConvertSubgroupKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLConv2dIntKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLLinearAttentionKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLMatmulLocalKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLScaleNobiasKernel()));
         }
     } r;
     (void)r;

@@ -36,7 +36,7 @@ void adaptElementwise(const CaseSpec& spec, AdaptedCase& ac) {
     ac.localSize[0] = localX;
 }
 
-bool PermuteOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool VulkanPermuteKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int w = spec.w(), h = spec.h(), c = spec.c();
     const int cstep = w * h;
     const int total = c * cstep;
@@ -73,8 +73,8 @@ bool PermuteOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 void registerElementwiseOp() {
     static struct Reg {
         Reg() {
-            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new SigmoidOp()));
-            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new TanhOp()));
+            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new VulkanSigmoidKernel()));
+            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new VulkanTanhKernel()));
         }
     } r;
     (void)r;
@@ -83,7 +83,7 @@ void registerElementwiseOp() {
 void registerPermuteOp() {
     static struct Reg {
         Reg() {
-            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new PermuteOp()));
+            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new VulkanPermuteKernel()));
         }
     } r;
     (void)r;

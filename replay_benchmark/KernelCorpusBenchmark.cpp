@@ -218,13 +218,76 @@ static bool runValidator(const AdaptedCase& ac, const std::vector<float>& output
     if (ac.validator == "reduction_sum_fp32") {
         return validateReductionSumFp32(ac.m, ac.h, ac.w, ac.validatorInputA, output);
     }
+    if (ac.validator == "reduction_sum_scalar_fp32") {
+        // Vulkan scalar layout: input[outside][axis][inside], output[outside][inside].
+        // Reduce over axis (height). ac.m=outside, ac.h=axis, ac.w=inside.
+        const int outside = ac.m, axis = ac.h, inside = ac.w;
+        if (static_cast<int>(output.size()) < outside * inside) return false;
+        for (int o = 0; o < outside; ++o) {
+            for (int i = 0; i < inside; ++i) {
+                float sum = 0.0f;
+                for (int a = 0; a < axis; ++a) {
+                    const int off = (o * axis + a) * inside + i;
+                    if (off < static_cast<int>(ac.validatorInputA.size())) sum += ac.validatorInputA[off];
+                }
+                const int out_off = o * inside + i;
+                if (std::fabs(output[out_off] - sum) > 1e-2f) return false;
+            }
+        }
+        return true;
+    }
     if (ac.validator == "pooling_max_fp32") {
         return validatePoolingMaxFp32(ac.h, ac.w, ac.c, ac.k, ac.k, 2, ac.validatorInputA, output);
+    }
+    if (ac.validator == "pooling_avg_fp32") {
+        const int ih = ac.h, iw = ac.w, channel = ac.c, kh = ac.k, kw = ac.k;
+        const int stride = 2;
+        const int channel_block = (channel + 3) / 4;
+        const int oh = (ih - kh) / stride + 1;
+        const int ow = (iw - kw) / stride + 1;
+        if (static_cast<int>(output.size()) < oh * ow * channel_block * 4) return false;
+        for (int cb = 0; cb < channel_block; ++cb) {
+            for (int oy = 0; oy < oh; ++oy) {
+                for (int ox = 0; ox < ow; ++ox) {
+                    float sum[4] = {0, 0, 0, 0};
+                    int count = 0;
+                    for (int ky = 0; ky < kh; ++ky) {
+                        for (int kx = 0; kx < kw; ++kx) {
+                            const int iy = oy * stride + ky;
+                            const int ix = ox * stride + kx;
+                            if (iy < 0 || iy >= ih || ix < 0 || ix >= iw) continue;
+                            const int in_off = ((cb * ih + iy) * iw + ix) * 4;
+                            for (int j = 0; j < 4; ++j) {
+                                if (in_off + j < static_cast<int>(ac.validatorInputA.size()))
+                                    sum[j] += ac.validatorInputA[in_off + j];
+                            }
+                            ++count;
+                        }
+                    }
+                    if (count == 0) count = 1;
+                    const int out_off = ((cb * oh + oy) * ow + ox) * 4;
+                    for (int j = 0; j < 4; ++j) {
+                        if (out_off + j < static_cast<int>(output.size())) {
+                            if (std::fabs(output[out_off + j] - sum[j] / count) > 1e-3f) return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
     }
     if (ac.validator == "absval_fp32") return validateAbsvalFp32(ac.validatorInputA, output);
     if (ac.validator == "relu_fp32") return validateReluFp32(ac.validatorInputA, output);
     if (ac.validator == "concat_identity_fp32") return validateConcatIdentityFp32(ac.validatorInputA, output);
     if (ac.validator == "identity_fp32") return validateIdentityFp32(ac.validatorInputA, output);
+    if (ac.validator == "binary_add_fp32") {
+        if (ac.validatorInputA.size() != output.size() ||
+            ac.validatorInputB.size() != output.size()) return false;
+        for (size_t i = 0; i < output.size(); ++i) {
+            if (std::fabs(output[i] - (ac.validatorInputA[i] + ac.validatorInputB[i])) > 1e-3f) return false;
+        }
+        return true;
+    }
     return false;
 }
 
@@ -606,7 +669,9 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
         const auto& b = ac.buffers[i];
         const void* hostData = b.initialData.empty() ? nullptr : b.initialData.data();
         vkBuffers.emplace_back(new VulkanBuffer(memPool, false, b.sizeBytes, hostData,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT));
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_SHARING_MODE_EXCLUSIVE,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
         bufInfos[i].buffer = vkBuffers.back()->buffer();
         bufInfos[i].offset = 0;
         bufInfos[i].range = VK_WHOLE_SIZE;

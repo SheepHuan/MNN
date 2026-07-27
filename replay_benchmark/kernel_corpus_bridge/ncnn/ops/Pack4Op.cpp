@@ -43,13 +43,13 @@ static bool adaptPack4Elementwise(const CaseSpec& spec, AdaptedCase& ac) {
 }
 
 #define DEFINE_PACK4_OP(name, vname) \
-    bool name##Pack4Op::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    bool Vulkan##name##Pack4Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
         return adaptPack4Elementwise(spec, ac); \
     }
 PACK4_ELEMENTWISE_OPS(DEFINE_PACK4_OP)
 #undef DEFINE_PACK4_OP
 
-bool ConcatOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool VulkanConcatKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "20260526") return false;
     const int w = spec.w(), h = spec.h(), c = spec.c();
     const int cstep = w * h;
@@ -110,7 +110,7 @@ void registerPack4Ops() {
         Reg() {
 #define REG_PACK4_OP(name, vname) \
             OpAdapterRegistry::instance().registerAdapter( \
-                std::unique_ptr<OpAdapter>(new name##Pack4Op()));
+                std::unique_ptr<OpAdapter>(new Vulkan##name##Pack4Kernel()));
             PACK4_ELEMENTWISE_OPS(REG_PACK4_OP)
 #undef REG_PACK4_OP
         }
@@ -121,7 +121,7 @@ void registerPack4Ops() {
 void registerConcatOp() {
     static struct Reg {
         Reg() {
-            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new ConcatOp()));
+            OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new VulkanConcatKernel()));
         }
     } r;
     (void)r;

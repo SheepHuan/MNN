@@ -8,56 +8,56 @@ namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
 
-class Conv2dBufOp : public OpAdapter {
+class OpenCLConv2dKernel : public OpAdapter {
 public:
     const char* opType() const override { return "conv"; }
     const char* variant() const override { return "conv_2d_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class DepthwiseConv2dBufOp : public OpAdapter {
+class OpenCLDepthwiseConv2dKernel : public OpAdapter {
 public:
     const char* opType() const override { return "depthwise_conv"; }
     const char* variant() const override { return "depthwise_conv2d_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class MatmulBufOp : public OpAdapter {
+class OpenCLMatmulBufKernel : public OpAdapter {
 public:
     const char* opType() const override { return "matmul"; }
     const char* variant() const override { return "matmul_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class GemmBufOp : public OpAdapter {
+class OpenCLGemmKernel : public OpAdapter {
 public:
     const char* opType() const override { return "gemm"; }
     const char* variant() const override { return "gemm_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class WinogradTransformBufOp : public OpAdapter {
+class OpenCLWinogradTransformKernel : public OpAdapter {
 public:
     const char* opType() const override { return "winograd"; }
     const char* variant() const override { return "winogradTransform_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class InterpBufOp : public OpAdapter {
+class OpenCLInterpKernel : public OpAdapter {
 public:
     const char* opType() const override { return "interp"; }
     const char* variant() const override { return "interp_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class InputTranseBufOp : public OpAdapter {
+class OpenCLInputTranseKernel : public OpAdapter {
 public:
     const char* opType() const override { return "input_transe"; }
     const char* variant() const override { return "input_transe_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class BufferConvertBufOp : public OpAdapter {
+class OpenCLBufferConvertKernel : public OpAdapter {
 public:
     const char* opType() const override { return "buffer_convert_buf"; }
     const char* variant() const override { return "buffer_convert_buf_fp32"; }

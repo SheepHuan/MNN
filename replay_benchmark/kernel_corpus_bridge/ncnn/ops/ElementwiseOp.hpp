@@ -13,7 +13,7 @@ namespace NcnnOps {
 void adaptElementwise(const CaseSpec& spec, AdaptedCase& ac);
 
 // Sigmoid adapter for ncnn 20190611 (scalar sfp, in-place).
-class SigmoidOp : public OpAdapter {
+class VulkanSigmoidKernel : public OpAdapter {
 public:
     const char* opType() const override { return "sigmoid"; }
     const char* variant() const override { return "sigmoid_fp32"; }
@@ -24,7 +24,7 @@ public:
 };
 
 // Tanh adapter for ncnn 20190611 (scalar sfp, in-place).
-class TanhOp : public OpAdapter {
+class VulkanTanhKernel : public OpAdapter {
 public:
     const char* opType() const override { return "tanh"; }
     const char* variant() const override { return "tanh_fp32"; }
@@ -35,7 +35,7 @@ public:
 };
 
 // Permute adapter: handles permute with order_type specialization constant.
-class PermuteOp : public OpAdapter {
+class VulkanPermuteKernel : public OpAdapter {
 public:
     const char* opType() const override { return "permute"; }
     const char* variant() const override { return "permute_order0_fp32"; }

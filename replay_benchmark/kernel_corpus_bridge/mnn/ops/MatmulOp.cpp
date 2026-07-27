@@ -5,7 +5,7 @@ namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
 
-bool MatmulOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLMatmulKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "matmul_buf";
     const int M = spec.m(), N = spec.n(), K = spec.k();
     const int M4 = (M + 3) / 4;
@@ -46,7 +46,7 @@ bool MatmulOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 void registerMatmulOp() {
     static struct Reg {
-        Reg() { OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new MatmulOp())); }
+        Reg() { OpAdapterRegistry::instance().registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLMatmulKernel())); }
     } r;
     (void)r;
 }

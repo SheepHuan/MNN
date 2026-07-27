@@ -9,7 +9,7 @@ namespace KernelCorpus {
 namespace MnnOps {
 
 // argmax_buf 3.6.0: (dim0, dim1, FLOAT* in, FLOAT* out, int inside, int outside, int dim)
-class ArgmaxBufOp : public OpAdapter {
+class OpenCLArgmaxKernel : public OpAdapter {
 public:
     const char* opType() const override { return "argmax"; }
     const char* variant() const override { return "argmax_buf_fp32"; }

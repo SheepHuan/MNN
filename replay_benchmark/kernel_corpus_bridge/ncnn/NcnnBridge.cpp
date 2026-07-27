@@ -2,6 +2,9 @@
 #include "../OpAdapter.hpp"
 #include "ops/ElementwiseOp.hpp"
 #include "ops/Pack4Op.hpp"
+#include "ops/NcnnElementwiseOps.hpp"
+#include "ops/NcnnShapeOps.hpp"
+#include "ops/NcnnNormOps.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -71,6 +74,9 @@ void registerNcnnBridge() {
             NcnnOps::registerPermuteOp();
             NcnnOps::registerPack4Ops();
             NcnnOps::registerConcatOp();
+            NcnnOps::registerNcnnElementwiseOps();
+            NcnnOps::registerNcnnShapeOps();
+            NcnnOps::registerNcnnNormOps();
             registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new NcnnBridge()));
         }

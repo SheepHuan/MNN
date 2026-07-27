@@ -12,6 +12,10 @@
 #include "ops/ArgmaxOp.hpp"
 #include "ops/ComplexOps.hpp"
 
+#include <cstring>
+#include <fstream>
+#include <sstream>
+
 namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
@@ -25,8 +29,6 @@ AdaptedCase MnnBridge::adapt(const CaseSpec& spec,
                               const std::string& sourceText,
                               const std::string& sourceFile,
                               const std::string& corpusRoot) const {
-    (void)sourceFile;
-    (void)corpusRoot;
     AdaptedCase ac;
     ac.framework = spec.framework;
     ac.tag = spec.tag;
@@ -42,6 +44,28 @@ AdaptedCase MnnBridge::adapt(const CaseSpec& spec,
     ac.w = spec.w(); ac.h = spec.h(); ac.c = spec.c();
     ac.orderType = spec.orderType();
     ac.source = sourceText;
+
+    // For Vulkan MNN kernels, load pre-compiled SPIR-V (.spv) alongside the
+    // .comp source so the device-side runner does not need glslangValidator.
+    // Mirrors the NcnnBridge .spv loading path.
+    if (spec.backend == "vulkan" && !sourceFile.empty()) {
+        std::string spvPath = sourceFile;
+        const size_t len = spvPath.size();
+        if (len >= 5 && spvPath.compare(len - 5, 5, ".comp") == 0) {
+            spvPath.replace(len - 5, 5, ".spv");
+            std::string full = corpusRoot;
+            if (!full.empty() && full.back() != '/') full.push_back('/');
+            full += spvPath;
+            std::ifstream spv(full, std::ios::binary);
+            if (spv) {
+                std::ostringstream ss;
+                ss << spv.rdbuf();
+                std::string data = ss.str();
+                ac.spirv.resize(data.size() / sizeof(uint32_t));
+                std::memcpy(ac.spirv.data(), data.data(), data.size());
+            }
+        }
+    }
 
     const OpAdapter* adapter = findAdapter(spec, ac);
     if (adapter == nullptr) {

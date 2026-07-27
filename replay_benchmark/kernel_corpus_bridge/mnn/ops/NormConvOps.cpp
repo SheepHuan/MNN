@@ -13,7 +13,7 @@ static void fillInput(std::vector<float>& v, int n) {
 
 // pooling 1.2.0: (dim0,dim1,dim2, FLOAT* in, int2 input_shape, int2 output_shape, int2 pad, int2 stride, int2 kernel, FLOAT* out, int channel_block)
 // pooling 3.6.0: same but + FLOAT* rediceOutput
-bool PoolingBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLPoolingBufKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "pooling";
     const int ih = spec.h(), iw = spec.w(), channel = spec.c();
     const int kh = spec.kernelSize(), kw = spec.kernelSize(), stride = spec.stride();
@@ -53,7 +53,7 @@ bool PoolingBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // scale_buf 1.2.0: (dim0,dim1, FLOAT* in, FLOAT* scale, FLOAT* out, int4 shape)
 // scale_buf 3.6.0: (dim0,dim1, FLOAT* in, FLOAT* scale, FLOAT* out, int channelBlock, int ohw, int offset)
-bool ScaleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLScaleKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "scale_buf";
     const int cb = spec.c(), hw = spec.w() * spec.h();
     const int n = cb * hw * 4;
@@ -87,7 +87,7 @@ bool ScaleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 
 // groupnorm 3.6.0: (dim0,dim1,dim2, FLOAT* in, FLOAT* out, FLOAT* group, FLOAT* gamma, int4 shape, float eps, ...)
 // Simplified — exact layout depends on #ifdef
-bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLGroupnormKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "groupnorm_plain_buf";
     const int hw = spec.w() * spec.h(), channel = spec.c(), groups = spec.groups();
     const int cb = (channel + 3) / 4;
@@ -114,7 +114,7 @@ bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // layernorm 3.6.0: (dim0,dim1, FLOAT* in, FLOAT* out, int inside, FLOAT* gamma, FLOAT* beta, float eps)
-bool LayernormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLLayernormKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "layernorm_buf";
     const int inside = spec.intParam("inside", 64), outside = spec.intParam("outside", 4);
     const int n = inside * outside;
@@ -142,7 +142,7 @@ bool LayernormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // splitgelu 3.6.0: (dim0,dim1, FLOAT* in, FLOAT* out, int4 shape)
-bool SplitgeluBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLSplitgeluKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "splitgelu_buf";
     const int hw = spec.w() * spec.h(), cb = spec.c();
     const int n = cb * hw * 4;
@@ -161,7 +161,7 @@ bool SplitgeluBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // topkv2 3.6.0: (dim0,dim1,dim2, DTYPE* outValue, int* outIndex, DTYPE* inValue, int rowSize, int k, int numRows)
-bool Topkv2BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLTopkv2Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "topkv2_buf";
     const int rowSize = spec.intParam("row_size", 16), k = spec.intParam("k", 4), numRows = spec.intParam("num_rows", 4);
     std::vector<float> in; fillInput(in, rowSize * numRows);
@@ -184,7 +184,7 @@ bool Topkv2BufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 
 // strassen 3.6.0: (dim0,dim1, FLOAT* in0, int offsetC, int strideC, FLOAT* in1, FLOAT* out, int width, int height)
-bool StrassenBinaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+bool OpenCLStrassenBinaryKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "binary_cfunction_buf";
     const int width = spec.w(), height = spec.h();
     const int n = width * height * 4;
@@ -212,13 +212,13 @@ void registerNormConvOps() {
     static struct Reg {
         Reg() {
             auto& r = OpAdapterRegistry::instance();
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new PoolingBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new ScaleBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new GroupnormBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new LayernormBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new SplitgeluBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new Topkv2BufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new StrassenBinaryBufOp()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLPoolingBufKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLScaleKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLGroupnormKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLLayernormKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLSplitgeluKernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLTopkv2Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new OpenCLStrassenBinaryKernel()));
         }
     } r;
     (void)r;

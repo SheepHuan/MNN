@@ -10,7 +10,7 @@ namespace MnnOps {
 
 // Matmul adapter: handles matmul_buf variants.
 // 1.2.0: matmul_buf(GLOBAL_SIZE_2_DIMS, a, b, out, channels=K, channel_blocks=K4, width_blocks=N4)
-class MatmulOp : public OpAdapter {
+class OpenCLMatmulKernel : public OpAdapter {
 public:
     const char* opType() const override { return "matmul"; }
     const char* variant() const override { return "matmul_buf_nobias_fp32"; }

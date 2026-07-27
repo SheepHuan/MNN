@@ -21,7 +21,7 @@ namespace NcnnOps {
     X(relu, "relu_pack4_fp32_slope0")
 
 #define DECLARE_PACK4_OP(name, vname) \
-    class name##Pack4Op : public OpAdapter { \
+    class Vulkan##name##Pack4Kernel : public OpAdapter { \
     public: \
         const char* opType() const override { return #name; } \
         const char* variant() const override { return vname; } \
@@ -32,7 +32,7 @@ PACK4_ELEMENTWISE_OPS(DECLARE_PACK4_OP)
 #undef DECLARE_PACK4_OP
 
 // Concat adapter for ncnn 20260526 (axis=0, dims=3, scalar sfp).
-class ConcatOp : public OpAdapter {
+class VulkanConcatKernel : public OpAdapter {
 public:
     const char* opType() const override { return "concat"; }
     const char* variant() const override { return "concat_axis0_fp32"; }
