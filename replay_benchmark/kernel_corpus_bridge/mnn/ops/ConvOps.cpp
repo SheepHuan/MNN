@@ -21,6 +21,7 @@ bool Conv2dBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int inCB = (inC + 3) / 4, outCB = (outC + 3) / 4;
     const int outH = ih, outW = iw;
     const int outWB = (outW + 3) / 4;
+    ac.compileMacros.push_back("-DIN_C_BLOCK=" + std::to_string(inCB));
     if (spec.tag == "1.2.0") {
         ac.entry = "conv_2d_c4h1w1";
         const int inN = inCB * ih * iw * 4;

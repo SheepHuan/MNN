@@ -124,25 +124,20 @@ bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int cb = (channel + 3) / 4;
     const int n = cb * hw * 4;
     std::vector<float> in; fillInput(in, n);
-    std::vector<float> group(groups * cb * 4), gamma(groups * cb * 4);
-    fillInput(group, groups * cb * 4); fillInput(gamma, groups * cb * 4);
     AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
     AdaptedBuffer outBuf; outBuf.sizeBytes = n * sizeof(float); outBuf.isOutput = true;
-    AdaptedBuffer groupBuf; groupBuf.setFp32(group); groupBuf.isOutput = false;
-    AdaptedBuffer gammaBuf; gammaBuf.setFp32(gamma); gammaBuf.isOutput = false;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
-    ac.buffers.push_back(groupBuf); ac.buffers.push_back(gammaBuf);
+    ac.compileMacros.push_back("-DLOCAL_SIZE=64");
+    // No GAMMA_BETA — kernel has: (dim0,dim1,dim2, in, out, area, group, inside, outside, eps)
     ac.args.push_back(AdaptedArg::sizeConst(0));
     ac.args.push_back(AdaptedArg::sizeConst(1));
     ac.args.push_back(AdaptedArg::sizeConst(2));
     ac.args.push_back(AdaptedArg::buffer(0));  // in
     ac.args.push_back(AdaptedArg::buffer(1));  // out
-    ac.args.push_back(AdaptedArg::buffer(2));  // group
-    ac.args.push_back(AdaptedArg::buffer(3));  // gamma
-    ac.args.push_back(AdaptedArg::scalarInt(hw));
-    ac.args.push_back(AdaptedArg::scalarInt(groups));
-    ac.args.push_back(AdaptedArg::scalarInt(cb));
-    ac.args.push_back(AdaptedArg::scalarInt(0));
+    ac.args.push_back(AdaptedArg::scalarInt(hw));     // area
+    ac.args.push_back(AdaptedArg::scalarInt(groups)); // group
+    ac.args.push_back(AdaptedArg::scalarInt(channel));// inside
+    ac.args.push_back(AdaptedArg::scalarInt(cb));     // outside
     ac.args.push_back(AdaptedArg::scalarFloat(spec.epsilon()));
     ac.globalSize[0] = cb; ac.globalSize[1] = 1; ac.globalSize[2] = 1; ac.dims = 3;
     ac.validatorInputA = in;
@@ -163,6 +158,7 @@ bool LayernormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     AdaptedBuffer betaBuf; betaBuf.setFp32(beta); betaBuf.isOutput = false;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
     ac.buffers.push_back(gammaBuf); ac.buffers.push_back(betaBuf);
+    ac.compileMacros.push_back("-DGAMMA_BETA");
     ac.args.push_back(AdaptedArg::sizeConst(0));
     ac.args.push_back(AdaptedArg::sizeConst(1));
     ac.args.push_back(AdaptedArg::buffer(0));
@@ -228,6 +224,7 @@ bool StrassenBinaryBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     AdaptedBuffer in1Buf; in1Buf.setFp32(in1); in1Buf.isOutput = false;
     AdaptedBuffer outBuf; outBuf.sizeBytes = n * sizeof(float); outBuf.isOutput = true;
     ac.buffers.push_back(in0Buf); ac.buffers.push_back(in1Buf); ac.buffers.push_back(outBuf);
+    ac.compileMacros.push_back("-DVEC_H=" + std::to_string(height));
     ac.args.push_back(AdaptedArg::sizeConst(0));
     ac.args.push_back(AdaptedArg::sizeConst(1));
     ac.args.push_back(AdaptedArg::buffer(0));  // in0
