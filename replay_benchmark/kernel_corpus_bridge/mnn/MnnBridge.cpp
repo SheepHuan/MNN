@@ -43,6 +43,7 @@ AdaptedCase MnnBridge::adapt(const CaseSpec& spec,
     ac.m = spec.m(); ac.n = spec.n(); ac.k = spec.k();
     ac.w = spec.w(); ac.h = spec.h(); ac.c = spec.c();
     ac.orderType = spec.orderType();
+    ac.stride = spec.stride();
     ac.source = sourceText;
 
     // For Vulkan MNN kernels, load pre-compiled SPIR-V (.spv) alongside the

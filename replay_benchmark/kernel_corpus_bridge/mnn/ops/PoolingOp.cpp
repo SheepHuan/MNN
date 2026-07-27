@@ -27,7 +27,7 @@ bool OpenCLPoolingMaxKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const 
     ac.buffers.push_back(inBuf);
     ac.buffers.push_back(outBuf);
     ac.validatorInputA = input;
-    ac.h = ih; ac.w = iw; ac.c = channel; ac.k = kh;
+    ac.h = ih; ac.w = iw; ac.c = channel; ac.k = kh; ac.stride = stride;
     ac.elementCount = outputCount;
 
     ac.args.push_back(AdaptedArg::sizeConst(0));
@@ -51,7 +51,7 @@ bool OpenCLPoolingMaxKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const 
 namespace {
 bool validatePoolingMaxImpl(const AdaptedCase& ac, const std::vector<float>& output) {
     const int ih = ac.h, iw = ac.w, channel = ac.c, kh = ac.k, kw = ac.k;
-    const int stride = 2;
+    const int stride = ac.stride > 0 ? ac.stride : 2;
     const int channel_block = (channel + 3) / 4;
     const int oh = (ih - kh) / stride + 1;
     const int ow = (iw - kw) / stride + 1;
@@ -84,7 +84,7 @@ bool validatePoolingMaxImpl(const AdaptedCase& ac, const std::vector<float>& out
 
 bool validatePoolingAvgImpl(const AdaptedCase& ac, const std::vector<float>& output) {
     const int ih = ac.h, iw = ac.w, channel = ac.c, kh = ac.k, kw = ac.k;
-    const int stride = 2;
+    const int stride = ac.stride > 0 ? ac.stride : 2;
     const int channel_block = (channel + 3) / 4;
     const int oh = (ih - kh) / stride + 1;
     const int ow = (iw - kw) / stride + 1;
@@ -188,7 +188,7 @@ bool VulkanPoolingMaxKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const 
     ac.buffers.push_back(outBuf);
     ac.vulkanBindings = {1, 0};  // input->binding=1, output->binding=0
     ac.validatorInputA = input;
-    ac.h = ih; ac.w = iw; ac.c = channel; ac.k = kh;
+    ac.h = ih; ac.w = iw; ac.c = channel; ac.k = kh; ac.stride = stride;
     ac.elementCount = outputCount;
 
     fillVulkanPoolingPushConstants(ac, ih, iw, oh, ow, channel_block, kh, kh, stride, false);
@@ -221,7 +221,7 @@ bool VulkanPoolingAvgKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const 
     ac.buffers.push_back(outBuf);
     ac.vulkanBindings = {1, 0};
     ac.validatorInputA = input;
-    ac.h = ih; ac.w = iw; ac.c = channel; ac.k = kh;
+    ac.h = ih; ac.w = iw; ac.c = channel; ac.k = kh; ac.stride = stride;
     ac.elementCount = outputCount;
 
     fillVulkanPoolingPushConstants(ac, ih, iw, oh, ow, channel_block, kh, kh, stride, true);

@@ -250,7 +250,7 @@ static bool runValidator(const AdaptedCase& ac, const std::vector<float>& output
         return true;
     }
     if (ac.validator == "pooling_max_fp32") {
-        return validatePoolingMaxFp32(ac.h, ac.w, ac.c, ac.k, ac.k, 2, ac.validatorInputA, output);
+        return validatePoolingMaxFp32(ac.h, ac.w, ac.c, ac.k, ac.k, ac.stride > 0 ? ac.stride : 2, ac.validatorInputA, output);
     }
     if (ac.validator == "pooling_avg_fp32") {
         const int ih = ac.h, iw = ac.w, channel = ac.c, kh = ac.k, kw = ac.k;
@@ -550,12 +550,24 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     }
 
     // validation
-    if (ac.validator.empty()) {
+    if (ac.validator.empty() && ac.adapter == nullptr) {
         report.validationStatus = "not_validated";
     } else {
         const bool valid = runValidator(ac, output);
         report.validationStatus = valid ? "validation_passed" : "validation_failed";
         report.valid = valid;
+        if (!valid) {
+            fprintf(stderr, "DBG[opencl] case=%s validator=%s adapter=%p inSize=%zu outSize=%zu\n",
+                    ac.caseName.c_str(), ac.validator.c_str(), (void*)ac.adapter,
+                    ac.validatorInputA.size(), output.size());
+            fprintf(stderr, "  in[0..15]:");
+            for (size_t i = 0; i < ac.validatorInputA.size() && i < 16; ++i)
+                fprintf(stderr, " %.4f", ac.validatorInputA[i]);
+            fprintf(stderr, "\n  out[0..15]:");
+            for (size_t i = 0; i < output.size() && i < 16; ++i)
+                fprintf(stderr, " %.4f", output[i]);
+            fprintf(stderr, "\n");
+        }
     }
     report.responsive = report.workloadDelta > 0;
     return report;
