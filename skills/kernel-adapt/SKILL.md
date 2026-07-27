@@ -1,6 +1,6 @@
 ---
 name: kernel-adapt
-description: 将历史 MNN/ncnn 的 OpenCL/Vulkan kernel 适配到当前 MNN GPU runtime 运行。覆盖 kernel 提取、baked 文件生成、版本桥接器(OpAdapter)实现、case 注册、设备验证的完整 TDD 流程。
+description: 将历史 MNN/ncnn 的 OpenCL/Vulkan/CUDA kernel 适配到当前 MNN GPU runtime 运行。覆盖 kernel 提取、baked 文件生成、版本桥接器(OpAdapter)实现、case 注册、设备验证的完整 TDD 流程。
 ---
 
 # 历史 GPU Kernel 适配 SKILL
@@ -478,3 +478,145 @@ for c in opencl:
   - Vulkan lib: `/mnt/nvme/workspace/replay-benchmark-vulkan/lib/libvulkan.so`
 - **OrangePi**：`root@192.168.101.113`，`/mnt/ssd/workspace`，Mali-G610
 - 凭据只从环境读取，不写入仓库
+
+---
+
+## CUDA Backend 适配规范
+
+### CUDA 与 OpenCL/Vulkan 的本质差异
+
+| 维度 | OpenCL/Vulkan | CUDA |
+|------|--------------|------|
+| kernel 形态 | 源码字符串，runtime 编译 | nvcc 预编译 `__global__` 符号，编进 `libMNN_Cuda_Main.so` |
+| 符号可见性 | cl::Kernel(program, name) 按名取 | `__global__` host stub 永远 internal，跨 TU 不可见 |
+| corpus 策略 | bake 源码 → runtime 编译 → setArg → dispatch | **重实现 kernel** → `extern "C"` shim → `<<<>>>` 启动 |
+| 多 tag | 源码按 tag 存不同文件（`1.2.0/xxx.cl` vs `3.6.0/xxx.cl`） | kernel 代码按 tag 内部分支（同 shim，不同参数/实现） |
+| PMU | Adreno/Mali ioctl 或 Vulkan query | CUPTI Range Profiler（需 `RmProfilingAdminOnly=0` 或 sudo） |
+
+### CUDA corpus 三层架构
+
+```
+replay_benchmark/kernel_corpus_bridge/cuda/
+├── CudaOpAdapter.hpp          ← CudaOpAdapter 接口 + CudaLaunchCtx
+├── CudaOps.hpp                ← 所有 adapter 类声明（共享） + kBlock/gridFor helper
+├── CorpusKernels.cu            ← A类 kernel 重实现 + extern "C" shim
+├── CorpusKernelsMisc.cu        ← B类 kernel + 1.2.0 tag 独立 kernel
+├── CudaOps.cpp                ← A类 fp32 adapter（g++ 编译）
+├── CudaOpsMisc.cpp            ← B类 fp32 adapter + 1.2.0 tag adapter（g++ 编译）
+└── CudaOpsFp16.cu             ← fp16/int8 adapter（nvcc 编译，__half 不可用于 g++）
+```
+
+### CUDA Shim 模式（固定规则）
+
+1. **每个 `__global__` kernel 必须在 corpus 的 `.cu` 文件里重实现**——因为 `libMNN_Cuda_Main.so` 是 SHARED 库，`__global__` 的 host stub 永远是 internal linkage，跨 TU 引用不到
+2. **重实现的 kernel 放在 `namespace MNN::Corpus`**，与 MNN 推理后端的 `namespace MNN::CUDA` 隔离
+3. **每个 kernel 配一个 `extern "C"` 启动 shim**（如 `mnn_corpus_relu_fp32`），签名只含 POD 类型（`const float*`/`int`/`cudaStream_t`），不含 C++ 类
+4. **shim 定义在 `.cu` 文件里**（nvcc 编译），**shim 声明在 adapter `.cpp` 文件顶部的 `extern "C" {}` 块里**（g++ 编译）
+5. **shim 名固定，不含 tag 版本号**——tag 分流在 adapter 内部
+6. **`DivModFast` 等 device helper 在每个 `.cu` 文件里独立定义**（不能跨 TU 共享，因为是 `__device__` 代码）
+
+### CUDA Adapter 命名规则（固定规则）
+
+**类名不含版本号**——同一个算子的所有 tag 共用一个 adapter 类，内部按 `spec.tag`/`ac.tag` 分流：
+
+```cpp
+// 正确：类名固定，内部按 tag 分流
+class CudaMaxPoolFp32Kernel : public CudaOpAdapter {
+    const char* variant() const override { return "cuda_maxpool_fp32"; }  // 不含 tag
+    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override {
+        if (spec.tag == "1.2.0") {
+            // 1.2.0: NCHW 布局, bc 参数
+            ac.entry = "mnn_corpus_maxpool_120_fp32";  // shim 名可含 tag
+            ...
+        } else {
+            // 3.6.0: NC4HW4 布局, ib+ic_p 参数
+            ac.entry = "mnn_corpus_maxpool_fp32";
+            ...
+        }
+    }
+    cudaError_t launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const override {
+        if (ac.tag == "1.2.0") {
+            mnn_corpus_maxpool_120_fp32(...);  // 不同 shim
+        } else {
+            mnn_corpus_maxpool_fp32(...);     // 不同 shim
+        }
+    }
+    bool validate(const AdaptedCase& ac, ...) const override {
+        if (ac.tag == "1.2.0") {
+            // NCHW 布局校验
+        } else {
+            // NC4HW4 布局校验
+        }
+    }
+};
+```
+
+### CUDA 多 Tag 分流规则（固定规则）
+
+| tag | 含义 | 分流点 |
+|-----|------|--------|
+| `1.2.0` | MNN 1.2.0 发布版的 CUDA kernel | `adapt()` 里 `if (spec.tag == "1.2.0")` 选参数布局 + shim 名 |
+| `3.6.0` | MNN 3.6.0 当前版 | `adapt()` 的 `else` 分支 |
+
+**1.2.0 vs 3.6.0 已知差异**：
+
+| 算子 | 1.2.0 | 3.6.0 | 差异类型 |
+|------|-------|-------|---------|
+| RELU/CLAMP/ATAN2/MOD/LOGICALOR | 签名相同 | 签名相同 | 无差异，共用 shim |
+| CAST/CASTBOOL/GATHERV2 | 签名相同 | 签名相同 | 无差异，共用 shim |
+| blitRegion | 签名相同 | 签名相同 | 无差异，共用 shim |
+| MaxPool/AvgPool | NCHW 布局, `bc` 参数 | NC4HW4 布局, `ib+ic_p` | **独立 kernel + shim** |
+| Reduction SUM/MEAN | T 累积, `(inside,axis,outside)` | float 累积, `(outside,axis,inside)` | **独立 kernel + shim** |
+| Reduction MAX/MIN/PROD | 逻辑相同, 参数顺序不同 | 逻辑相同 | 复用 3.6.0 shim, launch 里 swap 参数 |
+| ARGMAX | 输出 `T*`（float 存 index） | 输出 `int*` | **独立 kernel + shim** |
+| SCALE | scale/bias 是 `T*` | scale/bias 是 `float*` | **独立 kernel + shim** |
+| LAYERNORM | gamma/beta 是 `T*`, 无 RMSNorm | gamma/beta 是 `float*`, 有 RMSNorm | **独立 kernel + shim** |
+| PRELU | slope 是 `T*`, `div_factor` | slope 是 `float*`, `share_factor` | **独立 kernel + shim** |
+| INTERP | `INTERP(n, ...)` 无 c_p | `INTERP_NERAEST(total, c_p, ...)` | **独立 kernel + shim** |
+| Softmax | cuDNN（无 `__global__`） | 自定义 kernel | 1.2.0 无 corpus case |
+| pack_c4/unpack_c4 | 有 | 用 PACKCOMMON 替代 | 1.2.0 独有 shim |
+| SETZERO/add_bias | 有 | 不存在 | 1.2.0 独有 shim |
+| Cast/Range/Select/TopKV2/Transpose/GridSample/ArgMin/RoPE | 不存在 | 有 | 1.2.0 无 corpus case |
+
+### CUDA PMU（CUPTI Range Profiler）
+
+1. **PMU 后端**：`MNNPerfCounter` 的 `NvRangeProfiler.cpp`，通过 CUPTI Range Profiler API 做 per-kernel 计数
+2. **权限**：需 `RmProfilingAdminOnly=0`（`/proc/driver/nvidia/params`），或 `sudo` 运行
+3. **metric 查询**：`./build/list_cuda_metrics` 列举本机 GPU 支持的全部 metric
+4. **手动指定**：`--perf-counter-events sm__cycles_elapsed.avg,sm__inst_executed.avg`
+5. **runCuda() 流程**：`beginPmu()` → 每个 launch 包 `beginRange()/endRange()` → `endPmu()` → `nvEvaluateMetrics()`
+6. **fallback**：PMU 不可用时 fallback 到 `cudaEvent` 计时
+
+### CUDA 构建规则
+
+1. `replay_cuda_corpus` 静态库（nvcc 编译）含 `CorpusKernels.cu` + `CorpusKernelsMisc.cu` + `CudaOpsFp16.cu`
+2. `replay_benchmark.out` 链接 `replay_cuda_corpus` + `MNN_Cuda_Main` + `libcuda` + `libcupti` + `libnvperf_host/target`
+3. `CudaOps.cpp` + `CudaOpsMisc.cpp` 用 g++ 编译（fp32 adapter，不需要 `__half`）
+4. `CudaOpsFp16.cu` 用 nvcc 编译（fp16 adapter，需要 `__half`/`__float2half`）
+5. CMake: `find_package(CUDA)` + `cuda_add_library` 编 shim, `target_link_libraries` 链 MNN_Cuda_Main
+
+### CUDA 验证流程
+
+```bash
+# 本机构建
+export PATH=/usr/local/cuda-13.2/bin:$PATH
+cd build && cmake .. -DMNN_CUDA=ON -DMNN_BUILD_BENCHMARK=ON -DMNN_CUDA_NATIVE_ARCH=ON -DMNN_REPLAY_ENABLE_PERFCOUNTER=ON
+make replay_benchmark.out list_cuda_metrics -j$(nproc)
+
+# 列举 metric
+./build/list_cuda_metrics --no-submetrics
+
+# 运行 corpus（需 sudo 或 RmProfilingAdminOnly=0）
+echo 'password' | sudo -S ./build/replay_benchmark.out \
+  --kernel-corpus-bench --kernel-corpus-root replay_benchmark/kernel_corpus \
+  --perf-counter-events sm__cycles_elapsed.avg \
+  --perf-counter-output /tmp/result.json
+
+# 查看
+python3 -c "
+import json
+d=json.load(open('/tmp/result.json'))
+cases=[c for c in d['cases'] if c['backend']=='cuda']
+print(f'CUDA: {len(cases)}, valid: {sum(1 for c in cases if c[\"valid\"])}/{len(cases)}')
+"
+```
