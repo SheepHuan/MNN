@@ -2,6 +2,7 @@
 #define MNN_REPLAY_KERNEL_CORPUS_BRIDGE_NCNN_OPS_PACK4_OP_HPP
 
 #include "../../OpAdapter.hpp"
+#include <cmath>
 
 namespace MNN {
 namespace Replay {
@@ -37,6 +38,14 @@ public:
     const char* opType() const override { return "concat"; }
     const char* variant() const override { return "concat_axis0_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override {
+    if (ac.validatorInputA.size() != output.size()) return false;
+    for (size_t i = 0; i < output.size(); ++i) {
+        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-5f) return false;
+    }
+    return true;
+    }
 };
 
 void registerPack4Ops();

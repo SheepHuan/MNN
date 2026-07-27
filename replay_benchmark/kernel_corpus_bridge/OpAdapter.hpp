@@ -7,12 +7,18 @@ namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
 
-// OpAdapter: per-operator adapter that knows the operator's parameter layout,
-// data preparation and dispatch geometry. Version-specific differences are
-// expressed through the `tag` field of CaseSpec and handled inside adapt().
+// OpAdapter: per-kernel adapter that knows the kernel's parameter layout,
+// data preparation, dispatch geometry, and result validation. Version-specific
+// differences are expressed through the `tag` field of CaseSpec and handled
+// inside adapt()/validate().
 //
 // An OpAdapter is stateless and registered per-framework. The framework
-// bridge dispatches to the matching OpAdapter by opType.
+// bridge dispatches to the matching OpAdapter by (opType, variant).
+//
+// Design: adapter and validator are co-located — the same class that knows
+// how to feed parameters to a kernel also knows how to check its output. This
+// avoids fragile string-based validator dispatch and keeps the op's semantics
+// (data layout, formula, tolerance) in one place.
 class OpAdapter {
 public:
     virtual ~OpAdapter() = default;
@@ -27,6 +33,13 @@ public:
     // ac.source / ac.framework / ac.tag / ac.backend / metadata are already set
     // by the caller. Returns false if the tag is not supported by this adapter.
     virtual bool adapt(const CaseSpec& spec, AdaptedCase& ac) const = 0;
+    // Validate the kernel's output against the expected result. The default
+    // implementation returns false (not_validated). Subclasses override to
+    // implement op-specific validation using ac.validatorInputA/B and the
+    // output read back from the GPU. Returns true if output is correct.
+    virtual bool validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+        (void)ac; (void)output; return false;
+    }
 };
 
 // Registry for OpAdapters within one framework. Lookup by opType.
@@ -66,6 +79,11 @@ public:
     const char* opType() const override { return "__fallback__"; }
     const char* variant() const override { return "__fallback__"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    // Fallback has no op-specific validation logic. Returns true (smoke test:
+    // kernel compiled and dispatched successfully).
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override {
+        (void)ac; (void)output; return true;
+    }
 };
 
 void registerFallbackAdapter();

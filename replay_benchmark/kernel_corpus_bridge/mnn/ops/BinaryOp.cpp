@@ -1,4 +1,5 @@
 #include "BinaryOp.hpp"
+#include <cmath>
 #include <cstring>
 
 namespace MNN {
@@ -94,6 +95,24 @@ bool VulkanBinaryAddKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.globalSize[0] = gx; ac.globalSize[1] = 1; ac.globalSize[2] = 1;
     ac.localSize[0] = localX; ac.localSize[1] = 1; ac.localSize[2] = 1;
     ac.dims = 1;
+    return true;
+}
+
+bool OpenCLBinaryAddKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    if (ac.validatorInputA.size() != output.size() ||
+        ac.validatorInputB.size() != output.size()) return false;
+    for (size_t i = 0; i < output.size(); ++i) {
+        if (std::fabs(output[i] - (ac.validatorInputA[i] + ac.validatorInputB[i])) > 1e-3f) return false;
+    }
+    return true;
+}
+
+bool VulkanBinaryAddKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    if (ac.validatorInputA.size() != output.size() ||
+        ac.validatorInputB.size() != output.size()) return false;
+    for (size_t i = 0; i < output.size(); ++i) {
+        if (std::fabs(output[i] - (ac.validatorInputA[i] + ac.validatorInputB[i])) > 1e-3f) return false;
+    }
     return true;
 }
 

@@ -24,6 +24,7 @@ public:
     const char* opType() const override { return "pooling"; }
     const char* variant() const override { return "pooling_max_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 // MNN Vulkan maxpool.comp kernel.
@@ -32,6 +33,7 @@ public:
     const char* opType() const override { return "pooling"; }
     const char* variant() const override { return "vulkan_maxpool_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 // MNN Vulkan avgpool.comp kernel.
@@ -40,6 +42,7 @@ public:
     const char* opType() const override { return "pooling"; }
     const char* variant() const override { return "vulkan_avgpool_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 void registerPoolingOp();

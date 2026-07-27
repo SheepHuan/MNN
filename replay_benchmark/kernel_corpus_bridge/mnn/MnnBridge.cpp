@@ -71,6 +71,8 @@ AdaptedCase MnnBridge::adapt(const CaseSpec& spec,
     if (adapter == nullptr) {
         ac.entry.clear();
         ac.validator.clear();
+    } else {
+        ac.adapter = adapter;
     }
     return ac;
 }

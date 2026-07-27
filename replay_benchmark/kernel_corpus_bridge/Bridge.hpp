@@ -13,6 +13,12 @@ namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
 
+// Forward declaration: OpAdapter is defined in OpAdapter.hpp (which includes
+// Bridge.hpp). The AdaptedCase stores a raw pointer to the adapter that
+// produced it, so the runner can call adapter->validate() for co-located
+// validation without string-based dispatch.
+class OpAdapter;
+
 // A single kernel argument slot. The runner sets args[i] via setArg(i, value)
 // in array order. Kind determines how the value is derived.
 struct AdaptedArg {
@@ -121,10 +127,16 @@ struct AdaptedCase {
     int dims = 2;                       // OpenCL NDRange dimension count
 
     // Validation
-    std::string validator;              // "exp_fp32" / "sigmoid_fp32" / ...
+    std::string validator;              // legacy: "exp_fp32" / "sigmoid_fp32" / ...
+                                        // When non-empty and adapter has no validate(), runner falls back to runValidator.
 
     // Metadata
     std::string framework, tag, backend, opType, variant, caseName;
+
+    // Pointer to the adapter that produced this AdaptedCase. The runner uses
+    // it to call adapter->validate() for co-located validation. Set by bridge
+    // after findAdapter() succeeds.
+    const OpAdapter* adapter = nullptr;
     int warmupRuns = 2;
     int workloadRuns = 5;
 

@@ -25,6 +25,7 @@ public:
     const char* opType() const override { return "unary"; }
     const char* variant() const override { return "unary_buf_exp_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 // MNN Vulkan unary.comp kernel (EXP baked into SPIR-V).
@@ -33,6 +34,7 @@ public:
     const char* opType() const override { return "unary"; }
     const char* variant() const override { return "vulkan_unary_buf_exp_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 void registerUnaryOp();

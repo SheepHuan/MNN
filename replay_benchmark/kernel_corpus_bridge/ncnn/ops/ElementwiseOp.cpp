@@ -28,12 +28,11 @@ void adaptElementwise(const CaseSpec& spec, AdaptedCase& ac) {
     ac.pushConstants.resize(sizeof(pp));
     std::memcpy(ac.pushConstants.data(), &pp, sizeof(pp));
 
-    // dispatch: global = (ceil(w/64)*64, 1, 1)
-    const uint32_t localX = 64;
-    ac.globalSize[0] = ((w + localX - 1) / localX) * localX;
-    ac.globalSize[1] = 1;
-    ac.globalSize[2] = 1;
-    ac.localSize[0] = localX;
+    // dispatch: 3D (w, h, c) matching ncnn shader's gl_GlobalInvocationID.xyz
+    ac.globalSize[0] = static_cast<uint32_t>(w);
+    ac.globalSize[1] = static_cast<uint32_t>(h);
+    ac.globalSize[2] = static_cast<uint32_t>(c);
+    ac.localSize[0] = 0; ac.localSize[1] = 0; ac.localSize[2] = 0;  // runtime default
 }
 
 bool VulkanPermuteKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {

@@ -1,10 +1,22 @@
 #include "UnaryOp.hpp"
+#include <cmath>
 #include <cstring>
 
 namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
 namespace MnnOps {
+
+namespace {
+// Shared exp validator: output[i] == exp(input[i]).
+bool validateExpImpl(const AdaptedCase& ac, const std::vector<float>& output) {
+    if (ac.validatorInputA.size() != output.size()) return false;
+    for (size_t i = 0; i < output.size(); ++i) {
+        if (std::fabs(output[i] - std::exp(ac.validatorInputA[i])) > 1e-3f) return false;
+    }
+    return true;
+}
+} // namespace
 
 bool OpenCLUnaryExpKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "unary_buf";
@@ -87,6 +99,14 @@ bool VulkanUnaryExpKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.localSize[0] = localX; ac.localSize[1] = 1; ac.localSize[2] = 1;
     ac.dims = 1;
     return true;
+}
+
+bool OpenCLUnaryExpKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return validateExpImpl(ac, output);
+}
+
+bool VulkanUnaryExpKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return validateExpImpl(ac, output);
 }
 
 void registerUnaryOp() {

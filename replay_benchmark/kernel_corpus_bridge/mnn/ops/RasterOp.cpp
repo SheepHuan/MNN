@@ -1,4 +1,5 @@
 #include "RasterOp.hpp"
+#include <cmath>
 #include <cstring>
 
 namespace MNN {
@@ -20,6 +21,19 @@ bool OpenCLRasterSetZeroKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) con
     ac.globalSize[1] = 1;
     ac.dims = 2;
     ac.elementCount = count;
+    return true;
+}
+
+bool OpenCLRasterSetZeroKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    for (float v : output) if (v != 0.0f) return false;
+    return true;
+}
+
+bool VulkanRasterBlitC4Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    if (ac.validatorInputA.size() != output.size()) return false;
+    for (size_t i = 0; i < output.size(); ++i) {
+        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-5f) return false;
+    }
     return true;
 }
 

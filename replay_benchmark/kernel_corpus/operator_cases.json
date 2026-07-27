@@ -940,7 +940,7 @@
       "tag": "20190611",
       "variant": "absval",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "absval_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -955,7 +955,7 @@
       "tag": "20190611",
       "variant": "absval_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "absval_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -970,7 +970,7 @@
       "tag": "20260526",
       "variant": "absval",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "absval_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -985,7 +985,7 @@
       "tag": "20260526",
       "variant": "absval_pack4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "absval_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1000,7 +1000,7 @@
       "tag": "20190611",
       "variant": "batchnorm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1015,7 +1015,7 @@
       "tag": "20190611",
       "variant": "batchnorm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1030,7 +1030,7 @@
       "tag": "20260526",
       "variant": "batchnorm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1045,7 +1045,7 @@
       "tag": "20260526",
       "variant": "batchnorm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1060,7 +1060,7 @@
       "tag": "20190611",
       "variant": "binaryop",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1075,7 +1075,7 @@
       "tag": "20190611",
       "variant": "binaryop_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1090,7 +1090,7 @@
       "tag": "20260526",
       "variant": "binaryop",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1105,7 +1105,7 @@
       "tag": "20260526",
       "variant": "binaryop_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1120,7 +1120,7 @@
       "tag": "20260526",
       "variant": "binaryop_broadcast",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1135,7 +1135,7 @@
       "tag": "20260526",
       "variant": "binaryop_broadcast_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1150,7 +1150,7 @@
       "tag": "20260526",
       "variant": "binaryop_broadcast_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1285,7 +1285,7 @@
       "tag": "20260526",
       "variant": "celu",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1300,7 +1300,7 @@
       "tag": "20190611",
       "variant": "clip",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1315,7 +1315,7 @@
       "tag": "20190611",
       "variant": "clip_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -1330,7 +1330,7 @@
       "tag": "20260526",
       "variant": "clip",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2125,7 +2125,7 @@
       "tag": "20190611",
       "variant": "crop",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2140,7 +2140,7 @@
       "tag": "20190611",
       "variant": "crop_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2155,7 +2155,7 @@
       "tag": "20260526",
       "variant": "crop",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2170,7 +2170,7 @@
       "tag": "20260526",
       "variant": "crop_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2185,7 +2185,7 @@
       "tag": "20260526",
       "variant": "crop_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2200,7 +2200,7 @@
       "tag": "20260526",
       "variant": "crop_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2590,7 +2590,7 @@
       "tag": "20190611",
       "variant": "dropout",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2605,7 +2605,7 @@
       "tag": "20190611",
       "variant": "dropout_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2620,7 +2620,7 @@
       "tag": "20260526",
       "variant": "dropout",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2695,7 +2695,7 @@
       "tag": "20260526",
       "variant": "erf",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "erf_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2710,7 +2710,7 @@
       "tag": "20190611",
       "variant": "flatten",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2725,7 +2725,7 @@
       "tag": "20190611",
       "variant": "flatten_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2740,7 +2740,7 @@
       "tag": "20190611",
       "variant": "flatten_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2755,7 +2755,7 @@
       "tag": "20260526",
       "variant": "flatten",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2770,7 +2770,7 @@
       "tag": "20260526",
       "variant": "flatten_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2785,7 +2785,7 @@
       "tag": "20260526",
       "variant": "flatten_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2800,7 +2800,7 @@
       "tag": "20260526",
       "variant": "gelu",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "gelu_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2860,7 +2860,7 @@
       "tag": "20260526",
       "variant": "groupnorm_coeffs",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2875,7 +2875,7 @@
       "tag": "20260526",
       "variant": "groupnorm_coeffs_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2890,7 +2890,7 @@
       "tag": "20260526",
       "variant": "groupnorm_norm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2905,7 +2905,7 @@
       "tag": "20260526",
       "variant": "groupnorm_norm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2920,7 +2920,7 @@
       "tag": "20260526",
       "variant": "groupnorm_reduce_mean",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2935,7 +2935,7 @@
       "tag": "20260526",
       "variant": "groupnorm_reduce_mean_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2950,7 +2950,7 @@
       "tag": "20260526",
       "variant": "groupnorm_reduce_sum4_fp16_to_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2965,7 +2965,7 @@
       "tag": "20260526",
       "variant": "groupnorm_reduce_sum4_fp16_to_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2980,7 +2980,7 @@
       "tag": "20260526",
       "variant": "groupnorm_reduce_sum4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -2995,7 +2995,7 @@
       "tag": "20260526",
       "variant": "groupnorm_reduce_sum4_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3010,7 +3010,7 @@
       "tag": "20260526",
       "variant": "groupnorm_sub_mean_square",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3025,7 +3025,7 @@
       "tag": "20260526",
       "variant": "groupnorm_sub_mean_square_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3040,7 +3040,7 @@
       "tag": "20260526",
       "variant": "hardsigmoid",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3055,7 +3055,7 @@
       "tag": "20260526",
       "variant": "hardswish",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3355,7 +3355,7 @@
       "tag": "20260526",
       "variant": "instancenorm_coeffs",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3370,7 +3370,7 @@
       "tag": "20260526",
       "variant": "instancenorm_coeffs_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3385,7 +3385,7 @@
       "tag": "20260526",
       "variant": "instancenorm_norm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3400,7 +3400,7 @@
       "tag": "20260526",
       "variant": "instancenorm_norm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3415,7 +3415,7 @@
       "tag": "20260526",
       "variant": "instancenorm_reduce_mean",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3430,7 +3430,7 @@
       "tag": "20260526",
       "variant": "instancenorm_reduce_mean_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3445,7 +3445,7 @@
       "tag": "20260526",
       "variant": "instancenorm_reduce_sum4_fp16_to_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3460,7 +3460,7 @@
       "tag": "20260526",
       "variant": "instancenorm_reduce_sum4_fp16_to_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3475,7 +3475,7 @@
       "tag": "20260526",
       "variant": "instancenorm_reduce_sum4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3490,7 +3490,7 @@
       "tag": "20260526",
       "variant": "instancenorm_reduce_sum4_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3505,7 +3505,7 @@
       "tag": "20260526",
       "variant": "instancenorm_sub_mean_square",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3520,7 +3520,7 @@
       "tag": "20260526",
       "variant": "instancenorm_sub_mean_square_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3685,7 +3685,7 @@
       "tag": "20260526",
       "variant": "layernorm_coeffs",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3700,7 +3700,7 @@
       "tag": "20260526",
       "variant": "layernorm_coeffs_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3715,7 +3715,7 @@
       "tag": "20260526",
       "variant": "layernorm_norm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3730,7 +3730,7 @@
       "tag": "20260526",
       "variant": "layernorm_norm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3745,7 +3745,7 @@
       "tag": "20260526",
       "variant": "layernorm_reduce_mean",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3760,7 +3760,7 @@
       "tag": "20260526",
       "variant": "layernorm_reduce_mean_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3775,7 +3775,7 @@
       "tag": "20260526",
       "variant": "layernorm_reduce_sum4_fp16_to_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3790,7 +3790,7 @@
       "tag": "20260526",
       "variant": "layernorm_reduce_sum4_fp16_to_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3805,7 +3805,7 @@
       "tag": "20260526",
       "variant": "layernorm_reduce_sum4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3820,7 +3820,7 @@
       "tag": "20260526",
       "variant": "layernorm_reduce_sum4_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3835,7 +3835,7 @@
       "tag": "20260526",
       "variant": "layernorm_sub_mean_square",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -3850,7 +3850,7 @@
       "tag": "20260526",
       "variant": "layernorm_sub_mean_square_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4045,7 +4045,7 @@
       "tag": "20260526",
       "variant": "mish",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "mish_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4180,7 +4180,7 @@
       "tag": "20260526",
       "variant": "normalize_coeffs",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4195,7 +4195,7 @@
       "tag": "20260526",
       "variant": "normalize_coeffs_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4210,7 +4210,7 @@
       "tag": "20260526",
       "variant": "normalize_norm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4225,7 +4225,7 @@
       "tag": "20260526",
       "variant": "normalize_norm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4240,7 +4240,7 @@
       "tag": "20260526",
       "variant": "normalize_reduce_sum4_fp16_to_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4255,7 +4255,7 @@
       "tag": "20260526",
       "variant": "normalize_reduce_sum4_fp16_to_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4270,7 +4270,7 @@
       "tag": "20260526",
       "variant": "normalize_reduce_sum4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4285,7 +4285,7 @@
       "tag": "20260526",
       "variant": "normalize_reduce_sum4_fp32_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4300,7 +4300,7 @@
       "tag": "20260526",
       "variant": "packing",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4315,7 +4315,7 @@
       "tag": "20260526",
       "variant": "packing_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4330,7 +4330,7 @@
       "tag": "20260526",
       "variant": "packing_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4420,7 +4420,7 @@
       "tag": "20190611",
       "variant": "padding",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4435,7 +4435,7 @@
       "tag": "20190611",
       "variant": "padding_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4450,7 +4450,7 @@
       "tag": "20260526",
       "variant": "padding",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4465,7 +4465,7 @@
       "tag": "20260526",
       "variant": "padding_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4480,7 +4480,7 @@
       "tag": "20260526",
       "variant": "padding_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4495,7 +4495,7 @@
       "tag": "20260526",
       "variant": "padding_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4540,7 +4540,7 @@
       "tag": "20190611",
       "variant": "permute",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4555,7 +4555,7 @@
       "tag": "20190611",
       "variant": "permute_order0_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4570,7 +4570,7 @@
       "tag": "20190611",
       "variant": "permute_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4585,7 +4585,7 @@
       "tag": "20260526",
       "variant": "permute",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4600,7 +4600,7 @@
       "tag": "20260526",
       "variant": "permute_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4615,7 +4615,7 @@
       "tag": "20260526",
       "variant": "permute_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4630,7 +4630,7 @@
       "tag": "20260526",
       "variant": "permute_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4645,7 +4645,7 @@
       "tag": "20260526",
       "variant": "pixelshuffle",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4660,7 +4660,7 @@
       "tag": "20260526",
       "variant": "pixelshuffle_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4675,7 +4675,7 @@
       "tag": "20260526",
       "variant": "pixelshuffle_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -4990,7 +4990,7 @@
       "tag": "20190611",
       "variant": "prelu",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5005,7 +5005,7 @@
       "tag": "20190611",
       "variant": "prelu_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5020,7 +5020,7 @@
       "tag": "20260526",
       "variant": "prelu",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5035,7 +5035,7 @@
       "tag": "20260526",
       "variant": "prelu_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5215,7 +5215,7 @@
       "tag": "20190611",
       "variant": "reorg",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5230,7 +5230,7 @@
       "tag": "20190611",
       "variant": "reorg_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5245,7 +5245,7 @@
       "tag": "20190611",
       "variant": "reorg_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5260,7 +5260,7 @@
       "tag": "20260526",
       "variant": "reorg",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5275,7 +5275,7 @@
       "tag": "20260526",
       "variant": "reorg_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5290,7 +5290,7 @@
       "tag": "20260526",
       "variant": "reorg_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5335,7 +5335,7 @@
       "tag": "20190611",
       "variant": "reshape",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5350,7 +5350,7 @@
       "tag": "20190611",
       "variant": "reshape_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5365,7 +5365,7 @@
       "tag": "20190611",
       "variant": "reshape_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5380,7 +5380,7 @@
       "tag": "20190611",
       "variant": "reshape_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5395,7 +5395,7 @@
       "tag": "20260526",
       "variant": "reshape",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5410,7 +5410,7 @@
       "tag": "20260526",
       "variant": "reshape_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5425,7 +5425,7 @@
       "tag": "20260526",
       "variant": "reshape_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5440,7 +5440,7 @@
       "tag": "20260526",
       "variant": "reshape_pack4to1",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5455,7 +5455,7 @@
       "tag": "20260526",
       "variant": "rmsnorm_coeffs",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5470,7 +5470,7 @@
       "tag": "20260526",
       "variant": "rmsnorm_coeffs_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5485,7 +5485,7 @@
       "tag": "20260526",
       "variant": "rmsnorm_norm",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5500,7 +5500,7 @@
       "tag": "20260526",
       "variant": "rmsnorm_norm_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5515,7 +5515,7 @@
       "tag": "20260526",
       "variant": "rmsnorm_square",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5530,7 +5530,7 @@
       "tag": "20260526",
       "variant": "rmsnorm_square_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5575,7 +5575,7 @@
       "tag": "20190611",
       "variant": "scale",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5590,7 +5590,7 @@
       "tag": "20190611",
       "variant": "scale_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5605,7 +5605,7 @@
       "tag": "20260526",
       "variant": "scale",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5620,7 +5620,7 @@
       "tag": "20260526",
       "variant": "scale_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5695,7 +5695,7 @@
       "tag": "20260526",
       "variant": "selu",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5725,7 +5725,7 @@
       "tag": "20190611",
       "variant": "shufflechannel",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5740,7 +5740,7 @@
       "tag": "20190611",
       "variant": "shufflechannel_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5755,7 +5755,7 @@
       "tag": "20260526",
       "variant": "shufflechannel",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5770,7 +5770,7 @@
       "tag": "20260526",
       "variant": "shufflechannel_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5785,7 +5785,7 @@
       "tag": "20190611",
       "variant": "sigmoid",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "sigmoid_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5800,7 +5800,7 @@
       "tag": "20190611",
       "variant": "sigmoid_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "sigmoid_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5815,7 +5815,7 @@
       "tag": "20190611",
       "variant": "sigmoid_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "sigmoid_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5830,7 +5830,7 @@
       "tag": "20260526",
       "variant": "sigmoid",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "sigmoid_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5845,7 +5845,7 @@
       "tag": "20260526",
       "variant": "sigmoid_pack4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "sigmoid_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5860,7 +5860,7 @@
       "tag": "20260526",
       "variant": "slice",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5875,7 +5875,7 @@
       "tag": "20260526",
       "variant": "slice_pack1to4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -5890,7 +5890,7 @@
       "tag": "20260526",
       "variant": "slice_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "not_all_zero_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6145,7 +6145,7 @@
       "tag": "20260526",
       "variant": "softplus",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "softplus_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6160,7 +6160,7 @@
       "tag": "20260526",
       "variant": "swish",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "swish_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6175,7 +6175,7 @@
       "tag": "20190611",
       "variant": "tanh",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6190,7 +6190,7 @@
       "tag": "20190611",
       "variant": "tanh_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6205,7 +6205,7 @@
       "tag": "20190611",
       "variant": "tanh_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6220,7 +6220,7 @@
       "tag": "20260526",
       "variant": "tanh",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6235,7 +6235,7 @@
       "tag": "20260526",
       "variant": "tanh_pack4_fp32",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6250,7 +6250,7 @@
       "tag": "20190611",
       "variant": "unaryop",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6265,7 +6265,7 @@
       "tag": "20190611",
       "variant": "unaryop_pack4",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {
@@ -6280,7 +6280,7 @@
       "tag": "20260526",
       "variant": "unaryop",
       "dtype": "float32",
-      "validator": "identity_fp32",
+      "validator": "tanh_fp32",
       "warmup_runs": 2,
       "workload_runs": 5,
       "int_params": {

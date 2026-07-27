@@ -25,6 +25,7 @@ public:
     const char* opType() const override { return "raster"; }
     const char* variant() const override { return "buffer_set_zero_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 // MNN Vulkan blit.comp kernel (C4 baked: TYPE=FLOAT4). Identity copy.
@@ -33,6 +34,7 @@ public:
     const char* opType() const override { return "raster"; }
     const char* variant() const override { return "vulkan_blit_c4_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 void registerRasterOp();

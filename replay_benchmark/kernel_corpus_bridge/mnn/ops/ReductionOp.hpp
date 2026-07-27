@@ -25,6 +25,7 @@ public:
     const char* opType() const override { return "reduction"; }
     const char* variant() const override { return "reduct_buf_sum_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 // MNN Vulkan reduce.comp kernel (SUM baked into SPIR-V).
@@ -33,6 +34,7 @@ public:
     const char* opType() const override { return "reduction"; }
     const char* variant() const override { return "vulkan_reduce_buf_sum_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 void registerReductionOp();

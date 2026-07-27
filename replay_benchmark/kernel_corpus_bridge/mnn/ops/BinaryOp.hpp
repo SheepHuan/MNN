@@ -25,6 +25,7 @@ public:
     const char* opType() const override { return "binary"; }
     const char* variant() const override { return "binary_buf_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 // MNN Vulkan binary.comp kernel (ADD baked into SPIR-V).
@@ -33,6 +34,7 @@ public:
     const char* opType() const override { return "binary"; }
     const char* variant() const override { return "vulkan_binary_buf_add_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
+    bool validate(const AdaptedCase& ac, const std::vector<float>& output) const override;
 };
 
 void registerBinaryOp();

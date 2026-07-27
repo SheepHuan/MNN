@@ -1,4 +1,5 @@
 #include "ReductionOp.hpp"
+#include <cmath>
 #include <cstring>
 
 namespace MNN {
@@ -32,6 +33,42 @@ bool OpenCLReductionSumKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) cons
     ac.globalSize[0] = batch;
     ac.globalSize[1] = width;
     ac.dims = 2;
+    return true;
+}
+
+bool OpenCLReductionSumKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    // NC4HW4 layout: input[((b*h+h_idx)*w+w_idx)*4], output[(b*w+w_idx)*4]
+    for (int b = 0; b < ac.m; ++b) {
+        for (int w_idx = 0; w_idx < ac.w; ++w_idx) {
+            float sum = 0.0f;
+            for (int h_idx = 0; h_idx < ac.h; ++h_idx) {
+                const int off = ((b * ac.h + h_idx) * ac.w + w_idx) * 4;
+                if (off < static_cast<int>(ac.validatorInputA.size())) sum += ac.validatorInputA[off];
+            }
+            const int out_off = (b * ac.w + w_idx) * 4;
+            if (out_off < static_cast<int>(output.size())) {
+                if (std::fabs(output[out_off] - sum) > 1e-2f) return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool VulkanReductionSumKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    // Scalar layout: input[outside][axis][inside], output[outside][inside]
+    const int outside = ac.m, axis = ac.h, inside = ac.w;
+    if (static_cast<int>(output.size()) < outside * inside) return false;
+    for (int o = 0; o < outside; ++o) {
+        for (int i = 0; i < inside; ++i) {
+            float sum = 0.0f;
+            for (int a = 0; a < axis; ++a) {
+                const int off = (o * axis + a) * inside + i;
+                if (off < static_cast<int>(ac.validatorInputA.size())) sum += ac.validatorInputA[off];
+            }
+            const int out_off = o * inside + i;
+            if (std::fabs(output[out_off] - sum) > 1e-2f) return false;
+        }
+    }
     return true;
 }
 
