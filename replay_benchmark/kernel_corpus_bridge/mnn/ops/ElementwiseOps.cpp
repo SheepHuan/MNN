@@ -117,6 +117,7 @@ bool OpenCLReductionKernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     AdaptedBuffer outBuf; outBuf.sizeBytes = batch * width * 4 * sizeof(float); outBuf.isOutput = true;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
     ac.compileMacros.push_back("-DOPERATE=(num+in)");
+    ac.compileMacros.push_back("-DVALUE=0");
     if (spec.tag == "1.2.0") {
         ac.args.push_back(AdaptedArg::sizeConst(0));   // dim0 = batch
         ac.args.push_back(AdaptedArg::sizeConst(1));   // dim1 = width

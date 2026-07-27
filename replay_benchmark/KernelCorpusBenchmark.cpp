@@ -556,18 +556,6 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
         const bool valid = runValidator(ac, output);
         report.validationStatus = valid ? "validation_passed" : "validation_failed";
         report.valid = valid;
-        if (!valid) {
-            fprintf(stderr, "DBG[opencl] case=%s validator=%s adapter=%p inSize=%zu outSize=%zu\n",
-                    ac.caseName.c_str(), ac.validator.c_str(), (void*)ac.adapter,
-                    ac.validatorInputA.size(), output.size());
-            fprintf(stderr, "  in[0..15]:");
-            for (size_t i = 0; i < ac.validatorInputA.size() && i < 16; ++i)
-                fprintf(stderr, " %.4f", ac.validatorInputA[i]);
-            fprintf(stderr, "\n  out[0..15]:");
-            for (size_t i = 0; i < output.size() && i < 16; ++i)
-                fprintf(stderr, " %.4f", output[i]);
-            fprintf(stderr, "\n");
-        }
     }
     report.responsive = report.workloadDelta > 0;
     return report;

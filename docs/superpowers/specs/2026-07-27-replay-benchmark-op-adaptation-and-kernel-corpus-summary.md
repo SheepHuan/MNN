@@ -252,3 +252,67 @@ kernel corpus 是 GPU kernel 的"版本化石库"，配合 `KernelCorpusBenchmar
 
 它和 `replayOp` 的区别：`replayOp` 测整个 Execution 在 backend 中的适配；
 kernel corpus 测单个 kernel 文件能否独立编译并通过 PMU 评测。
+
+### 6. KernelCorpusBenchmark 是独立入口
+
+`replay_benchmark.cpp:510-518` 显示 `--kernel-corpus-bench` 是一个独立分支，
+它构造一个 `KernelCorpus::Options` 后调用 `runKernelCorpusBenchmark`，与
+`replayOp`（算子级重放）完全分离，互不调用。
+
+但它可以调用 kernel corpus 中的任意 kernel 完成测试并采集 dispatch 前后的 PMU。
+从 `KernelCorpusBenchmark.cpp:858-1049` 的 `runKernelCorpusBenchmark` 看，它的
+流程是：
+
+1. 加载 `operators.json`（kernel 索引）和 `operator_cases.json`（测试用例）。
+2. 遍历 `operator_cases.json` 中所有 case，可用 `--kernel-corpus-case name`
+   过滤。
+3. 对每个 case：用 `(backend, op_type, framework, tag, variant)` 五元组在
+   `operators.json` 里查到 kernel 源码文件路径。
+4. 用 `Bridge::adapt()` 把 `CaseSpec` 转成 `AdaptedCase`
+   （含 source/args/buffers/gws/lws/validator）。
+5. 按 backend 走 `runOpenCL` 或 `runVulkan`。
+
+`runOpenCL`（行 418-574）和 `runVulkan`（行 596-852）内部都做了编译 kernel →
+warmup（PMU 之外）→ `beginPmu()` → dispatch N 次 → `endPmu()` + 同步
+（`queue.finish()` / `submitAndWait`）→ readback → validate。所以"调用任意
+kernel + 前后 PMU"这套能力是支持的。
+
+### 7. "任意 kernel"的两个限制
+
+但要注意它不是任意裸源码都能跑，有两层约束：
+
+**A. kernel 必须在 corpus 索引中**：通过 `--kernel-corpus-case name` 过滤的
+case，必须是 `operator_cases.json` 中声明的，且其
+`(backend, op_type, framework, tag, variant)` 必须能在 `operators.json` 中查到
+`file`/`entry`。不能临时喂一个外部 `.cl` 文件进去。
+
+**B. kernel 必须有适配器（OpAdapter）或匹配的 validator**：`Bridge::adapt()`
+负责把 CaseSpec 的 int_params/float_params 翻译成 `AdaptedCase`（buffer 布局、
+setArg 顺序、gws/lws、validator）。如果一个 op 没有对应的 `OpAdapter` 子类，
+且 CaseSpec 里的 `validator` 字符串没在 `runValidator` 的 fallback 列表里
+（行 218-352），那么 validation 会失败。
+
+### 8. 用法
+
+```bash
+./replay_benchmark --kernel-corpus-bench \
+  --kernel-corpus-root replay_benchmark/kernel_corpus \
+  --kernel-corpus-case binary_buf_fp32_smoke \
+  --perf-counter-output report.json \
+  --perf-counter-events gpu_active_cycles,compute_active_cycles
+```
+
+PMU 事件名由 `--perf-counter-events` 指定（逗号分隔），不传则按 GPU 厂商自动选
+一组（Adreno 13 个、Mali 6 个、其它 3 个便携计数器，见行 51-92）。
+
+### 9. 与 replayOp 在 PMU 采集上的区别
+
+`replayOp` 走的是 MNN `Backend/Execution` 框架，PMU 是可选的
+（`--perf-counter-output`），它采集的是整个 Execution 的 `onExecute` + output
+wait 这段窗口（`ReplayRunner.cpp:310-352`）。而 `KernelCorpusBenchmark` 采集的
+是裸 kernel 的 N 次 dispatch，不经过 MNN 算子调度层。两者都是"前后包 PMU"，但
+测的粒度不同。
+
+一句话总结：`KernelCorpusBenchmark` 是独立入口，它内部确实实现了"从 kernel
+corpus 中选任意已注册的 kernel → 编译 → warmup → PMU start → dispatch N 次 →
+PMU stop → readback → validate"的完整链路。
