@@ -85,37 +85,6 @@ bool ScaleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     return true;
 }
 
-// grid_sample 3.6.0: (dim0,dim1,dim2, FLOAT* in, FLOAT* grid, FLOAT* out, int inH, int inW, int outH, int outW, int batch, int channel, ...)
-bool GridSampleBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    ac.entry = "nearest_buf";
-    const int inH = spec.h(), inW = spec.w(), batch = spec.batch(), channel = spec.c();
-    const int outH = spec.intParam("out_h", inH / 2), outW = spec.intParam("out_w", inW / 2);
-    const int cb = (channel + 3) / 4;
-    const int inN = batch * cb * inH * inW * 4;
-    const int outN = batch * cb * outH * outW * 4;
-    const int gridN = batch * outH * outW * 2 * 4;  // grid has x,y per pixel
-    std::vector<float> in, grid; fillInput(in, inN); fillInput(grid, gridN);
-    AdaptedBuffer inBuf; inBuf.setFp32(in); inBuf.isOutput = false;
-    AdaptedBuffer gridBuf; gridBuf.setFp32(grid); gridBuf.isOutput = false;
-    AdaptedBuffer outBuf; outBuf.sizeBytes = outN * sizeof(float); outBuf.isOutput = true;
-    ac.buffers.push_back(inBuf); ac.buffers.push_back(gridBuf); ac.buffers.push_back(outBuf);
-    ac.args.push_back(AdaptedArg::sizeConst(0));
-    ac.args.push_back(AdaptedArg::sizeConst(1));
-    ac.args.push_back(AdaptedArg::sizeConst(2));
-    ac.args.push_back(AdaptedArg::buffer(0));  // in
-    ac.args.push_back(AdaptedArg::buffer(1));  // grid
-    ac.args.push_back(AdaptedArg::buffer(2));  // out
-    ac.args.push_back(AdaptedArg::scalarInt(inH));
-    ac.args.push_back(AdaptedArg::scalarInt(inW));
-    ac.args.push_back(AdaptedArg::scalarInt(outH));
-    ac.args.push_back(AdaptedArg::scalarInt(outW));
-    ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(channel));
-    ac.globalSize[0] = outW; ac.globalSize[1] = outH; ac.globalSize[2] = cb; ac.dims = 3;
-    ac.validatorInputA = in;
-    return true;
-}
-
 // groupnorm 3.6.0: (dim0,dim1,dim2, FLOAT* in, FLOAT* out, FLOAT* group, FLOAT* gamma, int4 shape, float eps, ...)
 // Simplified — exact layout depends on #ifdef
 bool GroupnormBufOp::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
@@ -245,7 +214,6 @@ void registerNormConvOps() {
             auto& r = OpAdapterRegistry::instance();
             r.registerAdapter(std::unique_ptr<OpAdapter>(new PoolingBufOp()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new ScaleBufOp()));
-            r.registerAdapter(std::unique_ptr<OpAdapter>(new GridSampleBufOp()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new GroupnormBufOp()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new LayernormBufOp()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new SplitgeluBufOp()));

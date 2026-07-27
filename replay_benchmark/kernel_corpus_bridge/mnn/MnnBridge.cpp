@@ -10,6 +10,7 @@
 #include "ops/NormConvOps.hpp"
 #include "ops/ConvOps.hpp"
 #include "ops/ArgmaxOp.hpp"
+#include "ops/ComplexOps.hpp"
 
 namespace MNN {
 namespace Replay {
@@ -63,6 +64,7 @@ void registerMnnBridge() {
             MnnOps::registerNormConvOps();
             MnnOps::registerConvOps();
             MnnOps::registerArgmaxOp();
+            MnnOps::registerComplexOps();
             registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new MnnBridge()));
         }

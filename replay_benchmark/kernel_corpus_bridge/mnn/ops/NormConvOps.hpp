@@ -22,13 +22,6 @@ public:
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
 };
 
-class GridSampleBufOp : public OpAdapter {
-public:
-    const char* opType() const override { return "grid_sample"; }
-    const char* variant() const override { return "grid_sample_buf_fp32"; }
-    bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override;
-};
-
 class GroupnormBufOp : public OpAdapter {
 public:
     const char* opType() const override { return "groupnorm"; }
