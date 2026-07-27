@@ -40,6 +40,16 @@ public:
     virtual bool validate(const AdaptedCase& ac, const std::vector<float>& output) const {
         (void)ac; (void)output; return false;
     }
+    // CUDA adapters override these to expose a launch() entry point so the
+    // CUDA runner can dispatch the kernel through the adapter without
+    // knowing the shim's C signature. No-RTTI safe downcast pattern: a base
+    // adapter returns nullptr/false; a CUDA adapter returns `this` cast to
+    // CudaOpAdapter*. Non-CUDA backends are unaffected. CudaOpAdapter is
+    // defined in CudaOpAdapter.hpp (CUDA headers are required for its
+    // launch signature, so it cannot live in this header).
+    virtual bool isCuda() const { return false; }
+    virtual void* asCuda() { return nullptr; }
+    virtual const void* asCuda() const { return nullptr; }
 };
 
 // Registry for OpAdapters within one framework. Lookup by opType.

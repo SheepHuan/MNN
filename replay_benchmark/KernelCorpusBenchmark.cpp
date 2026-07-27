@@ -3,6 +3,7 @@
 #include "kernel_corpus_bridge/Bridge.hpp"
 #include "kernel_corpus_bridge/OpAdapter.hpp"
 #include "kernel_corpus_bridge/mnn/MnnBridge.hpp"
+#include "kernel_corpus_bridge/cuda/CudaOps.hpp"
 #include "kernel_corpus_bridge/ncnn/NcnnBridge.hpp"
 
 #include <algorithm>
@@ -42,6 +43,10 @@
 #include "MNNPerfCounter.hpp"
 #endif
 
+#if defined(MNN_REPLAY_HAS_CUDA)
+#include <cuda_runtime.h>
+#endif
+
 namespace MNN {
 namespace Replay {
 namespace KernelCorpus {
@@ -77,6 +82,14 @@ static bool discoverPmuDevice(MNN::PerfCounter::DeviceInfo* device, std::string*
 }
 #endif
 
+static const char* kNvidiaCounters[] = {
+    "sm__cycles_elapsed.avg",
+    "sm__inst_executed.avg",
+    "gpc__cycles_elapsed.avg",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+};
+
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
 static std::vector<std::string> selectPmuCounters(const MNN::PerfCounter::DeviceInfo& device) {
     if (device.vendor == MNN::PerfCounter::GpuVendor::Adreno) {
@@ -86,6 +99,10 @@ static std::vector<std::string> selectPmuCounters(const MNN::PerfCounter::Device
     if (device.vendor == MNN::PerfCounter::GpuVendor::Mali) {
         return std::vector<std::string>(kMaliCounters,
             kMaliCounters + sizeof(kMaliCounters) / sizeof(kMaliCounters[0]));
+    }
+    if (device.vendor == MNN::PerfCounter::GpuVendor::Nvidia) {
+        return std::vector<std::string>(kNvidiaCounters,
+            kNvidiaCounters + sizeof(kNvidiaCounters) / sizeof(kNvidiaCounters[0]));
     }
     return std::vector<std::string>(kPortableCounters,
         kPortableCounters + sizeof(kPortableCounters) / sizeof(kPortableCounters[0]));
@@ -103,7 +120,7 @@ struct PmuScope {
     std::string status = "unavailable";
 };
 
-static PmuScope beginPmu() {
+static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
     PmuScope s;
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     MNN::PerfCounter::DeviceInfo device;
@@ -112,9 +129,23 @@ static PmuScope beginPmu() {
         s.status = "unavailable";
         return s;
     }
-    s.names = selectPmuCounters(device);
+    // If the caller supplied an explicit comma-separated metric list (non-empty
+    // and not "auto"), use it verbatim. Otherwise auto-select counters based
+    // on the detected GPU vendor. This lets users pass any NVIDIA metric name
+    // via --perf-counter-events (e.g. "sm__cycles_elapsed.avg,sm__inst_executed.avg").
+    if (!eventsOverride.empty() && eventsOverride != "auto") {
+        std::string cur;
+        for (char c : eventsOverride) {
+            if (c == ',') { if (!cur.empty()) s.names.push_back(cur); cur.clear(); }
+            else cur.push_back(c);
+        }
+        if (!cur.empty()) s.names.push_back(cur);
+    } else {
+        s.names = selectPmuCounters(device);
+    }
     std::vector<MNN::PerfCounter::CounterSpec> specs;
-    for (const auto& name : s.names) {
+    std::vector<std::string> owned = s.names; // keep strings alive
+    for (const auto& name : owned) {
         MNN::PerfCounter::CounterSpec sp;
         sp.name = name.c_str();
         specs.push_back(sp);
@@ -126,7 +157,9 @@ static PmuScope beginPmu() {
         s.started = true;
         s.status = "started";
     } else {
-        s.status = "start_failed";
+        const char* e = s.session ? s.session->error() : (pmuErr ? pmuErr : "session create failed");
+        s.status = std::string("start_failed: ") + (e ? e : "unknown");
+        s.session.reset();
     }
 #endif
     return s;
@@ -140,7 +173,8 @@ static void endPmu(PmuScope& s) {
         s.status = "sampled";
         if (!s.values.empty()) s.workloadDelta = s.values[0].value;
     } else {
-        s.status = "stop_failed";
+        const char* e = s.session ? s.session->error() : nullptr;
+        s.status = std::string("stop_failed") + (e ? (": " + std::string(e)) : "");
     }
 #endif
 }static bool makeParentDirectories(const std::string& path) {
@@ -843,10 +877,174 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
 
 #endif // MNN_REPLAY_HAS_VULKAN
 
+#if defined(MNN_REPLAY_HAS_CUDA)
+
+#include "kernel_corpus_bridge/cuda/CudaOpAdapter.hpp"
+
+namespace {
+
+// Generic CUDA runner: consumes AdaptedCase only. No compilation step is
+// needed (kernels are pre-compiled into the shim library). The runner
+// allocates device buffers, collects scalar args, and dispatches through the
+// adapter's launch() entry point — so it stays agnostic to each kernel's C
+// signature.
+static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& perfCounterEvents) {
+    CaseReport report = buildReport(ac, "precompiled");
+
+    // The adapter must be a CudaOpAdapter to expose launch().
+    if (ac.adapter == nullptr || !ac.adapter->isCuda()) {
+        report.error = "No CUDA adapter for entry: " + ac.entry;
+        return report;
+    }
+    CudaOpAdapter* cudaAdapter = static_cast<CudaOpAdapter*>(const_cast<void*>(ac.adapter->asCuda()));
+
+    // Device buffers from AdaptedCase.buffers
+    std::vector<void*> devBufs(ac.buffers.size(), nullptr);
+    for (size_t i = 0; i < ac.buffers.size(); ++i) {
+        const auto& b = ac.buffers[i];
+        if (cudaMalloc(&devBufs[i], b.sizeBytes) != cudaSuccess) {
+            report.error = "cudaMalloc failed for buffer " + std::to_string(i);
+            for (size_t j = 0; j < i; ++j) cudaFree(devBufs[j]);
+            return report;
+        }
+        if (!b.initialData.empty()) {
+            if (cudaMemcpy(devBufs[i], b.initialData.data(), b.sizeBytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+                report.error = "cudaMemcpy H2D failed for buffer " + std::to_string(i);
+                for (size_t j = 0; j <= i; ++j) cudaFree(devBufs[j]);
+                return report;
+            }
+        }
+    }
+
+    // Build launch context: grid/block from AdaptedCase, scalar args in order.
+    CudaLaunchCtx ctx;
+    ctx.devBufs = devBufs;
+    ctx.grid = static_cast<int>(ac.globalSize[0]);
+    ctx.block = ac.localSize[0] > 0 ? static_cast<int>(ac.localSize[0]) : 128;
+    for (const auto& a : ac.args) {
+        if (a.kind == AdaptedArg::Scalar) {
+            if (a.scalarType == AdaptedArg::Int) ctx.intArgs.push_back(a.intVal);
+            else ctx.floatArgs.push_back(a.floatVal);
+        }
+    }
+    // Resolve buffer args to device pointers (adapter indexes ctx.devBufs).
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreate(&stream) != cudaSuccess) {
+        report.error = "cudaStreamCreate failed";
+        for (auto p : devBufs) cudaFree(p);
+        return report;
+    }
+    ctx.stream = stream;
+
+    // warmup
+    for (int i = 0; i < ac.warmupRuns; ++i) {
+        cudaAdapter->launch(ac, ctx);
+    }
+    if (cudaStreamSynchronize(stream) != cudaSuccess || cudaGetLastError() != cudaSuccess) {
+        report.error = "CUDA warmup launch failed: " + std::string(cudaGetErrorString(cudaGetLastError()));
+        cudaStreamDestroy(stream);
+        for (auto p : devBufs) cudaFree(p);
+        return report;
+    }
+    report.dispatchStatus = "dispatched";
+
+    // workload + NVIDIA range profiler (per-kernel counters via
+    // MNNPerfCounter Session::beginRange/endRange). Each launch is wrapped in
+    // a range so per-kernel metrics are collected precisely. When the PMU
+    // backend is unavailable, fall back to cuda event wall-clock timing.
+    PmuScope pmu = beginPmu(perfCounterEvents);
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    if (pmu.started) {
+        for (int r = 0; r < runs; ++r) {
+            char rangeName[64];
+            std::snprintf(rangeName, sizeof(rangeName), "%s_run%d", ac.entry.c_str(), r);
+            pmu.session->beginRange(rangeName);
+            cudaAdapter->launch(ac, ctx);
+            pmu.session->endRange();
+        }
+        // stop() is called by endPmu() below; do not call it here (would
+        // double-stop and set started=false prematurely).
+    } else {
+        // PMU unavailable; fall back to cuda event timing. Preserve the
+        // beginPmu failure reason in pmu.status for diagnostics.
+        cudaEvent_t evStart, evStop;
+        cudaEventCreate(&evStart);
+        cudaEventCreate(&evStop);
+        cudaEventRecord(evStart, stream);
+        for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
+        cudaEventRecord(evStop, stream);
+        cudaEventSynchronize(evStop);
+        float elapsedMs = 0.0f;
+        cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+        cudaEventDestroy(evStart);
+        cudaEventDestroy(evStop);
+        pmu.workloadDelta = static_cast<uint64_t>(elapsedMs * 1000.0f);
+        // Keep pmu.status from beginPmu so the failure reason is visible.
+        if (pmu.status.empty() || pmu.status == "unavailable") {
+            pmu.status = "cuda_event_fallback";
+        } else {
+            pmu.status = "cuda_event_fallback(" + pmu.status + ")";
+        }
+    }
+#else
+    cudaEvent_t evStart, evStop;
+    cudaEventCreate(&evStart);
+    cudaEventCreate(&evStop);
+    cudaEventRecord(evStart, stream);
+    for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
+    cudaEventRecord(evStop, stream);
+    cudaEventSynchronize(evStop);
+    float elapsedMs = 0.0f;
+    cudaEventElapsedTime(&elapsedMs, evStart, evStop);
+    cudaEventDestroy(evStart);
+    cudaEventDestroy(evStop);
+    pmu.workloadDelta = static_cast<uint64_t>(elapsedMs * 1000.0f);
+    pmu.status = "cuda_event";
+#endif
+    endPmu(pmu);
+    report.pmuStatus = pmu.status;
+    report.workloadDelta = pmu.workloadDelta;
+
+    // readback output buffers (as float; int kernels are compared bit-exact)
+    std::vector<float> output;
+    for (size_t i = 0; i < ac.buffers.size(); ++i) {
+        if (!ac.buffers[i].isOutput) continue;
+        output.resize(ac.buffers[i].sizeBytes / sizeof(float));
+        if (cudaMemcpy(output.data(), devBufs[i], ac.buffers[i].sizeBytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            report.error = "CUDA readback failed";
+            report.validationStatus = "readback_failed";
+            cudaStreamDestroy(stream);
+            for (auto p : devBufs) cudaFree(p);
+            return report;
+        }
+    }
+
+    // validation
+    if (ac.validator.empty() && ac.adapter == nullptr) {
+        report.validationStatus = "not_validated";
+    } else {
+        const bool valid = runValidator(ac, output);
+        report.validationStatus = valid ? "validation_passed" : "validation_failed";
+        report.valid = valid;
+    }
+
+    cudaStreamDestroy(stream);
+    for (auto p : devBufs) cudaFree(p);
+    return report;
+}
+
+} // namespace
+
+#endif // MNN_REPLAY_HAS_CUDA
+
 bool runKernelCorpusBenchmark(const Options& options) {
     // Force bridge registration (function-local static, no global dynamic init).
     registerMnnBridge();
     registerNcnnBridge();
+#if defined(MNN_REPLAY_HAS_CUDA)
+    MNN::Replay::KernelCorpus::MnnOps::registerCudaOps();
+    MNN::Replay::KernelCorpus::MnnOps::registerCudaOpsFp16();
+#endif
 
     rapidjson::Document document;
     document.SetObject();
@@ -951,7 +1149,12 @@ bool runKernelCorpusBenchmark(const Options& options) {
         {
             // Read source
             std::vector<uint8_t> srcBytes;
-            if (!readBytes(joinPath(options.corpusRoot, opIt->second.file), srcBytes)) {
+            // CUDA kernels are pre-compiled into libMNN_Cuda_Main.so and need
+            // no source at run time; a missing corpus source file is therefore
+            // not an error for the cuda backend (the file field is kept only
+            // for provenance). Other backends still require readable source.
+            const bool sourceOptional = (spec.backend == "cuda");
+            if (!readBytes(joinPath(options.corpusRoot, opIt->second.file), srcBytes) && !sourceOptional) {
                 AdaptedCase stub;
                 stub.framework = spec.framework; stub.tag = spec.tag; stub.backend = spec.backend;
                 stub.opType = spec.opType; stub.variant = spec.variant; stub.caseName = spec.name;
@@ -1009,6 +1212,12 @@ bool runKernelCorpusBenchmark(const Options& options) {
                 }
 #else
                 report = buildReport(ac, "unsupported", "Vulkan not compiled into replay_benchmark");
+#endif
+            } else if (spec.backend == "cuda") {
+#if defined(MNN_REPLAY_HAS_CUDA)
+                report = runCuda(ac, std::max(1, options.runs), options.perfCounterEvents);
+#else
+                report = buildReport(ac, "unsupported", "CUDA not compiled into replay_benchmark");
 #endif
             } else {
                 report = buildReport(ac, "unsupported", "Unknown backend: " + spec.backend);

@@ -29,6 +29,42 @@ add_library(MNNPerfCounter STATIC
     upstream/libgpucounters/hwcpipe/src/hwcpipe/counter_metadata.cpp
     upstream/libgpucounters/hwcpipe/src/hwcpipe/derived_functions.cpp)
 
+# Optional NVIDIA CUPTI Range Profiler backend. Enabled when the consuming
+# project passes MNN_PERFCOUNTER_HAS_CUDA=ON and provides CUDA_INCLUDE_DIRS
+# (pointing at a CUDA toolkit). The NvRangeProfiler.cpp TU must be added
+# explicitly here so the static lib carries the NVPA/CUPTI symbols.
+option(MNN_PERFCOUNTER_HAS_CUDA "Enable NVIDIA CUPTI Range Profiler backend" OFF)
+if(MNN_PERFCOUNTER_HAS_CUDA)
+    target_sources(MNNPerfCounter PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/NvRangeProfiler.cpp)
+    target_compile_definitions(MNNPerfCounter PUBLIC MNN_PERFCOUNTER_HAS_CUDA)
+    target_include_directories(MNNPerfCounter PRIVATE ${CUDA_INCLUDE_DIRS})
+    target_link_libraries(MNNPerfCounter PUBLIC ${CUDA_LIBRARIES})
+    find_library(NV_CUDA_DRIVER_LIB cuda HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib/stubs)
+    if(NV_CUDA_DRIVER_LIB)
+        target_link_libraries(MNNPerfCounter PUBLIC ${NV_CUDA_DRIVER_LIB})
+    endif()
+    # libcupti + nvperf_* ship in <cuda>/lib64. nvperf_host/cuda_host/target
+    # provide NVPW_* symbols used by the Range Profiler backend.
+    find_library(CUPTI_LIBRARY cupti HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(NVPERF_HOST_LIBRARY nvperf_host HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(NVPERF_CUDA_HOST_LIBRARY nvperf_cuda_host HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(NVPERF_TARGET_LIBRARY nvperf_target HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    if(CUPTI_LIBRARY)
+        target_link_libraries(MNNPerfCounter PUBLIC ${CUPTI_LIBRARY})
+    else()
+        target_link_libraries(MNNPerfCounter PUBLIC -lcupti)
+    endif()
+    if(NVPERF_HOST_LIBRARY)
+        target_link_libraries(MNNPerfCounter PUBLIC ${NVPERF_HOST_LIBRARY})
+    endif()
+    if(NVPERF_CUDA_HOST_LIBRARY)
+        target_link_libraries(MNNPerfCounter PUBLIC ${NVPERF_CUDA_HOST_LIBRARY})
+    endif()
+    if(NVPERF_TARGET_LIBRARY)
+        target_link_libraries(MNNPerfCounter PUBLIC ${NVPERF_TARGET_LIBRARY})
+    endif()
+endif()
+
 target_include_directories(MNNPerfCounter
     PUBLIC
         ${CMAKE_CURRENT_LIST_DIR}/include

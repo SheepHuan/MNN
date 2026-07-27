@@ -20,6 +20,8 @@ add_executable(replay_benchmark.out
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ArgmaxOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ConvOps.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ComplexOps.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOps.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsMisc.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/NcnnBridge.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/ops/ElementwiseOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/ops/Pack4Op.cpp
@@ -71,6 +73,75 @@ if(MNN_VULKAN)
     target_link_libraries(replay_benchmark.out ${Vulkan_LIBRARIES})
   else()
     target_link_libraries(replay_benchmark.out ${CMAKE_DL_LIBS})
+  endif()
+endif()
+
+if(MNN_CUDA)
+  # The corpus launch shims (forward declarations of MNN __global__ kernels +
+  # extern "C" wrappers) are compiled by nvcc here and linked against
+  # MNN_Cuda_Main, which contains the kernel definitions. Device-link time
+  # resolves the forward-declared __global__ symbols. The MNN backend
+  # directory itself is untouched.
+  find_package(CUDA 8.0)
+  if(CUDA_FOUND)
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -D_FORCE_INLINES -Wno-deprecated-gpu-targets -w --std=c++17 -O3")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/source/backend/cuda/SelectCudaComputeArch.cmake)
+    CUDA_SELECT_NVCC_ARCH_FLAGS(CUDA_ARCH_FLAGS ${CUDA_ARCHS})
+    cuda_add_library(replay_cuda_corpus STATIC
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CorpusKernels.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CorpusKernelsMisc.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsFp16.cu)
+    # CudaOpsFp16.cu includes CudaOps.hpp -> CudaOpAdapter.hpp -> OpAdapter.hpp
+    # which live under replay_benchmark/. Expose that path so nvcc can find them.
+    target_include_directories(replay_cuda_corpus PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge
+        ${CUDA_INCLUDE_DIRS})
+    target_link_libraries(replay_benchmark.out replay_cuda_corpus MNN_Cuda_Main ${CUDA_LIBRARIES})
+    # CudaOps.cpp (fp32 adapters) needs CudaOps.hpp/CudaOpAdapter.hpp too.
+    target_include_directories(replay_benchmark.out PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge)
+    # libcuda (driver API) + nvperf_* (NVPW_* symbols) needed by the
+    # NvRangeProfiler backend compiled into MNNPerfCounter. These must be
+    # linked when MNN_REPLAY_ENABLE_PERFCOUNTER is on so the static archive's
+    # NvRangeProfiler.cpp.o gets pulled in by the linker.
+    find_library(CUDA_DRIVER_LIB cuda HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib/stubs)
+    find_library(RB_NVPERF_HOST nvperf_host HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(RB_NVPERF_CUDA_HOST nvperf_cuda_host HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(RB_NVPERF_TARGET nvperf_target HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    if(CUDA_DRIVER_LIB)
+      target_link_libraries(replay_benchmark.out ${CUDA_DRIVER_LIB})
+    endif()
+    if(RB_NVPERF_HOST)
+      target_link_libraries(replay_benchmark.out ${RB_NVPERF_HOST})
+    endif()
+    if(RB_NVPERF_CUDA_HOST)
+      target_link_libraries(replay_benchmark.out ${RB_NVPERF_CUDA_HOST})
+    endif()
+    if(RB_NVPERF_TARGET)
+      target_link_libraries(replay_benchmark.out ${RB_NVPERF_TARGET})
+    endif()
+    target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_CUDA)
+    target_include_directories(replay_benchmark.out PRIVATE ${CUDA_INCLUDE_DIRS})
+
+    # Standalone NVIDIA metric enumerator. Prints one metric name per line.
+    # Build target: list_cuda_metrics. Not built unless MNN_CUDA is ON.
+    cuda_add_executable(list_cuda_metrics
+        ${CMAKE_CURRENT_LIST_DIR}/list_cuda_metrics.cu)
+    target_include_directories(list_cuda_metrics PRIVATE
+        ${CUDA_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/source/backend/cuda)
+    find_library(LCM_CUPTI_LIBRARY cupti HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(LCM_NVPERF_HOST nvperf_host HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(LCM_NVPERF_TARGET nvperf_target HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    find_library(LCM_CUDA_DRIVER cuda HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib/stubs)
+    if(LCM_CUPTI_LIBRARY)
+      target_link_libraries(list_cuda_metrics ${LCM_CUPTI_LIBRARY} ${LCM_NVPERF_HOST} ${LCM_NVPERF_TARGET} ${LCM_CUDA_DRIVER} ${CUDA_LIBRARIES})
+    else()
+      target_link_libraries(list_cuda_metrics -lcupti ${LCM_NVPERF_HOST} ${LCM_NVPERF_TARGET} ${LCM_CUDA_DRIVER} ${CUDA_LIBRARIES})
+    endif()
+  else()
+    message(WARNING "MNN_CUDA enabled but CUDA toolkit not found; CUDA corpus backend disabled")
   endif()
 endif()
 

@@ -10,9 +10,8 @@
 namespace MNN {
 namespace PerfCounter {
 
-enum class GpuVendor { Unknown, Mali, Adreno };
-
-enum class GpuFamily { Unknown, Midgard, Bifrost, Valhall, Arm5thGen, AdrenoLegacy, AdrenoA7xx };
+enum class GpuVendor { Unknown, Mali, Adreno, Nvidia };
+enum class GpuFamily { Unknown, Midgard, Bifrost, Valhall, Arm5thGen, AdrenoLegacy, AdrenoA7xx, NvidiaTuring, NvidiaAmpere, NvidiaAda, NvidiaHopper, NvidiaOther };
 
 struct DeviceInfo {
     GpuVendor vendor = GpuVendor::Unknown;
@@ -49,6 +48,10 @@ std::vector<std::string> supportedCounterNames(const DeviceInfo& device);
 // Decode the raw Mali GPU_ID register used by the ARM driver family.
 bool identifyMali(uint64_t rawProductId, DeviceInfo* device);
 
+// Identify an NVIDIA GPU from a CUDA device ordinal. Returns true and fills
+// device on success. Uses CUPTI Range Profiler API internally.
+bool identifyNvidia(int deviceOrdinal, DeviceInfo* device);
+
 class Session {
 public:
     static Session* create(const CounterSpec* specs, size_t count, DeviceInfo* device, const char** error);
@@ -56,6 +59,14 @@ public:
 
     bool start();
     bool stop(CounterValue* values, size_t count);
+
+    // NVIDIA Range Profiler per-kernel range API (no-op on Mali/Adreno). For
+    // NVIDIA sessions using CUPTI Range Profiler, start()/stop() demarcate the
+    // profiling session, and beginRange()/endRange() wrap individual kernels.
+    // Returns false (no-op) if the backend has no range support.
+    bool beginRange(const char* rangeName);
+    bool endRange();
+
     const char* error() const;
 
 private:

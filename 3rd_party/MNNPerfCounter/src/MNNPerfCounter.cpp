@@ -1,6 +1,15 @@
 #include "MNNPerfCounter.hpp"
 #include "A7xxPerfCounters.hpp"
 
+#if defined(MNN_PERFCOUNTER_HAS_CUDA)
+#include "NvRangeProfilerInternal.hpp"
+#include <cuda.h>
+#include <cupti.h>
+#include <cupti_target.h>
+#include <cupti_profiler_target.h>
+#include <cupti_range_profiler.h>
+#endif
+
 #include "driver_ioctl.h"
 #include "hwcpipe/counter_database.hpp"
 #include "hwcpipe/gpu.hpp"
@@ -263,6 +272,15 @@ struct Session::Impl {
     std::unique_ptr<hwcpipe::sampler<>> maliSampler;
     std::vector<hwcpipe_counter> maliCounters;
     std::vector<CounterSpec> maliSpecs;
+    // NVIDIA Range Profiler state (only used when vendor == Nvidia).
+    std::string nvChipName;
+    std::vector<std::string> nvMetricNames;
+    std::vector<uint8_t> nvConfigImage;
+    std::vector<uint8_t> nvCounterDataImage;
+    std::vector<uint8_t> nvCounterDataScratch;
+    void* nvRangeObj = nullptr;  // CUpti_RangeProfiler_Object*
+    void* nvCtx = nullptr;       // CUcontext
+    int nvRangeDepth = 0;
     bool started = false;
 };
 
@@ -449,6 +467,20 @@ Session* Session::create(const CounterSpec* specs, size_t count, DeviceInfo* dev
 
     hwcpipe::gpu gpu(0);
     if (!gpu) {
+        // Try NVIDIA via CUPTI Range Profiler before giving up.
+#if defined(MNN_PERFCOUNTER_HAS_CUDA)
+        DeviceInfo nvDev;
+        if (identifyNvidia(0, &nvDev)) {
+            impl.vendor = GpuVendor::Nvidia;
+            impl.device = nvDev;
+            impl.nvMetricNames.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                impl.nvMetricNames.emplace_back(specs[i].name ? specs[i].name : "");
+            }
+            if (device != nullptr) *device = impl.device;
+            return session.release();
+        }
+#endif
         if (error != nullptr) *error = kUnavailable;
         return nullptr;
     }
@@ -501,6 +533,117 @@ bool Session::start() {
             mImpl->error = "Mali counter accumulation start failed";
             return false;
         }
+    } else if (mImpl->vendor == GpuVendor::Nvidia) {
+#if defined(MNN_PERFCOUNTER_HAS_CUDA)
+        // Lazy-build config/counterData images on first start() so create()
+        // stays cheap when the session is only probed.
+        if (mImpl->nvConfigImage.empty()) {
+            // Resolve chipName via CUPTI.
+            CUpti_Device_GetChipName_Params chipParams = {CUpti_Device_GetChipName_Params_STRUCT_SIZE};
+            chipParams.deviceIndex = 0; // single-device assumption
+            if (cuptiDeviceGetChipName(&chipParams) != CUPTI_SUCCESS) {
+                mImpl->error = "cuptiDeviceGetChipName failed";
+                return false;
+            }
+            mImpl->nvChipName = chipParams.pChipName ? chipParams.pChipName : "";
+            CUpti_Profiler_Initialize_Params initParams = {CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
+            if (cuptiProfilerInitialize(&initParams) != CUPTI_SUCCESS) {
+                mImpl->error = "cuptiProfilerInitialize failed";
+                return false;
+            }
+            if (!nvBuildConfigImage(mImpl->nvChipName, mImpl->nvMetricNames, &mImpl->nvConfigImage, &mImpl->error)) {
+                return false;
+            }
+            std::vector<uint8_t> prefix;
+            if (!nvBuildCounterDataPrefix(mImpl->nvChipName, mImpl->nvMetricNames, &prefix, &mImpl->error)) {
+                return false;
+            }
+            // Allocate counterDataImage + scratch via CounterDataImageOptions.
+            CUpti_Profiler_CounterDataImageOptions opts = {CUpti_Profiler_CounterDataImageOptions_STRUCT_SIZE};
+            opts.pCounterDataPrefix = prefix.data();
+            opts.counterDataPrefixSize = prefix.size();
+            opts.maxNumRanges = 1; // caller-driven; one range per beginRange/endRange per session
+            opts.maxNumRangeTreeNodes = 1;
+            opts.maxRangeNameLength = 256;
+
+            CUpti_Profiler_CounterDataImage_CalculateSize_Params sizeParams = {CUpti_Profiler_CounterDataImage_CalculateSize_Params_STRUCT_SIZE};
+            sizeParams.sizeofCounterDataImageOptions = CUpti_Profiler_CounterDataImageOptions_STRUCT_SIZE;
+            sizeParams.pOptions = &opts;
+            if (cuptiProfilerCounterDataImageCalculateSize(&sizeParams) != CUPTI_SUCCESS) {
+                mImpl->error = "cuptiProfilerCounterDataImageCalculateSize failed";
+                return false;
+            }
+            mImpl->nvCounterDataImage.resize(sizeParams.counterDataImageSize);
+            CUpti_Profiler_CounterDataImage_Initialize_Params initImg = {CUpti_Profiler_CounterDataImage_Initialize_Params_STRUCT_SIZE};
+            initImg.sizeofCounterDataImageOptions = CUpti_Profiler_CounterDataImageOptions_STRUCT_SIZE;
+            initImg.pOptions = &opts;
+            initImg.counterDataImageSize = mImpl->nvCounterDataImage.size();
+            initImg.pCounterDataImage = mImpl->nvCounterDataImage.data();
+            if (cuptiProfilerCounterDataImageInitialize(&initImg) != CUPTI_SUCCESS) {
+                mImpl->error = "cuptiProfilerCounterDataImageInitialize failed";
+                return false;
+            }
+            CUpti_Profiler_CounterDataImage_CalculateScratchBufferSize_Params sbs = {CUpti_Profiler_CounterDataImage_CalculateScratchBufferSize_Params_STRUCT_SIZE};
+            sbs.counterDataImageSize = mImpl->nvCounterDataImage.size();
+            sbs.pCounterDataImage = mImpl->nvCounterDataImage.data();
+            if (cuptiProfilerCounterDataImageCalculateScratchBufferSize(&sbs) != CUPTI_SUCCESS) {
+                mImpl->error = "scratch size failed";
+                return false;
+            }
+            mImpl->nvCounterDataScratch.resize(sbs.counterDataScratchBufferSize);
+            CUpti_Profiler_CounterDataImage_InitializeScratchBuffer_Params isb = {CUpti_Profiler_CounterDataImage_InitializeScratchBuffer_Params_STRUCT_SIZE};
+            isb.counterDataImageSize = mImpl->nvCounterDataImage.size();
+            isb.pCounterDataImage = mImpl->nvCounterDataImage.data();
+            isb.counterDataScratchBufferSize = mImpl->nvCounterDataScratch.size();
+            isb.pCounterDataScratchBuffer = mImpl->nvCounterDataScratch.data();
+            if (cuptiProfilerCounterDataImageInitializeScratchBuffer(&isb) != CUPTI_SUCCESS) {
+                mImpl->error = "scratch init failed";
+                return false;
+            }
+        }
+        // Get current CUDA context.
+        CUcontext cuCtx = nullptr;
+        if (cuCtxGetCurrent(&cuCtx) != CUDA_SUCCESS) {
+            mImpl->error = "cuCtxGetCurrent failed";
+            return false;
+        }
+        mImpl->nvCtx = cuCtx;
+        CUpti_RangeProfiler_Enable_Params en = {CUpti_RangeProfiler_Enable_Params_STRUCT_SIZE};
+        en.ctx = cuCtx;
+        if (cuptiRangeProfilerEnable(&en) != CUPTI_SUCCESS) {
+            mImpl->error = "cuptiRangeProfilerEnable failed";
+            return false;
+        }
+        mImpl->nvRangeObj = en.pRangeProfilerObject;
+        CUpti_RangeProfiler_SetConfig_Params sc = {CUpti_RangeProfiler_SetConfig_Params_STRUCT_SIZE};
+        sc.pRangeProfilerObject = en.pRangeProfilerObject;
+        sc.pConfig = mImpl->nvConfigImage.data();
+        sc.configSize = mImpl->nvConfigImage.size();
+        sc.counterDataImageSize = mImpl->nvCounterDataImage.size();
+        sc.pCounterDataImage = mImpl->nvCounterDataImage.data();
+        sc.range = CUPTI_UserRange;
+        sc.replayMode = CUPTI_UserReplay;
+        sc.maxRangesPerPass = 1;
+        sc.numNestingLevels = 1;
+        sc.minNestingLevel = 1;
+        sc.passIndex = 0;
+        if (cuptiRangeProfilerSetConfig(&sc) != CUPTI_SUCCESS) {
+            mImpl->error = "cuptiRangeProfilerSetConfig failed";
+            return false;
+        }
+        CUpti_RangeProfiler_Start_Params st = {CUpti_RangeProfiler_Start_Params_STRUCT_SIZE};
+        st.pRangeProfilerObject = en.pRangeProfilerObject;
+        CUptiResult sr = cuptiRangeProfilerStart(&st);
+        if (sr != CUPTI_SUCCESS) {
+            const char* es = nullptr;
+            cuptiGetResultString(sr, &es);
+            mImpl->error = std::string("cuptiRangeProfilerStart failed: ") + (es ? es : "unknown");
+            return false;
+        }
+#else
+        mImpl->error = kUnavailable;
+        return false;
+#endif
     } else {
         mImpl->error = kUnavailable;
         return false;
@@ -546,6 +689,39 @@ bool Session::stop(CounterValue* values, size_t count) {
             }
         }
         if (mImpl->maliSampler->stop_sampling()) ok = false;
+    } else if (mImpl->vendor == GpuVendor::Nvidia) {
+#if defined(MNN_PERFCOUNTER_HAS_CUDA)
+        // Stop the range profiler session and evaluate collected metrics.
+        CUpti_RangeProfiler_Object* rangeObj = static_cast<CUpti_RangeProfiler_Object*>(mImpl->nvRangeObj);
+        CUpti_RangeProfiler_Stop_Params st = {CUpti_RangeProfiler_Stop_Params_STRUCT_SIZE};
+        st.pRangeProfilerObject = rangeObj;
+        CUptiResult sr = cuptiRangeProfilerStop(&st);
+        if (sr != CUPTI_SUCCESS) {
+            const char* es = nullptr;
+            cuptiGetResultString(sr, &es);
+            mImpl->error = std::string("cuptiRangeProfilerStop failed: ") + (es ? es : "unknown");
+            ok = false;
+        }
+        CUpti_RangeProfiler_Disable_Params dis = {CUpti_RangeProfiler_Disable_Params_STRUCT_SIZE};
+        dis.pRangeProfilerObject = rangeObj;
+        cuptiRangeProfilerDisable(&dis); // best-effort
+        mImpl->nvRangeObj = nullptr;
+
+        if (ok) {
+            // Evaluate metrics from the counterDataImage (which holds all
+            // collected ranges). nvEvaluateMetrics sums across ranges and
+            // fills values[i] for metric i.
+            std::string evalErr;
+            if (!nvEvaluateMetrics(mImpl->nvChipName, mImpl->nvCounterDataImage, mImpl->nvMetricNames,
+                                   values, count, &evalErr)) {
+                mImpl->error = "nvEvaluateMetrics failed: " + evalErr;
+                ok = false;
+            }
+        }
+#else
+        mImpl->error = kUnavailable;
+        ok = false;
+#endif
     }
     mImpl->started = false;
     return ok;
@@ -553,6 +729,36 @@ bool Session::stop(CounterValue* values, size_t count) {
 
 const char* Session::error() const {
     return mImpl == nullptr ? kUnavailable : mImpl->error.c_str();
+}
+
+bool Session::beginRange(const char* rangeName) {
+    if (mImpl == nullptr || !mImpl->started || mImpl->vendor != GpuVendor::Nvidia) return false;
+    if (mImpl->nvRangeObj == nullptr) return false;
+#if defined(MNN_PERFCOUNTER_HAS_CUDA)
+    if (!nvBeginRange(mImpl->nvRangeObj, rangeName)) {
+        mImpl->error = "cuptiRangeProfilerPushRange failed";
+        return false;
+    }
+    ++mImpl->nvRangeDepth;
+    return true;
+#else
+    (void)rangeName;
+    return false;
+#endif
+}
+
+bool Session::endRange() {
+    if (mImpl == nullptr || mImpl->nvRangeDepth == 0) return false;
+#if defined(MNN_PERFCOUNTER_HAS_CUDA)
+    if (!nvEndRange(mImpl->nvRangeObj)) {
+        mImpl->error = "cuptiRangeProfilerPopRange failed";
+        return false;
+    }
+    --mImpl->nvRangeDepth;
+    return true;
+#else
+    return false;
+#endif
 }
 
 } // namespace PerfCounter
