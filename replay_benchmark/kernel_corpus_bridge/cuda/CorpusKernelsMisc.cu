@@ -952,6 +952,105 @@ __global__ void CONV_DW_204(const T* input, const half* kernel, const half* bias
     }
 }
 
+// ---- blitRegion 2.4.1: no count param, triple nested ZYX loop ----
+template <typename T>
+__global__ void blitRegion_241(const T* inputO, T* outputO, int loopCount,
+                                const int32_t* dstIndice, const int32_t* srcIndice,
+                                int dstUseIndice, int srcUseIndice, int dstStep, int srcStep, int srcLimit,
+                                int sizeZ, int sizeY, int sizeX,
+                                int strideZ, int strideY, int strideX,
+                                int dstStrideZ, int dstStrideY, int dstStrideX) {
+    int total = loopCount;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)total; i += blockDim.x * gridDim.x) {
+        int srcOffsetO = i * srcStep;
+        if (srcUseIndice >= 0) srcOffsetO = srcIndice[i] * srcStep;
+        int dstOffsetO = i * dstStep;
+        if (dstUseIndice >= 0) dstOffsetO = dstIndice[i] * dstStep;
+        if (srcOffsetO >= 0 && srcOffsetO < srcLimit) {
+            const T* input = inputO + srcOffsetO;
+            T* output = outputO + dstOffsetO;
+            for (int z = 0; z < sizeZ; ++z)
+                for (int y = 0; y < sizeY; ++y)
+                    for (int x = 0; x < sizeX; ++x)
+                        output[z*dstStrideZ + y*dstStrideY + x*dstStrideX] = input[z*strideZ + y*strideY + x*strideX];
+        } else {
+            T* output = outputO + dstOffsetO;
+            for (int z = 0; z < sizeZ; ++z)
+                for (int y = 0; y < sizeY; ++y)
+                    for (int x = 0; x < sizeX; ++x)
+                        output[z*dstStrideZ + y*dstStrideY + x*dstStrideX] = (T)0;
+        }
+    }
+}
+
+// ---- NCHW_2_NHWC 2.1.2: src_offset uses channel (not inChannelPack) ----
+template <typename T0, typename T1>
+__global__ void NCHW_2_NHWC_212(const T0* input, T1* output, const int maxCount, const int channel,
+                                 const int area, const int channel_pack,
+                                 MNN::Corpus::DivModFast d_oc, MNN::Corpus::DivModFast d_area) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        d_oc.divmod(index, temp, chnl_idx);
+        d_area.divmod(temp, batch_idx, area_idx);
+        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+
+// ---- GRID_SAMPLE_NEAREST 2.7.2: idx_cp = index % channel_pack, output[index] ----
+template <typename T>
+__global__ void GRID_SAMPLE_NEAREST_272(const int count, const T* input, const T* grid, T* output,
+                                         int ih, int iw, int oh, int ow, int ch, int ch_p,
+                                         int padMode, bool align) {
+    CUDA_KERNEL_LOOP(index, count) {
+        int idx_cp = index % ch_p;
+        int idx_nhw = index / ch_p;
+        int idx_ow = idx_nhw % ow;
+        int idx_nh = idx_nhw / ow;
+        int idx_oh = idx_nh % oh;
+        int idx_ob = idx_nh / oh;
+        if (idx_cp >= ch) { output[index] = (T)0.0; continue; }
+        float pos_x = grid[idx_nhw * 2 + 0];
+        float pos_y = grid[idx_nhw * 2 + 1];
+        // align corners
+        float igx = align ? (pos_x * (iw - 1) + 1) * 0.5f : (pos_x + 1) * 0.5f * iw;
+        float igy = align ? (pos_y * (ih - 1) + 1) * 0.5f : (pos_y + 1) * 0.5f * ih;
+        int ix = floor(igx + 0.5f), iy = floor(igy + 0.5f);
+        // border
+        if (padMode == 0) { ix = max(0, min(ix, iw-1)); iy = max(0, min(iy, ih-1)); }
+        else { if (ix < 0 || ix >= iw || iy < 0 || iy >= ih) { output[index] = (T)0.0; continue; } }
+        output[index] = input[((idx_ob * ih + iy) * iw + ix) * ch_p + idx_cp];
+    }
+}
+
+// ---- GRID_SAMPLE_BILINEAR 2.7.2 ----
+template <typename T>
+__global__ void GRID_SAMPLE_BILINEAR_272(const int count, const T* input, const T* grid, T* output,
+                                          int ih, int iw, int oh, int ow, int ch, int ch_p,
+                                          int padMode, bool align) {
+    CUDA_KERNEL_LOOP(index, count) {
+        int idx_cp = index % ch_p;
+        int idx_nhw = index / ch_p;
+        int idx_ow = idx_nhw % ow;
+        int idx_nh = idx_nhw / ow;
+        int idx_oh = idx_nh % oh;
+        int idx_ob = idx_nh / oh;
+        if (idx_cp >= ch) { output[index] = (T)0.0; continue; }
+        float pos_x = grid[idx_nhw * 2 + 0];
+        float pos_y = grid[idx_nhw * 2 + 1];
+        float igx = align ? (pos_x * (iw - 1) + 1) * 0.5f : (pos_x + 1) * 0.5f * iw;
+        float igy = align ? (pos_y * (ih - 1) + 1) * 0.5f : (pos_y + 1) * 0.5f * ih;
+        int ix0 = floor(igx), iy0 = floor(igy);
+        int ix1 = ceil(igx), iy1 = ceil(igy);
+        float xw = ix1 - igx, yw = iy1 - igy;
+        auto samp = [&](int v, int lim)->int { return padMode==0 ? max(0,min(v,lim-1)) : ((v<0||v>=lim)?-1:v); };
+        ix0 = samp(ix0, iw); iy0 = samp(iy0, ih);
+        ix1 = samp(ix1, iw); iy1 = samp(iy1, ih);
+        auto get = [&](int iy, int ix)->float { return (iy==-1||ix==-1)?0.0f:(float)input[((idx_ob*ih+iy)*iw+ix)*ch_p+idx_cp]; };
+        output[index] = (T)(get(iy0,ix0)*xw*yw + get(iy0,ix1)*(1.0f-xw)*yw + get(iy1,ix0)*xw*(1.0f-yw) + get(iy1,ix1)*(1.0f-xw)*(1.0f-yw));
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -1218,6 +1317,47 @@ void mnn_corpus_interp_bilinear_120_fp32(const int n, int ih, int iw, int oh, in
                                          float sh, float sw, float ohf, float owf,
                                          const float* in, float* out, int grid, int block, cudaStream_t stream) {
     MNN::Corpus::INTERP_BILINEAR_120<float><<<grid, block, 0, stream>>>(n, ih, iw, oh, ow, sh, sw, ohf, owf, in, out);
+}
+
+// ============================================================================
+// Intermediate version shims (Misc)
+// ============================================================================
+
+// ---- blitRegion 2.4.1: no count param ----
+void mnn_corpus_blitregion_241_fp32(const float* input, float* output, int loopCount,
+                                     const int32_t* dstIndice, const int32_t* srcIndice,
+                                     int dstUseIndice, int srcUseIndice, int dstStep, int srcStep, int srcLimit,
+                                     int sizeZ, int sizeY, int sizeX,
+                                     int strideZ, int strideY, int strideX,
+                                     int dstStrideZ, int dstStrideY, int dstStrideX,
+                                     int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::blitRegion_241<float><<<grid, block, 0, stream>>>(input, output, loopCount,
+        dstIndice, srcIndice, dstUseIndice, srcUseIndice, dstStep, srcStep, srcLimit,
+        sizeZ, sizeY, sizeX, strideZ, strideY, strideX, dstStrideZ, dstStrideY, dstStrideX);
+}
+
+// ---- NCHW_2_NHWC 2.1.2: src_offset uses channel ----
+void mnn_corpus_nhwc2nchw_212_fp32(const float* input, float* output, int total, int channel, int area, int channel_pack,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(channel_pack);
+    MNN::Corpus::DivModFast d_area(area);
+    MNN::Corpus::NCHW_2_NHWC_212<float, float><<<grid, block, 0, stream>>>(input, output, total, channel, area, channel_pack, d_oc, d_area);
+}
+
+// ---- GRID_SAMPLE_NEAREST 2.7.2: output[index], idx_cp = index % channel_pack ----
+void mnn_corpus_grid_sample_nearest_272_fp32(const int count, const float* input, const float* grid, float* output,
+                                               int ih, int iw, int oh, int ow, int ch, int ch_p,
+                                               int padMode, int align, int grid_, int block, cudaStream_t stream) {
+    MNN::Corpus::GRID_SAMPLE_NEAREST_272<float><<<grid_, block, 0, stream>>>(
+        count, input, grid, output, ih, iw, oh, ow, ch, ch_p, padMode, align != 0);
+}
+
+// ---- GRID_SAMPLE_BILINEAR 2.7.2 ----
+void mnn_corpus_grid_sample_bilinear_272_fp32(const int count, const float* input, const float* grid, float* output,
+                                                int ih, int iw, int oh, int ow, int ch, int ch_p,
+                                                int padMode, int align, int grid_, int block, cudaStream_t stream) {
+    MNN::Corpus::GRID_SAMPLE_BILINEAR_272<float><<<grid_, block, 0, stream>>>(
+        count, input, grid, output, ih, iw, oh, ow, ch, ch_p, padMode, align != 0);
 }
 
 } // extern "C"

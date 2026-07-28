@@ -500,6 +500,218 @@ __global__ void global_maxpool_C8(const T* input, T* output, const int outside, 
     output[idx_outside * inside + idx_inside] = (T)maxValue;
 }
 
+// ============================================================================
+// Intermediate version kernels (body-diff confirmed, each needs independent shim)
+// ============================================================================
+
+// ---- CLAMP 1.2.7: templatized (float*→T*) — body identical, type differs ----
+// (fp32 instantiation is functionally same as 1.2.0 but body source differs)
+// Reuse CLAMP<float> — no separate kernel needed for fp32 corpus.
+
+// ---- SCALE 1.2.7: float* scale/bias, PACK_NUMBER channel packing ----
+template <typename T>
+__global__ void SCALE_127(const int n, const int channels, const int dim, const T* in, T* out,
+                          const float* scaleData, const float* biasData) {
+    const int PACK_NUMBER = 4;
+    CUDA_KERNEL_LOOP(count, n) {
+        int index = count / PACK_NUMBER;
+        int r = count % PACK_NUMBER;
+        int c = (index / dim) * PACK_NUMBER + r;
+        out[count] = (T)((float)in[count] * scaleData[c] + biasData[c]);
+    }
+}
+
+// ---- ARGMAX 1.2.7: T* output (index stored as T) ----
+template <typename T>
+__global__ void ARGMAX_127(const int count, const int outside, const int inside, const int dim,
+                           const T* input, T* output) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        const int o = i / inside;
+        const int n = i % inside;
+        T* outPtr = output + inside * o;
+        const T* inpPtr = input + inside * dim * o;
+        int index = 0;
+        T maxValue = inpPtr[0];
+        for (int j = 1; j < dim; j++) {
+            T value = inpPtr[j * inside];
+            if (maxValue < value) { index = j; maxValue = value; }
+        }
+        outPtr[n] = (T)index;
+    }
+}
+
+// ---- ARGMAX 1.2.8 / 2.1.2: int* output, n+offset indexing ----
+template <typename T>
+__global__ void ARGMAX_128(const int count, const int outside, const int inside, const int dim,
+                           const T* input, int* output) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        const int o = i / inside;
+        const int n = i % inside;
+        int* outPtr = output + inside * o;
+        const T* inpPtr = input + inside * dim * o;
+        int index = 0;
+        T maxValue = inpPtr[n + 0 * inside];
+        for (int j = 1; j < dim; j++) {
+            T value = inpPtr[n + j * inside];
+            if (maxValue < value) { index = j; maxValue = value; }
+        }
+        outPtr[n] = index;
+    }
+}
+
+// ---- ARGMAX 2.5.0: pointer-baked offset, outPtr[0] ----
+template <typename T>
+__global__ void ARGMAX_250(const int count, const int outside, const int inside, const int dim,
+                           const T* input, int* output) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        const int idx_out = i / inside;
+        const int idx_in = i % inside;
+        int* outPtr = output + idx_out * inside + idx_in;
+        const T* inpPtr = input + idx_out * inside * dim + idx_in;
+        int index = 0;
+        T maxValue = inpPtr[0 * inside];
+        for (int j = 1; j < dim; j++) {
+            T value = inpPtr[j * inside];
+            if (maxValue < value) { index = j; maxValue = value; }
+        }
+        outPtr[0] = index;
+    }
+}
+
+// ---- Reduction 1.2.7: ReduceParam struct, float accumulator ----
+struct ReduceParam_127 { int inside; int axis; int outside; };
+template <typename T>
+__global__ void SUM_127(const T* input, T* output, const ReduceParam_127* param) {
+    int count = param->inside * param->outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int y = i / param->inside, x = i % param->inside;
+        float sumValue = 0.0;
+        const T* basicInput = input + y * param->axis * param->inside + x;
+        for (int v = 0; v < param->axis; ++v) sumValue += (float)basicInput[v * param->inside];
+        output[y * param->inside + x] = (T)sumValue;
+    }
+}
+template <typename T>
+__global__ void MEAN_127(const T* input, T* output, const ReduceParam_127* param) {
+    int count = param->inside * param->outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int y = i / param->inside, x = i % param->inside;
+        float sumValue = 0.0;
+        const T* basicInput = input + y * param->axis * param->inside + x;
+        for (int v = 0; v < param->axis; ++v) sumValue += (float)basicInput[v * param->inside];
+        output[y * param->inside + x] = (T)(sumValue / (float)param->axis);
+    }
+}
+template <typename T>
+__global__ void MAXIMUM_127(const T* input, T* output, const ReduceParam_127* param) {
+    int count = param->inside * param->outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int y = i / param->inside, x = i % param->inside;
+        const T* basicInput = input + y * param->axis * param->inside + x;
+        float res = (float)basicInput[0];
+        for (int v = 1; v < param->axis; ++v) res = max((float)basicInput[v * param->inside], res);
+        output[y * param->inside + x] = (T)res;
+    }
+}
+template <typename T>
+__global__ void MINIMUM_127(const T* input, T* output, const ReduceParam_127* param) {
+    int count = param->inside * param->outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int y = i / param->inside, x = i % param->inside;
+        const T* basicInput = input + y * param->axis * param->inside + x;
+        float res = (float)basicInput[0];
+        for (int v = 1; v < param->axis; ++v) res = min((float)basicInput[v * param->inside], res);
+        output[y * param->inside + x] = (T)res;
+    }
+}
+template <typename T>
+__global__ void PROD_127(const T* input, T* output, const ReduceParam_127* param) {
+    int count = param->inside * param->outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int y = i / param->inside, x = i % param->inside;
+        float sumValue = 1.0;
+        const T* basicInput = input + y * param->axis * param->inside + x;
+        for (int v = 0; v < param->axis; ++v) sumValue *= (float)basicInput[v * param->inside];
+        output[y * param->inside + x] = (T)sumValue;
+    }
+}
+
+// ---- SELECT 2.7.2: no stride params ----
+template <typename T>
+__global__ void SELECT_272(const int size, const int* input0, const T* input1, const T* input2, T* output) {
+    CUDA_KERNEL_LOOP(i, size) {
+        output[i] = (input0[i] > 0) ? input1[i] : input2[i];
+    }
+}
+
+// ---- SOFTMAX 2.2.2: ReduceParam struct ----
+template <typename T>
+__global__ void SOFTMAX_222(const T* input, T* output, const ReduceParam_127* param) {
+    int inside = param->inside, axis = param->axis, outside = param->outside;
+    int count = inside * outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int y = i / inside, x = i % inside;
+        const T* src = input + y * axis * inside + x;
+        T* dst = output + y * axis * inside + x;
+        float maxValue = (float)src[0];
+        for (int z = 1; z < axis; ++z) maxValue = max(maxValue, (float)src[z * inside]);
+        float sumValue = 0.0;
+        for (int z = 0; z < axis; ++z) sumValue += exp((float)src[z * inside] - maxValue);
+        sumValue = 1.0 / sumValue;
+        for (int z = 0; z < axis; ++z) dst[z * inside] = (T)(exp((float)src[z * inside] - maxValue) * sumValue);
+    }
+}
+
+// ---- INTERP_NERAEST 1.2.7: PACK_NUMBER, no c_p ----
+template <typename T>
+__global__ void INTERP_NERAEST_127(const int n, const int ih, const int iw, const int oh, const int ow,
+                                    const float scaleh, const float scalew, const float offseth, const float offsetw,
+                                    const T* in, T* out) {
+    const int PACK_NUMBER = 4;
+    CUDA_KERNEL_LOOP(total, n) {
+        int index = total / PACK_NUMBER;
+        int remain = total % PACK_NUMBER;
+        int x = index % ow;
+        int tmp = index / ow;
+        int y = tmp % oh;
+        int z = tmp / oh;
+        int ix = min(max(0, (int)floor((float)x * scalew + offsetw)), iw - 1);
+        int iy = min(max(0, (int)floor((float)y * scaleh + offseth)), ih - 1);
+        out[(z * oh * ow + y * ow + x) * PACK_NUMBER + remain]
+            = in[(z * ih * iw + iy * iw + ix) * PACK_NUMBER + remain];
+    }
+}
+
+// ---- INTERP_BILINEAR 1.2.7: PACK_NUMBER, no c_p ----
+template <typename T>
+__global__ void INTERP_BILINEAR_127(const int n, const int ih, const int iw, const int oh, const int ow,
+                                     const float scaleh, const float scalew, const float offseth, const float offsetw,
+                                     const T* in, T* out) {
+    const int PACK_NUMBER = 4;
+    CUDA_KERNEL_LOOP(total, n) {
+        int index = total / PACK_NUMBER;
+        int remain = total % PACK_NUMBER;
+        int x = index % ow;
+        int tmp = index / ow;
+        int y = tmp % oh;
+        int z = tmp / oh;
+        float fx = x * scalew + offsetw;
+        int ix_0 = min(max(0, (int)floor(fx)), iw - 1);
+        int ix_1 = min((int)ceil(fx), iw - 1);
+        float fy = y * scaleh + offseth;
+        int iy_0 = min(max(0, (int)floor(fy)), ih - 1);
+        int iy_1 = min((int)ceil(fy), ih - 1);
+        int i00 = (z * ih * iw + iy_0 * iw + ix_0) * PACK_NUMBER + remain;
+        int i01 = (z * ih * iw + iy_0 * iw + ix_1) * PACK_NUMBER + remain;
+        int i10 = (z * ih * iw + iy_1 * iw + ix_0) * PACK_NUMBER + remain;
+        int i11 = (z * ih * iw + iy_1 * iw + ix_1) * PACK_NUMBER + remain;
+        float fx_w = fx - ix_0, fy_w = fy - iy_0;
+        out[(z * oh * ow + y * ow + x) * PACK_NUMBER + remain] = (T)(
+            (1.0 - fx_w) * (1.0 - fy_w) * (float)in[i00] + fx_w * (1.0 - fy_w) * (float)in[i01] +
+            (1.0 - fx_w) * fy_w * (float)in[i10] + fx_w * fy_w * (float)in[i11]);
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -759,6 +971,89 @@ void mnn_corpus_global_maxpool_fp16(const void* input, void* output, int outside
                                      cudaStream_t stream) {
     MNN::Corpus::global_maxpool_C8<half><<<grid, block, 0, stream>>>((const half*)input, (half*)output, outside, axis,
                                                                        inside, per_block_size, calc_multi_num);
+}
+
+// ============================================================================
+// Intermediate version shims
+// ============================================================================
+
+// ---- SCALE 1.2.7 ----
+void mnn_corpus_scale_127_fp32(const int n, const int channels, const int dim, const float* in, float* out,
+                                const float* scaleData, const float* biasData, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SCALE_127<float><<<grid, block, 0, stream>>>(n, channels, dim, in, out, scaleData, biasData);
+}
+
+// ---- CLAMP 1.2.7 (templatized, fp32 = same as 1.2.0 body) ----
+void mnn_corpus_clamp_127_fp32(const float* input, float* output, size_t count, float minV, float maxV,
+                                int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::CLAMP<float><<<grid, block, 0, stream>>>(input, output, count, minV, maxV);
+}
+
+// ---- ARGMAX 1.2.7 (T* output) ----
+void mnn_corpus_argmax_127_fp32(const int count, const int outside, const int inside, const int dim,
+                                  const float* input, float* output, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::ARGMAX_127<float><<<grid, block, 0, stream>>>(count, outside, inside, dim, input, output);
+}
+// ---- ARGMAX 1.2.8 / 2.1.2 (int* output, n+offset) ----
+void mnn_corpus_argmax_128_fp32(const int count, const int outside, const int inside, const int dim,
+                                  const float* input, int* output, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::ARGMAX_128<float><<<grid, block, 0, stream>>>(count, outside, inside, dim, input, output);
+}
+void mnn_corpus_argmax_212_fp32(const int count, const int outside, const int inside, const int dim,
+                                  const float* input, int* output, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::ARGMAX_128<float><<<grid, block, 0, stream>>>(count, outside, inside, dim, input, output);
+}
+// ---- ARGMAX 2.5.0 (pointer-baked) ----
+void mnn_corpus_argmax_250_fp32(const int count, const int outside, const int inside, const int dim,
+                                  const float* input, int* output, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::ARGMAX_250<float><<<grid, block, 0, stream>>>(count, outside, inside, dim, input, output);
+}
+
+// ---- Reduction 1.2.7 (ReduceParam struct) ----
+void mnn_corpus_reduction_sum_127_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
+                                       int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SUM_127<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+void mnn_corpus_reduction_mean_127_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
+                                         int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::MEAN_127<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+void mnn_corpus_reduction_max_127_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
+                                        int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::MAXIMUM_127<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+void mnn_corpus_reduction_min_127_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
+                                        int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::MINIMUM_127<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+void mnn_corpus_reduction_prod_127_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
+                                         int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::PROD_127<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+
+// ---- SELECT 2.7.2 (no stride) ----
+void mnn_corpus_select_272_fp32(const int size, const int* sel, const float* in1, const float* in2,
+                                 float* output, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SELECT_272<float><<<grid, block, 0, stream>>>(size, sel, in1, in2, output);
+}
+
+// ---- SOFTMAX 2.2.2 (ReduceParam) ----
+void mnn_corpus_softmax_222_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
+                                  int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SOFTMAX_222<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+
+// ---- INTERP_NERAEST 1.2.7 (PACK_NUMBER, no c_p) ----
+void mnn_corpus_interp_nearest_127_fp32(const int n, int ih, int iw, int oh, int ow,
+                                         float sh, float sw, float ohf, float owf,
+                                         const float* in, float* out, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::INTERP_NERAEST_127<float><<<grid, block, 0, stream>>>(n, ih, iw, oh, ow, sh, sw, ohf, owf, in, out);
+}
+// ---- INTERP_BILINEAR 1.2.7 (PACK_NUMBER, no c_p) ----
+void mnn_corpus_interp_bilinear_127_fp32(const int n, int ih, int iw, int oh, int ow,
+                                          float sh, float sw, float ohf, float owf,
+                                          const float* in, float* out, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::INTERP_BILINEAR_127<float><<<grid, block, 0, stream>>>(n, ih, iw, oh, ow, sh, sw, ohf, owf, in, out);
 }
 
 } // extern "C"

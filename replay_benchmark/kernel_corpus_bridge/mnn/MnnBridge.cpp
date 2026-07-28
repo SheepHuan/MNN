@@ -25,8 +25,8 @@ bool MnnBridge::supports(const std::string& framework, const std::string& tag) c
     // CUDA corpus spans 1.2.0 through 3.6.0; intermediate tags are added as
     // their kernel variants are implemented in the adapters.
     static const char* kSupported[] = {
-        "1.2.0", "1.2.7", "1.2.8", "2.0.2", "2.0.4", "2.1.2", "2.2.2", "2.2.3", "2.4.2",
-        "2.5.1", "2.5.3", "2.7.1", "2.8.0", "2.8.4", "3.6.0"
+        "1.2.0", "1.2.7", "1.2.8", "2.0.2", "2.0.4", "2.1.2", "2.2.2", "2.2.3", "2.4.1", "2.4.2",
+        "2.5.0", "2.5.1", "2.5.3", "2.7.1", "2.7.2", "2.8.0", "2.8.4", "3.6.0"
     };
     for (auto t : kSupported) if (tag == t) return true;
     return false;

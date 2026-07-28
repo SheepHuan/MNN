@@ -36,6 +36,11 @@ void mnn_corpus_layernorm_222_fp32(const int, const int, const int, const float,
 void mnn_corpus_prelu_120_fp32(const int, const int, const int, const float*, float*, const float*, int, int, int, cudaStream_t);
 void mnn_corpus_prelu_127_fp32(const int, const int, const int, const float*, float*, const float*, int, int, int, cudaStream_t);
 void mnn_corpus_prelu_128_fp32(const int, const int, const int, const float*, float*, const float*, int, int, int, cudaStream_t);
+// Intermediate version shims (defined in CorpusKernels.cu)
+void mnn_corpus_scale_127_fp32(const int, const int, const int, const float*, float*, const float*, const float*, int, int, cudaStream_t);
+void mnn_corpus_clamp_127_fp32(const float*, float*, size_t, float, float, int, int, cudaStream_t);
+void mnn_corpus_select_272_fp32(const int, const int*, const float*, const float*, float*, int, int, cudaStream_t);
+void mnn_corpus_softmax_222_fp32(const float*, float*, const void*, int, int, cudaStream_t);
 }
 
 namespace MNN {
@@ -126,7 +131,8 @@ bool CudaReluInt8Kernel::validate(const AdaptedCase& ac, const std::vector<float
 // Unary: CLAMP fp32 (relu6: min=0, max=6)
 // ============================================================================
 bool CudaClampFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    ac.entry = "mnn_corpus_clamp_fp32";
+    if (spec.tag == "1.2.7") ac.entry = "mnn_corpus_clamp_127_fp32";
+    else ac.entry = "mnn_corpus_clamp_fp32";
     const int count = spec.intParam("size", 1024);
     const float minV = spec.floatParam("min_v", 0.0f);
     const float maxV = spec.floatParam("max_v", 6.0f);
@@ -144,9 +150,14 @@ bool CudaClampFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.validatorInputA = input; ac.elementCount = count;
     return true;
 }
-cudaError_t CudaClampFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
-    mnn_corpus_clamp_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1], (size_t)ctx.intArgs[0],
-                           ctx.floatArgs[0], ctx.floatArgs[1], ctx.grid, ctx.block, ctx.stream);
+cudaError_t CudaClampFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    if (ac.tag == "1.2.7") {
+        mnn_corpus_clamp_127_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1], (size_t)ctx.intArgs[0],
+                                    ctx.floatArgs[0], ctx.floatArgs[1], ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_clamp_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1], (size_t)ctx.intArgs[0],
+                               ctx.floatArgs[0], ctx.floatArgs[1], ctx.grid, ctx.block, ctx.stream);
+    }
     return cudaGetLastError();
 }
 bool CudaClampFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -413,7 +424,8 @@ bool CudaRangeFp32Kernel::validate(const AdaptedCase& ac, const std::vector<floa
 // Select
 // ============================================================================
 bool CudaSelectFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    ac.entry = "mnn_corpus_select_fp32";
+    if (spec.tag == "2.7.2") ac.entry = "mnn_corpus_select_272_fp32";
+    else ac.entry = "mnn_corpus_select_fp32";
     const int count = spec.intParam("size", 1024);
     std::vector<int32_t> sel(count);
     for (int i = 0; i < count; ++i) sel[i] = i % 2;
@@ -429,17 +441,24 @@ bool CudaSelectFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.args.push_back(AdaptedArg::buffer(0));
     ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::buffer(2));
-    ac.args.push_back(AdaptedArg::scalarInt(1));  // s1
-    ac.args.push_back(AdaptedArg::scalarInt(1));  // s2
+    if (spec.tag != "2.7.2") {
+        ac.args.push_back(AdaptedArg::scalarInt(1));  // s1
+        ac.args.push_back(AdaptedArg::scalarInt(1));  // s2
+    }
     ac.args.push_back(AdaptedArg::buffer(3));
     ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
     ac.validatorInputA = in1; ac.validatorInputB = in2; ac.elementCount = count;
     return true;
 }
-cudaError_t CudaSelectFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
-    mnn_corpus_select_fp32(ctx.intArgs[0], (const int*)ctx.devBufs[0], (const float*)ctx.devBufs[1],
-                            (const float*)ctx.devBufs[2], ctx.intArgs[1], ctx.intArgs[2],
-                            (float*)ctx.devBufs[3], ctx.grid, ctx.block, ctx.stream);
+cudaError_t CudaSelectFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    if (ac.tag == "2.7.2") {
+        mnn_corpus_select_272_fp32(ctx.intArgs[0], (const int*)ctx.devBufs[0], (const float*)ctx.devBufs[1],
+                                    (const float*)ctx.devBufs[2], (float*)ctx.devBufs[3], ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_select_fp32(ctx.intArgs[0], (const int*)ctx.devBufs[0], (const float*)ctx.devBufs[1],
+                                (const float*)ctx.devBufs[2], ctx.intArgs[1], ctx.intArgs[2],
+                                (float*)ctx.devBufs[3], ctx.grid, ctx.block, ctx.stream);
+    }
     return cudaGetLastError();
 }
 bool CudaSelectFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -456,7 +475,8 @@ bool CudaSelectFp32Kernel::validate(const AdaptedCase& ac, const std::vector<flo
 // Softmax
 // ============================================================================
 bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    ac.entry = "mnn_corpus_softmax_fp32";
+    if (spec.tag == "2.2.2") ac.entry = "mnn_corpus_softmax_222_fp32";
+    else ac.entry = "mnn_corpus_softmax_fp32";
     const int outside = spec.intParam("outside", 4);
     const int axis = spec.intParam("axis", 16);
     const int inside = spec.intParam("inside", 1);
@@ -468,19 +488,34 @@ bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
     ac.args.push_back(AdaptedArg::buffer(0));
     ac.args.push_back(AdaptedArg::buffer(1));
-    ac.args.push_back(AdaptedArg::scalarInt(inside));
-    ac.args.push_back(AdaptedArg::scalarInt(axis));
-    ac.args.push_back(AdaptedArg::scalarInt(outside));
-    ac.args.push_back(AdaptedArg::scalarInt(count));
+    if (spec.tag == "2.2.2") {
+        // ReduceParam_127 { int inside; int axis; int outside; }
+        struct P { int inside; int axis; int outside; } p{inside, axis, outside};
+        AdaptedBuffer pb; pb.sizeBytes = sizeof(P);
+        pb.initialData.assign((const uint8_t*)&p, (const uint8_t*)&p + sizeof(P));
+        pb.isOutput = false;
+        ac.buffers.push_back(pb);
+        ac.args.push_back(AdaptedArg::buffer(2));
+    } else {
+        ac.args.push_back(AdaptedArg::scalarInt(inside));
+        ac.args.push_back(AdaptedArg::scalarInt(axis));
+        ac.args.push_back(AdaptedArg::scalarInt(outside));
+        ac.args.push_back(AdaptedArg::scalarInt(count));
+    }
     ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = count;
     ac.m = outside; ac.n = axis; ac.k = inside;
     return true;
 }
-cudaError_t CudaSoftmaxFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
-    mnn_corpus_softmax_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
-                              ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-                              ctx.grid, ctx.block, ctx.stream);
+cudaError_t CudaSoftmaxFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    if (ac.tag == "2.2.2") {
+        mnn_corpus_softmax_222_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
+                                     (const void*)ctx.devBufs[2], ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_softmax_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
+                                  ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
+                                  ctx.grid, ctx.block, ctx.stream);
+    }
     return cudaGetLastError();
 }
 bool CudaSoftmaxFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -769,6 +804,8 @@ bool CudaPreluFp32Kernel::validate(const AdaptedCase& ac, const std::vector<floa
 bool CudaScaleFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag == "1.2.0") {
         ac.entry = "mnn_corpus_scale_120_fp32";
+    } else if (spec.tag == "1.2.7") {
+        ac.entry = "mnn_corpus_scale_127_fp32";
     } else {
         ac.entry = "mnn_corpus_scale_fp32";
     }
@@ -797,12 +834,17 @@ bool CudaScaleFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     }
     ac.dims = 1;
     ac.validatorInputA = input; ac.validatorInputB = scale; ac.elementCount = total;
-    ac.n = channelsPack; ac.validatorInputA.resize(total); // will use validatorInputB for bias
+    ac.n = channelsPack; // will use validatorInputB for bias
     return true;
 }
 cudaError_t CudaScaleFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
     if (ac.tag == "1.2.0") {
         mnn_corpus_scale_120_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                   (const float*)ctx.devBufs[0], (float*)ctx.devBufs[3],
+                                   (const float*)ctx.devBufs[1], (const float*)ctx.devBufs[2],
+                                   ctx.grid, ctx.block, ctx.stream);
+    } else if (ac.tag == "1.2.7") {
+        mnn_corpus_scale_127_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
                                    (const float*)ctx.devBufs[0], (float*)ctx.devBufs[3],
                                    (const float*)ctx.devBufs[1], (const float*)ctx.devBufs[2],
                                    ctx.grid, ctx.block, ctx.stream);
@@ -819,7 +861,16 @@ bool CudaScaleFp32Kernel::validate(const AdaptedCase& ac, const std::vector<floa
     if ((int)output.size() < total) return false;
     // validatorInputB holds scale; reconstruct bias as 1.0 (we set it so)
     for (int i = 0; i < total; ++i) {
-        const int c = i % channelsPack;
+        int c;
+        if (ac.tag == "1.2.7") {
+            // PACK_NUMBER=4: index = i/4, r = i%4, c = (index/dim)*4 + r, dim = total/channelsPack
+            const int dim = total / channelsPack;
+            const int index = i / 4;
+            const int r = i % 4;
+            c = (index / dim) * 4 + r;
+        } else {
+            c = i % channelsPack;
+        }
         const float expected = ac.validatorInputA[i] * ac.validatorInputB[c] + 1.0f;
         if (std::fabs(output[i] - expected) > 1e-3f) return false;
     }
