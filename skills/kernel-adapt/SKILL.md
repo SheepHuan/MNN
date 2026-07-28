@@ -497,14 +497,43 @@ for c in opencl:
 
 ```
 replay_benchmark/kernel_corpus_bridge/cuda/
-├── CudaOpAdapter.hpp          ← CudaOpAdapter 接口 + CudaLaunchCtx
-├── CudaOps.hpp                ← 所有 adapter 类声明（共享） + kBlock/gridFor helper
-├── CorpusKernels.cu            ← A类 kernel 重实现 + extern "C" shim
-├── CorpusKernelsMisc.cu        ← B类 kernel + 1.2.0 tag 独立 kernel
-├── CudaOps.cpp                ← A类 fp32 adapter（g++ 编译）
-├── CudaOpsMisc.cpp            ← B类 fp32 adapter + 1.2.0 tag adapter（g++ 编译）
-└── CudaOpsFp16.cu             ← fp16/int8 adapter（nvcc 编译，__half 不可用于 g++）
+├── CudaOpAdapter.hpp              ← CudaOpAdapter 接口 + CudaLaunchCtx
+├── CudaOps.hpp                    ← 所有 adapter 类声明（共享） + kBlock/gridFor/fillInputRamp/mnnBlock120 helper
+├── CudaOps.cpp                    ← A类 fp32 adapter: relu/clamp/cast/binary/range/select/softmax/layernorm/prelu/scale/pool（g++ 编译，不拆分）
+├── CudaOpsMisc.cpp                ← B类 fp32 adapter: gatherv2/argmax/interp/transpose/gridsample/reduction/topkv2/raster/convdw/pack_c4 等（g++ 编译，不拆分）
+├── CudaOpsFp16.cu                 ← fp16/int8/bf16 adapter（nvcc 编译，__half 不可用于 g++）
+└── kernels/                       ← GPU kernel 定义层（nvcc 编译，按算子类型分文件）
+    ├── corpus_common.cuh           ← 共享 device helper: warpReduceSum/blockReduceMax/CUDA_KERNEL_LOOP/DivModFast/ReduceParam_127
+    ├── unary_cast.cu               ← RELU/CLAMP/CAST 各版本
+    ├── binary.cu                   ← ATAN2/MOD/LOGICALOR
+    ├── range.cu                    ← RANGE
+    ├── select.cu                   ← SELECT 3.6.0 + 2.7.2
+    ├── softmax.cu                  ← SOFTMAX 3.6.0 + 2.2.2
+    ├── layernorm.cu                ← LAYERNORM 3.6.0/1.2.7/2.2.2/1.2.0
+    ├── prelu.cu                    ← PRELU 3.6.0/1.2.7/1.2.8/1.2.0
+    ├── scale.cu                    ← SCALE 3.6.0/1.2.7/1.2.0
+    ├── pool.cu                     ← MAXPOOL/AVGPOOL/GLOBAL 3.6.0/1.2.0
+    ├── gatherv2_argmax.cu          ← GATHERV2 + ARGMAX/ARGMIN 3.6.0/1.2.0/1.2.7/1.2.8/2.1.2/2.5.0
+    ├── interp.cu                   ← INTERP nearest/bilinear/round 3.6.0/1.2.0/1.2.7
+    ├── transpose.cu                ← NHWC↔NCHW 3.6.0/2.1.2
+    ├── gridsample.cu               ← GRID_SAMPLE nearest/bilinear/3D 3.6.0/2.7.2
+    ├── reduction_naive.cu          ← SUM/MEAN/MAX/MIN/PROD 3.6.0/1.2.0/1.2.7
+    ├── topkv2.cu                   ← TopKAllRows/GetResultAllRows
+    ├── raster.cu                  ← blitRegion 3.6.0/2.4.1 + pack_c4/unpack_c4/setzero/add_bias 1.2.0
+    └── convdw.cu                   ← CONV_DW 3.6.0/1.2.0/2.0.4
 ```
+
+**拆分规则**（kernels/ 层）：
+- 每个 `.cu` 文件按**算子类型**命名，同一算子的所有版本（3.6.0 + 1.2.7 + 1.2.0 等）放同一文件
+- `__global__` kernel 和调用它的 `extern "C"` shim 必须在同一 `.cu` 文件（CUDA 要求 kernel host stub 同 TU 可见）
+- 共享 device helper 放 `corpus_common.cuh`（inline/device-template，无 ODR 问题）
+- **adapter 层（CudaOps.cpp/CudaOpsMisc.cpp/CudaOpsFp16.cu）暂不拆分**，保持按 A/B 类 + 数据类型分文件
+
+**不拆 adapter 的原因**：
+- `extern "C"` 前向声明分散在 4 处（CudaOps.cpp 顶部、CudaOpsMisc.cpp 中间 4 个块、CudaOpsFp16.cu 顶部），拆分后需在各子文件重复声明
+- `REDUCTION_ADAPTER`/`REDUCTION_ADAPTER_REUSE` 宏定义在 CudaOpsMisc.cpp 中间，需整体搬到 reduction.cpp
+- CudaOpsFp16.cu 需 nvcc 编译，拆分后各 .cu 要加入 `cuda_add_library`，收益不大
+- CudaOps.hpp 是公共声明头，保留所有 adapter 类声明集中放置（类似 `<vector>`）
 
 ### CUDA Shim 模式（固定规则）
 
@@ -513,7 +542,27 @@ replay_benchmark/kernel_corpus_bridge/cuda/
 3. **每个 kernel 配一个 `extern "C"` 启动 shim**（如 `mnn_corpus_relu_fp32`），签名只含 POD 类型（`const float*`/`int`/`cudaStream_t`），不含 C++ 类
 4. **shim 定义在 `.cu` 文件里**（nvcc 编译），**shim 声明在 adapter `.cpp` 文件顶部的 `extern "C" {}` 块里**（g++ 编译）
 5. **shim 名固定，不含 tag 版本号**——tag 分流在 adapter 内部
-6. **`DivModFast` 等 device helper 在每个 `.cu` 文件里独立定义**（不能跨 TU 共享，因为是 `__device__` 代码）
+6. **`DivModFast` 等 device helper 放 `kernels/corpus_common.cuh`**（inline/device-template，各 `.cu` 文件 `#include` 即可，无 ODR 问题）
+
+### CUDA Kernel 全覆盖约束（强制规则）
+
+> **MNN CUDA backend 的每个 `__global__` kernel 都必须在 replay_benchmark 有对应重实现。**
+> 缺失清单见 `replay_benchmark/kernel_corpus_bridge/cuda/CUDA_KERNEL_VERSIONING.md`
+> 末尾"缺失 kernel 变体清单"，逐个版本补齐。
+
+1. **新增 kernel 时必须检查覆盖率**：用以下命令对比 MNN 源码与 corpus：
+   ```bash
+   # MNN 有但 replay_benchmark 没有的 __global__ kernel
+   grep -rh "__global__ void" source/backend/cuda/execution/*.cu \
+     | sed 's/.*__global__ void //;s/(.*//;s/ //g' | sort -u | grep -v "##" > /tmp/mnn.txt
+   grep -rh "__global__ void" replay_benchmark/kernel_corpus_bridge/cuda/kernels/*.cu \
+     | sed 's/.*__global__ void //;s/(.*//;s/ //g' | sort -u > /tmp/replay.txt
+   comm -23 /tmp/mnn.txt /tmp/replay.txt  # 差集 = 缺失
+   ```
+2. **按算子类型分文件**：新增 kernel 变体放入 `kernels/<op>.cu`（与已有同算子的 kernel 一起），不可新建 `intermediate_versions.cu` / `misc_*.cu` 等按版本分的文件
+3. **函数体变更即独立 shim**：不仅看签名，更看公式/索引/累积方式。用 `git diff <tagA> <tagB> -- <file>.cu` 对比 `__global__` 函数体
+4. **逐个版本推进**：补齐时先确认引入 tag，再做 body-diff，最后写 kernel+shim+adapter+case+validate
+5. **补齐后更新文档**：从 `CUDA_KERNEL_VERSIONING.md` 缺失清单中移除已补齐的条目
 
 ### CUDA Adapter 命名规则（固定规则）
 
@@ -625,11 +674,11 @@ class CudaMaxPoolFp32Kernel : public CudaOpAdapter {
 
 ### CUDA 构建规则
 
-1. `replay_cuda_corpus` 静态库（nvcc 编译）含 `CorpusKernels.cu` + `CorpusKernelsMisc.cu` + `CudaOpsFp16.cu`
+1. `replay_cuda_corpus` 静态库（nvcc 编译）含 `kernels/*.cu`（17 个按算子分的文件）+ `CudaOpsFp16.cu`
 2. `replay_benchmark.out` 链接 `replay_cuda_corpus` + `MNN_Cuda_Main` + `libcuda` + `libcupti` + `libnvperf_host/target`
-3. `CudaOps.cpp` + `CudaOpsMisc.cpp` 用 g++ 编译（fp32 adapter，不需要 `__half`）
-4. `CudaOpsFp16.cu` 用 nvcc 编译（fp16 adapter，需要 `__half`/`__float2half`）
-5. CMake: `find_package(CUDA)` + `cuda_add_library` 编 shim, `target_link_libraries` 链 MNN_Cuda_Main
+3. `CudaOps.cpp` + `CudaOpsMisc.cpp` 用 g++ 编译（fp32 adapter，不需要 `__half`），直接编入 `replay_benchmark.out`
+4. `CudaOpsFp16.cu` 用 nvcc 编译（fp16/int8 adapter，需要 `__half`/`__float2half`），编入 `replay_cuda_corpus`
+5. CMake: `find_package(CUDA)` + `cuda_add_library` 编 kernels/*.cu + CudaOpsFp16.cu, `target_link_libraries` 链 MNN_Cuda_Main
 
 ### CUDA 验证流程
 

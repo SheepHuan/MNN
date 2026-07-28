@@ -351,3 +351,63 @@
 - 无其他现有 kernel 函数体变化
 - 新增 kernel: binary_layernorm_c4, layernorm_c4, matmul_gemv_kernel
 
+---
+
+## 缺失 kernel 变体清单 (replay_benchmark vs MNN 3.6.0 HEAD)
+
+> 对比 `source/backend/cuda/execution/*.cu`(排除 plugin/int8/bf16/cutlass)
+> 与 `kernels/*.cu` 已有 kernel，以下为 **MNN 有但 replay_benchmark 未支持**
+> 的 `__global__` kernel。按优先级分组，逐个版本补齐时参考。
+
+### A. 已支持算子的缺失变体 (优先补齐)
+
+这些是已支持算子的变体 kernel，补齐成本低、收益高：
+
+| Kernel | 所属文件 | 说明 | 引入 tag |
+|--------|---------|------|---------|
+| ARGMAX_FIRST_STEP | ArgMaxExecution.cu | ARGMAX 辅助 kernel（2.5.0 两阶段 argmax） | 2.5.0 |
+| ARGMAX_SECOND_STEP | ArgMaxExecution.cu | ARGMAX 辅助 kernel（2.5.0 两阶段 argmax） | 2.5.0 |
+| SOFTMAX_WARP_32 | SoftmaxExecution.cu | warp 级 reduce 的 softmax 变体 | 2.3.1 |
+| SOFTMAX_AXIS_REDUCE | SoftmaxExecution.cu | axis 级 reduce 的 softmax 变体 | 2.4.1 |
+| INTERP_BILINEAR_OPT | InterpExecution.cu | 双线性插值优化版 | 3.6.0? |
+| SUM_REDUCE_AXIS | ReductionTemplate.cuh | reduce-axis 级别的 SUM | 2.8.2 |
+| MEAN_REDUCE_AXIS | ReductionTemplate.cuh | reduce-axis 级别的 MEAN | 2.8.2 |
+| layernorm_c4 | LayerNormExecution.cu | C4 通道打包的 LayerNorm | 3.6.0 |
+| binary_layernorm_c4 | LayerNormExecution.cu | 融合 binary+layernorm C4 | 3.6.0 |
+| CONV_DW_OPT | ConvDepthWiseExecution.cu | DW 卷积优化版 | ? |
+| CONV_DW_HALF2_OPT | ConvDepthWiseExecution.cu | half2 向量化 DW 卷积 | ? |
+| CONV_DW3x3_HALF2_OPT | ConvDepthWiseExecution.cu | 3x3 half2 特化 DW 卷积 | ? |
+| CONV_DW_MULTI_WIDTH4 | ConvDepthWiseExecution.cu | 多宽度向量化 DW 卷积 | ? |
+| CONV_DW_MULTI_WIDTH_CHANNEL | ConvDepthWiseExecution.cu | 多宽度+通道 DW 卷积 | ? |
+| blit_2_float | Raster.cu | float blit 变体 | ? |
+| blit_2_half | Raster.cu | half blit 变体 | ? |
+| fuseblit / fuseblit_4 / fuseblit_half_4 / fuseblitLimit | Raster.cu | 融合 blit+unary/binary 变体 | ? |
+| PACKCOMMON / PACKCOMMON_4 / _half_4 / _REARRANGE_half_4 | Transpose.cu | pack_c4 各 dtype 变体 | ? |
+| UNPACKCOMMON / UNPACKCOMMON_4 / _REARRANGE_half_4 | Transpose.cu | unpack_c4 各 dtype 变体 | ? |
+| TRANSPOSE / TRANSPOSE_LOCAL | Transpose.cu | 通用转置 kernel | ? |
+| NCHW_2_NCHW / NCHW_2_NHWC8 / NHWC_2_NHWC8 / NHWC8_2_* / C4NHW4_2_* | Transpose.cu | 各格式转换变体 | ? |
+| FLOAT_2_INT8_CAST_PACK / INT8_2_FLOAT_CAST_PACK | CastExecution.cu | 打包版量化 cast | 2.5.3 |
+| Float22Half2 / Float22BFloat16 | CastExecution.cu | float2↔half2/bf16 转换 | ? |
+
+### B. 完全未支持的算子 (后续逐步支持)
+
+这些是 MNN CUDA backend 存在但 replay_benchmark 完全没有 adapter 的算子：
+
+| 算子 | 所属文件 | __global__ kernel | 说明 |
+|------|---------|-------------------|------|
+| MatMul | MatMulExecution.cu | PackPadFill, GENERAL_BATCH_MATMUL, matmul_gemv_kernel | 矩阵乘法（含 GEMV） |
+| RoPE | RoPEExecution.cu | ropeC4Kernel | 旋转位置编码 |
+| Attention | AttentionExecution.cu | flash_decode_kernel*, compact_kv_cache_kernel, copy_kv_to_cache_kernel, flash_attn_combine_results | Flash Attention + KV Cache |
+| LinearAttention | LinearAttentionExecution.cu | conv1d_silu_kernel, short_conv_kernel, short_conv_output_kernel, transpose_BDL_to_BLD, gated_delta_rule_decode_kernel | 线性 Attention |
+| Conv (非 DW) | ConvSingleInputExecution.cu, ConvWinogradExecution.cu, ConvImplicitExecution.cu | WeightPackFill_Implicit, WinoWeightReorder | 普通卷积 + Winograd |
+| MultiInputConv | MultiInputConvExecution.cu, MultiInputConvDepthWiseExecution.cu | WeightPrepare, BiasPrepare, BiasZeroPrepare | 多输入卷积 |
+| Loop | LoopExecution.cu | (无 __global__，纯 host) | 循环（无 kernel，低优先级） |
+| Fuse | FuseExecution.cu, FuseExecutionV2.cu | (无 __global__，纯 host) | 算子融合（无 kernel，低优先级） |
+
+### C. 支持规则
+
+1. **必须全部支持**：MNN CUDA backend 的每个 `__global__` kernel 都应在 replay_benchmark 有对应重实现
+2. **按算子类型分文件**：新增 kernel 变体放入 `kernels/<op>.cu`（与已有同算子的 kernel 一起）
+3. **函数体变更即独立 shim**：不仅看签名，更看公式/索引/累积方式
+4. **逐个版本推进**：从 A 类（已支持算子的缺失变体）开始，每个变体确认引入 tag + body-diff 后补齐
+
