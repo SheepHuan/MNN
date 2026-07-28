@@ -61,6 +61,97 @@ __global__ void INTERP_BILINEAR(const int total, const int c_p,
             + factor_x * factor_y * (float)in[index_11]);
     }
 }
+
+// ============================================================================
+// INTERP_BILINEAR_OPT: optimized bilinear (2 output x-pixels per thread)
+//   source/backend/cuda/execution/InterpExecution.cu (lines 86-164)
+//   Disabled in MNN with if(0), but kernel is complete and usable.
+//   Uses NC4HW4 layout: index = (spatial_flat << 4) + remain, where remain
+//   indexes the PACK_NUMBER=4 channel lane within a C4 group.
+// ============================================================================
+static const int PACK_NUMBER = 4;  // MNN InterpExecution uses PACK_NUMBER=4
+
+template<typename T>
+__global__ void INTERP_BILINEAR_OPT(const int n, const int ih, const int iw, const int oh, const int ow,
+    const float scaleh, const float scalew, const float offseth, const float offsetw, const T* in, T* out,
+    DivModFast d_ow, DivModFast d_oh) {
+    CUDA_KERNEL_LOOP(total, n) {
+        size_t index = total >> 4;
+        size_t remain = total & 15;
+
+        int tmp, x_idx, y, z;
+        d_ow.divmod(index, tmp, x_idx);
+        d_oh.divmod(tmp, z, y);
+
+        size_t x = x_idx << 1;
+        float fx = x*scalew+offsetw;
+        int ix_0 = min(max(0, (int)floor(fx)), iw-1);
+        int ix_1 = min((int)ceil(fx), iw-1);
+
+        float fx_1 = fx + scalew;
+        int ix_2 = min(max(0, (int)floor(fx_1)), iw-1);
+        int ix_3 = min((int)ceil(fx_1), iw-1);
+
+        float fy = y*scaleh+offseth;
+        int iy_0 = min(max(0, (int)floor(fy)), ih-1);
+        int iy_1 = min((int)ceil(fy), ih-1);
+
+        int index_00 = (z*ih+ iy_0)*iw + ix_0;
+        int index_01 = index_00 - ix_0 + ix_1;
+        int index_10 = (z*ih+ iy_1)*iw + ix_0;
+        int index_11 = index_10 - ix_0 + ix_1;
+        index_00 = (index_00 << 4) + remain;
+        index_01 = (index_01 << 4) + remain;
+        index_10 = (index_10 << 4) + remain;
+        index_11 = (index_11 << 4) + remain;
+
+        float factor_x = fx-ix_0;
+        float factor_y = fy-iy_0;
+        float in_00 = (float)in[index_00];
+        float in_01 = (float)in[index_01];
+        float in_10 = (float)in[index_10];
+        float in_11 = (float)in[index_11];
+
+        float factor_00 = (1.0-factor_x)*(1.0-factor_y);
+        float factor_01 = factor_x*(1.0-factor_y);
+        float factor_10 = (1.0-factor_x)*factor_y;
+        float factor_11 = factor_x*factor_y;
+
+        size_t dstOffset = (((z*oh+ y)*ow + x) << 4) + remain;
+        out[dstOffset] = \
+            factor_00* in_00 + factor_01*in_01 + \
+            factor_10* in_10 + factor_11*in_11;
+
+        if(x+1 >= ow) {
+            continue;
+        }
+
+        if(ix_2 != ix_0) {
+            index_00 = index_00 + ((ix_2-ix_0) << 4);
+            index_10 = index_10 + ((ix_2-ix_0) << 4);
+            in_00 = (float)in[index_00];
+            in_10 = (float)in[index_10];
+        }
+        if(ix_3 != ix_1) {
+            index_01 = index_01 + ((ix_3-ix_1) << 4);
+            index_11 = index_11 + ((ix_3-ix_1) << 4);
+            in_01 = (float)in[index_01];
+            in_11 = (float)in[index_11];
+        }
+
+        if(factor_x != fx_1-ix_2) {
+            factor_x = fx_1-ix_2;
+            factor_00 = (1.0-factor_x)*(1.0-factor_y);
+            factor_01 = factor_x*(1.0-factor_y);
+            factor_10 = (1.0-factor_x)*factor_y;
+            factor_11 = factor_x*factor_y;
+        }
+        out[dstOffset+ PACK_NUMBER] = \
+            factor_00* in_00 + factor_01*in_01 + \
+            factor_10* in_10 + factor_11*in_11;
+    }
+}
+
 template <typename T>
 __global__ void INTERP_NERAEST_ROUND(const int total, const int c_p,
                                      const int ih, const int iw, const int oh, const int ow,
@@ -222,6 +313,16 @@ void mnn_corpus_interp_bilinear_127_fp32(const int n, int ih, int iw, int oh, in
                                           float sh, float sw, float ohf, float owf,
                                           const float* in, float* out, int grid, int block, cudaStream_t stream) {
     MNN::Corpus::INTERP_BILINEAR_127<float><<<grid, block, 0, stream>>>(n, ih, iw, oh, ow, sh, sw, ohf, owf, in, out);
+}
+
+// ---- INTERP_BILINEAR_OPT (2x-pixel-per-thread optimized bilinear, NC4HW4) ----
+void mnn_corpus_interp_bilinear_opt_fp32(const int n, int ih, int iw, int oh, int ow,
+                                         float sh, float sw, float ohf, float owf,
+                                         const float* in, float* out,
+                                         int d_ow, int d_oh, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast owD(d_ow), ohD(d_oh);
+    MNN::Corpus::INTERP_BILINEAR_OPT<float><<<grid, block, 0, stream>>>(
+        n, ih, iw, oh, ow, sh, sw, ohf, owf, in, out, owD, ohD);
 }
 
 } // extern "C"

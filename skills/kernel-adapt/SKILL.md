@@ -561,44 +561,95 @@ replay_benchmark/kernel_corpus_bridge/cuda/
    ```
 2. **按算子类型分文件**：新增 kernel 变体放入 `kernels/<op>.cu`（与已有同算子的 kernel 一起），不可新建 `intermediate_versions.cu` / `misc_*.cu` 等按版本分的文件
 3. **函数体变更即独立 shim**：不仅看签名，更看公式/索引/累积方式。用 `git diff <tagA> <tagB> -- <file>.cu` 对比 `__global__` 函数体
-4. **逐个版本推进**：补齐时先确认引入 tag，再做 body-diff，最后写 kernel+shim+adapter+case+validate
+4. **逐个版本推进**：补齐时先确认引入 tag，再做 body-diff，最后写 kernel+shim+adapter+case+validate。同一算子的不同实现策略（如 softmax naive/warp32/axis_reduce）按"变体"规则处理（见下"变体与版本的分层规则"）
 5. **补齐后更新文档**：从 `CUDA_KERNEL_VERSIONING.md` 缺失清单中移除已补齐的条目
 
-### CUDA Adapter 命名规则（固定规则）
+### CUDA Adapter 变体与版本的分层规则（强制规则）
 
-**类名不含版本号**——同一个算子的所有 tag 共用一个 adapter 类，内部按 `spec.tag`/`ac.tag` 分流：
+> **变体(variant) ≠ 版本(tag)**。参照 OpenCL/Vulkan 的做法，两者是正交的两个维度。
+
+#### 概念定义
+
+| 概念 | 含义 | 对应什么 | 例子 |
+|------|------|---------|------|
+| **变体(variant)** | 同一算子的**不同实现策略** | 一个 adapter 类 + 一个 variant 名 | SOFTMAX 的 naive/warp32/axis_reduce；conv 的 conv_2d_buf / conv_2d_c16_subgroup_buf |
+| **版本(tag)** | 同一变体在不同 MNN 版本的**函数体更新** | adapter 类内部按 `spec.tag` 分流 | SOFTMAX_WARP_32 在 2.4.2 无 exp cutoff，3.6.0 有 exp cutoff |
+
+#### 变体划分规则
+
+1. **每个变体一个独立 adapter 类**，类名含变体标识，`variant()` 返回独立名：
+   ```cpp
+   // 正确：naive 和 warp32 是不同变体，各自独立 adapter 类
+   class CudaSoftmaxFp32Kernel : public CudaOpAdapter {  // naive 变体
+       const char* variant() const override { return "cuda_softmax_fp32"; }
+       // ...
+   };
+   class CudaSoftmaxWarp32Fp32Kernel : public CudaOpAdapter {  // warp32 变体
+       const char* variant() const override { return "cuda_softmax_warp32_fp32"; }
+       // ...
+   };
+   class CudaSoftmaxAxisReduceFp32Kernel : public CudaOpAdapter {  // axis_reduce 变体
+       const char* variant() const override { return "cuda_softmax_axis_reduce_fp32"; }
+       // ...
+   };
+   ```
+
+2. **变体名 = `<op>_<策略>_fp32`**，如 `cuda_softmax_warp32_fp32`、`cuda_softmax_axis_reduce_fp32`
+
+3. **operators.json 每个变体+tag 一条 entry**，entry 字段 = 该变体在该 tag 下的 shim 名：
+   ```json
+   {"backend":"cuda","op_type":"softmax","tag":"3.6.0","variant":"cuda_softmax_warp32_fp32","entry":"mnn_corpus_softmax_warp32_fp32"}
+   {"backend":"cuda","op_type":"softmax","tag":"2.4.2","variant":"cuda_softmax_warp32_fp32","entry":"mnn_corpus_softmax_warp32_242_fp32"}
+   ```
+
+4. **operator_cases.json 每个变体+tag 一个 case**，不用 int_params 区分变体
+
+#### 版本(tag)分流规则（同一变体内）
+
+**类名不含版本号**——同一个变体的所有 tag 共用一个 adapter 类，内部按 `spec.tag`/`ac.tag` 分流：
 
 ```cpp
-// 正确：类名固定，内部按 tag 分流
-class CudaMaxPoolFp32Kernel : public CudaOpAdapter {
-    const char* variant() const override { return "cuda_maxpool_fp32"; }  // 不含 tag
+// 正确：类名固定（含变体标识但不含 tag），内部按 tag 分流
+class CudaSoftmaxWarp32Fp32Kernel : public CudaOpAdapter {
+    const char* variant() const override { return "cuda_softmax_warp32_fp32"; }
     bool adapt(const CaseSpec& spec, AdaptedCase& ac) const override {
-        if (spec.tag == "1.2.0") {
-            // 1.2.0: NCHW 布局, bc 参数
-            ac.entry = "mnn_corpus_maxpool_120_fp32";  // shim 名可含 tag
-            ...
+        if (spec.tag == "2.4.2") {
+            ac.entry = "mnn_corpus_softmax_warp32_242_fp32";  // 无 exp cutoff
         } else {
-            // 3.6.0: NC4HW4 布局, ib+ic_p 参数
-            ac.entry = "mnn_corpus_maxpool_fp32";
-            ...
+            ac.entry = "mnn_corpus_softmax_warp32_fp32";      // 有 exp cutoff (3.6.0)
         }
+        // ... 相同的 buffer/grid 设置 ...
     }
     cudaError_t launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const override {
-        if (ac.tag == "1.2.0") {
-            mnn_corpus_maxpool_120_fp32(...);  // 不同 shim
+        if (ac.entry == "mnn_corpus_softmax_warp32_242_fp32") {
+            mnn_corpus_softmax_warp32_242_fp32(...);
         } else {
-            mnn_corpus_maxpool_fp32(...);     // 不同 shim
+            mnn_corpus_softmax_warp32_fp32(...);
         }
     }
-    bool validate(const AdaptedCase& ac, ...) const override {
-        if (ac.tag == "1.2.0") {
-            // NCHW 布局校验
-        } else {
-            // NC4HW4 布局校验
-        }
+    bool validate(...) const override {
+        // 2.4.2 和 3.6.0 的验证公式相同（都是 softmax），只是 kernel 实现有 exp cutoff 差异
+        // 验证容差可适当放宽
     }
 };
 ```
+
+#### 反模式（禁止）
+
+```cpp
+// 错误：用 int_params 区分变体——变体应该用独立 adapter 类
+bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    int variant = spec.intParam("softmax_variant", 0);  // 0=naive, 1=warp32 ← 错！
+    if (variant == 1) { ... }
+}
+```
+
+#### 变体识别方法
+
+如何判断 MNN 的 kernel 是否属于不同变体：
+1. **看 MNN `onExecute()` 的调度逻辑**：如果按 axis 大小 / 数据类型 / 布局选择不同 `__global__` kernel，则每个 kernel 是一个变体
+2. **看 kernel 签名**：参数个数/类型不同 = 不同变体（如 SOFTMAX vs SOFTMAX_WARP_32 vs SOFTMAX_AXIS_REDUCE）
+3. **看 kernel 函数体**：如果两个 kernel 公式完全不同（不是版本演进导致的微调），则是不同变体
 
 ### CUDA 多 Tag 分流规则（固定规则）
 

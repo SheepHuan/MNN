@@ -87,6 +87,42 @@ __global__ void INT8_2_FLOAT_CAST(const int count, const int8_t* in, T* out, con
     }
 }
 
+// ---- FLOAT_2_INT8_CAST_PACK (packed quantization cast, 2.5.3+) ----
+template<typename T>
+__global__ void FLOAT_2_INT8_CAST_PACK(const int count, const T* in, int8_t* out,
+                                       const float scaleData, const int8_t zeroPoint,
+                                       const int8_t clampMax, const int8_t clampMin,
+                                       const int channelPackFloat, const int channels,
+                                       DivModFast d_cp) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)count; index += blockDim.x * gridDim.x) {
+        int nhw_idx, c_idx;
+        d_cp.divmod(index, nhw_idx, c_idx);
+        if (c_idx >= channels) {
+            out[index] = 0;
+            return;
+        }
+        float inp_0 = in[nhw_idx * channelPackFloat + c_idx];
+        int res = __float2int_rn(inp_0 * scaleData) + zeroPoint;
+        res = min(res, clampMax);
+        res = max(res, clampMin);
+        out[index] = res;
+    }
+}
+
+// ---- INT8_2_FLOAT_CAST_PACK (packed dequantization cast, 2.5.3+) ----
+template<typename T>
+__global__ void INT8_2_FLOAT_CAST_PACK(const int count, const int8_t* in, T* out,
+                                       const float scaleData, const int8_t zeroPoint,
+                                       const int channelPackInt8, const int channels,
+                                       DivModFast d_cp) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)count; index += blockDim.x * gridDim.x) {
+        int nhw_idx, c_idx;
+        d_cp.divmod(index, nhw_idx, c_idx);
+        char inp_0 = in[nhw_idx * channelPackInt8 + c_idx];
+        out[index] = (T)((inp_0 - zeroPoint) * scaleData);
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -177,6 +213,26 @@ void mnn_corpus_int82float_fp32(const int8_t* in, float* out, size_t count, floa
 void mnn_corpus_clamp_127_fp32(const float* input, float* output, size_t count, float minV, float maxV,
                                 int grid, int block, cudaStream_t stream) {
     MNN::Corpus::CLAMP<float><<<grid, block, 0, stream>>>(input, output, count, minV, maxV);
+}
+
+// ---- FLOAT_2_INT8_CAST_PACK (packed quantization cast, 2.5.3+) ----
+void mnn_corpus_float2int8_cast_pack_fp32(const int count, const float* in, int8_t* out,
+                                          float scaleData, int8_t zeroPoint, int8_t clampMax, int8_t clampMin,
+                                          int channelPackFloat, int channels, int d_cp_val,
+                                          int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_cp(d_cp_val);
+    MNN::Corpus::FLOAT_2_INT8_CAST_PACK<float><<<grid, block, 0, stream>>>(
+        count, in, out, scaleData, zeroPoint, clampMax, clampMin, channelPackFloat, channels, d_cp);
+}
+
+// ---- INT8_2_FLOAT_CAST_PACK (packed dequantization cast, 2.5.3+) ----
+void mnn_corpus_int82float_cast_pack_fp32(const int count, const int8_t* in, float* out,
+                                          float scaleData, int8_t zeroPoint,
+                                          int channelPackInt8, int channels, int d_cp_val,
+                                          int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_cp(d_cp_val);
+    MNN::Corpus::INT8_2_FLOAT_CAST_PACK<float><<<grid, block, 0, stream>>>(
+        count, in, out, scaleData, zeroPoint, channelPackInt8, channels, d_cp);
 }
 
 } // extern "C"

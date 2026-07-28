@@ -3,6 +3,9 @@
 //   source/backend/cuda/execution/Transpose.cu
 #include "corpus_common.cuh"
 
+// MNN CUDA uses PACK_NUMBER=8 for transpose/pack kernels
+static const int PACK_NUMBER = 8;
+
 namespace MNN {
 namespace Corpus {
 
@@ -45,6 +48,279 @@ __global__ void NCHW_2_NHWC_212(const T0* input, T1* output, const int maxCount,
     }
 }
 
+// ---- TRANSPOSE (generic, uses TransposeParam struct) ----
+template <typename T>
+__global__ void TRANSPOSE(const T* input, T* output, const TransposeParam* param) {
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < (size_t)param->total) {
+        int x = i % param->dims[0];
+        int tmp = i / param->dims[0];
+        int y = tmp % param->dims[1];
+        int z = tmp / param->dims[1];
+        int srcOffset = param->srcStride * z + y + x * param->dims[2];
+        int dstOffset = param->dstStride * z + x + y * param->dims[3];
+        output[dstOffset] = input[srcOffset];
+    }
+}
+
+#define LOCAL_DIM 8
+template <typename T>
+__global__ void TRANSPOSE_LOCAL(const T* input, T* output, const TransposeParam* param) {
+    __shared__ T localM[LOCAL_DIM][LOCAL_DIM + 1];
+    int num = blockIdx.z;
+    for (int n = num; n < param->size; n += gridDim.z) {
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+        if (x < param->dims[0] && y < param->dims[1]) {
+            int offset = n * param->srcStride + x * param->dims[2] + y;
+            localM[threadIdx.y][threadIdx.x] = input[offset];
+        }
+        __syncthreads();
+        x = blockIdx.y * blockDim.y + threadIdx.x;
+        y = blockIdx.x * blockDim.x + threadIdx.y;
+        if (x < param->dims[1] && y < param->dims[0]) {
+            int offset = n * param->dstStride + x * param->dims[3] + y;
+            output[offset] = localM[threadIdx.x][threadIdx.y];
+        }
+    }
+}
+
+// ---- NCHW_2_NCHW (identity copy) ----
+template<typename T0, typename T1>
+__global__ void NCHW_2_NCHW(const T0* input, T1* output, const int maxCount) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        output[index] = (T1)input[index];
+    }
+}
+
+// ---- Format conversion kernels (all share same body, different src/dst strides) ----
+template<typename T0, typename T1>
+__global__ void NHWC8_2_NCHW(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                             const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void C4NHW4_2_NCHW(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                               const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void NHWC8_2_NHWC(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                             const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void C4NHW4_2_NHWC(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                               const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void NHWC_2_NHWC8(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                             const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * channel + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void NCHW_2_NHWC8(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                             const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void C4NHW4_2_NHWC8(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                                const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void NHWC_2_C4NHW4(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                              const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * channel + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void NCHW_2_C4NHW4(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                              const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void NHWC8_2_C4NHW4(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                                const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+
+// ---- PACKCOMMON / UNPACKCOMMON ----
+template<typename T0, typename T1>
+__global__ void PACKCOMMON(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                           const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+template<typename T0, typename T1>
+__global__ void UNPACKCOMMON(const T0* input, T1* output, const int maxCount, const int channel, const int area,
+                             const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
+    }
+}
+
+// ---- blit_2_float (vec2 blit) ----
+template<typename T>
+__global__ void blit_2_float(const T* input, T* output, int count,
+                             DivModFast sizeZ, DivModFast sizeY, DivModFast sizeX,
+                             int strideZ, int strideY, int dstStrideZ, int dstStrideY) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int ix, tmp, iy, iz;
+        sizeX.divmod(i, tmp, ix);
+        sizeY.divmod(tmp, iz, iy);
+        int srcOffset = iz * strideZ + iy * strideY + (ix << 1);
+        int dstOffset = iz * dstStrideZ + iy * dstStrideY + (ix << 1);
+        int2* dstF = (int2*)(output + dstOffset);
+        dstF[0] = ((int2*)(input + srcOffset))[0];
+    }
+}
+
+// ---- PACKCOMMON_4 (vec4 pack C4) ----
+// Corpus adaptation: MNN's _4 variant uses int4* (4-float vectorization). Since
+// the corpus framework operates on float* scalars, we use the same body as
+// MNN's non-_4 PACKCOMMON but keep the _4 parameter list (with DivModFast).
+// axisAlign uses PACK_NUMBER=8 to match MNN's packing convention.
+template<typename T0, typename T1>
+__global__ void PACKCOMMON_4(const T0* input, T1* output,
+    int inside, int axis, int outside,
+    int insideStride, int axisStride,
+    DivModFast is, DivModFast cs
+) {
+    int axisAlign = UP_DIV(axis, PACK_NUMBER) * PACK_NUMBER;
+    int total = axisAlign * inside * outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)total; i += blockDim.x * gridDim.x) {
+        int tmp, x, y, z;
+        cs.divmod(i, tmp, y);
+        is.divmod(tmp, z, x);
+        int dstOffset = (z * inside + x) * axisAlign + y;
+        int srcOffset = x * insideStride + y * axisStride + z * inside * axis;
+        if (y < axis) {
+            output[dstOffset] = input[srcOffset];
+        }
+    }
+}
+
+// ---- UNPACKCOMMON_4 (vec4 unpack C4) ----
+template<typename T0, typename T1>
+__global__ void UNPACKCOMMON_4(const T0* input, T1* output,
+    const int total, int inside, int axis, int outside,
+    int insideStride, int axisStride, int axisAlign,
+    DivModFast is, DivModFast cs
+) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)total; i += blockDim.x * gridDim.x) {
+        int tmp, x, y, z;
+        cs.divmod(i, tmp, y);
+        is.divmod(tmp, z, x);
+        if (y < axis) {
+            int srcOffset = (z * inside + x) * axisAlign + y;
+            int dstOffset = x * insideStride + y * axisStride + z * inside * axis;
+            output[dstOffset] = input[srcOffset];
+        }
+    }
+}
+
+// ---- blit_2_half (vec2 blit for raster, same as blit_2_float but int copy) ----
+template<typename T>
+__global__ void blit_2_half(const T* input, T* output, int count,
+                            DivModFast sizeZ, DivModFast sizeY, DivModFast sizeX,
+                            int strideZ, int strideY, int dstStrideZ, int dstStrideY) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)count; i += blockDim.x * gridDim.x) {
+        int ix, tmp, iy, iz;
+        sizeX.divmod(i, tmp, ix);
+        sizeY.divmod(tmp, iz, iy);
+        int srcOffset = iz * strideZ + iy * strideY + (ix << 1);
+        int dstOffset = iz * dstStrideZ + iy * dstStrideY + (ix << 1);
+        int* dstF = (int*)(output + dstOffset);
+        dstF[0] = ((int*)(input + srcOffset))[0];
+    }
+}
+
+// ---- transpose_BDL_to_BLD (LinearAttention, 3.6.0) ----
+// Transposes [B][D][L] → [B][L][D]. Simple grid-stride version (no shared
+// memory tiling). Same result as the tiled original.
+__global__ void transpose_BDL_to_BLD(const float* input, float* output,
+                                     int B, int D, int L) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)(B * D * L); i += blockDim.x * gridDim.x) {
+        int b = i / (D * L);
+        int dl = i % (D * L);
+        int d = dl / L;
+        int l = dl % L;
+        int srcOffset = b * D * L + d * L + l;  // [B][D][L]
+        int dstOffset = b * L * D + l * D + d;  // [B][L][D]
+        output[dstOffset] = input[srcOffset];
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -76,6 +352,138 @@ void mnn_corpus_nhwc2nchw_212_fp32(const float* input, float* output, int total,
     MNN::Corpus::DivModFast d_oc(channel_pack);
     MNN::Corpus::DivModFast d_area(area);
     MNN::Corpus::NCHW_2_NHWC_212<float, float><<<grid, block, 0, stream>>>(input, output, total, channel, area, channel_pack, d_oc, d_area);
+}
+
+// ---- TRANSPOSE (generic, uses TransposeParam struct) ----
+void mnn_corpus_transpose_fp32(const float* input, float* output, const MNN::Corpus::TransposeParam* param,
+                               int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::TRANSPOSE<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+// ---- TRANSPOSE_LOCAL (shared memory tiled transpose, 8x8) ----
+void mnn_corpus_transpose_local_fp32(const float* input, float* output, const MNN::Corpus::TransposeParam* param,
+                                     int gridX, int gridY, int gridZ, int block, cudaStream_t stream) {
+    dim3 grid(gridX, gridY, gridZ);
+    dim3 blk(8, 8);
+    MNN::Corpus::TRANSPOSE_LOCAL<float><<<grid, blk, 0, stream>>>(input, output, param);
+}
+
+// ---- Format conversion kernels (NCHW↔NHWC8↔C4NHW4) ----
+// All follow the same pattern: for each output element, compute source offset
+// from batch/area/channel decomposition. We implement a single generic kernel
+// that covers all conversions by parameterizing the stride/pack relationships.
+void mnn_corpus_nchw2nchw_fp32(const float* input, float* output, int maxCount,
+                               int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::NCHW_2_NCHW<float, float><<<grid, block, 0, stream>>>(input, output, maxCount);
+}
+void mnn_corpus_nhwc8_2_nchw_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                  int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NHWC8_2_NCHW<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_c4nhw4_2_nchw_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                   int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::C4NHW4_2_NCHW<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_nhwc8_2_nhwc_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                  int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NHWC8_2_NHWC<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_c4nhw4_2_nhwc_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                   int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::C4NHW4_2_NHWC<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_nhwc_2_nhwc8_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                  int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NHWC_2_NHWC8<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_nchw_2_nhwc8_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                  int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NCHW_2_NHWC8<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_c4nhw4_2_nhwc8_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                    int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::C4NHW4_2_NHWC8<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_nhwc_2_c4nhw4_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                   int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NHWC_2_C4NHW4<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_nchw_2_c4nhw4_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                   int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NCHW_2_C4NHW4<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_nhwc8_2_c4nhw4_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                    int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::NHWC8_2_C4NHW4<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+
+// ---- PACKCOMMON / UNPACKCOMMON (pack/unpack C4 channel) ----
+void mnn_corpus_packcommon_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::PACKCOMMON<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+void mnn_corpus_unpackcommon_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
+                                  int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
+    MNN::Corpus::UNPACKCOMMON<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+}
+
+// ---- blit_2_float / blit_2_half (vec2 blit for raster) ----
+void mnn_corpus_blit_2_float_fp32(const float* input, float* output, int count,
+                                  int sizeX_val, int sizeY_val, int sizeZ_val,
+                                  int strideZ, int strideY, int dstStrideZ, int dstStrideY,
+                                  int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_x(sizeX_val), d_y(sizeY_val), d_z(sizeZ_val);
+    MNN::Corpus::blit_2_float<float><<<grid, block, 0, stream>>>(input, output, count, d_z, d_y, d_x, strideZ, strideY, dstStrideZ, dstStrideY);
+}
+
+// ---- PACKCOMMON_4 (vec4 pack C4) ----
+void mnn_corpus_packcommon_4_fp32(const float* input, float* output,
+                                   int inside, int axis, int outside,
+                                   int insideStride, int axisStride,
+                                   int d_is_val, int d_cs_val,
+                                   int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_is(d_is_val), d_cs(d_cs_val);
+    MNN::Corpus::PACKCOMMON_4<float, float><<<grid, block, 0, stream>>>(
+        input, output, inside, axis, outside, insideStride, axisStride, d_is, d_cs);
+}
+
+// ---- UNPACKCOMMON_4 (vec4 unpack C4) ----
+void mnn_corpus_unpackcommon_4_fp32(const float* input, float* output,
+                                     int total, int inside, int axis, int outside,
+                                     int insideStride, int axisStride, int axisAlign,
+                                     int d_is_val, int d_cs_val,
+                                     int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_is(d_is_val), d_cs(d_cs_val);
+    MNN::Corpus::UNPACKCOMMON_4<float, float><<<grid, block, 0, stream>>>(
+        input, output, total, inside, axis, outside, insideStride, axisStride, axisAlign, d_is, d_cs);
+}
+
+// ---- blit_2_half (vec2 blit, same body as blit_2_float but int copy) ----
+void mnn_corpus_blit_2_half_fp32(const float* input, float* output, int count,
+                                  int sizeX_val, int sizeY_val, int sizeZ_val,
+                                  int strideZ, int strideY, int dstStrideZ, int dstStrideY,
+                                  int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_x(sizeX_val), d_y(sizeY_val), d_z(sizeZ_val);
+    MNN::Corpus::blit_2_half<float><<<grid, block, 0, stream>>>(
+        input, output, count, d_z, d_y, d_x, strideZ, strideY, dstStrideZ, dstStrideY);
+}
+
+// ---- transpose_BDL_to_BLD (LinearAttention, 3.6.0) ----
+void mnn_corpus_transpose_bdl_to_bld_fp32(const float* input, float* output,
+                                           int B, int D, int L,
+                                           int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::transpose_BDL_to_BLD<<<grid, block, 0, stream>>>(input, output, B, D, L);
 }
 
 } // extern "C"

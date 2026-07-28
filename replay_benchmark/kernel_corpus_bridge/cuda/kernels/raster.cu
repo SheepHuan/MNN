@@ -121,6 +121,69 @@ __global__ void blitRegion_241(const T* inputO, T* outputO, int loopCount,
     }
 }
 
+// ---- fuseblit (fused multi-region blit, 3.6.0) ----
+template<typename T0, typename T1>
+__global__ void fuseblit(const T0* input, T1* output, int fuseNum, int count, const int32_t* sliceOffset,
+                         DivModFast sizeZ, DivModFast sizeY, DivModFast sizeX,
+                         int strideZ, int strideY, int strideX,
+                         int dstStrideZ, int dstStrideY, int dstStrideX) {
+    for (size_t c = blockIdx.x * blockDim.x + threadIdx.x; c < (size_t)count; c += blockDim.x * gridDim.x) {
+        int ix, tmp, iy, tmp2, iz, j;
+        sizeX.divmod(c, tmp, ix);
+        sizeY.divmod(tmp, tmp2, iy);
+        sizeZ.divmod(tmp2, j, iz);
+        int src_offset = sliceOffset[j] + iz * strideZ + iy * strideY + ix * strideX;
+        int dst_offset = sliceOffset[fuseNum + j] + iz * dstStrideZ + iy * dstStrideY + ix * dstStrideX;
+        output[dst_offset] = input[src_offset];
+    }
+}
+
+// ---- fuseblit_4 (vec4 fused blit, 3.6.0) ----
+__global__ void fuseblit_4(const int32_t* input, int32_t* output, int fuseNum, int count, const int32_t* sliceOffset,
+                           DivModFast sizeZ, DivModFast sizeY, DivModFast sizeX,
+                           int strideZ, int strideY, int dstStrideZ, int dstStrideY) {
+    for (size_t c = blockIdx.x * blockDim.x + threadIdx.x; c < (size_t)count; c += blockDim.x * gridDim.x) {
+        int ix, tmp, iy, tmp2, iz, j;
+        sizeX.divmod(c, tmp, ix);
+        sizeY.divmod(tmp, tmp2, iy);
+        sizeZ.divmod(tmp2, j, iz);
+        int src_offset = sliceOffset[j] + iz * strideZ + iy * strideY + (ix << 2);
+        int dst_offset = sliceOffset[fuseNum + j] + iz * dstStrideZ + iy * dstStrideY + (ix << 2);
+        int4* srcF = (int4*)(input + src_offset);
+        int4* dstF = (int4*)(output + dst_offset);
+        dstF[0] = srcF[0];
+    }
+}
+
+// ---- fuseblitLimit (fused blit with boundary check, 3.6.0) ----
+template<typename T0, typename T1>
+__global__ void fuseblitLimit(const T0* input, T1* output, const FuseRegion* info, const int32_t* sliceOffset) {
+    int sizeZ = info->size[0], sizeY = info->size[1], sizeX = info->size[2];
+    int strideZ = info->srcStride[0], strideY = info->srcStride[1], strideX = info->srcStride[2];
+    int dstStrideZ = info->dstStride[0], dstStrideY = info->dstStride[1], dstStrideX = info->dstStride[2];
+    int fuseNum = info->fuseNumber;
+    int count = fuseNum * sizeZ * sizeY * sizeX;
+    for (size_t c = blockIdx.x * blockDim.x + threadIdx.x; c < (size_t)count; c += blockDim.x * gridDim.x) {
+        int j = c / (sizeZ * sizeY * sizeX);
+        int i = c % (sizeZ * sizeY * sizeX);
+        int ix = i % sizeX;
+        int tmp = i / sizeX;
+        int iy = tmp % sizeY;
+        int iz = tmp / sizeY;
+        const int* srcOffsetPtr = sliceOffset + 8 * j;
+        const int* dstOffsetPtr = sliceOffset + 8 * j + 4;
+        T0 srcValue = (T0)0;
+        int src_offset = srcOffsetPtr[3] + iz * strideZ + iy * strideY + ix * strideX;
+        if (srcOffsetPtr[0] > iz && srcOffsetPtr[1] > iy && srcOffsetPtr[2] > ix) {
+            srcValue = input[src_offset];
+        }
+        int dst_offset = dstOffsetPtr[3] + iz * dstStrideZ + iy * dstStrideY + ix * dstStrideX;
+        if (dstOffsetPtr[0] > iz && dstOffsetPtr[1] > iy && dstOffsetPtr[2] > ix) {
+            output[dst_offset] = srcValue;
+        }
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -171,6 +234,36 @@ void mnn_corpus_setzero_120_fp32(const int n, float* outputPtr, int grid, int bl
 void mnn_corpus_add_bias_120_fp32(float* input, float* output, const float* bias, int e, int h,
                                    int grid, int block, cudaStream_t stream) {
     MNN::Corpus::add_bias_120<float><<<grid, block, 0, stream>>>(input, output, bias, e, h);
+}
+
+// ---- fuseblit (fused multi-region blit, 3.6.0) ----
+void mnn_corpus_fuseblit_fp32(const float* input, float* output, int fuseNum, int count, const int32_t* sliceOffset,
+                              int sizeX_val, int sizeY_val, int sizeZ_val,
+                              int strideZ, int strideY, int strideX,
+                              int dstStrideZ, int dstStrideY, int dstStrideX,
+                              int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_z(sizeZ_val), d_y(sizeY_val), d_x(sizeX_val);
+    MNN::Corpus::fuseblit<float, float><<<grid, block, 0, stream>>>(
+        input, output, fuseNum, count, sliceOffset, d_z, d_y, d_x,
+        strideZ, strideY, strideX, dstStrideZ, dstStrideY, dstStrideX);
+}
+
+// ---- fuseblit_4 (vec4 fused blit, 3.6.0) ----
+void mnn_corpus_fuseblit_4_fp32(const int32_t* input, int32_t* output, int fuseNum, int count, const int32_t* sliceOffset,
+                                int sizeX_val, int sizeY_val, int sizeZ_val,
+                                int strideZ, int strideY, int dstStrideZ, int dstStrideY,
+                                int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_z(sizeZ_val), d_y(sizeY_val), d_x(sizeX_val);
+    MNN::Corpus::fuseblit_4<<<grid, block, 0, stream>>>(
+        input, output, fuseNum, count, sliceOffset, d_z, d_y, d_x,
+        strideZ, strideY, dstStrideZ, dstStrideY);
+}
+
+// ---- fuseblitLimit (fused blit with boundary check, 3.6.0) ----
+void mnn_corpus_fuseblit_limit_fp32(const float* input, float* output,
+                                    const MNN::Corpus::FuseRegion* info, const int32_t* sliceOffset,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::fuseblitLimit<float, float><<<grid, block, 0, stream>>>(input, output, info, sliceOffset);
 }
 
 } // extern "C"

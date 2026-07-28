@@ -14,6 +14,13 @@
 #include <cstdint>
 #include <float.h>
 
+// MNN CUDA defines (from MNNCUDADefine.hpp / Macro.h)
+// PACK_NUMBER is 8 for CUDA backend but some 1.2.7-era kernels use 4;
+// each kernel .cu file defines its own PACK_NUMBER as needed.
+#ifndef UP_DIV
+#define UP_DIV(x, y) (((x) + (y) - 1) / (y))
+#endif
+
 namespace MNN {
 namespace Corpus {
 
@@ -90,6 +97,25 @@ struct DivModFast {
 
 // ReduceParam_127 (1.2.7 Reduction/SOFTMAX parameter struct — {inside, axis, outside}).
 struct ReduceParam_127 { int inside; int axis; int outside; };
+
+// TransposeParam (3.6.0 Transpose kernel parameter struct).
+struct TransposeParam {
+    int dims[4];
+    int srcOffset;
+    int srcStride;
+    int dstOffset;
+    int dstStride;
+    int size;
+    int total;
+};
+
+// FuseRegion (3.6.0 Raster fuseblitLimit kernel parameter struct).
+struct FuseRegion {
+    int32_t size[3];
+    int32_t srcStride[3];
+    int32_t dstStride[3];
+    int32_t fuseNumber;
+};
 
 } // namespace Corpus
 } // namespace MNN

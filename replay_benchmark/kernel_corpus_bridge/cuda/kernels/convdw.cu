@@ -139,6 +139,43 @@ __global__ void CONV_DW_204(const T* input, const half* kernel, const half* bias
     }
 }
 
+// ---- MultiInputDW: WeightPrepare / BiasPrepare / BiasZeroPrepare ----
+template<typename T0, typename T1>
+__global__ void WeightPrepare(const T0* inputWeightDevice, T1* outputWeightDevice,
+                              const int numTotal, const int numChannel,
+                              const int kernelHeight, const int kernelWeight,
+                              DivModFast divNumChannelPack, DivModFast divKernelWeight) {
+    for (int indexOutput = blockDim.x * blockIdx.x + threadIdx.x; indexOutput < numTotal; indexOutput += blockDim.x * gridDim.x) {
+        int indexChannel, tempOutputChannel, indexKernelWeight, indexKernelHeight;
+        divNumChannelPack.divmod(indexOutput, tempOutputChannel, indexChannel);
+        divKernelWeight.divmod(tempOutputChannel, indexKernelHeight, indexKernelWeight);
+        if (indexChannel >= numChannel) {
+            outputWeightDevice[indexOutput] = (T1)0.0f;
+            continue;
+        } else {
+            int indexInput = (indexChannel * kernelHeight + indexKernelHeight) * kernelWeight + indexKernelWeight;
+            outputWeightDevice[indexOutput] = (T1)inputWeightDevice[indexInput];
+        }
+    }
+}
+template<typename T0, typename T1>
+__global__ void BiasPrepare(const T0* inputBiasDevice, T1* outputBiasDevice,
+                            const int numTotal, const int numChannel) {
+    for (int index = blockDim.x * blockIdx.x + threadIdx.x; index < numTotal; index += blockDim.x * gridDim.x) {
+        if (index >= numChannel) {
+            outputBiasDevice[index] = (T1)0.0f;
+            continue;
+        }
+        outputBiasDevice[index] = (T1)inputBiasDevice[index];
+    }
+}
+template<typename T>
+__global__ void BiasZeroPrepare(T* outputBiasDevice, const int numTotal) {
+    for (int index = blockDim.x * blockIdx.x + threadIdx.x; index < numTotal; index += blockDim.x * gridDim.x) {
+        outputBiasDevice[index] = (T)0.0f;
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -151,7 +188,7 @@ void mnn_corpus_conv_dw_fp32(const float* input, const half* kernel, const half*
                              int total, int grid, int block, cudaStream_t stream) {
     MNN::Corpus::DivModFast d_oc(c_p / 2);
     MNN::Corpus::DivModFast d_ow(ow);
-    MNN::Corpus::DivModFast d_oh(1);
+    MNN::Corpus::DivModFast d_oh(oh);
     MNN::Corpus::CONV_DW<float><<<grid, block, 0, stream>>>(
         input, kernel, bias, output, maxV, minV, iw, ih, c, c_p, ow, oh, kw, kh, dw, dh, sw, sh, pw, ph,
         total, d_oc, d_ow, d_oh);
@@ -171,6 +208,26 @@ void mnn_corpus_conv_dw_204_fp32(const float* input, const half* kernel, const h
                                   int total, int grid, int block, cudaStream_t stream) {
     MNN::Corpus::CONV_DW_204<float><<<grid, block, 0, stream>>>(
         input, kernel, bias, output, maxV, minV, iw, ih, c, c_p, ow, oh, kw, kh, dw, dh, sw, sh, pw, ph, total);
+}
+
+// ---- MultiInputDW: WeightPrepare / BiasPrepare / BiasZeroPrepare ----
+void mnn_corpus_weight_prepare_fp32(const float* inputWeight, float* outputWeight,
+                                    int numTotal, int numChannel, int kh, int kw,
+                                    int d_ncp_val, int d_kw_val,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast d_ncp(d_ncp_val), d_kw(d_kw_val);
+    MNN::Corpus::WeightPrepare<float, float><<<grid, block, 0, stream>>>(
+        inputWeight, outputWeight, numTotal, numChannel, kh, kw, d_ncp, d_kw);
+}
+void mnn_corpus_bias_prepare_fp32(const float* inputBias, float* outputBias,
+                                  int numTotal, int numChannel,
+                                  int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::BiasPrepare<float, float><<<grid, block, 0, stream>>>(
+        inputBias, outputBias, numTotal, numChannel);
+}
+void mnn_corpus_bias_zero_prepare_fp32(float* outputBias, int numTotal,
+                                       int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::BiasZeroPrepare<float><<<grid, block, 0, stream>>>(outputBias, numTotal);
 }
 
 } // extern "C"

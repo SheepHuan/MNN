@@ -118,6 +118,84 @@ __global__ void LAYERNORM_120(const int count, const int outside, const int insi
     }
 }
 
+// ---- layernorm_c4 (3.6.0, C4 packed, block-per-row with blockReduceSum) ----
+template <typename T>
+__global__ void layernorm_c4(T* output, const T* input, const float* gamma, const float* beta, int inside,
+                             int rowStride, float epsilon, bool RMSNorm) {
+    const int tid = threadIdx.x;
+    const int base = blockIdx.x * rowStride;
+    __shared__ float sMean;
+    __shared__ float sVariance;
+
+    float localSum = 0.0f;
+    float localSquareSum = 0.0f;
+    for (int i = tid; i < inside; i += blockDim.x) {
+        float value = (float)input[base + i];
+        localSum += value;
+        localSquareSum += value * value;
+    }
+    float sum = blockReduceSum<float>(localSum);
+    if (tid == 0) {
+        sMean = RMSNorm ? 0.0f : sum / inside;
+    }
+    __syncthreads();
+    float squareSum = blockReduceSum<float>(localSquareSum);
+    if (tid == 0) {
+        float squareMean = squareSum / inside;
+        sVariance = (RMSNorm ? squareMean : fmaxf(squareMean - sMean * sMean, 0.0f)) + epsilon;
+    }
+    __syncthreads();
+
+    float invStd = rsqrtf(sVariance);
+    for (int i = tid; i < inside; i += blockDim.x) {
+        float result = ((float)input[base + i] - sMean) * invStd;
+        if (gamma != nullptr && beta != nullptr) {
+            result = result * __ldg(gamma + i) + __ldg(beta + i);
+        }
+        output[base + i] = (T)result;
+    }
+}
+
+// ---- binary_layernorm_c4 (3.6.0, fuses binary add + layernorm C4) ----
+template <typename T>
+__global__ void binary_layernorm_c4(T* sumOut, T* normOut, const T* input0, const T* input1, const float* gamma,
+                                    const float* beta, int inside, int rowStride, float epsilon, bool RMSNorm) {
+    const int tid = threadIdx.x;
+    const int base = blockIdx.x * rowStride;
+    __shared__ float sMean;
+    __shared__ float sVariance;
+
+    float localSum = 0.0f;
+    float localSquareSum = 0.0f;
+    for (int i = tid; i < inside; i += blockDim.x) {
+        float value = (float)input0[base + i] + (float)input1[base + i];
+        localSum += value;
+        localSquareSum += value * value;
+    }
+    float sum = blockReduceSum<float>(localSum);
+    if (tid == 0) {
+        sMean = RMSNorm ? 0.0f : sum / inside;
+    }
+    __syncthreads();
+    float squareSum = blockReduceSum<float>(localSquareSum);
+    if (tid == 0) {
+        float squareMean = squareSum / inside;
+        sVariance = (RMSNorm ? squareMean : fmaxf(squareMean - sMean * sMean, 0.0f)) + epsilon;
+    }
+    __syncthreads();
+
+    float invStd = rsqrtf(sVariance);
+    for (int i = tid; i < inside; i += blockDim.x) {
+        float value = (float)input0[base + i] + (float)input1[base + i];
+        float result = (value - sMean) * invStd;
+        if (gamma != nullptr && beta != nullptr) {
+            result = result * __ldg(gamma + i) + __ldg(beta + i);
+        }
+        sumOut[base + i] = (T)value;
+        normOut[base + i] = (T)result;
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -154,6 +232,24 @@ void mnn_corpus_layernorm_120_fp32(const int count, const int outside, const int
                                    const float* in, float* out, const float* gamma, const float* beta,
                                    int grid, int block, cudaStream_t stream) {
     MNN::Corpus::LAYERNORM_120<float><<<grid, block, 0, stream>>>(count, outside, inside, epsilon, in, out, gamma, beta);
+}
+
+// ---- layernorm_c4 (C4 variant, 3.6.0) ----
+void mnn_corpus_layernorm_c4_fp32(float* output, const float* input, const float* gamma, const float* beta,
+                                  int inside, int rowStride, float epsilon, bool RMSNorm,
+                                  int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::layernorm_c4<float><<<grid, block, 0, stream>>>(output, input, gamma, beta,
+                                                                  inside, rowStride, epsilon, RMSNorm);
+}
+
+// ---- binary_layernorm_c4 (fused binary add + layernorm C4, 3.6.0) ----
+void mnn_corpus_binary_layernorm_c4_fp32(float* sumOut, float* normOut,
+                                         const float* input0, const float* input1,
+                                         const float* gamma, const float* beta,
+                                         int inside, int rowStride, float epsilon, bool RMSNorm,
+                                         int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::binary_layernorm_c4<float><<<grid, block, 0, stream>>>(
+        sumOut, normOut, input0, input1, gamma, beta, inside, rowStride, epsilon, RMSNorm);
 }
 
 } // extern "C"

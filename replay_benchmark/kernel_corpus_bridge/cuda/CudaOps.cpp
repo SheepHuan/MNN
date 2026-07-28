@@ -41,6 +41,11 @@ void mnn_corpus_scale_127_fp32(const int, const int, const int, const float*, fl
 void mnn_corpus_clamp_127_fp32(const float*, float*, size_t, float, float, int, int, cudaStream_t);
 void mnn_corpus_select_272_fp32(const int, const int*, const float*, const float*, float*, int, int, cudaStream_t);
 void mnn_corpus_softmax_222_fp32(const float*, float*, const void*, int, int, cudaStream_t);
+// SOFTMAX_WARP_32 / SOFTMAX_AXIS_REDUCE shims (2.4.2+ variants)
+void mnn_corpus_softmax_warp32_fp32(const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_softmax_warp32_242_fp32(const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_softmax_axis_reduce_fp32(const float*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_softmax_axis_reduce_242_fp32(const float*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
 }
 
 namespace MNN {
@@ -472,53 +477,14 @@ bool CudaSelectFp32Kernel::validate(const AdaptedCase& ac, const std::vector<flo
 }
 
 // ============================================================================
-// Softmax
+// Softmax — naive variant (cuda_softmax_fp32)
+// Handles SOFTMAX (3.6.0) + SOFTMAX_222 (2.2.2 ReduceParam).
+// warp32 / axis_reduce variants live in their own adapter classes below.
 // ============================================================================
-bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    if (spec.tag == "2.2.2") ac.entry = "mnn_corpus_softmax_222_fp32";
-    else ac.entry = "mnn_corpus_softmax_fp32";
-    const int outside = spec.intParam("outside", 4);
-    const int axis = spec.intParam("axis", 16);
-    const int inside = spec.intParam("inside", 1);
-    const int count = outside * inside;
-    std::vector<float> input(outside * axis * inside);
-    for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
-    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
-    AdaptedBuffer outBuf; outBuf.sizeBytes = input.size() * sizeof(float); outBuf.isOutput = true;
-    ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
-    ac.args.push_back(AdaptedArg::buffer(0));
-    ac.args.push_back(AdaptedArg::buffer(1));
-    if (spec.tag == "2.2.2") {
-        // ReduceParam_127 { int inside; int axis; int outside; }
-        struct P { int inside; int axis; int outside; } p{inside, axis, outside};
-        AdaptedBuffer pb; pb.sizeBytes = sizeof(P);
-        pb.initialData.assign((const uint8_t*)&p, (const uint8_t*)&p + sizeof(P));
-        pb.isOutput = false;
-        ac.buffers.push_back(pb);
-        ac.args.push_back(AdaptedArg::buffer(2));
-    } else {
-        ac.args.push_back(AdaptedArg::scalarInt(inside));
-        ac.args.push_back(AdaptedArg::scalarInt(axis));
-        ac.args.push_back(AdaptedArg::scalarInt(outside));
-        ac.args.push_back(AdaptedArg::scalarInt(count));
-    }
-    ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
-    ac.validatorInputA = input; ac.elementCount = count;
-    ac.m = outside; ac.n = axis; ac.k = inside;
-    return true;
-}
-cudaError_t CudaSoftmaxFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
-    if (ac.tag == "2.2.2") {
-        mnn_corpus_softmax_222_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
-                                     (const void*)ctx.devBufs[2], ctx.grid, ctx.block, ctx.stream);
-    } else {
-        mnn_corpus_softmax_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
-                                  ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-                                  ctx.grid, ctx.block, ctx.stream);
-    }
-    return cudaGetLastError();
-}
-bool CudaSoftmaxFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+
+// Shared softmax validator: all three variants (naive/warp32/axis_reduce)
+// compute the same mathematical function, so one validator suffices.
+static bool softmaxValidate(const AdaptedCase& ac, const std::vector<float>& output) {
     const int outside = ac.m, axis = ac.n, inside = ac.k;
     if ((int)output.size() < outside * axis * inside) return false;
     for (int o = 0; o < outside; ++o) {
@@ -543,6 +509,156 @@ bool CudaSoftmaxFp32Kernel::validate(const AdaptedCase& ac, const std::vector<fl
         }
     }
     return true;
+}
+
+bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    const int outside = spec.intParam("outside", 4);
+    const int axis = spec.intParam("axis", 16);
+    const int inside = spec.intParam("inside", 1);
+    const int count = outside * inside;
+    std::vector<float> input(outside * axis * inside);
+    for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
+    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = input.size() * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
+    ac.args.push_back(AdaptedArg::buffer(0));
+    ac.args.push_back(AdaptedArg::buffer(1));
+
+    if (spec.tag == "2.2.2") {
+        // SOFTMAX_222: ReduceParam struct
+        ac.entry = "mnn_corpus_softmax_222_fp32";
+        struct P { int inside; int axis; int outside; } p{inside, axis, outside};
+        AdaptedBuffer pb; pb.sizeBytes = sizeof(P);
+        pb.initialData.assign((const uint8_t*)&p, (const uint8_t*)&p + sizeof(P));
+        pb.isOutput = false;
+        ac.buffers.push_back(pb);
+        ac.args.push_back(AdaptedArg::buffer(2));
+        ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock;
+    } else {
+        // SOFTMAX naive (3.6.0 / 1.2.0)
+        ac.entry = "mnn_corpus_softmax_fp32";
+        ac.args.push_back(AdaptedArg::scalarInt(inside));
+        ac.args.push_back(AdaptedArg::scalarInt(axis));
+        ac.args.push_back(AdaptedArg::scalarInt(outside));
+        ac.args.push_back(AdaptedArg::scalarInt(count));
+        ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
+    ac.validatorInputA = input; ac.elementCount = count;
+    ac.m = outside; ac.n = axis; ac.k = inside;
+    return true;
+}
+cudaError_t CudaSoftmaxFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    const float* in = (const float*)ctx.devBufs[0];
+    float* out = (float*)ctx.devBufs[1];
+    if (ac.entry == "mnn_corpus_softmax_222_fp32") {
+        mnn_corpus_softmax_222_fp32(in, out, (const void*)ctx.devBufs[2], ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_softmax_fp32(in, out, ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
+                                 ctx.grid, ctx.block, ctx.stream);
+    }
+    return cudaGetLastError();
+}
+bool CudaSoftmaxFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return softmaxValidate(ac, output);
+}
+
+// ----------------------------------------------------------------------------
+// Softmax — warp32 variant (cuda_softmax_warp32_fp32)
+//   axis <= 32, one warp per (outside, inside). tag 2.4.2 = no exp cutoff,
+//   3.6.0 = exp cutoff. Bodies differ → independent shims, one adapter.
+// ----------------------------------------------------------------------------
+bool CudaSoftmaxWarp32Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    const int outside = spec.intParam("outside", 4);
+    const int axis = spec.intParam("axis", 16);
+    const int inside = spec.intParam("inside", 1);
+    const int count = outside * inside;
+    std::vector<float> input(outside * axis * inside);
+    for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
+    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = input.size() * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
+    ac.args.push_back(AdaptedArg::buffer(0));
+    ac.args.push_back(AdaptedArg::buffer(1));
+    ac.args.push_back(AdaptedArg::scalarInt(inside));
+    ac.args.push_back(AdaptedArg::scalarInt(axis));
+    ac.args.push_back(AdaptedArg::scalarInt(outside));
+    ac.args.push_back(AdaptedArg::scalarInt(count));
+
+    if (spec.tag == "2.4.2") ac.entry = "mnn_corpus_softmax_warp32_242_fp32";
+    else ac.entry = "mnn_corpus_softmax_warp32_fp32";
+    ac.globalSize[0] = count; ac.localSize[0] = 32;
+    ac.dims = 1;
+    ac.validatorInputA = input; ac.elementCount = count;
+    ac.m = outside; ac.n = axis; ac.k = inside;
+    return true;
+}
+cudaError_t CudaSoftmaxWarp32Fp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    const float* in = (const float*)ctx.devBufs[0];
+    float* out = (float*)ctx.devBufs[1];
+    if (ac.entry == "mnn_corpus_softmax_warp32_242_fp32") {
+        mnn_corpus_softmax_warp32_242_fp32(in, out, ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                            ctx.intArgs[3], ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_softmax_warp32_fp32(in, out, ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                       ctx.intArgs[3], ctx.grid, ctx.block, ctx.stream);
+    }
+    return cudaGetLastError();
+}
+bool CudaSoftmaxWarp32Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return softmaxValidate(ac, output);
+}
+
+// ----------------------------------------------------------------------------
+// Softmax — axis_reduce variant (cuda_softmax_axis_reduce_fp32)
+//   axis % 256==0 || axis>=768 → block=256; else (axis%64==0 || axis>32) → 64.
+//   tag 2.4.2 = no exp cutoff, 3.6.0 = exp cutoff.
+// ----------------------------------------------------------------------------
+bool CudaSoftmaxAxisReduceFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    const int outside = spec.intParam("outside", 2);
+    const int axis = spec.intParam("axis", 768);
+    const int inside = spec.intParam("inside", 1);
+    const int count = outside * inside;
+    const int pbs = (axis % 256 == 0 || axis >= 768) ? 256 : 64;
+    const int calc_multi = (axis + pbs - 1) / pbs;
+    std::vector<float> input(outside * axis * inside);
+    for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
+    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = input.size() * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
+    ac.args.push_back(AdaptedArg::buffer(0));
+    ac.args.push_back(AdaptedArg::buffer(1));
+    ac.args.push_back(AdaptedArg::scalarInt(inside));
+    ac.args.push_back(AdaptedArg::scalarInt(axis));
+    ac.args.push_back(AdaptedArg::scalarInt(pbs));
+    ac.args.push_back(AdaptedArg::scalarInt(calc_multi));
+    ac.args.push_back(AdaptedArg::scalarInt(outside));
+    ac.args.push_back(AdaptedArg::scalarInt(count));
+
+    if (spec.tag == "2.4.2") ac.entry = "mnn_corpus_softmax_axis_reduce_242_fp32";
+    else ac.entry = "mnn_corpus_softmax_axis_reduce_fp32";
+    ac.globalSize[0] = count; ac.localSize[0] = pbs;
+    ac.dims = 1;
+    ac.validatorInputA = input; ac.elementCount = count;
+    ac.m = outside; ac.n = axis; ac.k = inside;
+    return true;
+}
+cudaError_t CudaSoftmaxAxisReduceFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    const float* in = (const float*)ctx.devBufs[0];
+    float* out = (float*)ctx.devBufs[1];
+    if (ac.entry == "mnn_corpus_softmax_axis_reduce_242_fp32") {
+        mnn_corpus_softmax_axis_reduce_242_fp32(in, out, ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                                ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+                                                ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_softmax_axis_reduce_fp32(in, out, ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                            ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+                                            ctx.grid, ctx.block, ctx.stream);
+    }
+    return cudaGetLastError();
+}
+bool CudaSoftmaxAxisReduceFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return softmaxValidate(ac, output);
 }
 
 // ============================================================================
@@ -1172,6 +1288,8 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaRangeFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSelectFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSoftmaxFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSoftmaxWarp32Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSoftmaxAxisReduceFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaLayerNormFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaPreluFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaScaleFp32Kernel()));
@@ -1181,6 +1299,7 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGlobalMaxPoolFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGatherV2Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaArgMaxFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaArgMaxTwostageFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaArgMinFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInterpNearestFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc2NchwFp32Kernel()));
@@ -1191,8 +1310,11 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionMaxFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionMinFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionProdFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionSumAxisFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionMeanAxisFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInterpBilinearFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInterpNearestRoundFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInterpBilinearOptFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGridSampleBilinearFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaTopKV2Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBlitRegionFp32Kernel()));
@@ -1203,6 +1325,50 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaUnpackC4Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSetZeroFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaAddBiasFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaRopeC4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGeneralBatchMatmulFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaMatmulGemvFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaLayerNormC4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryLayerNormC4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat22Half2Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaIm2ColFilterCFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWeightPackFillFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaTransposeFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaPackCommonFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaUnpackCommonFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBlit2FloatFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFuseBlitFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFuseBlitLimitFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat2Int8CastPackFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInt82FloatCastPackFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWeightPrepareFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBiasPrepareFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBiasZeroPrepareFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaDeconvKernelReorderFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaCol2ImFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaCol2ImVec4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaPackPadFillFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWeightPackFillImplicitFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaTransposeBdlToBldFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaPackCommon4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaUnpackCommon4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBlit2HalfFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWinoWeightReorderFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWinoInputTransFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWinoTrans2OutputFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaIm2ColFilterCVec4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFlashDecodeFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFlashDecodeWithMaskFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFlashDecodeSplitkFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFlashAttnCombineResultsFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaCompactKvCacheFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaCopyKvToCacheFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaQkKernelTiledFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaQkvKernelTiledFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaConv1dSiluFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaShortConvFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaShortConvOutputFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGatedDeltaRuleDecodeFp32Kernel()));
         }
     } r;
     (void)r;

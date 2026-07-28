@@ -155,6 +155,48 @@ __global__ void PROD_127(const T* input, T* output, const ReduceParam_127* param
     }
 }
 
+// ---- SUM_REDUCE_AXIS / MEAN_REDUCE_AXIS (2.5.1+, axis >= 32 block reduce) ----
+// Distinct variant: blockReduceSum to collapse the axis dim in one block per
+// (outside, inside). Body identical 2.5.1 through 3.6.0 (one shim, no tag diff).
+template <typename T>
+__global__ void SUM_REDUCE_AXIS(const T* input, T* output, const int outside, const int axis, const int inside,
+                                const int per_block_size, const int calc_multi_num) {
+    int idx_outside = blockIdx.x / inside;
+    int idx_inside = blockIdx.x - idx_outside * inside;
+    const T* src = input + idx_outside * axis * inside + idx_inside;
+    int tid = threadIdx.x;
+    float local_src = 0.0f;
+    __shared__ float sumValue;
+    for (int i = 0; i < calc_multi_num; ++i) {
+        if (tid + i * per_block_size < axis) {
+            local_src += (float)src[(tid + i * per_block_size) * inside];
+        }
+    }
+    float maxRes = blockReduceSum<float>(local_src);
+    if (tid == 0) sumValue = maxRes;
+    __syncthreads();
+    output[idx_outside * inside + idx_inside] = (T)sumValue;
+}
+template <typename T>
+__global__ void MEAN_REDUCE_AXIS(const T* input, T* output, const int outside, const int axis, const int inside,
+                                 const int per_block_size, const int calc_multi_num) {
+    int idx_outside = blockIdx.x / inside;
+    int idx_inside = blockIdx.x - idx_outside * inside;
+    const T* src = input + idx_outside * axis * inside + idx_inside;
+    int tid = threadIdx.x;
+    float local_src = 0.0f;
+    __shared__ float sumValue;
+    for (int i = 0; i < calc_multi_num; ++i) {
+        if (tid + i * per_block_size < axis) {
+            local_src += (float)src[(tid + i * per_block_size) * inside];
+        }
+    }
+    float maxRes = blockReduceSum<float>(local_src);
+    if (tid == 0) sumValue = maxRes;
+    __syncthreads();
+    output[idx_outside * inside + idx_inside] = (T)(sumValue / (float)axis);
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -212,6 +254,20 @@ void mnn_corpus_reduction_min_127_fp32(const float* input, float* output, const 
 void mnn_corpus_reduction_prod_127_fp32(const float* input, float* output, const MNN::Corpus::ReduceParam_127* param,
                                          int grid, int block, cudaStream_t stream) {
     MNN::Corpus::PROD_127<float><<<grid, block, 0, stream>>>(input, output, param);
+}
+
+// ---- SUM_REDUCE_AXIS / MEAN_REDUCE_AXIS (axis variant, 2.5.1+) ----
+void mnn_corpus_reduction_sum_axis_fp32(const float* input, float* output, int outside, int axis, int inside,
+                                        int per_block_size, int calc_multi_num, int grid, int block,
+                                        cudaStream_t stream) {
+    MNN::Corpus::SUM_REDUCE_AXIS<float><<<grid, block, 0, stream>>>(input, output, outside, axis, inside,
+                                                                    per_block_size, calc_multi_num);
+}
+void mnn_corpus_reduction_mean_axis_fp32(const float* input, float* output, int outside, int axis, int inside,
+                                         int per_block_size, int calc_multi_num, int grid, int block,
+                                         cudaStream_t stream) {
+    MNN::Corpus::MEAN_REDUCE_AXIS<float><<<grid, block, 0, stream>>>(input, output, outside, axis, inside,
+                                                                     per_block_size, calc_multi_num);
 }
 
 } // extern "C"
