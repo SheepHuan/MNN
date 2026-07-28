@@ -137,6 +137,87 @@ __global__ void ARGMAX_250(const int count, const int outside, const int inside,
     }
 }
 
+// ---- ARGMAX_FIRST_STEP (2.5.0+, body stable to 3.6.0) ----
+// Two-stage argmax for dim > 256. FIRST_STEP reduces dim into chunks of
+// ARG_REDUCE_NUM, producing partial max values + indices.
+#define ARG_REDUCE_NUM 256
+template <typename T>
+__global__ void ARGMAX_FIRST_STEP(const int count, const int outside, const int inside,
+                            const int totalDims, const int dims, const int numDims,
+                            const T *input, T *outputData, int *outputIndex) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)count; index += blockDim.x * gridDim.x) {
+        const int idx_in = index % inside;
+        const int tmp = index / inside;
+        const int idx_out = tmp % outside;
+        const int idx_num_dim = tmp / outside;
+
+        const int idx_output = (idx_out * numDims + idx_num_dim) * inside + idx_in;
+        const T* inpPtr = input + (idx_out * totalDims + idx_num_dim * dims) * inside + idx_in;
+        int maxIndex = idx_num_dim * dims;
+        T maxValue = inpPtr[0 * inside];
+        for(int j=1; j<dims; j++) {
+            const int idx_access = idx_num_dim * dims + j;
+            if(idx_access < totalDims) {
+                T value = inpPtr[j * inside];
+                if(maxValue < value) {
+                    maxIndex = idx_access;
+                    maxValue = value;
+                }
+            }
+        }
+        outputData[idx_output] = maxValue;
+        outputIndex[idx_output] = maxIndex;
+    }
+}
+
+// ---- ARGMAX_SECOND_STEP 3.6.0 (fixed: correct baseInputIndex offset) ----
+template <typename T>
+__global__ void ARGMAX_SECOND_STEP(const int count, const int outside, const int inside, const int dims,
+                            const T *inputData, const int *inputIndex, int *outputIndex) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)count; index += blockDim.x * gridDim.x) {
+        const int idx_in = index % inside;
+        const int idx_out = index / inside;
+
+        int idx_output = idx_out * inside + idx_in;
+        const T* inpPtr = inputData + idx_out * dims * inside + idx_in;
+        const int* baseInputIndex = inputIndex + idx_out * dims * inside + idx_in;
+        int maxIndex = baseInputIndex[0];
+        T maxValue = inpPtr[0 * inside];
+        for(int j=1; j<dims; j++) {
+            T value = inpPtr[j * inside];
+            if(maxValue < value) {
+                maxIndex = baseInputIndex[j];
+                maxValue = value;
+            }
+        }
+        outputIndex[idx_output] = maxIndex;
+    }
+}
+
+// ---- ARGMAX_SECOND_STEP 2.5.0-2.8.4 (buggy: no offset on inputIndex) ----
+template <typename T>
+__global__ void ARGMAX_SECOND_STEP_250(const int count, const int outside, const int inside, const int dims,
+                            const T *inputData, const int *inputIndex, int *outputIndex) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)count; index += blockDim.x * gridDim.x) {
+        const int idx_in = index % inside;
+        const int idx_out = index / inside;
+
+        int idx_output = idx_out * inside + idx_in;
+        const T* inpPtr = inputData + idx_out * dims * inside + idx_in;
+        int maxIndex = inputIndex[0];
+        T maxValue = inpPtr[0 * inside];
+        for(int j=1; j<dims; j++) {
+            T value = inpPtr[j * inside];
+            if(maxValue < value) {
+                maxIndex = inputIndex[j];
+                maxValue = value;
+            }
+        }
+        outputIndex[idx_output] = maxIndex;
+    }
+}
+#undef ARG_REDUCE_NUM
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -198,6 +279,39 @@ void mnn_corpus_argmax_212_fp32(const int count, const int outside, const int in
 void mnn_corpus_argmax_250_fp32(const int count, const int outside, const int inside, const int dim,
                                   const float* input, int* output, int grid, int block, cudaStream_t stream) {
     MNN::Corpus::ARGMAX_250<float><<<grid, block, 0, stream>>>(count, outside, inside, dim, input, output);
+}
+
+// ---- ARGMAX two-stage (dim > 256): 3.6.0 SECOND_STEP (fixed offset) ----
+// Shim does FIRST_STEP + SECOND_STEP in sequence. Caller provides temp buffers.
+void mnn_corpus_argmax_twostage_fp32(const int outside, const int inside, const int dim,
+                                       const float* input, int* output,
+                                       float* tempData, int* tempIndex,
+                                       int grid1, int block1, int grid2, int block2,
+                                       cudaStream_t stream) {
+    const int ARG_REDUCE_NUM = 256;
+    const int numDims = (dim + ARG_REDUCE_NUM - 1) / ARG_REDUCE_NUM;
+    const int count1 = outside * inside * numDims;
+    const int count2 = outside * inside;
+    MNN::Corpus::ARGMAX_FIRST_STEP<float><<<grid1, block1, 0, stream>>>(
+        count1, outside, inside, dim, ARG_REDUCE_NUM, numDims, input, tempData, tempIndex);
+    MNN::Corpus::ARGMAX_SECOND_STEP<float><<<grid2, block2, 0, stream>>>(
+        count2, outside, inside, numDims, tempData, tempIndex, output);
+}
+
+// ---- ARGMAX two-stage 2.5.0-2.8.4 (buggy SECOND_STEP: no offset) ----
+void mnn_corpus_argmax_twostage_250_fp32(const int outside, const int inside, const int dim,
+                                           const float* input, int* output,
+                                           float* tempData, int* tempIndex,
+                                           int grid1, int block1, int grid2, int block2,
+                                           cudaStream_t stream) {
+    const int ARG_REDUCE_NUM = 256;
+    const int numDims = (dim + ARG_REDUCE_NUM - 1) / ARG_REDUCE_NUM;
+    const int count1 = outside * inside * numDims;
+    const int count2 = outside * inside;
+    MNN::Corpus::ARGMAX_FIRST_STEP<float><<<grid1, block1, 0, stream>>>(
+        count1, outside, inside, dim, ARG_REDUCE_NUM, numDims, input, tempData, tempIndex);
+    MNN::Corpus::ARGMAX_SECOND_STEP_250<float><<<grid2, block2, 0, stream>>>(
+        count2, outside, inside, numDims, tempData, tempIndex, output);
 }
 
 } // extern "C"

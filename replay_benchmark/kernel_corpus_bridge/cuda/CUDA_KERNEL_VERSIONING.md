@@ -365,8 +365,8 @@
 
 | Kernel | 所属文件 | 说明 | 引入 tag |
 |--------|---------|------|---------|
-| ARGMAX_FIRST_STEP | ArgMaxExecution.cu | ARGMAX 辅助 kernel（2.5.0 两阶段 argmax） | 2.5.0 |
-| ARGMAX_SECOND_STEP | ArgMaxExecution.cu | ARGMAX 辅助 kernel（2.5.0 两阶段 argmax） | 2.5.0 |
+| ~~ARGMAX_FIRST_STEP~~ | ~~ArgMaxExecution.cu~~ | ~~两阶段 argmax 辅助~~ | ~~2.5.0~~ ✅ 已支持 |
+| ~~ARGMAX_SECOND_STEP~~ | ~~ArgMaxExecution.cu~~ | ~~2.5.0-2.8.4 buggy, 3.6.0 fixed~~ | ~~2.5.0~~ ✅ 已支持 |
 | SOFTMAX_WARP_32 | SoftmaxExecution.cu | warp 级 reduce 的 softmax 变体 | 2.3.1 |
 | SOFTMAX_AXIS_REDUCE | SoftmaxExecution.cu | axis 级 reduce 的 softmax 变体 | 2.4.1 |
 | INTERP_BILINEAR_OPT | InterpExecution.cu | 双线性插值优化版 | 3.6.0? |

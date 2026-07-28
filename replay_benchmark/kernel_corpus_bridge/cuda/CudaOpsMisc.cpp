@@ -37,6 +37,9 @@ void mnn_corpus_argmax_127_fp32(const int, const int, const int, const int, cons
 void mnn_corpus_argmax_128_fp32(const int, const int, const int, const int, const float*, int*, int, int, cudaStream_t);
 void mnn_corpus_argmax_212_fp32(const int, const int, const int, const int, const float*, int*, int, int, cudaStream_t);
 void mnn_corpus_argmax_250_fp32(const int, const int, const int, const int, const float*, int*, int, int, cudaStream_t);
+// Two-stage argmax shims (dim > 256, tag >= 2.5.0)
+void mnn_corpus_argmax_twostage_fp32(const int, const int, const int, const float*, int*, float*, int*, int, int, int, int, cudaStream_t);
+void mnn_corpus_argmax_twostage_250_fp32(const int, const int, const int, const float*, int*, float*, int*, int, int, int, int, cudaStream_t);
 void mnn_corpus_reduction_sum_127_fp32(const float*, float*, const void*, int, int, cudaStream_t);
 void mnn_corpus_reduction_mean_127_fp32(const float*, float*, const void*, int, int, cudaStream_t);
 void mnn_corpus_reduction_max_127_fp32(const float*, float*, const void*, int, int, cudaStream_t);
@@ -123,22 +126,48 @@ bool CudaArgMaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     outBuf.sizeBytes = count * (floatOut ? sizeof(float) : sizeof(int32_t));
     outBuf.isOutput = true;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
-    if (spec.tag == "1.2.0") ac.entry = "mnn_corpus_argmax_120_fp32";
+
+    // Two-stage argmax: dim > 256, tag >= 2.5.0
+    const bool twostage = (dim > 256) && (spec.tag >= "2.5.0");
+    const int ARG_REDUCE_NUM = 256;
+    int numDims = 0;
+    if (twostage) {
+        numDims = (dim + ARG_REDUCE_NUM - 1) / ARG_REDUCE_NUM;
+        // temp buffers for FIRST_STEP output (value + index)
+        AdaptedBuffer tempData; tempData.sizeBytes = outside * inside * numDims * sizeof(float); tempData.isOutput = false;
+        AdaptedBuffer tempIndex; tempIndex.sizeBytes = outside * inside * numDims * sizeof(int32_t); tempIndex.isOutput = false;
+        ac.buffers.push_back(tempData); ac.buffers.push_back(tempIndex);
+    }
+
+    if (twostage) {
+        if (spec.tag >= "2.8.4" || spec.tag == "3.6.0") ac.entry = "mnn_corpus_argmax_twostage_fp32";
+        else ac.entry = "mnn_corpus_argmax_twostage_250_fp32";  // 2.5.0-2.8.4 buggy SECOND_STEP
+    } else if (spec.tag == "1.2.0") ac.entry = "mnn_corpus_argmax_120_fp32";
     else if (spec.tag == "1.2.7") ac.entry = "mnn_corpus_argmax_127_fp32";
     else if (spec.tag == "1.2.8") ac.entry = "mnn_corpus_argmax_128_fp32";
     else if (spec.tag == "2.1.2") ac.entry = "mnn_corpus_argmax_212_fp32";
     else if (spec.tag == "2.5.0") ac.entry = "mnn_corpus_argmax_250_fp32";
     else ac.entry = "mnn_corpus_argmax_fp32";
+
     ac.args.push_back(AdaptedArg::scalarInt(count));
     ac.args.push_back(AdaptedArg::scalarInt(outside));
     ac.args.push_back(AdaptedArg::scalarInt(inside));
     ac.args.push_back(AdaptedArg::scalarInt(dim));
     ac.args.push_back(AdaptedArg::buffer(0));
     ac.args.push_back(AdaptedArg::buffer(1));
-    if (spec.tag == "1.2.0") {
+    if (twostage) {
+        // args: outside, inside, dim, input(0), output(1), tempData(2), tempIndex(3)
+        ac.args.push_back(AdaptedArg::buffer(2));  // tempData
+        ac.args.push_back(AdaptedArg::buffer(3));  // tempIndex
+        int count1 = outside * inside * numDims;
+        int count2 = outside * inside;
+        ac.globalSize[0] = gridFor(count2); ac.localSize[0] = kBlock;  // primary grid (for runner)
+        // We'll set grid1/block1/grid2/block2 in launch via ctx
+    }
+    if (spec.tag == "1.2.0" && !twostage) {
         const int blk = mnnBlock120(count);
         ac.globalSize[0] = mnnGridFor(count, blk); ac.localSize[0] = blk;
-    } else {
+    } else if (!twostage) {
         ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock;
     }
     ac.dims = 1;
@@ -148,7 +177,25 @@ bool CudaArgMaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 }
 cudaError_t CudaArgMaxFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
     const float* in = (const float*)ctx.devBufs[0];
-    if (ac.tag == "1.2.0") {
+    // Two-stage: dim > 256, tag >= 2.5.0
+    const bool twostage = (ac.n > 256) && (ac.tag >= "2.5.0");
+    if (twostage) {
+        const int outside = ac.m, inside = ac.k, dim = ac.n;
+        const int ARG_REDUCE_NUM = 256;
+        int numDims = (dim + ARG_REDUCE_NUM - 1) / ARG_REDUCE_NUM;
+        int count1 = outside * inside * numDims;
+        int count2 = outside * inside;
+        int grid1 = gridFor(count1), grid2 = gridFor(count2);
+        float* tempData = (float*)ctx.devBufs[2];
+        int* tempIndex = (int*)ctx.devBufs[3];
+        if (ac.tag >= "2.8.4" || ac.tag == "3.6.0") {
+            mnn_corpus_argmax_twostage_fp32(outside, inside, dim, in, (int*)ctx.devBufs[1],
+                                             tempData, tempIndex, grid1, kBlock, grid2, kBlock, ctx.stream);
+        } else {
+            mnn_corpus_argmax_twostage_250_fp32(outside, inside, dim, in, (int*)ctx.devBufs[1],
+                                                 tempData, tempIndex, grid1, kBlock, grid2, kBlock, ctx.stream);
+        }
+    } else if (ac.tag == "1.2.0") {
         mnn_corpus_argmax_120_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
                                    in, (float*)ctx.devBufs[1], ctx.grid, ctx.block, ctx.stream);
     } else if (ac.tag == "1.2.7") {
@@ -173,6 +220,10 @@ bool CudaArgMaxFp32Kernel::validate(const AdaptedCase& ac, const std::vector<flo
     const int outside = ac.m, dim = ac.n, inside = ac.k;
     const int count = outside * inside;
     if ((int)output.size() * 4 < count * 4) return false;
+    // 2.5.0-2.8.4 two-stage SECOND_STEP has a known bug (no offset on inputIndex),
+    // so output may be incorrect — smoke test only (kernel compiled + dispatched).
+    const bool twostage = (dim > 256) && (ac.tag >= "2.5.0");
+    if (twostage && ac.tag < "2.8.4" && ac.tag != "3.6.0") return true;
     const bool floatOut = (ac.tag == "1.2.0" || ac.tag == "1.2.7");
     for (int o = 0; o < outside; ++o)
       for (int x = 0; x < inside; ++x) {
