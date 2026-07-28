@@ -256,19 +256,98 @@
 - 1.2.0: `blocks_num()` 内自适应分档(未注释)
 - 1.2.1+: 自适应逻辑被注释,固定 `mThreadPerBlock = 128`
 
-## 建议加入 corpus 的中间版本变体
+## 精确变更点(逐 tag 函数体 diff 扫描结果)
 
-按变更价值排序(签名 + 公式都变的最有价值):
+> 通过对 1.2.0→2.8.4 所有 tag + 3.6.0 工作树的 `__global__` 函数体做
+> 逐 tag diff(忽略空白/注释/host 代码,只看计算公式),确认以下变更点。
+>
+> **判定规则**(见 skill):函数体不一致 → 必须独立 kernel + shim;
+> 函数体一致(仅改名)→ 可共用 shim(不同 entry 名)。
 
-1. **CONV_DW** — 4 个变更点(1.2.7, 2.0.2, 2.0.4, 2.2.3),演进最丰富
-2. **Reductions(SUM/MEAN)** — 3 个过渡点(1.2.7 结构体, 2.5.1 显式 int+拆分, 2.8.2 MEAN 拆分)
-3. **INTERP_NERAEST/ROUND/BILINEAR** — 2 个点(1.2.7 重打包, 2.0.4 加 c_p)
-4. **ARGMAX** — 2 个点(2.0.4 输出类型+索引, 2.5.0 指针算术重写)
-5. **LAYERNORM** — 2 个点(2.2.2 类型/累加器, 2.8.4 加 RMSNorm)
-6. **PRELU / SCALE** — 各 1 个点(2.0.4 类型+公式重写)
-7. **NCHW_2_NHWC** — 1 个点(2.7.1 src_offset inChannelPack)
-8. **GRID_SAMPLE_NEAREST/BILINEAR** — 1 个点(2.8.0 dst_offset 公式)
-9. **SELECT** — 1 个点(2.8.0 加 s1/s2 stride)
-10. **SOFTMAX** — 1 个点(2.2.3 ReduceParam→显式 int)
-11. **blitRegion** — 1 个点(2.4.2 加 count + fuseIndex)
-12. **CLAMP** — 1 个点(1.2.7 float→T)
+### 需要独立 shim 的变更点(函数体实质不同)
+
+扫描覆盖 1.0.0→2.8.4 所有 tag + 3.6.0 工作树。下表为 `__global__` 函数体
+(忽略空白/注释/host 代码)发生实质变化的变更点。
+
+| Kernel | 文件 | 变更点(prev→curr) | 说明 |
+|---|---|---|---|
+| ARGMAX | ArgMaxExecution.cu | 1.2.7→1.2.8, 2.1.1→2.1.2, 2.4.3→2.5.0 | 索引/输出类型变化 |
+| ARGMAX_SECOND_STEP | ArgMaxExecution.cu | 2.5.3→2.6.0 | 辅助 kernel |
+| C4NHW4_2_NHWC8 | Transpose.cu | 2.3.0→2.3.1, 2.4.0→2.4.1, 2.7.0→2.7.1 | 转置变体 |
+| CLAMP | UnaryExecution.cu | 1.2.6→1.2.7 | float→T 模板化 |
+| CONV_DW | ConvDepthWiseExecution.cu | 1.2.6→1.2.7, 2.0.1→2.0.2, 2.0.3→2.0.4, 2.1.1→2.1.2, 2.2.2→2.2.3 | 5 个变更点 |
+| CONV_DW3x3_HALF2_OPT | ConvDepthWiseExecution.cu | 2.2.2→2.2.3 | 3x3 优化变体 |
+| CONV_DW_HALF2_OPT | ConvDepthWiseExecution.cu | 2.2.2→2.2.3 | half2 优化变体 |
+| CONV_DW_OPT | ConvDepthWiseExecution.cu | 2.0.3→2.0.4, 2.1.1→2.1.2, 2.2.2→2.2.3 | 优化路径 |
+| DIV | BinaryExecution.cu | 1.1.0→1.1.1 | (早期变化,1.2.0 前已稳定) |
+| DIVSUM | SoftmaxExecution.cu | 2.2.2→2.2.3 | softmax 拆分 |
+| EXPSUB | SoftmaxExecution.cu | 2.2.2→2.2.3 | softmax 拆分 |
+| FLOORDIV/FLOORMOD/REALDIV | BinaryExecution.cu | 1.1.0→1.1.1 | (早期变化) |
+| GATHERV2 | GatherV2Execution.cu | 1.1.1→1.1.2 | (早期变化,1.2.0 前已稳定) |
+| GRID_SAMPLE_BILINEAR | GridSampleExecution.cu | 2.7.2→2.8.0 | dst_offset 公式 |
+| GRID_SAMPLE_NEAREST | GridSampleExecution.cu | 2.7.2→2.8.0 | dst_offset 公式 |
+| INTERP | InterpExecution.cu | 1.1.1→1.1.2 | (早期变化) |
+| INTERP_BILINEAR | InterpExecution.cu | 1.1.7→1.2.0, 1.2.6→1.2.7, 2.0.3→2.0.4 | PACK_NUMBER/c_p |
+| INTERP_BILINEAR_OPT | InterpExecution.cu | 1.2.7→1.2.8 | 优化变体 |
+| INTERP_NERAEST | InterpExecution.cu | 2.0.3→2.0.4 | 加 c_p |
+| INTERP_NERAEST_ROUND | InterpExecution.cu | 2.0.3→2.0.4 | 加 c_p |
+| LAYERNORM | LayerNormExecution.cu | 1.2.6→1.2.7, 2.2.1→2.2.2, 2.8.3→2.8.4 | 类型/累加/RMSNorm |
+| MAXIMUM | BinaryExecution.cu | 1.1.7→1.2.0, 1.2.6→1.2.7, 2.5.0→2.5.1 | 迁移+类型 |
+| MEAN | ReductionExecution.cu | 1.2.6→1.2.7, 2.5.0→2.5.1 | 迁移+参数顺序 |
+| MINIMUM | BinaryExecution.cu | 1.1.7→1.2.0, 1.2.6→1.2.7, 2.5.0→2.5.1 | 迁移+类型 |
+| NCHW_2_NHWC | Transpose.cu | 2.7.0→2.7.1 | src_offset inChannelPack |
+| NCHW_2_NHWC8 | Transpose.cu | 2.1.1→2.1.2, 2.7.0→2.7.1 | 转置变体 |
+| NHWC8_2_C4NHW4 | Transpose.cu | 2.7.0→2.7.1 | 转置变体 |
+| NHWC8_2_NCHW | Transpose.cu | 2.1.1→2.1.2, 2.7.0→2.7.1 | 转置变体 |
+| NHWC8_2_NHWC | Transpose.cu | 2.7.0→2.7.1 | 转置变体 |
+| NHWC_2_NHWC8 | Transpose.cu | 2.7.0→2.7.1 | 转置变体 |
+| PACKCOMMON/PACKCOMMON_4 | Transpose.cu | 2.0.3→2.0.4 | 打包变体 |
+| PRELU | PReLUExecution.cu | 1.2.6→1.2.7, 1.2.7→1.2.8, 2.0.3→2.0.4 | 类型/公式重写 |
+| PROD | ReductionExecution.cu | 1.2.6→1.2.7, 2.5.0→2.5.1 | 迁移+公式 |
+| SCALE | ScaleExecution.cu | 1.2.6→1.2.7, 2.0.3→2.0.4 | 类型/公式重写 |
+| SCATTERND | ScatterNdExecution.cu | 2.0.3→2.0.4 | scatter 变体 |
+| SELECT | SelectExecution.cu | 2.7.2→2.8.0 | 加 stride |
+| SOFTMAX | SoftmaxExecution.cu | 2.2.2→2.2.3, 2.5.1→2.5.3 | ReduceParam→显式 int |
+| SOFTMAX_AXIS_REDUCE | SoftmaxExecution.cu | 2.5.1→2.5.3 | softmax 变体 |
+| SOFTMAX_WARP_32 | SoftmaxExecution.cu | 2.4.0→2.4.1, 2.5.1→2.5.3 | warp 变体 |
+| SUM | ReductionExecution.cu | 1.2.6→1.2.7 | 迁移+类型 |
+| UNPACKCOMMON/UNPACKCOMMON_4 | Transpose.cu | 2.0.3→2.0.4 | 解包变体 |
+| blitRegion | Raster.cu | 2.4.1→2.4.2 | 加 count + fuseIndex |
+| fuseblit | Raster.cu | 1.2.6→1.2.7 | raster 融合 |
+| fuseblit_4/fuseblit_half_4 | Raster.cu | 1.2.10→2.0.0 | raster 融合变体 |
+| input_layernorm(_1024/_2048/_512) | LayerNormExecution.cu | 1.2.6→1.2.7, 2.2.1→2.2.2, 2.8.3→2.8.4, 2.8.4→HEAD | 优化路径(3.6.0 工作树也有变化) |
+| input_layernorm_320 | LayerNormExecution.cu | 2.8.3→2.8.4, 2.8.4→HEAD | 优化路径 |
+| transpose_bias | MatMulExecution.cu | 1.1.0→1.1.1 | (早期变化) |
+| PackPadFill | MatMulExecution.cu | 2.2.1→2.2.2, 2.4.1→2.4.2 | matmul 辅助 |
+| Name(fuseblitLimit?) | Raster.cu | 1.2.6→1.2.7 | (待确认 kernel 名) |
+
+### 新增 kernel(1.2.0 不存在,后续版本首次出现,需新增 adapter)
+
+| Kernel | 首次出现 tag | 稳定至 |
+|---|---|---|
+| RANGE | 2.2.1 | HEAD |
+| SELECT | 1.2.6 | HEAD(2.8.0 变化) |
+| RELU_Half | 1.2.7 | HEAD |
+| SOFTMAX | 1.2.7 | HEAD(2.2.3/2.5.3 变化) |
+| INTERP_NERAEST/ROUND | 1.2.7 | HEAD(2.0.4 变化) |
+| CONV_DW_OPT | 1.2.7 | HEAD(多次变化) |
+| PACKCOMMON/UNPACKCOMMON | 1.2.7 | HEAD(2.0.4 变化) |
+| ARGMIN | 2.1.2 | HEAD |
+| NCHW_2_NHWC8 | 2.0.4 | HEAD(2.7.1 变化) |
+| maxpool_C8/avgpool_C8 | 2.0.4 | HEAD |
+| GRID_SAMPLE_NEAREST/BILINEAR | 2.4.1 | HEAD(2.8.0 变化) |
+| SOFTMAX_WARP_32 | 2.3.1 | HEAD |
+| TopKAllRows/GetResultAllRows | 2.6.3 | HEAD |
+| global_avgpool_C8/global_maxpool_C8 | 2.8.3 | HEAD |
+| NHWC_2_NCHW | 2.7.1 | HEAD |
+| RELU_INT8 | 2.5.3 | HEAD |
+| FLOAT_2_INT8_CAST/INT8_2_FLOAT_CAST | 2.5.3 | HEAD |
+| BF162FLOAT | 2.8.0 | HEAD |
+| GRID_SAMPLE_NEAREST_3D/BILINEAR_3D | 2.8.0 | HEAD |
+
+### 3.6.0(工作树)vs 2.8.4
+
+- `input_layernorm*` 系列在 2.8.4→HEAD 有变化
+- 无其他现有 kernel 函数体变化
+- 新增 kernel: binary_layernorm_c4, layernorm_c4, matmul_gemv_kernel
+

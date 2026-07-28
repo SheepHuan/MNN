@@ -105,6 +105,13 @@ RHINO_FREQS=$(get_rhino_freqs "$freq_log")
 echo "  freqs: $RHINO_FREQS"
 
 run_remote "$RHINO_NAME" "$RHINO_HOST" RHINO_PI_PASSWORD "$RHINO_REMOTE" "opencl" 3 "$RHINO_FREQS"
+
+# Vulkan: Rhino Pi-X1 (Ubuntu, Adreno) needs libvulkan.so symlink in lib/
+# (system only has libvulkan.so.1; MNN dlopens "libvulkan.so")
+SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no \
+    "root@$RHINO_HOST" \
+    "ln -sf /usr/lib/aarch64-linux-gnu/libvulkan.so.1 $RHINO_REMOTE/lib/libvulkan.so 2>/dev/null; \
+     ls /usr/lib/libvulkan.so.1 /lib/aarch64-linux-gnu/libvulkan.so.1 2>/dev/null | head -1" || true
 run_remote "$RHINO_NAME" "$RHINO_HOST" RHINO_PI_PASSWORD "$RHINO_REMOTE" "vulkan" 7 "$RHINO_FREQS"
 run_remote "$RHINO_NAME" "$RHINO_HOST" RHINO_PI_PASSWORD "$RHINO_REMOTE" "cpu" 0 "$RHINO_FREQS"
 

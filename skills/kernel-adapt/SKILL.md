@@ -553,12 +553,48 @@ class CudaMaxPoolFp32Kernel : public CudaOpAdapter {
 
 ### CUDA 多 Tag 分流规则（固定规则）
 
+> **核心判定原则（强制）**：是否需要为某个 tag 单独写 kernel + shim，**只看
+> `__global__` 函数体的源码是否完全一致**——不仅看签名，更要看公式/索引/累积方式。
+> 用 `git diff <tagA> <tagB> -- <file>.cu` 对比 `__global__` 函数体：
+> - **函数体字节级一致**（仅空白/注释/host 代码差异）→ 可复用相邻版本的 shim
+> - **函数体有任何实质差异**（哪怕签名相同）→ **必须独立重实现 kernel + 独立 shim**
+>
+> 禁止仅因"签名相同"就共用 shim。例如 PROD 在 2.5.1 起循环从 `v=1` 改为 `v=0`、
+> `res=basicInput[0]` 改为 `sumValue=1.0`——签名相同但公式不同，必须独立 shim。
+> 调研中间版本时，对每个变更点都要 `git diff` 函数体确认，不能凭签名判断。
+
 | tag | 含义 | 分流点 |
 |-----|------|--------|
 | `1.2.0` | MNN 1.2.0 发布版的 CUDA kernel | `adapt()` 里 `if (spec.tag == "1.2.0")` 选参数布局 + shim 名 |
+| `1.2.7` ~ `2.8.4` | 中间版本变更点 | `adapt()` 里 `else if (spec.tag == "x.y.z")` 分支，独立 shim |
 | `3.6.0` | MNN 3.6.0 当前版 | `adapt()` 的 `else` 分支 |
 
-**1.2.0 vs 3.6.0 已知差异**：
+**block/grid 按版本分流（强制）**：
+- `1.2.0`：自适应 block 分档，`adapt()` 内调 `mnnBlock120(total)` 设 `ac.localSize[0]`
+- `1.2.1+` ~ `3.6.0`：固定 `kBlock = 128`
+- `CudaLaunchCtx` 的 `grid`/`block` 无默认值，由 `ac.globalSize[0]`/`ac.localSize[0]` 设置
+
+**中间版本变更点速查**（详见 `replay_benchmark/kernel_corpus_bridge/cuda/CUDA_KERNEL_VERSIONING.md`）：
+
+| 算子 | 变更 tag | 是否需独立 shim | 原因 |
+|------|---------|----------------|------|
+| CONV_DW | 1.2.0, 1.2.7, 2.0.4, 2.2.3 | 是（各版本函数体不同） | 参数布局/索引/类型逐版变化 |
+| Reduction SUM/MEAN | 1.2.7, 2.5.1, 2.8.2 | 是（累积类型/参数顺序/拆分变化） | T→float 累积、参数顺序翻转 |
+| Reduction MAX/MIN/PROD | 1.2.7, 2.5.1 | 是（PROD 公式改、参数顺序改） | PROD 循环起点 0/`sumValue=1.0` |
+| INTERP_NERAEST/ROUND/BILINEAR | 1.2.7, 2.0.4 | 是（PACK_NUMBER 重打包、加 c_p） | 索引方式变化 |
+| LAYERNORM | 2.2.2, 2.8.4 | 是（gamma/beta 类型、加 RMSNorm） | 累积类型 + 新参数 |
+| PRELU | 2.0.4 | 是（slope 类型、公式重写） | nhw/c_idx 布局 |
+| SCALE | 2.0.4 | 是（scale/bias 类型、公式重写） | nhw/c_idx 布局 |
+| ARGMAX | 2.0.4, 2.5.0 | 是（输出类型、指针算术重写） | 索引语义变化 |
+| SELECT | 2.8.0 | 是（加 stride 参数 + 公式改） | 新增 s1/s2 |
+| SOFTMAX | 2.2.3 | 是（ReduceParam→显式 int） | 参数布局变化 |
+| blitRegion | 2.4.2 | 是（加 count + fuseIndex 循环） | 循环结构变化 |
+| NCHW_2_NHWC | 2.7.1 | 是（src_offset 用 inChannelPack） | 索引公式变化 |
+| GRID_SAMPLE_NEAREST/BILINEAR | 2.8.0 | 是（dst_offset 写入公式） | 输出索引变化 |
+| CLAMP | 1.2.7 | 是（float→T 模板化） | 类型泛化 |
+| RELU/ATAN2/MOD/LOGICALOR/GATHERV2 | 无 | 否（1.2.0→3.6.0 函数体一致） | 可共用 shim |
+
+**1.2.0 vs 3.6.0 已知差异**（保留供参考，中间版本见上表）：
 
 | 算子 | 1.2.0 | 3.6.0 | 差异类型 |
 |------|-------|-------|---------|

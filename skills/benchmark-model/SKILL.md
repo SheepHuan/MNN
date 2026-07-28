@@ -46,7 +46,7 @@ description: 在 Rhino Pi-X1（AArch64，OpenCL/Vulkan）和 x86 CUDA 主机上�
 
 | 角色 | 主机 | 用户 | 密码环境变量 | 远端工作目录 | 状态 |
 |------|------|------|--------------|---------------|------|
-| Rhino Pi-X1（Adreno OpenCL/Vulkan） | `192.168.101.227` | `root` | `RHINO_PI_PASSWORD`（`aidlux`） | `/mnt/nvme/workspace/benchmark-model` | 在线；主机名 `kalama`，内核 `5.15.148-android13-8-...` |
+| Rhino Pi-X1（Adreno OpenCL/Vulkan） | `192.168.101.227` | `root` | `RHINO_PI_PASSWORD`（`aidlux`） | `/mnt/nvme/workspace/benchmark-model` | 在线；Ubuntu，主机名 `kalama`，Adreno GPU，预装 libvulkan.so.1 + libvulkan_adreno.so |
 | Orange Pi 5 Plus（OpenCL） | `192.168.101.113` | `root` | `ORANGE_PI_PASSWORD`（`orangepi`） | `/root/benchmark-model` | 当前不可达；可达后同流程 |
 | x86 CUDA | `localhost` | — | — | `<repo>/build-x86-cuda` | CUDA toolkit 在 `/usr/local/cuda` |
 | 模型本地缓存 | `localhost` | — | — | `/mnt/hdd_4tb/kernflow-models` | modelscope 下载目标 |
@@ -311,12 +311,19 @@ SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no "$device
 
 #### 7.2 Rhino Pi-X1：Vulkan
 
+> Rhino Pi-X1 跑的是 Ubuntu（不是 Android），Adreno Vulkan 驱动
+> `libvulkan_adreno.so` + `libvulkan.so.1` 已预装在 `/lib/aarch64-linux-gnu/`。
+> 但系统只有 `libvulkan.so.1`，没有 `libvulkan.so`（无版本号软链），而 MNN
+> wrapper 模式 `dlopen("libvulkan.so")` 找不到它。运行前需在 `lib/` 里建软链：
+> `ln -sf /usr/lib/aarch64-linux-gnu/libvulkan.so.1 lib/libvulkan.so`
+
 ```bash
 : "${RHINO_PI_PASSWORD:?set RHINO_PI_PASSWORD first}"
 SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no "$device" \
-    "cd $remote_root && \
-    LD_LIBRARY_PATH=\$PWD/lib \
-    bin/benchmark.out models 20 10 7 4 2 2>&1 | tee result/vulkan_\$(date +%s).log"
+    "ln -sf /usr/lib/aarch64-linux-gnu/libvulkan.so.1 $remote_root/lib/libvulkan.so 2>/dev/null; \
+     cd $remote_root && \
+     LD_LIBRARY_PATH=\$PWD/lib \
+     bin/benchmark.out models 20 10 7 4 2 2>&1 | tee result/vulkan_\$(date +%s).log"
 ```
 
 #### 7.3 Rhino Pi-X1：CPU（对照）

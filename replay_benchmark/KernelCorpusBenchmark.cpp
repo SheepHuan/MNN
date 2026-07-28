@@ -916,11 +916,13 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         }
     }
 
-    // Build launch context: grid/block from AdaptedCase, scalar args in order.
+    // Build launch context: grid/block come from AdaptedCase (set by the
+    // adapter's adapt(), branching by spec.tag to match real MNN's per-version
+    // launch policy). No fallback — adapters must set them explicitly.
     CudaLaunchCtx ctx;
     ctx.devBufs = devBufs;
     ctx.grid = static_cast<int>(ac.globalSize[0]);
-    ctx.block = ac.localSize[0] > 0 ? static_cast<int>(ac.localSize[0]) : 128;
+    ctx.block = static_cast<int>(ac.localSize[0]);
     for (const auto& a : ac.args) {
         if (a.kind == AdaptedArg::Scalar) {
             if (a.scalarType == AdaptedArg::Int) ctx.intArgs.push_back(a.intVal);

@@ -419,3 +419,24 @@ apps/iOS/MNNLLMChat/MNNLLMiOS/LocalModel/Qwen2.5-Omni-3B-MNN
 # smoke models converted on the host by ./test.sh local (sources are fetched
 # into /smoke_sources/, then MNNConvert writes the .caffe.mnn here)
 /resource/model/**/*.caffe.mnn
+
+# Cross-compile toolchain archives and extracted toolchains (managed by
+# tools/download_archives.sh; large, externally fetched, not source).
+/prebuilts/archives/*.tar.xz
+/prebuilts/archives/*.zip
+/prebuilts/archives/arm-gnu-toolchain-*/
+/prebuilts/archives/android-ndk-*/
+
+# benchmark-model skill build dirs and device workspaces
+/build-aarch64-gnueabihf/
+/build-x86-cuda/
+
+# Local model cache for benchmark-model skill
+/mnt/hdd_4tb/kernflow-models/
+
+# Python venv managed by uv
+/.venv/
+
+# Generated scratch artifacts (op list, benchmark result CSVs)
+/op.txt
+/benchmark-model-result/

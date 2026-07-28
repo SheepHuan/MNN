@@ -8016,6 +8016,129 @@
         "pw": 1,
         "sw": 1
       }
+    },
+    {
+      "name": "cuda_reduction_sum_251_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "2.5.1",
+      "variant": "cuda_reduction_sum_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_mean_251_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "2.5.1",
+      "variant": "cuda_reduction_mean_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_max_251_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "2.5.1",
+      "variant": "cuda_reduction_max_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_min_251_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "2.5.1",
+      "variant": "cuda_reduction_min_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_prod_251_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "2.5.1",
+      "variant": "cuda_reduction_prod_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_interp_nearest_204_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "tag": "2.0.4",
+      "variant": "cuda_interp_nearest_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "op_type": "interp_nearest",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 8,
+        "ow": 8,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_interp_bilinear_204_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "tag": "2.0.4",
+      "variant": "cuda_interp_bilinear_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "op_type": "interp_bilinear",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 8,
+        "ow": 8,
+        "channels": 4
+      }
     }
   ]
 }
