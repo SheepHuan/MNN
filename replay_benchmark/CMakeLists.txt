@@ -88,9 +88,24 @@ if(MNN_CUDA)
     include(${CMAKE_CURRENT_SOURCE_DIR}/source/backend/cuda/SelectCudaComputeArch.cmake)
     CUDA_SELECT_NVCC_ARCH_FLAGS(CUDA_ARCH_FLAGS ${CUDA_ARCHS})
     cuda_add_library(replay_cuda_corpus STATIC
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CorpusKernels.cu
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CorpusKernelsMisc.cu
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsFp16.cu)
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsFp16.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/range.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/select.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/binary.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/unary_cast.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/layernorm.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/prelu.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/scale.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/pool.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/softmax.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/gatherv2_argmax.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/interp.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/transpose.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/gridsample.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/reduction_naive.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/topkv2.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/convdw.cu)
     # CudaOpsFp16.cu includes CudaOps.hpp -> CudaOpAdapter.hpp -> OpAdapter.hpp
     # which live under replay_benchmark/. Expose that path so nvcc can find them.
     target_include_directories(replay_cuda_corpus PRIVATE
