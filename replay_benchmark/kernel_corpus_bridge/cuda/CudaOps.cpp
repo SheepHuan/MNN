@@ -537,7 +537,13 @@ bool CudaLayerNormFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const
     ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::buffer(2));
     ac.args.push_back(AdaptedArg::scalarInt(0));  // RMSNorm = false
-    ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(count);
+        ac.globalSize[0] = mnnGridFor(count, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = count;
     ac.m = outside; ac.k = inside;
     return true;
@@ -605,8 +611,12 @@ bool CudaPreluFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag == "1.2.0") {
         // 1.2.0: div_factor=1 means c = (index/dim) % channels / 1
         ac.args.back().intVal = 1;
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
     }
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    ac.dims = 1;
     ac.validatorInputA = input; ac.validatorInputB = slope; ac.elementCount = total;
     ac.n = channelsPack;
     return true;
@@ -679,7 +689,13 @@ bool CudaScaleFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.args.push_back(AdaptedArg::buffer(3));
     ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::buffer(2));
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.validatorInputB = scale; ac.elementCount = total;
     ac.n = channelsPack; ac.validatorInputA.resize(total); // will use validatorInputB for bias
     return true;
@@ -747,7 +763,13 @@ bool CudaMaxPoolFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
         ac.entry = "mnn_corpus_maxpool_fp32";
     }
     const int total = ib * oh * ow * ic_p;
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = total;
     ac.m = ib; ac.n = ic_p; ac.h = ih; ac.w = iw; ac.k = kx; ac.stride = sx; ac.orderType = padX;
     return true;
@@ -840,7 +862,13 @@ bool CudaAvgPoolFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
         ac.entry = "mnn_corpus_avgpool_fp32";
     }
     const int total = ib * oh * ow * ic_p;
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = total;
     ac.m = ib; ac.n = ic_p; ac.h = ih; ac.w = iw; ac.k = kx; ac.stride = sx; ac.orderType = padX;
     return true;

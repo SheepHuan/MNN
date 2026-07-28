@@ -7976,6 +7976,46 @@
         "size_y": 2,
         "size_z": 1
       }
+    },
+    {
+      "name": "cuda_conv_dw_120_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "conv_dw",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "cuda_conv_dw_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "channels": 8,
+        "ih": 4,
+        "iw": 4,
+        "kw": 3,
+        "pw": 1,
+        "sw": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_204_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "conv_dw",
+      "framework": "mnn",
+      "tag": "2.0.4",
+      "variant": "cuda_conv_dw_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "channels": 8,
+        "ih": 4,
+        "iw": 4,
+        "kw": 3,
+        "pw": 1,
+        "sw": 1
+      }
     }
   ]
 }

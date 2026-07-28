@@ -122,7 +122,13 @@ bool CudaArgMaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
         ac.args.push_back(AdaptedArg::buffer(0));
         ac.args.push_back(AdaptedArg::buffer(1));
     }
-    ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(count);
+        ac.globalSize[0] = mnnGridFor(count, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = count;
     ac.m = outside; ac.n = dim; ac.k = inside;
     return true;
@@ -263,7 +269,13 @@ bool CudaInterpNearestFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) c
         ac.args.push_back(AdaptedArg::buffer(1));
         ac.c = c_p;
     }
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = total;
     ac.h = ih; ac.w = iw; ac.stride = oh;
     return true;
@@ -506,7 +518,8 @@ bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
         ac.args.push_back(AdaptedArg::scalarInt(inside)); \
         ac.args.push_back(AdaptedArg::scalarInt(axis)); \
         ac.args.push_back(AdaptedArg::scalarInt(outside)); \
-        ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1; \
+        { const int blk = mnnBlock120(count); ac.globalSize[0] = mnnGridFor(count, blk); ac.localSize[0] = blk; } \
+        ac.dims = 1; \
         ac.validatorInputA = input; ac.elementCount = count; \
         ac.m = outside; ac.n = axis; ac.k = inside; \
     } else { \
@@ -586,7 +599,13 @@ bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
         ac.args.push_back(AdaptedArg::scalarInt(inside)); \
         ac.entry = "mnn_corpus_" #SHIM; \
     } \
-    ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1; \
+    if (spec.tag == "1.2.0") { \
+        const int blk = mnnBlock120(count); \
+        ac.globalSize[0] = mnnGridFor(count, blk); ac.localSize[0] = blk; \
+    } else { \
+        ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; \
+    } \
+    ac.dims = 1; \
     ac.validatorInputA = input; ac.elementCount = count; \
     ac.m = outside; ac.n = axis; ac.k = inside; \
     return true; \
@@ -671,7 +690,13 @@ bool CudaInterpBilinearFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) 
         ac.args.push_back(AdaptedArg::buffer(1));
         ac.c = c_p;
     }
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    if (spec.tag == "1.2.0") {
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else {
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = total;
     ac.h = ih; ac.w = iw; ac.stride = oh;
     return true;
@@ -1013,6 +1038,10 @@ extern "C" {
 void mnn_corpus_grid_sample_nearest_3d_fp32(const int, const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_grid_sample_bilinear_3d_fp32(const int, const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_conv_dw_fp32(const float*, const void*, const void*, float*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// 1.2.0 conv_dw: float kernel/bias + constBuffer struct param
+void mnn_corpus_conv_dw_120_fp32(const float*, const float*, const float*, float*, const void*, int, int, cudaStream_t);
+// 2.0.4 conv_dw: c_p indexing, single-channel-per-thread, half kernel/bias
+void mnn_corpus_conv_dw_204_fp32(const float*, const void*, const void*, float*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 }
 
 // ---- GridSample Nearest 3D ----
@@ -1089,8 +1118,10 @@ bool CudaGridSampleBilinear3dFp32Kernel::validate(const AdaptedCase& ac, const s
 }
 
 // ---- Conv DepthWise fp32 ----
+// Multi-tag: 1.2.0 (constBuffer struct, NCHW, float kernel/bias),
+//            2.0.4 (c_p indexing, single-channel-per-thread),
+//            3.6.0 / 2.2.3+ (DivModFast, 2-channels-per-thread).
 bool CudaConvDwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    ac.entry = "mnn_corpus_conv_dw_fp32";
     const int iw = spec.intParam("iw", 4), ih = spec.intParam("ih", 4);
     const int c = spec.intParam("channels", 8), c_p = c;
     const int kw = spec.intParam("kw", 3), kh = kw;
@@ -1098,57 +1129,129 @@ bool CudaConvDwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     const int pw = spec.intParam("pw", 1), ph = pw;
     const int ow = (iw + 2 * pw - kw) / sw + 1;
     const int oh = (ih + 2 * ph - kh) / sh + 1;
-    const int total = oh * ow * c_p;
     std::vector<float> input(ih * iw * c_p);
     for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
-    // kernel/bias in half (MNN stores them as half) - pack without __half type
-    // (CudaOpsMisc.cpp is compiled by g++, __half is not available; use raw byte packing)
-    std::vector<float> kernelF(c_p * kh * kw, 0.1f);
-    std::vector<float> biasF(c_p, 0.5f);
-    std::vector<uint8_t> kernelH(c_p * kh * kw * 2); // half = 2 bytes each
-    std::vector<uint8_t> biasH(c_p * 2);
-    // Simple float→half conversion (IEEE 754 half)
-    auto floatToHalfBytes = [](float f) -> uint16_t {
-        uint32_t x; memcpy(&x, &f, 4);
-        uint16_t sign = (x >> 16) & 0x8000;
-        int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
-        uint32_t mant = (x >> 13) & 0x3FF;
-        if (exp <= 0) { exp = 0; mant = 0; }
-        if (exp >= 31) { exp = 31; mant = 0; }
-        return sign | (exp << 10) | mant;
-    };
-    for (size_t i = 0; i < kernelF.size(); ++i) {
-        uint16_t h = floatToHalfBytes(kernelF[i]);
-        memcpy(&kernelH[i * 2], &h, 2);
-    }
-    for (size_t i = 0; i < biasF.size(); ++i) {
-        uint16_t h = floatToHalfBytes(biasF[i]);
-        memcpy(&biasH[i * 2], &h, 2);
-    }
+
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
-    AdaptedBuffer kBuf; kBuf.sizeBytes = kernelH.size(); kBuf.initialData = kernelH; kBuf.isOutput = false;
-    AdaptedBuffer bBuf; bBuf.sizeBytes = biasH.size(); bBuf.initialData = biasH; bBuf.isOutput = false;
-    AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
-    ac.buffers.push_back(inBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
-    ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1)); ac.args.push_back(AdaptedArg::buffer(2));
-    ac.args.push_back(AdaptedArg::buffer(3));
-    ac.args.push_back(AdaptedArg::scalarFloat(1e30f)); // maxV (no clamp)
-    ac.args.push_back(AdaptedArg::scalarFloat(-1e30f)); // minV
-    for (int v : {iw, ih, c, c_p, ow, oh, kw, kh, 1, 1, sw, sh, pw, ph, total})
-        ac.args.push_back(AdaptedArg::scalarInt(v));
-    ac.globalSize[0] = gridFor(total / 2); ac.localSize[0] = kBlock; ac.dims = 1;
-    ac.validatorInputA = input; ac.elementCount = total;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = oh * ow * c_p * sizeof(float); outBuf.isOutput = true;
+    ac.validatorInputA = input;
+    ac.elementCount = oh * ow * c_p;
     ac.h = ih; ac.w = iw; ac.c = c_p; ac.k = kw; ac.stride = sw; ac.orderType = pw;
+
+    if (spec.tag == "1.2.0") {
+        // 1.2.0: float kernel/bias, constBuffer struct param, NCHW layout
+        ac.entry = "mnn_corpus_conv_dw_120_fp32";
+        std::vector<float> kernelF(c_p * kh * kw, 0.1f);
+        std::vector<float> biasF(c_p, 0.5f);
+        AdaptedBuffer kBuf; kBuf.setFp32(kernelF); kBuf.isOutput = false;
+        AdaptedBuffer bBuf; bBuf.setFp32(biasF); bBuf.isOutput = false;
+        ac.buffers.push_back(inBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+        // constBuffer struct (44 bytes)
+        struct ConstBuf {
+            int pad[2]; int kernelSize[2]; int stride[2]; int dilate[2];
+            int inputSize[2]; int outputSize[2]; int channel; int subChannel;
+            int total; int activationType;
+        };
+        ConstBuf u;
+        u.pad[0] = pw; u.pad[1] = ph; u.kernelSize[0] = kw; u.kernelSize[1] = kh;
+        u.stride[0] = sw; u.stride[1] = sh; u.dilate[0] = 1; u.dilate[1] = 1;
+        u.inputSize[0] = iw; u.inputSize[1] = ih; u.outputSize[0] = ow; u.outputSize[1] = oh;
+        u.channel = c_p; u.subChannel = c_p; u.total = oh * ow * c_p; u.activationType = 0;
+        std::vector<uint8_t> uBuf((const uint8_t*)&u, (const uint8_t*)&u + sizeof(u));
+        AdaptedBuffer cBuf; cBuf.sizeBytes = uBuf.size(); cBuf.initialData = uBuf; cBuf.isOutput = false;
+        ac.buffers.push_back(cBuf);
+        // args: input, kernel, bias, output, uConst
+        ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
+        ac.args.push_back(AdaptedArg::buffer(2)); ac.args.push_back(AdaptedArg::buffer(3));
+        ac.args.push_back(AdaptedArg::buffer(4));
+        const int total = oh * ow * c_p;
+        const int blk = mnnBlock120(total);
+        ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else if (spec.tag == "2.0.4") {
+        // 2.0.4: c_p indexing, single-channel-per-thread, half kernel/bias
+        ac.entry = "mnn_corpus_conv_dw_204_fp32";
+        std::vector<float> kernelF(c_p * kh * kw, 0.1f), biasF(c_p, 0.5f);
+        std::vector<uint8_t> kernelH(c_p * kh * kw * 2), biasH(c_p * 2);
+        auto f2h = [](float f)->uint16_t {
+            uint32_t x; memcpy(&x, &f, 4);
+            uint16_t sign = (x >> 16) & 0x8000;
+            int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
+            uint32_t mant = (x >> 13) & 0x3FF;
+            if (exp <= 0) { exp = 0; mant = 0; }
+            if (exp >= 31) { exp = 31; mant = 0; }
+            return sign | (exp << 10) | mant;
+        };
+        for (size_t i = 0; i < kernelF.size(); ++i) { uint16_t h = f2h(kernelF[i]); memcpy(&kernelH[i*2], &h, 2); }
+        for (size_t i = 0; i < biasF.size(); ++i) { uint16_t h = f2h(biasF[i]); memcpy(&biasH[i*2], &h, 2); }
+        AdaptedBuffer kBuf; kBuf.sizeBytes = kernelH.size(); kBuf.initialData = kernelH; kBuf.isOutput = false;
+        AdaptedBuffer bBuf; bBuf.sizeBytes = biasH.size(); bBuf.initialData = biasH; bBuf.isOutput = false;
+        ac.buffers.push_back(inBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+        ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
+        ac.args.push_back(AdaptedArg::buffer(2)); ac.args.push_back(AdaptedArg::buffer(3));
+        ac.args.push_back(AdaptedArg::scalarFloat(1e30f)); ac.args.push_back(AdaptedArg::scalarFloat(-1e30f));
+        const int total = oh * ow * c_p;
+        for (int v : {iw, ih, c, c_p, ow, oh, kw, kh, 1, 1, sw, sh, pw, ph, total})
+            ac.args.push_back(AdaptedArg::scalarInt(v));
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
+    } else {
+        // 3.6.0 / 2.2.3+: DivModFast, 2-channels-per-thread, half kernel/bias
+        ac.entry = "mnn_corpus_conv_dw_fp32";
+        std::vector<float> kernelF(c_p * kh * kw, 0.1f), biasF(c_p, 0.5f);
+        std::vector<uint8_t> kernelH(c_p * kh * kw * 2), biasH(c_p * 2);
+        auto f2h = [](float f)->uint16_t {
+            uint32_t x; memcpy(&x, &f, 4);
+            uint16_t sign = (x >> 16) & 0x8000;
+            int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
+            uint32_t mant = (x >> 13) & 0x3FF;
+            if (exp <= 0) { exp = 0; mant = 0; }
+            if (exp >= 31) { exp = 31; mant = 0; }
+            return sign | (exp << 10) | mant;
+        };
+        for (size_t i = 0; i < kernelF.size(); ++i) { uint16_t h = f2h(kernelF[i]); memcpy(&kernelH[i*2], &h, 2); }
+        for (size_t i = 0; i < biasF.size(); ++i) { uint16_t h = f2h(biasF[i]); memcpy(&biasH[i*2], &h, 2); }
+        AdaptedBuffer kBuf; kBuf.sizeBytes = kernelH.size(); kBuf.initialData = kernelH; kBuf.isOutput = false;
+        AdaptedBuffer bBuf; bBuf.sizeBytes = biasH.size(); bBuf.initialData = biasH; bBuf.isOutput = false;
+        ac.buffers.push_back(inBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+        ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
+        ac.args.push_back(AdaptedArg::buffer(2)); ac.args.push_back(AdaptedArg::buffer(3));
+        ac.args.push_back(AdaptedArg::scalarFloat(1e30f)); ac.args.push_back(AdaptedArg::scalarFloat(-1e30f));
+        const int total = oh * ow * c_p;
+        for (int v : {iw, ih, c, c_p, ow, oh, kw, kh, 1, 1, sw, sh, pw, ph, total})
+            ac.args.push_back(AdaptedArg::scalarInt(v));
+        ac.globalSize[0] = gridFor(total / 2); ac.localSize[0] = kBlock;
+    }
+    ac.dims = 1;
     return true;
 }
-cudaError_t CudaConvDwFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
-    mnn_corpus_conv_dw_fp32((const float*)ctx.devBufs[0], (const void*)ctx.devBufs[1], (const void*)ctx.devBufs[2],
-        (float*)ctx.devBufs[3], ctx.floatArgs[0], ctx.floatArgs[1],
-        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-        ctx.intArgs[4], ctx.intArgs[5], ctx.intArgs[6], ctx.intArgs[7],
-        ctx.intArgs[8], ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11],
-        ctx.intArgs[12], ctx.intArgs[13], ctx.intArgs[14],
-        ctx.grid, ctx.block, ctx.stream);
+cudaError_t CudaConvDwFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    if (ac.tag == "1.2.0") {
+        // 1.2.0: input, kernel(float), bias(float), output, uConst
+        extern void mnn_corpus_conv_dw_120_fp32(const float*, const float*, const float*, float*,
+                                                const void*, int, int, cudaStream_t);
+        mnn_corpus_conv_dw_120_fp32((const float*)ctx.devBufs[0], (const float*)ctx.devBufs[1],
+                                     (const float*)ctx.devBufs[2], (float*)ctx.devBufs[3],
+                                     ctx.devBufs[4], ctx.grid, ctx.block, ctx.stream);
+    } else if (ac.tag == "2.0.4") {
+        // 2.0.4: same arg layout as 3.6.0 but single-channel shim
+        mnn_corpus_conv_dw_204_fp32((const float*)ctx.devBufs[0], (const void*)ctx.devBufs[1],
+                                     (const void*)ctx.devBufs[2], (float*)ctx.devBufs[3],
+                                     ctx.floatArgs[0], ctx.floatArgs[1],
+                                     ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
+                                     ctx.intArgs[4], ctx.intArgs[5], ctx.intArgs[6], ctx.intArgs[7],
+                                     ctx.intArgs[8], ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11],
+                                     ctx.intArgs[12], ctx.intArgs[13], ctx.intArgs[14],
+                                     ctx.grid, ctx.block, ctx.stream);
+    } else {
+        // 3.6.0 / 2.2.3+
+        mnn_corpus_conv_dw_fp32((const float*)ctx.devBufs[0], (const void*)ctx.devBufs[1],
+                                 (const void*)ctx.devBufs[2], (float*)ctx.devBufs[3],
+                                 ctx.floatArgs[0], ctx.floatArgs[1],
+                                 ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
+                                 ctx.intArgs[4], ctx.intArgs[5], ctx.intArgs[6], ctx.intArgs[7],
+                                 ctx.intArgs[8], ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11],
+                                 ctx.intArgs[12], ctx.intArgs[13], ctx.intArgs[14],
+                                 ctx.grid, ctx.block, ctx.stream);
+    }
     return cudaGetLastError();
 }
 bool CudaConvDwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -1174,7 +1277,8 @@ bool CudaPackC4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::scalarInt(inside)); ac.args.push_back(AdaptedArg::scalarInt(axis));
     ac.args.push_back(AdaptedArg::scalarInt(outside)); ac.args.push_back(AdaptedArg::scalarInt(axisC4));
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    { const int blk = mnnBlock120(total); ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk; }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = total;
     return true;
 }
@@ -1201,7 +1305,8 @@ bool CudaUnpackC4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const 
     ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::scalarInt(inside)); ac.args.push_back(AdaptedArg::scalarInt(axis));
     ac.args.push_back(AdaptedArg::scalarInt(outside)); ac.args.push_back(AdaptedArg::scalarInt(axisC4));
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    { const int blk = mnnBlock120(total); ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk; }
+    ac.dims = 1;
     ac.elementCount = total;
     return true;
 }
@@ -1222,7 +1327,8 @@ bool CudaSetZeroFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     AdaptedBuffer outBuf; outBuf.sizeBytes = n * sizeof(float); outBuf.isOutput = true;
     ac.buffers.push_back(outBuf);
     ac.args.push_back(AdaptedArg::scalarInt(n)); ac.args.push_back(AdaptedArg::buffer(0));
-    ac.globalSize[0] = gridFor(n); ac.localSize[0] = kBlock; ac.dims = 1;
+    { const int blk = mnnBlock120(n); ac.globalSize[0] = mnnGridFor(n, blk); ac.localSize[0] = blk; }
+    ac.dims = 1;
     ac.elementCount = n;
     return true;
 }
@@ -1248,7 +1354,8 @@ bool CudaAddBiasFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.buffers.push_back(inBuf); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
     ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(2)); ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::scalarInt(e)); ac.args.push_back(AdaptedArg::scalarInt(h));
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    { const int blk = mnnBlock120(total); ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk; }
+    ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = total; ac.m = e; ac.k = h;
     return true;
 }

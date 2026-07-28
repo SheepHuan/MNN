@@ -22,7 +22,14 @@ namespace KernelCorpus {
 
 bool MnnBridge::supports(const std::string& framework, const std::string& tag) const {
     if (framework != "mnn") return false;
-    return tag == "1.2.0" || tag == "3.6.0";
+    // CUDA corpus spans 1.2.0 through 3.6.0; intermediate tags are added as
+    // their kernel variants are implemented in the adapters.
+    static const char* kSupported[] = {
+        "1.2.0", "1.2.7", "2.0.4", "2.2.2", "2.2.3", "2.4.2",
+        "2.5.1", "2.7.1", "2.8.0", "2.8.4", "3.6.0"
+    };
+    for (auto t : kSupported) if (tag == t) return true;
+    return false;
 }
 
 AdaptedCase MnnBridge::adapt(const CaseSpec& spec,

@@ -28,6 +28,23 @@ inline void fillInputRamp(std::vector<float>& v, int n) {
     for (int i = 0; i < n; ++i) v[i] = 0.1f * (i % 13);
 }
 
+// Reproduce MNN 1.2.0's adaptive block-size selection (CUDARuntime::blocks_num,
+// source/backend/cuda/core/runtime/CUDARuntime.cpp at tag 1.2.0). 1.2.1+ and
+// 3.6.0 fixed mThreadPerBlock = 128, so only 1.2.0 adapters should call this.
+// maxThreadsPerBlock defaults to 1024 (typical for Ampere/Turing consumer GPUs);
+// pass the device's actual value if known. The rule: pick the largest power-of-2
+// bucket so that total_threads / bucket > maxNum, else fall back to 128.
+inline int mnnBlock120(size_t total_threads, int maxThreadsPerBlock = 1024) {
+    if (total_threads / 32 > (size_t)maxThreadsPerBlock)      return maxThreadsPerBlock;
+    else if (total_threads / 16 > (size_t)maxThreadsPerBlock) return maxThreadsPerBlock / 2;
+    else if (total_threads / 8 > (size_t)maxThreadsPerBlock)  return maxThreadsPerBlock / 4;
+    else if (total_threads / 4 > (size_t)maxThreadsPerBlock)  return maxThreadsPerBlock / 8;
+    return 128;
+}
+// Grid (block_num) for a given workload size and block size — matches MNN's
+// (total + block - 1) / block in both 1.2.0 and 3.6.0.
+inline int mnnGridFor(size_t total, int block) { return static_cast<int>((total + block - 1) / block); }
+
 // ============================================================================
 // CUDA corpus adapters. fp32 variants are in CudaOps.cpp (compiled by g++).
 // fp16/int8/bf16 variants are in CudaOpsFp16.cu (compiled by nvcc, because

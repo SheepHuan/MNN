@@ -5698,6 +5698,28 @@
       "op_type": "raster",
       "tag": "1.2.0",
       "variant": "cuda_blitregion_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_conv_dw_120_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/ConvDepthWiseExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "conv_dw",
+      "tag": "1.2.0",
+      "variant": "cuda_conv_dw_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_conv_dw_204_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/ConvDepthWiseExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "conv_dw",
+      "tag": "2.0.4",
+      "variant": "cuda_conv_dw_fp32"
     }
   ],
   "version": 1
