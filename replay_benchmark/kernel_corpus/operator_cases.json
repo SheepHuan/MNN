@@ -8139,6 +8139,102 @@
         "ow": 8,
         "channels": 4
       }
+    },
+    {
+      "name": "cuda_layernorm_127_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "layernorm",
+      "framework": "mnn",
+      "tag": "1.2.7",
+      "variant": "cuda_layernorm_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "inside": 32
+      }
+    },
+    {
+      "name": "cuda_layernorm_222_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "layernorm",
+      "framework": "mnn",
+      "tag": "2.2.2",
+      "variant": "cuda_layernorm_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "inside": 32
+      }
+    },
+    {
+      "name": "cuda_layernorm_284_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "layernorm",
+      "framework": "mnn",
+      "tag": "2.8.4",
+      "variant": "cuda_layernorm_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "outside": 4,
+        "inside": 32
+      }
+    },
+    {
+      "name": "cuda_prelu_127_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "prelu",
+      "framework": "mnn",
+      "tag": "1.2.7",
+      "variant": "cuda_prelu_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 1024,
+        "channels": 8
+      }
+    },
+    {
+      "name": "cuda_prelu_128_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "prelu",
+      "framework": "mnn",
+      "tag": "1.2.8",
+      "variant": "cuda_prelu_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 1024,
+        "channels": 8
+      }
+    },
+    {
+      "name": "cuda_prelu_204_fp32_smoke",
+      "backend": "cuda",
+      "op_type": "prelu",
+      "framework": "mnn",
+      "tag": "2.0.4",
+      "variant": "cuda_prelu_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 1024,
+        "channels": 8
+      }
     }
   ]
 }

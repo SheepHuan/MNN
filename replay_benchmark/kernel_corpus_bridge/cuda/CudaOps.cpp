@@ -31,7 +31,11 @@ void mnn_corpus_maxpool_120_fp32(const float*, float*, int, int, int, int, int, 
 void mnn_corpus_avgpool_120_fp32(const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_scale_120_fp32(const int, const int, const int, const float*, float*, const float*, const float*, int, int, cudaStream_t);
 void mnn_corpus_layernorm_120_fp32(const int, const int, const int, const float, const float*, float*, const float*, const float*, int, int, cudaStream_t);
+void mnn_corpus_layernorm_127_fp32(const int, const int, const int, const float, const float*, float*, const float*, const float*, int, int, cudaStream_t);
+void mnn_corpus_layernorm_222_fp32(const int, const int, const int, const float, const float*, float*, const float*, const float*, int, int, cudaStream_t);
 void mnn_corpus_prelu_120_fp32(const int, const int, const int, const float*, float*, const float*, int, int, int, cudaStream_t);
+void mnn_corpus_prelu_127_fp32(const int, const int, const int, const float*, float*, const float*, int, int, int, cudaStream_t);
+void mnn_corpus_prelu_128_fp32(const int, const int, const int, const float*, float*, const float*, int, int, int, cudaStream_t);
 }
 
 namespace MNN {
@@ -512,7 +516,12 @@ bool CudaSoftmaxFp32Kernel::validate(const AdaptedCase& ac, const std::vector<fl
 bool CudaLayerNormFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag == "1.2.0") {
         ac.entry = "mnn_corpus_layernorm_120_fp32";
+    } else if (spec.tag == "1.2.7") {
+        ac.entry = "mnn_corpus_layernorm_127_fp32";
+    } else if (spec.tag == "2.2.2") {
+        ac.entry = "mnn_corpus_layernorm_222_fp32";
     } else {
+        // 2.8.4 and 3.6.0: RMSNorm param (bodies identical, shared shim)
         ac.entry = "mnn_corpus_layernorm_fp32";
     }
     const int outside = spec.intParam("outside", 4);
@@ -549,12 +558,18 @@ bool CudaLayerNormFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const
     return true;
 }
 cudaError_t CudaLayerNormFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
-    if (ac.tag == "1.2.0") {
-        // 1.2.0: no RMSNorm flag in signature
-        mnn_corpus_layernorm_120_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.floatArgs[0],
-                                       (const float*)ctx.devBufs[0], (float*)ctx.devBufs[3],
-                                       (const float*)ctx.devBufs[1], (const float*)ctx.devBufs[2],
-                                       ctx.grid, ctx.block, ctx.stream);
+    if (ac.tag == "1.2.0" || ac.tag == "1.2.7" || ac.tag == "2.2.2") {
+        // 1.2.0/1.2.7/2.2.2: no RMSNorm flag in signature
+        const float* gin = (const float*)ctx.devBufs[0];
+        float* gout = (float*)ctx.devBufs[3];
+        const float* gg = (const float*)ctx.devBufs[1];
+        const float* gb = (const float*)ctx.devBufs[2];
+        if (ac.tag == "1.2.0")
+            mnn_corpus_layernorm_120_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.floatArgs[0], gin, gout, gg, gb, ctx.grid, ctx.block, ctx.stream);
+        else if (ac.tag == "1.2.7")
+            mnn_corpus_layernorm_127_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.floatArgs[0], gin, gout, gg, gb, ctx.grid, ctx.block, ctx.stream);
+        else
+            mnn_corpus_layernorm_222_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.floatArgs[0], gin, gout, gg, gb, ctx.grid, ctx.block, ctx.stream);
     } else {
         mnn_corpus_layernorm_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.floatArgs[0],
                                    (const float*)ctx.devBufs[0], (float*)ctx.devBufs[3],
@@ -587,44 +602,99 @@ bool CudaLayerNormFp32Kernel::validate(const AdaptedCase& ac, const std::vector<
 // PReLU
 // ============================================================================
 bool CudaPreluFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    if (spec.tag == "1.2.0") {
-        ac.entry = "mnn_corpus_prelu_120_fp32";
-    } else {
-        ac.entry = "mnn_corpus_prelu_fp32";
-    }
     const int total = spec.intParam("size", 1024);
-    const int channelsPack = spec.intParam("channels", 8);
+    int channelsPack = spec.intParam("channels", 8);
     const int dim = total / channelsPack;
     std::vector<float> input(total); fillInputAlternating(input, total);
-    std::vector<float> slope(channelsPack, 0.1f);
-    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
-    AdaptedBuffer slopeBuf; slopeBuf.setFp32(slope); slopeBuf.isOutput = false;
-    AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
-    ac.buffers.push_back(inBuf); ac.buffers.push_back(slopeBuf); ac.buffers.push_back(outBuf);
-    ac.args.push_back(AdaptedArg::scalarInt(total));
-    ac.args.push_back(AdaptedArg::scalarInt(channelsPack));
-    ac.args.push_back(AdaptedArg::scalarInt(dim));
-    ac.args.push_back(AdaptedArg::buffer(0));
-    ac.args.push_back(AdaptedArg::buffer(2));
-    ac.args.push_back(AdaptedArg::buffer(1));
-    ac.args.push_back(AdaptedArg::scalarInt(0));  // share_factor=0 / div_factor=1 (no share)
+
     if (spec.tag == "1.2.0") {
-        // 1.2.0: div_factor=1 means c = (index/dim) % channels / 1
-        ac.args.back().intVal = 1;
+        ac.entry = "mnn_corpus_prelu_120_fp32";
+        std::vector<float> slope(channelsPack, 0.1f);
+        AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+        AdaptedBuffer slopeBuf; slopeBuf.setFp32(slope); slopeBuf.isOutput = false;
+        AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
+        ac.buffers.push_back(inBuf); ac.buffers.push_back(slopeBuf); ac.buffers.push_back(outBuf);
+        ac.args.push_back(AdaptedArg::scalarInt(total));
+        ac.args.push_back(AdaptedArg::scalarInt(channelsPack));
+        ac.args.push_back(AdaptedArg::scalarInt(dim));
+        ac.args.push_back(AdaptedArg::buffer(0));
+        ac.args.push_back(AdaptedArg::buffer(2));
+        ac.args.push_back(AdaptedArg::buffer(1));
+        ac.args.push_back(AdaptedArg::scalarInt(1));  // div_factor=1
         const int blk = mnnBlock120(total);
         ac.globalSize[0] = mnnGridFor(total, blk); ac.localSize[0] = blk;
+    } else if (spec.tag == "1.2.7" || spec.tag == "1.2.8") {
+        // 1.2.7/1.2.8: PACK_NUMBER=4 channel packing.
+        // mChannel = UP_DIV(channels, PACK), mArea = total / (mChannel * PACK)
+        // mCount = mChannel * mArea * PACK = total
+        const int PACK = 4;
+        const int mChannel = (channelsPack + PACK - 1) / PACK;  // packed channel groups
+        const int mArea = total / (mChannel * PACK);            // spatial elements
+        const int slopeSize = mChannel * PACK;                  // slope packed
+        std::vector<float> slope(slopeSize, 0.1f);
+        AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+        AdaptedBuffer slopeBuf; slopeBuf.setFp32(slope); slopeBuf.isOutput = false;
+        AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
+        ac.buffers.push_back(inBuf); ac.buffers.push_back(slopeBuf); ac.buffers.push_back(outBuf);
+        ac.args.push_back(AdaptedArg::scalarInt(total));       // n = mCount
+        ac.args.push_back(AdaptedArg::scalarInt(mChannel));     // channels (packed groups)
+        ac.args.push_back(AdaptedArg::scalarInt(mArea));        // dim = mArea
+        ac.args.push_back(AdaptedArg::buffer(0));
+        ac.args.push_back(AdaptedArg::buffer(2));
+        ac.args.push_back(AdaptedArg::buffer(1));
+        if (spec.tag == "1.2.7") {
+            ac.entry = "mnn_corpus_prelu_127_fp32";
+            ac.args.push_back(AdaptedArg::scalarInt(1));  // div_factor=1
+        } else {
+            ac.entry = "mnn_corpus_prelu_128_fp32";
+            ac.args.push_back(AdaptedArg::scalarInt(0));  // share_factor=0
+        }
+        ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
     } else {
+        // 2.0.4 / 3.6.0
+        ac.entry = "mnn_corpus_prelu_fp32";
+        std::vector<float> slope(channelsPack, 0.1f);
+        AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+        AdaptedBuffer slopeBuf; slopeBuf.setFp32(slope); slopeBuf.isOutput = false;
+        AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
+        ac.buffers.push_back(inBuf); ac.buffers.push_back(slopeBuf); ac.buffers.push_back(outBuf);
+        ac.args.push_back(AdaptedArg::scalarInt(total));
+        ac.args.push_back(AdaptedArg::scalarInt(channelsPack));
+        ac.args.push_back(AdaptedArg::scalarInt(dim));
+        ac.args.push_back(AdaptedArg::buffer(0));
+        ac.args.push_back(AdaptedArg::buffer(2));
+        ac.args.push_back(AdaptedArg::buffer(1));
+        ac.args.push_back(AdaptedArg::scalarInt(0));  // share_factor=0
         ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
     }
     ac.dims = 1;
-    ac.validatorInputA = input; ac.validatorInputB = slope; ac.elementCount = total;
-    ac.n = channelsPack;
+    ac.validatorInputA = input;
+    ac.elementCount = total;
+    // Set ac.n and validatorInputB per-tag for validate()
+    if (spec.tag == "1.2.7" || spec.tag == "1.2.8") {
+        const int PACK = 4;
+        const int mChannel = (channelsPack + PACK - 1) / PACK;
+        ac.n = mChannel;
+        ac.validatorInputB = std::vector<float>(mChannel * PACK, 0.1f);
+    } else {
+        ac.n = channelsPack;
+        ac.validatorInputB = std::vector<float>(channelsPack, 0.1f);
+    }
     return true;
 }
 cudaError_t CudaPreluFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
     if (ac.tag == "1.2.0") {
-        // 1.2.0: PRELU_120 uses c = (index/dim) % channels / div_factor
         mnn_corpus_prelu_120_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                   (const float*)ctx.devBufs[0], (float*)ctx.devBufs[2],
+                                   (const float*)ctx.devBufs[1], ctx.intArgs[3],
+                                   ctx.grid, ctx.block, ctx.stream);
+    } else if (ac.tag == "1.2.7") {
+        mnn_corpus_prelu_127_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                   (const float*)ctx.devBufs[0], (float*)ctx.devBufs[2],
+                                   (const float*)ctx.devBufs[1], ctx.intArgs[3],
+                                   ctx.grid, ctx.block, ctx.stream);
+    } else if (ac.tag == "1.2.8") {
+        mnn_corpus_prelu_128_fp32(ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
                                    (const float*)ctx.devBufs[0], (float*)ctx.devBufs[2],
                                    (const float*)ctx.devBufs[1], ctx.intArgs[3],
                                    ctx.grid, ctx.block, ctx.stream);
@@ -639,8 +709,8 @@ cudaError_t CudaPreluFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchC
 bool CudaPreluFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int total = ac.elementCount, channelsPack = ac.n;
     if ((int)output.size() < total) return false;
+    const int PACK = 4;
     if (ac.tag == "1.2.0") {
-        // 1.2.0: c_idx = (index / dim) % channels / div_factor
         const int dim = ac.args[2].intVal;
         const int div_factor = ac.args[6].intVal;
         for (int i = 0; i < total; ++i) {
@@ -649,8 +719,38 @@ bool CudaPreluFp32Kernel::validate(const AdaptedCase& ac, const std::vector<floa
             const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
             if (std::fabs(output[i] - expected) > 1e-3f) return false;
         }
+    } else if (ac.tag == "1.2.7") {
+        // 1.2.7: mChannel = UP_DIV(channels,PACK), c = (index/mArea) % mChannel / div_factor
+        const int PACK = 4;
+        const int mChannel = ac.n;
+        const int mArea = ac.args[2].intVal;
+        const int div_factor = ac.args[6].intVal;
+        for (int t = 0; t < total; ++t) {
+            int index = t / PACK;
+            int r = t % PACK;
+            int c = (index / mArea) % mChannel / div_factor;
+            int c_idx = c * PACK + r;
+            const float x = ac.validatorInputA[t];
+            const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
+            if (std::fabs(output[t] - expected) > 1e-3f) return false;
+        }
+    } else if (ac.tag == "1.2.8") {
+        // 1.2.8: mChannel = UP_DIV(channels,PACK), c = (index/mArea) % mChannel
+        const int PACK = 4;
+        const int mChannel = ac.n;
+        const int mArea = ac.args[2].intVal;
+        const int share_factor = ac.args[6].intVal;
+        for (int t = 0; t < total; ++t) {
+            int index = t / PACK;
+            int r = t % PACK;
+            int c = (index / mArea) % mChannel;
+            int c_idx = share_factor ? 0 : (c * PACK + r);
+            const float x = ac.validatorInputA[t];
+            const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
+            if (std::fabs(output[t] - expected) > 1e-3f) return false;
+        }
     } else {
-        // 3.6.0: c_idx = index % channelsPack (NHWC), share_factor ? 0 : c_idx
+        // 2.0.4 / 3.6.0: c_idx = index % channelsPack
         const int share_factor = ac.args[6].intVal;
         for (int i = 0; i < total; ++i) {
             int c_idx = i % channelsPack;

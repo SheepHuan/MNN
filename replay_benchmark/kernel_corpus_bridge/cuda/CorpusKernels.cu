@@ -240,7 +240,62 @@ __global__ void SOFTMAX(const T* input, T* output, const int inside, const int a
 }
 
 // ============================================================================
-// LayerNorm: source/backend/cuda/execution/LayerNormExecution.cu (simple version)
+// LayerNorm 1.2.7: float* gamma/beta, float accumulation + (float) casts, no null check
+// (source/backend/cuda/execution/LayerNormExecution.cu @ tag 1.2.7)
+// ============================================================================
+template <typename T>
+__global__ void LAYERNORM_127(const int count, const int outside, const int inside, const float epsilon,
+                               const T* in, T* out, const float* gamma_data, const float* beta_data) {
+    CUDA_KERNEL_LOOP(i, count) {
+        const int o = i / inside;
+        const int index = i % inside;
+        const T* inner_input = in + o * inside;
+        T* inner_output = out + o * inside;
+        float sum = 0.f;
+        for (int j = 0; j < inside; ++j) { sum += (float)inner_input[j]; }
+        float mean = sum / inside;
+        float square_sum = 0.f;
+        for (int j = 0; j < inside; ++j) {
+            square_sum += ((float)inner_input[j] - mean) * ((float)inner_input[j] - mean);
+        }
+        float variable = square_sum / inside;
+        variable = 1.f / sqrt(variable + epsilon);
+        inner_output[index] = (T)(((float)inner_input[index] - mean) * variable * gamma_data[index] + beta_data[index]);
+    }
+}
+
+// ============================================================================
+// LayerNorm 2.2.2: 1.2.7 + null check for gamma/beta
+// (source/backend/cuda/execution/LayerNormExecution.cu @ tag 2.2.2)
+// ============================================================================
+template <typename T>
+__global__ void LAYERNORM_222(const int count, const int outside, const int inside, const float epsilon,
+                               const T* in, T* out, const float* gamma_data, const float* beta_data) {
+    CUDA_KERNEL_LOOP(i, count) {
+        const int o = i / inside;
+        const int index = i % inside;
+        const T* inner_input = in + o * inside;
+        T* inner_output = out + o * inside;
+        float sum = 0.f;
+        for (int j = 0; j < inside; ++j) { sum += (float)inner_input[j]; }
+        float mean = sum / inside;
+        float square_sum = 0.f;
+        for (int j = 0; j < inside; ++j) {
+            square_sum += ((float)inner_input[j] - mean) * ((float)inner_input[j] - mean);
+        }
+        float variable = square_sum / inside;
+        variable = 1.f / sqrt(variable + epsilon);
+        float res = ((float)inner_input[index] - mean) * variable;
+        if (gamma_data != nullptr && beta_data != nullptr) {
+            res = res * gamma_data[index] + beta_data[index];
+        }
+        inner_output[index] = (T)res;
+    }
+}
+
+// ============================================================================
+// LayerNorm 2.8.4 / 3.6.0: 2.2.2 + bool RMSNorm param + branch
+// (source/backend/cuda/execution/LayerNormExecution.cu @ tag 2.8.4 / HEAD)
 // ============================================================================
 template <typename T>
 __global__ void LAYERNORM(const int count, const int outside, const int inside, const float epsilon,
@@ -271,7 +326,45 @@ __global__ void LAYERNORM(const int count, const int outside, const int inside, 
 }
 
 // ============================================================================
-// PReLU: source/backend/cuda/execution/PReLUExecution.cu
+// PReLU 1.2.7: float* slope, div_factor, PACK_NUMBER channel packing
+// (source/backend/cuda/execution/PReLUExecution.cu @ tag 1.2.7)
+// ============================================================================
+template <typename T>
+__global__ void PRELU_127(const int n, const int channels, const int dim, const T* in, T* out,
+                          const float* slopeData, int div_factor) {
+    const int PACK_NUMBER = 4;
+    CUDA_KERNEL_LOOP(t, n) {
+        int index = t / PACK_NUMBER;
+        int r = t % PACK_NUMBER;
+        int c = (index / dim) % channels / div_factor;
+        float iv = (float)in[t];
+        float ov = iv > 0.0f ? iv : iv * slopeData[c * PACK_NUMBER + r];
+        out[t] = (T)ov;
+    }
+}
+
+// ============================================================================
+// PReLU 1.2.8: float* slope, share_factor, PACK_NUMBER + share_factor gating
+// (source/backend/cuda/execution/PReLUExecution.cu @ tag 1.2.8)
+// ============================================================================
+template <typename T>
+__global__ void PRELU_128(const int n, const int channels, const int dim, const T* in, T* out,
+                          const float* slopeData, int share_factor) {
+    const int PACK_NUMBER = 4;
+    CUDA_KERNEL_LOOP(t, n) {
+        int index = t / PACK_NUMBER;
+        int r = t % PACK_NUMBER;
+        int c = (index / dim) % channels;
+        float iv = (float)in[t];
+        const int c_idx = share_factor ? 0 : (c * PACK_NUMBER + r);
+        float ov = iv > 0.0f ? iv : iv * slopeData[c_idx];
+        out[t] = (T)ov;
+    }
+}
+
+// ============================================================================
+// PReLU 2.0.4 / 3.6.0: float* slope, share_factor, channelsPack (no PACK_NUMBER)
+// (source/backend/cuda/execution/PReLUExecution.cu @ tag 2.0.4 / HEAD)
 // ============================================================================
 template <typename T>
 __global__ void PRELU(const int total, const int channelsPack, const int dim, const T* in, T* out,
@@ -571,6 +664,18 @@ void mnn_corpus_layernorm_fp16(const int count, const int outside, const int ins
     MNN::Corpus::LAYERNORM<half><<<grid, block, 0, stream>>>(count, outside, inside, epsilon, (const half*)in,
                                                               (half*)out, gamma, beta, RMSNorm);
 }
+// ---- LayerNorm 1.2.7: float* gamma/beta, float acc, no null check ----
+void mnn_corpus_layernorm_127_fp32(const int count, const int outside, const int inside, const float epsilon,
+                                    const float* in, float* out, const float* gamma, const float* beta,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::LAYERNORM_127<float><<<grid, block, 0, stream>>>(count, outside, inside, epsilon, in, out, gamma, beta);
+}
+// ---- LayerNorm 2.2.2: float* gamma/beta, float acc, null check ----
+void mnn_corpus_layernorm_222_fp32(const int count, const int outside, const int inside, const float epsilon,
+                                    const float* in, float* out, const float* gamma, const float* beta,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::LAYERNORM_222<float><<<grid, block, 0, stream>>>(count, outside, inside, epsilon, in, out, gamma, beta);
+}
 
 // ---- PReLU ----
 void mnn_corpus_prelu_fp32(const int total, const int channelsPack, const int dim, const float* in, float* out,
@@ -581,6 +686,16 @@ void mnn_corpus_prelu_fp16(const int total, const int channelsPack, const int di
                             const float* slopeData, int share_factor, int grid, int block, cudaStream_t stream) {
     MNN::Corpus::PRELU<half><<<grid, block, 0, stream>>>(total, channelsPack, dim, (const half*)in, (half*)out,
                                                            slopeData, share_factor);
+}
+// ---- PReLU 1.2.7: PACK_NUMBER, div_factor ----
+void mnn_corpus_prelu_127_fp32(const int n, const int channels, const int dim, const float* in, float* out,
+                                const float* slopeData, int div_factor, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::PRELU_127<float><<<grid, block, 0, stream>>>(n, channels, dim, in, out, slopeData, div_factor);
+}
+// ---- PReLU 1.2.8: PACK_NUMBER, share_factor ----
+void mnn_corpus_prelu_128_fp32(const int n, const int channels, const int dim, const float* in, float* out,
+                                const float* slopeData, int share_factor, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::PRELU_128<float><<<grid, block, 0, stream>>>(n, channels, dim, in, out, slopeData, share_factor);
 }
 
 // ---- Scale ----

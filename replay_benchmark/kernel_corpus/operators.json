@@ -5797,6 +5797,72 @@
       "op_type": "interp_bilinear",
       "tag": "2.0.4",
       "variant": "cuda_interp_bilinear_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_layernorm_127_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/LayerNormExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "layernorm",
+      "tag": "1.2.7",
+      "variant": "cuda_layernorm_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_layernorm_222_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/LayerNormExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "layernorm",
+      "tag": "2.2.2",
+      "variant": "cuda_layernorm_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_layernorm_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/LayerNormExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "layernorm",
+      "tag": "2.8.4",
+      "variant": "cuda_layernorm_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_prelu_127_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/PReLUExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "prelu",
+      "tag": "1.2.7",
+      "variant": "cuda_prelu_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_prelu_128_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/PReLUExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "prelu",
+      "tag": "1.2.8",
+      "variant": "cuda_prelu_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_prelu_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/PReLUExecution.cu",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "prelu",
+      "tag": "2.0.4",
+      "variant": "cuda_prelu_fp32"
     }
   ],
   "version": 1
