@@ -1954,6 +1954,107 @@ public:
     bool validate(const AdaptedCase&, const std::vector<float>&) const override;
 };
 
+// ============================================================================
+// weight_only_quant kernels (conv_fpa_intb). fp32 variants (non-template +
+// template<float>) live in CudaOpsMisc.cpp; fp16 variants in CudaOpsFp16.cu.
+// ============================================================================
+class CudaGemmInt8Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_fpa_intb"; }
+    const char* variant() const override { return "cuda_gemm_int8_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaPrecomputeSumbqFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_fpa_intb"; }
+    const char* variant() const override { return "cuda_precompute_sumbq_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaRearrangePackedWeightInt4Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_fpa_intb"; }
+    const char* variant() const override { return "cuda_rearrange_packed_weight_int4_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaRearrangeWeightInt4Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_fpa_intb"; }
+    const char* variant() const override { return "cuda_rearrange_weight_int4_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaRearrangeWeightInt8Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_fpa_intb"; }
+    const char* variant() const override { return "cuda_rearrange_weight_int8_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+#define WOQ_FP32_FP16_DECL(BASE, VARIANT, OPTYPE) \
+class Cuda##VARIANT##Fp32Kernel : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return OPTYPE; } \
+    const char* variant() const override { return "cuda_" #BASE "_fp32"; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+}; \
+class Cuda##VARIANT##Fp16Kernel : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return OPTYPE; } \
+    const char* variant() const override { return "cuda_" #BASE "_fp16"; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+};
+
+WOQ_FP32_FP16_DECL(precomputegemvparams, PrecomputeGemvParams, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(quanta, QuantA, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(dequantandacc, DequantAndAcc, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(biasandactivation, BiasAndActivation, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemm_fpaint8b, GemmFpAInt8B, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint8b, GemvFpAInt8B, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemm_fpaint4b, GemmFpAInt4B, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint4b, GemvFpAInt4B, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint4b_v5, GemvFpAInt4BV5, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint4b_v9, GemvFpAInt4BV9, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint4b_v14, GemvFpAInt4BV14, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint4b_v14_mb, GemvFpAInt4BV14Mb, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(gemv_fpaint8b_v2, GemvFpAInt8BV2, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(conv_fpaint8b, ConvFpAInt8B, "conv_fpa_intb")
+WOQ_FP32_FP16_DECL(conv_fpaint4b, ConvFpAInt4B, "conv_fpa_intb")
+#undef WOQ_FP32_FP16_DECL
+
+// ============================================================================
+// gated_delta_rule_prefill (linear_attention). fp32 in CudaOpsMisc.cpp,
+// fp16 in CudaOpsFp16.cu.
+// ============================================================================
+class CudaGatedDeltaRulePrefillFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "linear_attention"; }
+    const char* variant() const override { return "cuda_gated_delta_rule_prefill_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGatedDeltaRulePrefillFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "linear_attention"; }
+    const char* variant() const override { return "cuda_gated_delta_rule_prefill_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
 } // namespace MnnOps
 } // namespace KernelCorpus
 } // namespace Replay

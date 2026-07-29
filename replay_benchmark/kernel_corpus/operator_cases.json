@@ -11191,6 +11191,528 @@
       "int_params": {
         "count": 64
       }
+    },
+    {
+      "name": "cuda_gemm_int8_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_int8_fp32",
+      "int_params": {
+        "m": 4,
+        "n": 4,
+        "k": 8
+      }
+    },
+    {
+      "name": "cuda_precompute_sumbq_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_precompute_sumbq_fp32",
+      "int_params": {
+        "num_groups": 1,
+        "ic_per_group": 8,
+        "oc": 4,
+        "ic_p": 8
+      }
+    },
+    {
+      "name": "cuda_rearrange_packed_weight_int4_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_rearrange_packed_weight_int4_fp32",
+      "int_params": {
+        "oc": 4,
+        "ic": 8,
+        "khw": 9
+      }
+    },
+    {
+      "name": "cuda_rearrange_weight_int4_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_rearrange_weight_int4_fp32",
+      "int_params": {
+        "oc": 4,
+        "ic": 8,
+        "khw": 9
+      }
+    },
+    {
+      "name": "cuda_rearrange_weight_int8_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_rearrange_weight_int8_fp32",
+      "int_params": {
+        "oc": 4,
+        "ic": 8,
+        "khw": 9
+      }
+    },
+    {
+      "name": "cuda_precomputegemvparams_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_precomputegemvparams_fp32",
+      "int_params": {
+        "oc": 4,
+        "num_qg": 1
+      }
+    },
+    {
+      "name": "cuda_precomputegemvparams_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_precomputegemvparams_fp16",
+      "int_params": {
+        "oc": 4,
+        "num_qg": 1
+      }
+    },
+    {
+      "name": "cuda_quanta_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_quanta_fp32",
+      "int_params": {
+        "m": 4,
+        "k": 8
+      }
+    },
+    {
+      "name": "cuda_quanta_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_quanta_fp16",
+      "int_params": {
+        "m": 4,
+        "k": 8
+      }
+    },
+    {
+      "name": "cuda_dequantandacc_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_dequantandacc_fp32",
+      "int_params": {
+        "m": 4,
+        "n": 4,
+        "k": 8
+      }
+    },
+    {
+      "name": "cuda_dequantandacc_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_dequantandacc_fp16",
+      "int_params": {
+        "m": 4,
+        "n": 4,
+        "k": 8
+      }
+    },
+    {
+      "name": "cuda_biasandactivation_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_biasandactivation_fp32",
+      "int_params": {
+        "m": 1,
+        "n": 4
+      }
+    },
+    {
+      "name": "cuda_biasandactivation_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_biasandactivation_fp16",
+      "int_params": {
+        "m": 1,
+        "n": 4
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint8b_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint8b_fp32",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "batch": 1,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint8b_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint8b_fp16",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "batch": 1,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint8b_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint8b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint8b_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint8b_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint4b_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint4b_fp32",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "batch": 1,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint4b_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint4b_fp16",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "batch": 1,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v5_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v5_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v5_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v5_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v9_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v9_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v9_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v9_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v14_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v14_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v14_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v14_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v14_mb_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v14_mb_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v14_mb_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v14_mb_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint8b_v2_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint8b_v2_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint8b_v2_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint8b_v2_fp16",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_conv_fpaint8b_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_fpaint8b_fp32",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "iw": 4,
+        "ih": 4,
+        "kw": 3,
+        "kh": 3,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_conv_fpaint8b_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_fpaint8b_fp16",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "iw": 4,
+        "ih": 4,
+        "kw": 3,
+        "kh": 3,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_conv_fpaint4b_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_fpaint4b_fp32",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "iw": 4,
+        "ih": 4,
+        "kw": 3,
+        "kh": 3,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_conv_fpaint4b_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_fpaint4b_fp16",
+      "int_params": {
+        "ic": 8,
+        "oc": 4,
+        "iw": 4,
+        "ih": 4,
+        "kw": 3,
+        "kh": 3,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gated_delta_rule_prefill_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "linear_attention",
+      "tag": "3.6.0",
+      "variant": "cuda_gated_delta_rule_prefill_fp32",
+      "int_params": {
+        "batch": 1,
+        "l": 2,
+        "h_k": 1,
+        "h_v": 1,
+        "d_k": 4,
+        "d_v": 4
+      },
+      "float_params": {
+        "q_scale": 1.0
+      }
+    },
+    {
+      "name": "cuda_gated_delta_rule_prefill_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "linear_attention",
+      "tag": "3.6.0",
+      "variant": "cuda_gated_delta_rule_prefill_fp16",
+      "int_params": {
+        "batch": 1,
+        "l": 2,
+        "h_k": 1,
+        "h_v": 1,
+        "d_k": 4,
+        "d_v": 4
+      },
+      "float_params": {
+        "q_scale": 1.0
+      }
     }
   ]
 }

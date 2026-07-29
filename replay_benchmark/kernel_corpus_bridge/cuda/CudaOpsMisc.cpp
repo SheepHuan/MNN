@@ -51,6 +51,29 @@ void mnn_corpus_blitregion_241_fp32(const float*, float*, int, const int32_t*, c
 void mnn_corpus_nhwc2nchw_212_fp32(const float*, float*, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_grid_sample_nearest_272_fp32(const int, const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_grid_sample_bilinear_272_fp32(const int, const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// weight_only_quant shims (defined in weight_only_quant.cu)
+void mnn_corpus_gemm_int8_fp32(const int8_t*, const int8_t*, int32_t*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_precompute_sumbq_fp32(const int8_t*, int32_t*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_rearrange_packed_weight_int4_fp32(const uint8_t*, uint8_t*, int, size_t, int, int, int, int, cudaStream_t);
+void mnn_corpus_rearrange_weight_int4_fp32(const int8_t*, uint8_t*, int, size_t, int, int, int, int, cudaStream_t);
+void mnn_corpus_rearrange_weight_int8_fp32(const int8_t*, int8_t*, int, size_t, int, int, int, int, cudaStream_t);
+void mnn_corpus_precomputegemvparams_fp32(const float*, const float*, float2*, int, int, int, cudaStream_t);
+void mnn_corpus_quanta_fp32(const float*, int8_t*, float*, float*, int32_t*, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_dequantandacc_fp32(const int32_t*, float*, const float*, const float*, const float*, const float*, const int32_t*, int, int, const int32_t*, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_biasandactivation_fp32(float*, const float*, float, float, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemm_fpaint8b_fp32(const float*, const int8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint8b_fp32(const float*, const int8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemm_fpaint4b_fp32(const float*, const uint8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_fp32(const float*, const uint8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v5_fp32(const float*, const uint8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v9_fp32(const float*, const uint8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v14_fp32(const float*, const uint8_t*, const float2*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v14_mb_fp32(const float*, const uint8_t*, const float2*, const float*, float*, float, float, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint8b_v2_fp32(const float*, const int8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_conv_fpaint8b_fp32(const float*, const int8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_conv_fpaint4b_fp32(const float*, const uint8_t*, const float*, const float*, const float*, float*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// gated_delta_rule_prefill fp32 shim (defined in attention.cu)
+void mnn_corpus_gated_delta_rule_prefill_fp32(const float*, const void*, const void*, float*, void*, int, int, int, int, int, int, int, int, int, int, bool, float, bool, bool, bool, int, int, size_t, cudaStream_t);
 }
 
 // ---- GatherV2 ----
@@ -1894,9 +1917,10 @@ bool CudaConvDwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<flo
                         }
                         int dst = ((ob * oh + oy) * ow + ox) * c_p + oz;
                         if (std::fabs(output[dst] - color) > 1e-2f) return false;
-                    }
-        return true;
-    }
+        }
+    return true;
+}
+
     // Smoke test (1.2.0 / 2.0.4): output is not all zero
     for (int i = 0; i < std::min(10, total); ++i) {
         if (output[i] != 0.0f) return true;
@@ -5579,6 +5603,159 @@ bool CudaReductionMean120Fp32Kernel::validate(const AdaptedCase& ac, const std::
     return true;
 }
 
+// ============================================================================
+// weight_only_quant adapters (conv_fpa_intb). Small smoke cases: batch=1,
+// ic=8, oc=4, quanC=4 (= oc * 1 group). minV=0, maxV=6 (relu6 clamp).
+// Weight is int8 stored as small values (e.g. q=1 -> 1.0); scale=0.1, offset=0.
+// ============================================================================
+
+namespace {
+// Build int8 weight [oc, ic_p] of value `q` (per row constant for determinism).
+std::vector<int8_t> woqBuildInt8Weight(int oc, int ic_p, int8_t q) {
+    return std::vector<int8_t>((size_t)oc * ic_p, q);
+}
+// Build packed int4 weight [oc, ic_p/2]: each byte holds two nibbles, both = (q+8)
+// so dequant ((nibble>>4)-8) = q and ((nibble&0xF)-8) = q.
+std::vector<uint8_t> woqBuildInt4Weight(int oc, int ic_p, int8_t q) {
+    uint8_t nib = (uint8_t)(q + 8);
+    uint8_t byte = (uint8_t)(nib | (nib << 4));
+    return std::vector<uint8_t>((size_t)oc * (ic_p / 2), byte);
+}
+// Build float input [batch, ic_p]: 0.1f*(i%7) pattern.
+std::vector<float> woqBuildInput(int batch, int ic, int ic_p) {
+    std::vector<float> v((size_t)batch * ic_p, 0.0f);
+    for (int b = 0; b < batch; ++b)
+        for (int k = 0; k < ic; ++k) v[b * ic_p + k] = 0.1f * (k % 7);
+    return v;
+}
+// Host reference: dequantize int8 weight (w*scale+offset) and do matmul+bias+clamp.
+// input[batch, ic_p], weight[oc, ic_p], output[batch, oc_p].
+std::vector<float> woqRefInt8(const std::vector<float>& input, const std::vector<int8_t>& weight,
+                              const std::vector<float>& scale, const std::vector<float>& offset,
+                              const std::vector<float>& bias, int batch, int ic, int ic_p,
+                              int oc, int oc_p, int quanC, float maxV, float minV) {
+    const int num_qg = (quanC > 0) ? (quanC / oc) : 1;
+    const int ic_per_group = (num_qg > 0) ? (ic / num_qg) : ic;
+    std::vector<float> out((size_t)batch * oc_p, 0.0f);
+    for (int b = 0; b < batch; ++b)
+        for (int n = 0; n < oc; ++n) {
+            float acc = bias[n];
+            for (int k = 0; k < ic; ++k) {
+                int g = k / ic_per_group;
+                int qpi = n * num_qg + g;
+                float w_fp = (float)weight[n * ic_p + k] * scale[qpi] + offset[qpi];
+                acc += input[b * ic_p + k] * w_fp;
+            }
+            acc = std::max(acc, minV);
+            acc = std::min(acc, maxV);
+            out[b * oc_p + n] = acc;
+        }
+    return out;
+}
+// Host reference for packed int4 weight (two nibbles per byte).
+std::vector<float> woqRefInt4(const std::vector<float>& input, const std::vector<uint8_t>& weight,
+                              const std::vector<float>& scale, const std::vector<float>& offset,
+                              const std::vector<float>& bias, int batch, int ic, int ic_p,
+                              int oc, int oc_p, int quanC, float maxV, float minV) {
+    const int num_qg = (quanC > 0) ? (quanC / oc) : 1;
+    const int ic_per_group = (num_qg > 0) ? (ic / num_qg) : ic;
+    std::vector<float> out((size_t)batch * oc_p, 0.0f);
+    for (int b = 0; b < batch; ++b)
+        for (int n = 0; n < oc; ++n) {
+            float acc = bias[n];
+            for (int k = 0; k < ic; ++k) {
+                int g = k / ic_per_group;
+                int qpi = n * num_qg + g;
+                uint8_t pb = weight[n * (ic_p / 2) + k / 2];
+                int8_t q = (k % 2 == 0) ? (int8_t)((pb >> 4) - 8) : (int8_t)((pb & 0x0F) - 8);
+                float w_fp = (float)q * scale[qpi] + offset[qpi];
+                acc += input[b * ic_p + k] * w_fp;
+            }
+            acc = std::max(acc, minV);
+            acc = std::min(acc, maxV);
+            out[b * oc_p + n] = acc;
+        }
+    return out;
+}
+// V14 reference uses precomputed float2 params (.x=scale, .y=offset-8*scale).
+// V14 computes acc += in*(nibble*scale + adj). nibble=q+8, adj=offset-8*scale,
+// so in*((q+8)*scale + offset - 8*scale) = in*(q*scale + offset). Same as standard.
+std::vector<float> woqRefInt4V14(const std::vector<float>& input, const std::vector<uint8_t>& weight,
+                                 const std::vector<float2>& gemv_params, const std::vector<float>& bias,
+                                 int batch, int ic, int ic_p, int oc, int oc_p, int num_qg,
+                                 float maxV, float minV) {
+    const int ic_per_group = ic / num_qg;
+    std::vector<float> out((size_t)batch * oc_p, 0.0f);
+    for (int b = 0; b < batch; ++b)
+        for (int n = 0; n < oc; ++n) {
+            float acc = bias[n];
+            for (int k = 0; k < ic; ++k) {
+                int g = k / ic_per_group;
+                float2 p = gemv_params[n * num_qg + g];
+                uint8_t pb = weight[n * (ic_p / 2) + k / 2];
+                int nibble = (k % 2 == 0) ? (pb >> 4) : (pb & 0x0F);
+                float w_fp = (float)nibble * p.x + p.y;
+                acc += input[b * ic_p + k] * w_fp;
+            }
+            acc = std::max(acc, minV);
+            acc = std::min(acc, maxV);
+            out[b * oc_p + n] = acc;
+        }
+    return out;
+}
+} // namespace (anonymous)
+
+// ============================================================================
+// 1. GEMM_Int8 (non-template). Inputs: A_q[M, lda_q], B_q[N, ldb] int8.
+// Output: C_q[M, ldc] int32 = A_q @ B_q^T? Actually C_q[m,n]=sum_k A[m,k]*B[n,k].
+// ============================================================================
+bool CudaGemmInt8Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    ac.entry = "mnn_corpus_gemm_int8_fp32";
+    const int M = spec.intParam("m", 4), N = spec.intParam("n", 4), K_i = spec.intParam("k", 8);
+    const int lda_q = K_i, ldb = K_i, ldc = N;
+    std::vector<int8_t> A_q((size_t)M * lda_q), B_q((size_t)N * ldb);
+    for (int m = 0; m < M; ++m) for (int k = 0; k < K_i; ++k) A_q[m*lda_q+k] = (int8_t)((m + k) % 7 - 3);
+    for (int n = 0; n < N; ++n) for (int k = 0; k < K_i; ++k) B_q[n*ldb+k] = (int8_t)((n + k) % 5 - 2);
+    AdaptedBuffer aBuf; aBuf.sizeBytes = A_q.size(); aBuf.initialData.assign((const uint8_t*)A_q.data(), (const uint8_t*)A_q.data()+A_q.size()); aBuf.isOutput=false;
+    AdaptedBuffer bBuf; bBuf.sizeBytes = B_q.size(); bBuf.initialData.assign((const uint8_t*)B_q.data(), (const uint8_t*)B_q.data()+B_q.size()); bBuf.isOutput=false;
+    const int outBytes = M * ldc * sizeof(int32_t);
+    AdaptedBuffer oBuf; oBuf.sizeBytes = outBytes; oBuf.isOutput=true;
+    ac.buffers.push_back(aBuf); ac.buffers.push_back(bBuf); ac.buffers.push_back(oBuf);
+    ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1)); ac.args.push_back(AdaptedArg::buffer(2));
+    ac.args.push_back(AdaptedArg::scalarInt(M)); ac.args.push_back(AdaptedArg::scalarInt(N)); ac.args.push_back(AdaptedArg::scalarInt(K_i));
+    ac.args.push_back(AdaptedArg::scalarInt(lda_q)); ac.args.push_back(AdaptedArg::scalarInt(ldb)); ac.args.push_back(AdaptedArg::scalarInt(ldc));
+    const int gridX = (N + 15) / 16, gridY = (M + 15) / 16, blockX = 16, blockY = 16;
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
+    ac.args.push_back(AdaptedArg::scalarInt(blockX)); ac.args.push_back(AdaptedArg::scalarInt(blockY));
+    ac.globalSize[0] = gridX; ac.localSize[0] = blockX; ac.dims = 1;
+    ac.validatorInputA.assign(A_q.begin(), A_q.end()); // not used; recompute below
+    ac.m = M; ac.n = N; ac.k = K_i; ac.p = lda_q; ac.q = ldb; ac.stride = ldc;
+    // store B_q in validatorInputB as float slots
+    int bFloats = (B_q.size() + 3) / 4;
+    ac.validatorInputB.assign(bFloats, 0.0f);
+    std::memcpy(ac.validatorInputB.data(), B_q.data(), B_q.size());
+    return true;
+}
+cudaError_t CudaGemmInt8Fp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemm_int8_fp32((const int8_t*)ctx.devBufs[0], (const int8_t*)ctx.devBufs[1], (int32_t*)ctx.devBufs[2],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaGemmInt8Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    const int M = ac.m, N = ac.n, K_i = ac.k, lda_q = ac.p, ldb = ac.q, ldc = ac.stride;
+    if ((int)output.size() * 4 < M * ldc * 4) return false;
+    const int32_t* out = reinterpret_cast<const int32_t*>(output.data());
+    const int8_t* A_q = reinterpret_cast<const int8_t*>(ac.validatorInputA.data());
+    const int8_t* B_q = reinterpret_cast<const int8_t*>(ac.validatorInputB.data());
+    for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            int32_t expected = 0;
+            for (int k = 0; k < K_i; ++k) expected += (int32_t)A_q[m*lda_q+k] * (int32_t)B_q[n*ldb+k];
+            if (out[m*ldc+n] != expected) return false;
+        }
+    return true;
+}
 } // namespace MnnOps
 } // namespace KernelCorpus
 } // namespace Replay
