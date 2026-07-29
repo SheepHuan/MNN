@@ -1420,12 +1420,13 @@ bool CudaConvDwMultiWidthChannelFp32Kernel::validate(const AdaptedCase& ac, cons
 // A-class: half-precision transpose/pack/fuseblit/unary adapters (5)
 // ============================================================================
 // ---- PACKCOMMON_half_4: pack half4 (axisAlign = UP_DIV(axis,2)*2) ----
+// Corpus adaptation (see transpose_half.cu header): float-scalar variant of
+// MNN's int2 (4-half) packed kernel. axisAlign = UP_DIV(axis,2)*2.
 bool CudaPackCommonHalf4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
     const int inside = spec.intParam("inside", 4);
     const int axis = spec.intParam("axis", 8);
     const int outside = spec.intParam("outside", 1);
-    // Kernel body: axisAlign = UP_DIV(axis, PACK_NUMBER/4) * PACK_NUMBER/4 = UP_DIV(axis,2)*2
     const int axisAlign = (axis + 1) / 2 * 2;
     const int maxCount = axisAlign * inside * outside;
     const int insideStride = axis, axisStride = 1;

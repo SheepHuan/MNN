@@ -85,6 +85,13 @@ if(MNN_CUDA)
   find_package(CUDA 8.0)
   if(CUDA_FOUND)
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -D_FORCE_INLINES -Wno-deprecated-gpu-targets -w --std=c++17 -O3")
+    # MNN CUDA backend adds -fexceptions (source/backend/cuda/CMakeLists.txt:110)
+    # so that cub::BlockScan / thrust can compile. The corpus mirrors the same
+    # override here: plugins.cu groupNormNHWCSumKernel uses cub::BlockScan for
+    # segmented inclusive scan, which requires -fexceptions on the host side
+    # (thrust's system_error.inl has a catch(...) clause). Without this flag
+    # nvcc fails with "error: exception handling disabled, use -fexceptions".
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fexceptions")
     include(${CMAKE_CURRENT_SOURCE_DIR}/source/backend/cuda/SelectCudaComputeArch.cmake)
     CUDA_SELECT_NVCC_ARCH_FLAGS(CUDA_ARCH_FLAGS ${CUDA_ARCHS})
     cuda_add_library(replay_cuda_corpus STATIC

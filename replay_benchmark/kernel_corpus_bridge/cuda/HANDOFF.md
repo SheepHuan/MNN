@@ -4,7 +4,7 @@
 > `replay_benchmark`，按 kernel-adapt skill 的"变体 vs 版本"分层规则实现。
 >
 > **当前状态**: 28 个 kernels/*.cu 文件，201 个 adapter 类，261 个 case，**261/261 全部通过**。
-> 编译 0 error。P3 bf16 / P11 BF16 pool 因 sm75 环境限制跳过。
+> 编译 0 error。BF16 pool kernel 已复制（sm75 编译为空 kernel，运行需 sm80+）。
 >
 > **核心原则**: 忠实复制 MNN kernel 源码。adapter 只负责参数转换 + buffer 打包 + 验证。
 
@@ -195,10 +195,10 @@ for c in fails: print(f'  FAIL {c[\"case\"]}: {c[\"variant\"]}')"
 | P0 fp16 Attention/RoPE/TopKV2 | ✅ | 14 cases (210/210) |
 | P1 fp16 Reduction/Interp/GridSample/LayerNormC4 | ✅ | 17 cases (227/227) |
 | P2 插件 kernel | ✅ | 9 cases (236/236) |
-| P3 bf16 depthwise/pool | ⏸️ 跳过 | 需 sm80+ (当前 sm75 RTX 2080 Ti) |
+| P3 bf16 depthwise | ⏸️ 跳过 | 需 sm80+ (当前 sm75 RTX 2080 Ti); BF16 pool 已复制(空 kernel) |
 | P4 int8 量化/反量化/DW conv | ✅ 第一批 12 个 | 248/248; GEMV/GEMM int4/int8 (~20) 待后续 |
 | P5 Raster 融合 | ✅ 代表性 8 个 | 256/256; 剩余 66 个宏实例待后续 |
-| §7 忠实性审计 P0-P14 | ✅ 全部完成 | 见 §7 各子节; 261/261 pass |
+| §7 忠实性审计 P0-P14 | ✅ 全部完成 | P4 cub 忠实复制(加 -fexceptions); P11 BF16 pool 已复制; 261/261 pass |
 
 ---
 
@@ -215,15 +215,15 @@ for c in fails: print(f'  FAIL {c[\"case\"]}: {c[\"variant\"]}')"
 | 🔴 P1 | transpose.cu | PACKCOMMON/UNPACKCOMMON | ✅ 已修 | §7.3 |
 | 🔴 P2 | transpose.cu | PACKCOMMON_4/UNPACKCOMMON_4 | ✅ 已修 | §7.4 |
 | 🟡 P3 | convdw.cu | CONV_DW | ✅ 已修 | §7.5 |
-| 🟡 P4 | plugins.cu | groupNormNHWCSum/Scale | ✅ 记录 | §7.6 |
+| 🟡 P4 | plugins.cu | groupNormNHWCSum/Scale | ✅ 已修 | §7.6 |
 | 🟡 P5 | int8.cu | Im2Col_packC_16 | ✅ 已修 | §7.7 |
 | 🟡 P6 | conv_base.cu | Im2Col_FilterC_Vec4 | ✅ 已修 | §7.8 |
 | 🟡 P7 | deconv.cu | Col2Im_Vec4 | ✅ 已修 | §7.9 |
 | 🟡 P8 | topkv2.cu | TopKInThread | ✅ 已修 | §7.10 |
 | 🟢 P9 | binary.cu | MOD | ✅ 无需改 | §7.11 |
 | 🟢 P10 | layernorm.cu | input_layernorm_* | ✅ 已补 | §7.12 |
-| 🟢 P11 | pool.cu | BF16 pool | ⏸️ 跳过 | §7.13 |
-| 🟢 P12 | transpose_half.cu | PACKCOMMON_half_4 fp32 shim | ✅ 标注 | §7.14 |
+| 🟢 P11 | pool.cu | BF16 pool | ✅ 已复制 | §7.13 |
+| 🟢 P12 | transpose_half.cu | PACKCOMMON_half_4 fp32 shim | ✅ 适配标注 | §7.14 |
 | ✅ | 其余 16 个文件 | — | **YES** | 无需修改 |
 
 ### 7.2 🔴 transpose.cu — NHWC8/C4NHW4 格式转换 (10 个 kernel)
@@ -286,10 +286,12 @@ NHWC_2_NHWC8, NCHW_2_NHWC8, C4NHW4_2_NHWC8, NHWC_2_C4NHW4, NCHW_2_C4NHW4, NHWC8_
 
 **MNN 源码**: `source/backend/cuda/execution/plugin/GroupNorm/groupNormKernel.cu`
 
-**修复**:
-1. 检查 `cub::BlockScan` 是否可在 sm75 + `-fno-exceptions` 下编译
-2. 如可: 忠实复制 MNN 的 `GroupSums`/`GroupSumsOp`/`cub::BlockScan`
-3. 如不可: 记录"算法等价替代"并标注原因
+**修复**: 忠实复制 MNN 的 `GroupSums`/`GroupSumsOp`/`cub::BlockScan`。
+1. `cub::BlockScan` 在 `-fno-exceptions` 下编译失败（thrust system_error.inl 有 `catch(...)`）
+2. MNN CUDA backend 在 `source/backend/cuda/CMakeLists.txt:110` 加 `-fexceptions` 覆盖顶层 `-fno-exceptions`
+3. corpus 在 `replay_benchmark/CMakeLists.txt` 镜像同一覆盖：`-Xcompiler -fexceptions`
+4. 忠实复制 kernel body（含 `cub::BlockScan` + `GroupSumsOp` + `atomicAdd`）+ `switch(cPerBlock)` dispatch
+5. adapter case 改用 MNN 支持的 cPerBlock 值（128/256/320/480），c=128 groups=1
 
 ### 7.7 🟡 int8.cu — Im2Col_packC_16
 
@@ -334,14 +336,12 @@ NHWC_2_NHWC8, NCHW_2_NHWC8, C4NHW4_2_NHWC8, NHWC_2_C4NHW4, NCHW_2_C4NHW4, NHWC8_
 
 ### 7.11 🟢 binary.cu — MOD
 
-**问题**: corpus 用 `x - x/y`，MNN 当前用 `fmod(x,y)`(float) 或 `x%y`(int)。
+**问题**: HANDOFF 原描述称"MNN 用 fmod"，与 corpus 的 `x - x/y` 不一致。
 
 **MNN 源码**: `source/backend/cuda/execution/BinaryExecution.cu`
 
-**修复**:
-1. 读 MNN `MOD` 当前实现
-2. 如用 `fmod`，改 corpus 为 `fmodf(x,y)`
-3. 如有 int/float 分支，忠实复制
+**结论**: 经核对 MNN 源码（git 历史确认从未用 fmod），MOD 实现为 `output[i] = x - x / y`。
+corpus 实现已与 MNN 完全一致，无需修改。原 HANDOFF 描述有误。
 
 ### 7.12 🟢 layernorm.cu — input_layernorm_* (缺失)
 
@@ -361,21 +361,24 @@ NHWC_2_NHWC8, NCHW_2_NHWC8, C4NHW4_2_NHWC8, NHWC_2_C4NHW4, NCHW_2_C4NHW4, NHWC8_
 
 **MNN 源码**: `source/backend/cuda/execution/bf16/PoolBf16.cuh`
 
-**修复**:
-1. 复制 BF16 pool kernel 到 pool.cu
-2. 注意 `#if (__CUDA_ARCH__ >= 800)` 守卫
-3. 需 sm80+ 环境验证
+**修复**: 已忠实复制两个 BF16 pool kernel + shim。
+1. pool.cu 顶部 `#define ENABLE_CUDA_BF16` + `#include <cuda_bf16.h>`
+2. kernel body 含 `#if (__CUDA_ARCH__ >= 800)` 守卫：sm75 编译为空 kernel（类型可用，指令不可用），sm80+ 执行 body
+3. 实例化为 `<__nv_bfloat16>`，shim 加 `mnn_corpus_maxpool_c8_bf16`/`mnn_corpus_avgpool_c8_bf16`
+4. 运行验证需 sm80+ 环境（sm75 下 kernel 无输出，仅编译验证）
 
 ### 7.14 🟢 transpose_half.cu — PACKCOMMON_half_4 fp32 shim
 
-**问题**: fp32 shim 实例化 `<float,float>`（标量），MNN 实际用 `<int2*,int2*>`（half2 packed）。
+**问题**: fp32 shim 实例化 `<float,float>`（标量），MNN 实际用 `<int2*,int2*>`（4-half packed）。
 
 **MNN 源码**: `source/backend/cuda/execution/Transpose.cu` 的 `PACKCOMMON_half_4`
 
-**修复**:
-1. 读 MNN `PACKCOMMON_half_4` 实际签名和类型
-2. 如 MNN 只实例化 half2 版本，fp32 shim 标注"corpus-only fallback"
-3. 或改为忠实复制 MNN 的 half2 packed 版本
+**结论**: corpus 适配（非忠实复制），已标注。
+1. MNN `int2` = 8 字节 = 4 half（两个 half2），kernel 索引以 8 字节(4-half)为单位
+2. corpus replay runner 基于 float 标量，无法表达 4-half int2 打包（索引单位/stride 语义不同）
+3. corpus 实例化 `<float,float>`，`{0,0}` 零填充改为 `T1(0)`（标量 0，数学等价）
+4. axisAlign = `UP_DIV(axis,2)*2` 与 MNN 一致；validator 按标量布局验证
+5. 这是 runner 架构限制（非编译限制），若 runner 支持 half2/half4 打包可进一步忠实
 
 ### 7.15 ✅ 已忠实文件 (16 个，无需修改)
 

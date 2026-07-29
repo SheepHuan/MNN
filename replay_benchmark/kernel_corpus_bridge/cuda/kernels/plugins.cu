@@ -4,33 +4,26 @@
 //   source/backend/cuda/execution/plugin/SplitGelu/splitGeLUKernel.cu
 //   source/backend/cuda/execution/plugin/FmhaCommon/FmhaV2CommonExecution.cu (SPLIT_FusedQKV)
 //
-// GroupNorm algorithm-equivalent substitution (verified 2026-07-29):
-// MNN's groupNormNHWCSumKernel uses cub::BlockScan + GroupSumsOp for segmented
-// inclusive scan, then atomicAdd to redBuffer. cub::BlockScan cannot be
-// compiled under the corpus's -fno-exceptions host flags: thrust's
-// system_error.inl requires `-fexceptions` (verified: nvcc -Xcompiler
-// -fno-exceptions fails with "error: exception handling disabled, use
-// -fexceptions to enable" at system_error.inl:96). MNN CUDA backend sidesteps
-// this by appending `-fexceptions` to CMAKE_CXX_FLAGS (see
-// source/backend/cuda/CMakeLists.txt:110); the corpus cannot do this without
-// relaxing the project-wide RTTI/exceptions ban for the whole replay_cuda_corpus
-// target.
-//
-// Corpus therefore replaces the segmented scan with a mathematically equivalent
-// two-pass reduction: each block iterates over its [hwTile, cPerGroup] tile,
-// accumulates local sum/sumSq, blockReduceSum across threads, then thread 0
-// atomicAdd's to redBuffer. The downstream groupNormNHWCScaleKernel reads
-// the same redBuffer layout and applies identical normalize/scale/swish math.
-// Numerical result is bit-equivalent for fp32 accumulators; fp16 rounding may
-// differ in the last ULP but stays within the 1e-1 validation tolerance.
+// GroupNorm is a faithful copy of MNN's groupNormKernel.cu, including the
+// cub::BlockScan segmented scan. This requires -fexceptions on the host
+// compiler (MNN CUDA backend adds it at source/backend/cuda/CMakeLists.txt:110;
+// the corpus mirrors the same override in replay_benchmark/CMakeLists.txt via
+// -Xcompiler -fexceptions). Without -fexceptions, thrust's system_error.inl
+// fails with "exception handling disabled".
 #include "corpus_common.cuh"
 #include <cuda_fp16.h>
+#include <cub/cub.cuh>
 
 namespace MNN {
 namespace Corpus {
 
+static inline __device__ __host__ float groupNormSigmoid(float x)
+{
+    return 1.F / (1.F + expf(-x));
+}
+
 // ============================================================================
-// GroupNorm NHWC params (mirror MNN::CUDA::GroupNormNHWCParams layout, half-only)
+// GroupNorm NHWC params (faithful mirror of MNN::CUDA::GroupNormNHWCParams)
 // ============================================================================
 struct GroupNormNHWCParams {
     __half* dst;
@@ -47,72 +40,143 @@ struct GroupNormNHWCParams {
     int groupsPerBlock;
 };
 
-// ============================================================================
-// groupNormNHWCSumKernel: compute per-group sum + sumOfSquares into redBuffer.
-// Corpus variant: 1 block handles (n, hwTile, cGroup) — simplified vs MNN's
-// 2-channels-per-thread cub::BlockScan. Each block computes one group's sum
-// over [hwTile, cPerGroup] and atomicAdd's to redBuffer.
-// ============================================================================
-template<int32_t TPB>
-__global__ void groupNormNHWCSumKernel(GroupNormNHWCParams params) {
-    const int ni = blockIdx.z;
-    const int gi = blockIdx.x;  // group index
-    const int hwTile = blockIdx.y * params.hwPerBlock;
-    const int hwEnd = min(hwTile + params.hwPerBlock, params.hw);
-    const int cBegin = gi * params.cPerGroup;
-    const int cEnd = cBegin + params.cPerGroup;
+// Segmented scan structures (faithful copy of MNN GroupSums/GroupSumsOp)
+struct GroupSums {
+    int32_t flag;
+    float sum;
+    float sumSq;
+};
+struct GroupSumsOp {
+    inline __device__ GroupSums operator()(GroupSums const& a, GroupSums const& b) {
+        GroupSums dst;
+        dst.sum = b.flag ? b.sum : (a.sum + b.sum);
+        dst.sumSq = b.flag ? b.sumSq : (a.sumSq + b.sumSq);
+        dst.flag = a.flag + b.flag;
+        return dst;
+    }
+};
 
-    float localSum = 0.0f, localSqSum = 0.0f;
-    for (int hwi = hwTile; hwi < hwEnd; ++hwi) {
-        for (int ci = cBegin + threadIdx.x; ci < cEnd; ci += blockDim.x) {
-            if (ci < params.c) {
-                int64_t offset = (int64_t)ni * params.hwc + (int64_t)hwi * params.c + ci;
-                float v = (float)params.src[offset];
-                localSum += v;
-                localSqSum += v * v;
+// ============================================================================
+// groupNormNHWCSumKernel: faithful copy from
+// source/backend/cuda/execution/plugin/GroupNorm/groupNormKernel.cu
+// Uses cub::BlockScan for segmented inclusive scan, then atomicAdd to redBuffer.
+// ============================================================================
+template <int32_t tTHREADS_PER_BLOCK>
+__global__ void groupNormNHWCSumKernel(GroupNormNHWCParams params)
+{
+    typedef cub::BlockScan<GroupSums, tTHREADS_PER_BLOCK> BlockScan;
+    __shared__ typename BlockScan::TempStorage tempStorage;
+    __shared__ float2 smem[tTHREADS_PER_BLOCK];
+
+    int32_t ni = blockIdx.z;
+    int32_t ci = blockIdx.x * params.cPerBlock + threadIdx.x * 2;
+    int32_t hwBegin = blockIdx.y * params.hwPerBlock;
+    int32_t hwEnd = min(hwBegin + params.hwPerBlock, params.hw);
+
+    float sum = 0.F;
+    float sumSq = 0.F;
+
+    for (int32_t hwi = hwBegin; hwi < hwEnd; ++hwi) {
+        int64_t offset = static_cast<int64_t>(ni) * params.hwc + static_cast<int64_t>(hwi) * params.c + ci;
+        __half2 h2(0, 0);
+        float2 f2;
+        f2.x = 0.0f; f2.y = 0.0f;
+        if (ci < params.c) {
+            if (params.src != nullptr) {
+                h2 = *reinterpret_cast<__half2 const*>(&params.src[offset]);
+                f2 = __half22float2(h2);
+            } else {
+                int64_t offset_1 = static_cast<int64_t>(ni) * params.c + ci;
+                __half2 h2_0 = *reinterpret_cast<__half2 const*>(&params.src_0[offset]);
+                __half2 h2_1 = *reinterpret_cast<__half2 const*>(&params.src_1[offset_1]);
+                float2 f2_0 = __half22float2(h2_0);
+                float2 f2_1 = __half22float2(h2_1);
+                f2.x = f2_0.x + f2_1.x;
+                f2.y = f2_0.y + f2_1.y;
             }
         }
+        sum += f2.x + f2.y;
+        sumSq += f2.x * f2.x + f2.y * f2.y;
     }
-    float sum = blockReduceSum<float>(localSum);
-    float sqSum = blockReduceSum<float>(localSqSum);
-    if (threadIdx.x == 0) {
-        atomicAdd(&params.redBuffer[(2 * ni + 0) * params.groups + gi], sum);
-        atomicAdd(&params.redBuffer[(2 * ni + 1) * params.groups + gi], sqSum);
+
+    int32_t gi = threadIdx.x * 2 / params.cPerGroup;
+    int32_t cj = threadIdx.x * 2 - params.cPerGroup * gi;
+    GroupSums inp{cj == 0 ? 1 : 0, sum, sumSq};
+    GroupSums out;
+    BlockScan(tempStorage).InclusiveScan(inp, out, GroupSumsOp());
+
+    if (cj == params.cPerGroup - 2) {
+        smem[gi] = make_float2(out.sum, out.sumSq);
     }
+    __syncthreads();
+
+    int32_t gj = blockIdx.x * params.groupsPerBlock + threadIdx.x;
+    if (threadIdx.x >= params.groupsPerBlock || gj >= params.groups) {
+        return;
+    }
+    float2 sums = smem[threadIdx.x];
+    atomicAdd(&params.redBuffer[(2 * ni + 0) * params.groups + gj], sums.x);
+    atomicAdd(&params.redBuffer[(2 * ni + 1) * params.groups + gj], sums.y);
 }
 
 // ============================================================================
-// groupNormNHWCScaleKernel: normalize + scale + optional Swish.
-// Each block handles (n, hwTile, cGroup) — one group per block.
+// groupNormNHWCScaleKernel: faithful copy from groupNormKernel.cu
 // ============================================================================
-template<int32_t TPB>
-__global__ void groupNormNHWCScaleKernel(GroupNormNHWCParams params) {
-    const int ni = blockIdx.z;
-    const int gi = blockIdx.x;
-    const int hwTile = blockIdx.y * params.hwPerBlock;
-    const int hwEnd = min(hwTile + params.hwPerBlock, params.hw);
+template <int32_t tTHREADS_PER_BLOCK>
+__global__ void groupNormNHWCScaleKernel(GroupNormNHWCParams params)
+{
+    int32_t ni = blockIdx.z;
+    int32_t ci = blockIdx.x * params.cPerBlock + threadIdx.x * 2;
+    int32_t gi = ci / params.cPerGroup;
 
-    float sum = params.redBuffer[(2 * ni + 0) * params.groups + gi];
-    float sumSq = params.redBuffer[(2 * ni + 1) * params.groups + gi];
+    float sum = 0.F, sumSq = 0.F;
+    if (gi < params.groups) {
+        sum = params.redBuffer[(2 * ni + 0) * params.groups + gi];
+        sumSq = params.redBuffer[(2 * ni + 1) * params.groups + gi];
+    }
+
+    float2 gammaF2, betaF2;
+    if (ci < params.c) {
+        gammaF2 = *reinterpret_cast<float2 const*>(&params.gamma[ci]);
+        betaF2 = *reinterpret_cast<float2 const*>(&params.beta[ci]);
+    }
+
     float mean = sum * params.invHWC;
     float var = sumSq * params.invHWC - (mean * mean);
-    float invStd = (var <= 0.0f) ? 1.0f : rsqrtf(var);
+    float invStdDev = var <= 0.F ? 1.F : rsqrtf(var);
 
-    const int cBegin = gi * params.cPerGroup;
-    const int cEnd = cBegin + params.cPerGroup;
-    for (int hwi = hwTile; hwi < hwEnd; ++hwi) {
-        for (int ci = cBegin + threadIdx.x; ci < cEnd; ci += blockDim.x) {
-            if (ci < params.c) {
-                int64_t offset = (int64_t)ni * params.hwc + (int64_t)hwi * params.c + ci;
-                float v = (float)params.src[offset];
-                v = (v - mean) * invStd;
-                v = params.gamma[ci] * v + params.beta[ci];
-                if (params.withSwish) {
-                    float s = 1.0f / (1.0f + expf(-v));
-                    v = v * s;
-                }
-                params.dst[offset] = (__half)v;
+    int32_t hwBegin = blockIdx.y * params.hwPerBlock;
+    int32_t hwEnd = min(hwBegin + params.hwPerBlock, params.hw);
+
+    for (int32_t hwi = hwBegin; hwi < hwEnd; ++hwi) {
+        int64_t offset = (int64_t)ni * params.hwc + hwi * params.c + ci;
+        __half2 h2(0, 0);
+        float2 f2;
+        f2.x = 0.0f; f2.y = 0.0f;
+        if (ci < params.c) {
+            if (params.src != nullptr) {
+                h2 = *reinterpret_cast<__half2 const*>(&params.src[offset]);
+                f2 = __half22float2(h2);
+            } else {
+                int64_t offset_1 = static_cast<int64_t>(ni) * params.c + ci;
+                __half2 h2_0 = *reinterpret_cast<__half2 const*>(&params.src_0[offset]);
+                __half2 h2_1 = *reinterpret_cast<__half2 const*>(&params.src_1[offset_1]);
+                float2 f2_0 = __half22float2(h2_0);
+                float2 f2_1 = __half22float2(h2_1);
+                f2.x = f2_0.x + f2_1.x;
+                f2.y = f2_0.y + f2_1.y;
             }
+        }
+        f2.x = (f2.x - mean) * invStdDev;
+        f2.y = (f2.y - mean) * invStdDev;
+        f2.x = gammaF2.x * f2.x + betaF2.x;
+        f2.y = gammaF2.y * f2.y + betaF2.y;
+        if (params.withSwish) {
+            f2.x = f2.x * groupNormSigmoid(f2.x);
+            f2.y = f2.y * groupNormSigmoid(f2.y);
+        }
+        if (ci < params.c) {
+            *reinterpret_cast<__half2*>(&params.dst[offset]) = __float22half2_rn(f2);
         }
     }
 }
@@ -204,7 +268,16 @@ void mnn_corpus_groupnorm_nhwc_sum_fp16(
     p.hw = hw; p.hwPerBlock = hwPerBlock; p.cPerBlock = cPerBlock; p.cPerGroup = cPerGroup;
     p.hwc = hwc; p.invHWC = invHWC; p.groupsPerBlock = groupsPerBlock;
     dim3 grid(gridX, gridY, gridZ);
-    MNN::Corpus::groupNormNHWCSumKernel<256><<<grid, block, 0, stream>>>(p);
+    // Faithful dispatch: MNN selects thread count by cPerBlock
+    // (320→160, 480→256, 256→128, 128→64). The `block` arg from adapter is
+    // ignored for the kernel launch to match MNN exactly.
+    switch (cPerBlock) {
+        case 320: MNN::Corpus::groupNormNHWCSumKernel<160><<<grid, 160, 0, stream>>>(p); break;
+        case 480: MNN::Corpus::groupNormNHWCSumKernel<256><<<grid, 256, 0, stream>>>(p); break;
+        case 256: MNN::Corpus::groupNormNHWCSumKernel<128><<<grid, 128, 0, stream>>>(p); break;
+        case 128: MNN::Corpus::groupNormNHWCSumKernel<64><<<grid, 64, 0, stream>>>(p); break;
+        default: break;
+    }
 }
 
 // ---- GroupNorm NHWC Scale (half-only) ----
@@ -227,7 +300,13 @@ void mnn_corpus_groupnorm_nhwc_scale_fp16(
     p.hw = hw; p.hwPerBlock = hwPerBlock; p.cPerBlock = cPerBlock; p.cPerGroup = cPerGroup;
     p.hwc = hwc; p.invHWC = invHWC; p.groupsPerBlock = groupsPerBlock;
     dim3 grid(gridX, gridY, gridZ);
-    MNN::Corpus::groupNormNHWCScaleKernel<256><<<grid, block, 0, stream>>>(p);
+    switch (cPerBlock) {
+        case 320: MNN::Corpus::groupNormNHWCScaleKernel<160><<<grid, 160, 0, stream>>>(p); break;
+        case 480: MNN::Corpus::groupNormNHWCScaleKernel<256><<<grid, 256, 0, stream>>>(p); break;
+        case 256: MNN::Corpus::groupNormNHWCScaleKernel<128><<<grid, 128, 0, stream>>>(p); break;
+        case 128: MNN::Corpus::groupNormNHWCScaleKernel<64><<<grid, 64, 0, stream>>>(p); break;
+        default: break;
+    }
 }
 
 // ---- SeqLen2Spatial fp32 ----
