@@ -1,5 +1,12 @@
 // pool.cu - MAXPOOL/AVGPOOL/GLOBAL_AVGPOOL/GLOBAL_MAXPOOL kernels + shims
 //   source/backend/cuda/execution/PoolExecution.cu
+//
+// BF16 pool kernels (maxpool_C8_BF16 / avgpool_C8_BF16) are defined in MNN at
+// source/backend/cuda/execution/bf16/PoolBf16.cuh under
+// `#ifdef ENABLE_CUDA_BF16` and guarded by `#if (__CUDA_ARCH__ >= 800)`.
+// The corpus target is sm75 (RTX 2080 Ti), which cannot compile or run bf16
+// pool kernels. They are intentionally omitted; a future sm80+ corpus target
+// should add them with the same `#if (__CUDA_ARCH__ >= 800)` guard.
 #include "corpus_common.cuh"
 
 namespace MNN {

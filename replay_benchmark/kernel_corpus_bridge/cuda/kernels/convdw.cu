@@ -8,7 +8,9 @@ namespace Corpus {
 
 // ============================================================================
 // Conv DepthWise: source/backend/cuda/execution/ConvDepthWiseExecution.cu
-// Simplified fp32 re-implementation (processes 2 channels per thread like original).
+// Faithful fp32 re-implementation (processes 2 channels per thread like original).
+// Weight layout [kh][kw][c_p]: kernel[(fy * kw + fx) * c_p + oz]
+// Boundary via UP_DIV (integer), matching MNN exactly.
 // ============================================================================
 template <typename T>
 __global__ void CONV_DW(const T* input, const half* kernel, const half* bias, T* output,
@@ -25,28 +27,31 @@ __global__ void CONV_DW(const T* input, const half* kernel, const half* bias, T*
         int iy = oy * sh - ph;
         float color0 = bias[oz];
         float color1 = bias[oz + 1];
-        int fxSta = max(0, (int)ceil(-(float)ix / dw));
-        int fySta = max(0, (int)ceil(-(float)iy / dh));
-        int fxEnd = min(kw, (int)ceil((float)(iw - ix) / dw));
-        int fyEnd = min(kh, (int)ceil((float)(ih - iy) / dh));
-        for (int fy = fySta; fy < fyEnd; ++fy) {
-            for (int fx = fxSta; fx < fxEnd; ++fx) {
-                int currentX = ix + fx * dw;
-                int currentY = iy + fy * dh;
-                const half* k0 = kernel + (oz * kh + fy) * kw + fx;
-                const half* k1 = kernel + ((oz + 1) * kh + fy) * kw + fx;
-                const T* inp = (const T*)(input + (ob * ih * iw + currentY * iw + currentX) * c_p + oz);
-                float v0 = (float)inp[0];
-                float v1 = (float)inp[1];
-                color0 += v0 * (float)k0[0];
-                color1 += v1 * (float)k1[0];
+        int fxSta = max(0, UP_DIV(-ix, dw));
+        int fySta = max(0, UP_DIV(-iy, dh));
+        int fxEnd = min(kw, UP_DIV(iw - ix, dw));
+        int fyEnd = min(kh, UP_DIV(ih - iy, dh));
+        int fx, fy, fz;
+        for (fy = fySta; fy < fyEnd; ++fy) {
+            int sy = fy * dh + iy;
+            for (fx = fxSta; fx < fxEnd; ++fx) {
+                int sx = fx * dw + ix;
+                int src_offset = ((ob * ih + sy) * iw + sx) * c_p + oz;
+                float inp0 = input[src_offset];
+                float inp1 = input[src_offset + 1];
+                float ker0 = kernel[(fy * kw + fx) * c_p + oz];
+                float ker1 = kernel[(fy * kw + fx) * c_p + oz + 1];
+                color0 = color0 + inp0 * ker0;
+                color1 = color1 + inp1 * ker1;
             }
         }
-        color0 = max(minV, min(maxV, color0));
-        color1 = max(minV, min(maxV, color1));
-        T* dst0 = (T*)(output + (ob * oh * ow + oy * ow + ox) * c_p + oz);
-        dst0[0] = (T)color0;
-        dst0[1] = (T)color1;
+        color0 = max(color0, minV);
+        color0 = min(color0, maxV);
+        color1 = max(color1, minV);
+        color1 = min(color1, maxV);
+        int dst_offset = ((ob * oh + oy) * ow + ox) * c_p + oz;
+        output[dst_offset] = color0;
+        output[dst_offset + 1] = color1;
     }
 }
 

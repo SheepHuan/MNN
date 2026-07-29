@@ -156,14 +156,14 @@ __global__ void GRID_SAMPLE_BILINEAR_3D(const int count, const T* input, const T
         float xw = ix1 - igx, yw = iy1 - igy, zw = iz1 - igz;
         ix0 = gsSample(ix0, iw, paddingMode); iy0 = gsSample(iy0, ih, paddingMode); iz0 = gsSample(iz0, id, paddingMode);
         ix1 = gsSample(ix1, iw, paddingMode); iy1 = gsSample(iy1, ih, paddingMode); iz1 = gsSample(iz1, id, paddingMode);
-        float v000 = (iz0==-1||iy0==-1||ix0==-1)?0:input[(((idx_ob*id+iz0)*ih+iy0)*iw+ix0)*channel_pack+idx_cp];
-        float v001 = (iz0==-1||iy0==-1||ix1==-1)?0:input[(((idx_ob*id+iz0)*ih+iy0)*iw+ix1)*channel_pack+idx_cp];
-        float v010 = (iz0==-1||iy1==-1||ix0==-1)?0:input[(((idx_ob*id+iz0)*ih+iy1)*iw+ix0)*channel_pack+idx_cp];
-        float v011 = (iz0==-1||iy1==-1||ix1==-1)?0:input[(((idx_ob*id+iz0)*ih+iy1)*iw+ix1)*channel_pack+idx_cp];
-        float v100 = (iz1==-1||iy0==-1||ix0==-1)?0:input[(((idx_ob*id+iz1)*ih+iy0)*iw+ix0)*channel_pack+idx_cp];
-        float v101 = (iz1==-1||iy0==-1||ix1==-1)?0:input[(((idx_ob*id+iz1)*ih+iy0)*iw+ix1)*channel_pack+idx_cp];
-        float v110 = (iz1==-1||iy1==-1||ix0==-1)?0:input[(((idx_ob*id+iz1)*ih+iy1)*iw+ix0)*channel_pack+idx_cp];
-        float v111 = (iz1==-1||iy1==-1||ix1==-1)?0:input[(((idx_ob*id+iz1)*ih+iy1)*iw+ix1)*channel_pack+idx_cp];
+        float v000 = (iz0==-1||iy0==-1||ix0==-1)?0.0f:(float)input[(((idx_ob*id+iz0)*ih+iy0)*iw+ix0)*channel_pack+idx_cp];
+        float v001 = (iz0==-1||iy0==-1||ix1==-1)?0.0f:(float)input[(((idx_ob*id+iz0)*ih+iy0)*iw+ix1)*channel_pack+idx_cp];
+        float v010 = (iz0==-1||iy1==-1||ix0==-1)?0.0f:(float)input[(((idx_ob*id+iz0)*ih+iy1)*iw+ix0)*channel_pack+idx_cp];
+        float v011 = (iz0==-1||iy1==-1||ix1==-1)?0.0f:(float)input[(((idx_ob*id+iz0)*ih+iy1)*iw+ix1)*channel_pack+idx_cp];
+        float v100 = (iz1==-1||iy0==-1||ix0==-1)?0.0f:(float)input[(((idx_ob*id+iz1)*ih+iy0)*iw+ix0)*channel_pack+idx_cp];
+        float v101 = (iz1==-1||iy0==-1||ix1==-1)?0.0f:(float)input[(((idx_ob*id+iz1)*ih+iy0)*iw+ix1)*channel_pack+idx_cp];
+        float v110 = (iz1==-1||iy1==-1||ix0==-1)?0.0f:(float)input[(((idx_ob*id+iz1)*ih+iy1)*iw+ix0)*channel_pack+idx_cp];
+        float v111 = (iz1==-1||iy1==-1||ix1==-1)?0.0f:(float)input[(((idx_ob*id+iz1)*ih+iy1)*iw+ix1)*channel_pack+idx_cp];
         int dst = (((idx_ob*od+idx_od)*oh+idx_oh)*ow+idx_ow)*channel_pack+idx_cp;
         output[dst] = (T)(v000*xw*yw*zw + v001*(1-xw)*yw*zw + v010*xw*(1-yw)*zw + v011*(1-xw)*(1-yw)*zw
                            + v100*xw*yw*(1-zw) + v101*(1-xw)*yw*(1-zw) + v110*xw*(1-yw)*(1-zw) + v111*(1-xw)*(1-yw)*(1-zw));
@@ -275,6 +275,36 @@ void mnn_corpus_grid_sample_bilinear_272_fp32(const int count, const float* inpu
                                                 int padMode, int align, int grid_, int block, cudaStream_t stream) {
     MNN::Corpus::GRID_SAMPLE_BILINEAR_272<float><<<grid_, block, 0, stream>>>(
         count, input, grid, output, ih, iw, oh, ow, ch, ch_p, padMode, align != 0);
+}
+
+// ============================================================================
+// fp16 (<half>) variants — only 3.6.0 (nearest, bilinear, 3D nearest/bilinear)
+// ============================================================================
+void mnn_corpus_grid_sample_nearest_fp16(const int count, const void* input, const void* grid, void* output,
+                                          int ih, int iw, int oh, int ow, int ch, int ch_p, int padMode, int align,
+                                          int grid_, int block, cudaStream_t stream) {
+    MNN::Corpus::GRID_SAMPLE_NEAREST<__half><<<grid_, block, 0, stream>>>(
+        count, (const __half*)input, (const __half*)grid, (__half*)output, ih, iw, oh, ow, ch, ch_p, padMode, align != 0);
+}
+void mnn_corpus_grid_sample_bilinear_fp16(const int count, const void* input, const void* grid, void* output,
+                                           int ih, int iw, int oh, int ow, int ch, int ch_p, int padMode, int align,
+                                           int grid_, int block, cudaStream_t stream) {
+    MNN::Corpus::GRID_SAMPLE_BILINEAR<__half><<<grid_, block, 0, stream>>>(
+        count, (const __half*)input, (const __half*)grid, (__half*)output, ih, iw, oh, ow, ch, ch_p, padMode, align != 0);
+}
+void mnn_corpus_grid_sample_nearest_3d_fp16(const int count, const void* input, const void* grid, void* output,
+                                             int id, int ih, int iw, int od, int oh, int ow,
+                                             int ch, int ch_p, int padMode, int align,
+                                             int grid_, int block, cudaStream_t stream) {
+    MNN::Corpus::GRID_SAMPLE_NEAREST_3D<__half><<<grid_, block, 0, stream>>>(
+        count, (const __half*)input, (const __half*)grid, (__half*)output, id, ih, iw, od, oh, ow, ch, ch_p, padMode, align != 0);
+}
+void mnn_corpus_grid_sample_bilinear_3d_fp16(const int count, const void* input, const void* grid, void* output,
+                                               int id, int ih, int iw, int od, int oh, int ow,
+                                               int ch, int ch_p, int padMode, int align,
+                                               int grid_, int block, cudaStream_t stream) {
+    MNN::Corpus::GRID_SAMPLE_BILINEAR_3D<__half><<<grid_, block, 0, stream>>>(
+        count, (const __half*)input, (const __half*)grid, (__half*)output, id, ih, iw, od, oh, ow, ch, ch_p, padMode, align != 0);
 }
 
 } // extern "C"

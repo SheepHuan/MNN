@@ -701,6 +701,12 @@ void mnn_corpus_layernorm_c4_fp32(float*, const float*, const float*, const floa
 void mnn_corpus_binary_layernorm_c4_fp32(float*, float*, const float*, const float*,
                                          const float*, const float*,
                                          int, int, float, bool, int, int, cudaStream_t);
+// input_layernorm_<size> shims (3.6.0)
+void mnn_corpus_input_layernorm_320_fp32(float*, const float*, const float*, const float*, int, int, float, bool, int, int, cudaStream_t);
+void mnn_corpus_input_layernorm_512_fp32(float*, const float*, const float*, const float*, int, int, float, bool, int, int, cudaStream_t);
+void mnn_corpus_input_layernorm_1024_fp32(float*, const float*, const float*, const float*, int, int, float, bool, int, int, cudaStream_t);
+void mnn_corpus_input_layernorm_2048_fp32(float*, const float*, const float*, const float*, int, int, float, bool, int, int, cudaStream_t);
+void mnn_corpus_input_layernorm_adaptive_fp32(float*, const float*, const float*, const float*, int, int, float, bool, int, int, cudaStream_t);
 // ConvBase variant shims (3.6.0)
 void mnn_corpus_float22half2_fp32(const float*, void*, size_t, int, int, cudaStream_t);
 void mnn_corpus_float22bfloat16_fp32(const float*, void*, size_t, int, int, cudaStream_t);
@@ -728,7 +734,7 @@ void mnn_corpus_bias_zero_prepare_fp32(float*, int, int, int, cudaStream_t);
 // Deconv + ConvBase + Transpose extra shims (3.6.0)
 void mnn_corpus_deconv_kernel_reorder_fp32(const float*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_col2im_fp32(const int, const float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, const float*, float*, int, int, int, int, int, int, cudaStream_t);
-void mnn_corpus_col2im_vec4_fp32(const int, const float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_col2im_vec4_fp32(const int, const float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, const float*, float*, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_pack_pad_fill_fp32(const float*, const float*, bool, bool, float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_weight_pack_fill_implicit_fp32(const float*, float*, int, size_t, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_transpose_bdl_to_bld_fp32(const float*, float*, int, int, int, int, int, cudaStream_t);
@@ -1763,8 +1769,14 @@ bool CudaConvDwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
         ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock;
     } else {
         // 3.6.0 / 2.2.3+: DivModFast, 2-channels-per-thread, half kernel/bias
+        // Weight layout [kh][kw][c_p] (faithful to MNN after WeightPrepare).
         ac.entry = "mnn_corpus_conv_dw_fp32";
-        std::vector<float> kernelF(c_p * kh * kw, 0.1f), biasF(c_p, 0.5f);
+        std::vector<float> kernelF(c_p * kh * kw, 0.0f), biasF(c_p, 0.5f);
+        // Pack weight as [kh][kw][c_p]: index = (fy * kw + fx) * c_p + oz
+        for (int fy = 0; fy < kh; ++fy)
+            for (int fx = 0; fx < kw; ++fx)
+                for (int oz = 0; oz < c_p; ++oz)
+                    kernelF[(fy * kw + fx) * c_p + oz] = 0.1f * (((fy * kw + fx) * c_p + oz) % 7);
         std::vector<uint8_t> kernelH(c_p * kh * kw * 2), biasH(c_p * 2);
         auto f2h = [](float f)->uint16_t {
             uint32_t x; memcpy(&x, &f, 4);
@@ -1787,6 +1799,9 @@ bool CudaConvDwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
         for (int v : {iw, ih, c, c_p, ow, oh, kw, kh, 1, 1, sw, sh, pw, ph, total})
             ac.args.push_back(AdaptedArg::scalarInt(v));
         ac.globalSize[0] = gridFor(total / 2); ac.localSize[0] = kBlock;
+        // stash kernel fp32 for validator (host recompute)
+        ac.validatorInputB = kernelF;
+        ac.p = kh; ac.q = kw; ac.orderType = 1;  // dilate dw=dh=1 (corpus default)
     }
     ac.dims = 1;
     return true;
@@ -1823,9 +1838,45 @@ cudaError_t CudaConvDwFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunch
     return cudaGetLastError();
 }
 bool CudaConvDwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    // Smoke test: output is not all zero (conv did something)
     const int total = ac.elementCount;
     if ((int)output.size() < total) return false;
+    // 3.6.0 path: validatorInputB holds fp32 weight in [kh][kw][c_p] layout.
+    // Recompute depthwise conv on host and compare.
+    if (!ac.validatorInputB.empty()) {
+        const int iw = ac.w, ih = ac.h, c_p = ac.c, kh = ac.p, kw = ac.q;
+        const int dw = ac.orderType, sw = ac.stride, sh = ac.stride;
+        const int pw = 1, ph = 1;  // adapt() defaults pw=ph=1
+        const int ow = (iw + 2 * pw - kw) / sw + 1;
+        const int oh = (ih + 2 * ph - kh) / sh + 1;
+        const auto& inp = ac.validatorInputA;
+        const auto& ker = ac.validatorInputB;
+        // kernel processes 2 channels per thread; verify every channel.
+        for (int ob = 0; ob < 1; ++ob)
+            for (int oy = 0; oy < oh; ++oy)
+                for (int ox = 0; ox < ow; ++ox)
+                    for (int oz = 0; oz < c_p; ++oz) {
+                        const int ix = ox * sw - pw;
+                        const int iy = oy * sh - ph;
+                        float color = 0.5f;  // bias
+                        int fxSta = std::max(0, (-ix + dw - 1) / dw);
+                        int fySta = std::max(0, (-iy + dw - 1) / dw);
+                        int fxEnd = std::min(kw, (iw - ix + dw - 1) / dw);
+                        int fyEnd = std::min(kh, (ih - iy + dw - 1) / dw);
+                        for (int fy = fySta; fy < fyEnd; ++fy) {
+                            int sy = fy * dw + iy;
+                            for (int fx = fxSta; fx < fxEnd; ++fx) {
+                                int sx = fx * dw + ix;
+                                int src = ((ob * ih + sy) * iw + sx) * c_p + oz;
+                                float k = ker[(fy * kw + fx) * c_p + oz];
+                                color += inp[src] * k;
+                            }
+                        }
+                        int dst = ((ob * oh + oy) * ow + ox) * c_p + oz;
+                        if (std::fabs(output[dst] - color) > 1e-2f) return false;
+                    }
+        return true;
+    }
+    // Smoke test (1.2.0 / 2.0.4): output is not all zero
     for (int i = 0; i < std::min(10, total); ++i) {
         if (output[i] != 0.0f) return true;
     }
@@ -2350,6 +2401,63 @@ bool CudaBinaryLayerNormC4Fp32Kernel::validate(const AdaptedCase& ac, const std:
     return true;
 }
 
+// ---- input_layernorm_<size> variants (3.6.0): size-specialized LayerNorm ----
+// Each block handles one row (m blocks). gamma/beta float; n fixed per variant.
+#define INPUT_LAYERNORM_ADAPTER(CLASS, VARIANT, SHIM, N, BLOCK) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    const int m = spec.intParam("outside", 2); \
+    const int n = N; \
+    const float eps = spec.floatParam("epsilon", 1e-5f); \
+    const int count = m * n; \
+    std::vector<float> input(count); \
+    for (int i = 0; i < count; ++i) input[i] = 0.1f * (i % 13) - 0.5f; \
+    std::vector<float> gamma(n, 1.0f), beta(n, 0.0f); \
+    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false; \
+    AdaptedBuffer gBuf; gBuf.setFp32(gamma); gBuf.isOutput = false; \
+    AdaptedBuffer bBuf; bBuf.setFp32(beta); bBuf.isOutput = false; \
+    AdaptedBuffer outBuf; outBuf.sizeBytes = count * sizeof(float); outBuf.isOutput = true; \
+    ac.buffers.push_back(outBuf); ac.buffers.push_back(inBuf); ac.buffers.push_back(gBuf); ac.buffers.push_back(bBuf); \
+    ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1)); \
+    ac.args.push_back(AdaptedArg::buffer(2)); ac.args.push_back(AdaptedArg::buffer(3)); \
+    ac.args.push_back(AdaptedArg::scalarInt(m)); ac.args.push_back(AdaptedArg::scalarInt(n)); \
+    ac.args.push_back(AdaptedArg::scalarFloat(eps)); ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.entry = #SHIM; \
+    ac.globalSize[0] = m; ac.localSize[0] = BLOCK; ac.dims = 1; \
+    ac.validatorInputA = input; ac.elementCount = count; \
+    ac.m = m; ac.k = n; ac.stride = (int)(eps * 1e6f); \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const { \
+    SHIM((float*)ctx.devBufs[0], (const float*)ctx.devBufs[1], (const float*)ctx.devBufs[2], (const float*)ctx.devBufs[3], \
+         ctx.intArgs[0], ctx.intArgs[1], ctx.floatArgs[0], ctx.intArgs[2] != 0, \
+         ctx.grid, ctx.block, ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    const int m = ac.m, n = ac.k; \
+    const float eps = (float)ac.stride * 1e-6f; \
+    for (int o = 0; o < m; ++o) { \
+        float mean = 0.0f; \
+        for (int j = 0; j < n; ++j) mean += ac.validatorInputA[o * n + j]; \
+        mean /= n; \
+        float sq = 0.0f; \
+        for (int j = 0; j < n; ++j) { float d = ac.validatorInputA[o * n + j] - mean; sq += d * d; } \
+        float invStd = 1.0f / sqrtf(sq / n + eps); \
+        for (int j = 0; j < n; ++j) { \
+            float expected = (ac.validatorInputA[o * n + j] - mean) * invStd; \
+            if (std::fabs(output[o * n + j] - expected) > 1e-2f) return false; \
+        } \
+    } \
+    return true; \
+}
+
+INPUT_LAYERNORM_ADAPTER(CudaInputLayerNorm320Fp32Kernel, cuda_input_layernorm_320_fp32, mnn_corpus_input_layernorm_320_fp32, 320, 64)
+INPUT_LAYERNORM_ADAPTER(CudaInputLayerNorm512Fp32Kernel, cuda_input_layernorm_512_fp32, mnn_corpus_input_layernorm_512_fp32, 512, 256)
+INPUT_LAYERNORM_ADAPTER(CudaInputLayerNorm1024Fp32Kernel, cuda_input_layernorm_1024_fp32, mnn_corpus_input_layernorm_1024_fp32, 1024, 256)
+INPUT_LAYERNORM_ADAPTER(CudaInputLayerNorm2048Fp32Kernel, cuda_input_layernorm_2048_fp32, mnn_corpus_input_layernorm_2048_fp32, 2048, 256)
+INPUT_LAYERNORM_ADAPTER(CudaInputLayerNormAdaptiveFp32Kernel, cuda_input_layernorm_adaptive_fp32, mnn_corpus_input_layernorm_adaptive_fp32, spec.intParam("inside", 1024), 256)
+
 // ---- Float22Half2: float→half2 packing (4 elements per thread) ----
 bool CudaFloat22Half2Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
@@ -2627,17 +2735,18 @@ cudaError_t CudaPackCommonFp32Kernel::launch(const AdaptedCase& ac, const CudaLa
     return cudaGetLastError();
 }
 bool CudaPackCommonFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    // PACKCOMMON: output index = batch_idx * ic_p * area + chnl_idx * area + area_idx
-    // src = (batch_idx * channel + chnl_idx) * area + area_idx
+    // PACKCOMMON (faithful to MNN): dst layout = [batch][area][axisAlign] (NC4HW4)
+    //   dstOffset = (b * area + a) * axisAlign + c
+    //   srcOffset = a + c * area + b * area * channel   (NHWC src, insideStride=1, axisStride=area)
     const int batch = ac.m, channel = ac.n, area = ac.k, ic_p = ac.w;
     for (int b = 0; b < batch; ++b)
-        for (int c = 0; c < ic_p; ++c)
-            for (int a = 0; a < area; ++a) {
-                int outIdx = b * ic_p * area + c * area + a;
+        for (int a = 0; a < area; ++a)
+            for (int c = 0; c < ic_p; ++c) {
+                int outIdx = (b * area + a) * ic_p + c;
                 if (c >= channel) {
                     if (std::fabs(output[outIdx]) > 1e-6f) return false;
                 } else {
-                    int src = (b * channel + c) * area + a;
+                    int src = a + c * area + b * area * channel;
                     if (std::fabs(output[outIdx] - ac.validatorInputA[src]) > 1e-3f) return false;
                 }
             }
@@ -3218,6 +3327,7 @@ bool CudaCol2ImVec4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) cons
     ac.args.push_back(AdaptedArg::scalarInt(0));
     ac.args.push_back(AdaptedArg::scalarInt(ih)); ac.args.push_back(AdaptedArg::scalarInt(iw));
     ac.args.push_back(AdaptedArg::buffer(1));
+    ac.args.push_back(AdaptedArg::scalarInt(1));  // precision=1 (fp32 float4 store)
     ac.args.push_back(AdaptedArg::scalarInt(ocPack4));
     ac.args.push_back(AdaptedArg::scalarInt(ow)); ac.args.push_back(AdaptedArg::scalarInt(oh)); ac.args.push_back(AdaptedArg::scalarInt(batch));
     ac.entry = "mnn_corpus_col2im_vec4_fp32";
@@ -3226,11 +3336,15 @@ bool CudaCol2ImVec4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) cons
     return true;
 }
 cudaError_t CudaCol2ImVec4Fp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    // intArgs: [0]=n,[1]=batch,[2]=oh,[3]=ow,[4]=oc,[5]=kh,[6]=kw,[7]=ph,[8]=pw,
+    //          [9]=sh,[10]=sw,[11]=dh,[12]=dw,[13]=actType,[14]=ih,[15]=iw,
+    //          [16]=precision,[17]=ocPack4,[18]=ow,[19]=oh,[20]=batch
     mnn_corpus_col2im_vec4_fp32(ctx.intArgs[0], (const float*)ctx.devBufs[0],
         ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5], ctx.intArgs[6],
         ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11], ctx.intArgs[12],
         ctx.intArgs[13], ctx.intArgs[14], ctx.intArgs[15], nullptr, (float*)ctx.devBufs[1],
-        ctx.intArgs[16], ctx.intArgs[17], ctx.intArgs[18], ctx.intArgs[19],
+        ctx.intArgs[16],
+        ctx.intArgs[17], ctx.intArgs[18], ctx.intArgs[19], ctx.intArgs[20],
         ctx.grid, ctx.block, ctx.stream);
     return cudaGetLastError();
 }
@@ -3366,7 +3480,9 @@ bool CudaPackCommon4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) con
     if (spec.tag != "3.6.0") return false;
     const int batch = spec.intParam("batch", 1), channel = spec.intParam("c", 8), area = spec.intParam("area", 4);
     const int insideStride = channel, axisStride = 1;
-    const int axisAlign = (channel + 7) / 8 * 8;  // align to PACK_NUMBER=8
+    // Faithful to MNN PACKCOMMON_4: axisAlign = UP_DIV(axis, PACK_NUMBER/4) * PACK_NUMBER/4
+    // (PACK_NUMBER=8 → align to 2). Corpus treats `channel` as MNN's `axis` (post /4 pack unit).
+    const int axisAlign = (channel + 1) / 2 * 2;
     const int maxCount = axisAlign * area * batch;
     std::vector<float> input(batch * channel * area);
     for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
@@ -3414,7 +3530,8 @@ bool CudaPackCommon4Fp32Kernel::validate(const AdaptedCase& ac, const std::vecto
 bool CudaUnpackCommon4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
     const int batch = spec.intParam("batch", 1), channel = spec.intParam("c", 8), area = spec.intParam("area", 4);
-    const int axisAlign = (channel + 7) / 8 * 8, insideStride = channel, axisStride = 1;  // PACK_NUMBER=8
+    // Faithful to MNN UNPACKCOMMON_4: axisAlign = UP_DIV(axis, PACK_NUMBER/4) * PACK_NUMBER/4
+    const int axisAlign = (channel + 1) / 2 * 2, insideStride = channel, axisStride = 1;
     const int total = batch * area * axisAlign;  // padded element count
     const int outCount = batch * area * channel;
     std::vector<float> input(total);

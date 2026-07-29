@@ -105,6 +105,9 @@ __global__ void Im2Col_FilterC_Vec4(
             size_t src_offset = ((ob * ih + sy) * iw + sx) * ic_p + iz;
             if (precision == 1) {
                 *((float4*)((float*)AP + dst_offset)) = *((float4*)((float*)A + src_offset));
+            } else if (precision == 2) {
+                // half4 -> half4 via int64 copy (faithful to MNN DATA_CONVERT_COPY)
+                *((int64_t*)((half*)AP + dst_offset)) = *((int64_t*)((half*)A + src_offset));
             } else if (precision == 0) {
                 *((half2*)((half*)AP + dst_offset))     = __float22half2_rn(*((float2*)((float*)A + src_offset)));
                 *((half2*)((half*)AP + dst_offset + 2)) = __float22half2_rn(*((float2*)((float*)A + src_offset + 2)));
@@ -114,11 +117,13 @@ __global__ void Im2Col_FilterC_Vec4(
         if (precision == 1) {
             float4 zeros; zeros.x = zeros.y = zeros.z = zeros.w = 0.0f;
             *((float4*)((float*)AP + dst_offset)) = zeros;
-        } else if (precision == 0) {
+        } else if (precision == 2 || precision == 0) {
             half2 zeros; zeros.x = (half)0.0f; zeros.y = (half)0.0f;
             *((half2*)((half*)AP + dst_offset))     = zeros;
             *((half2*)((half*)AP + dst_offset + 2)) = zeros;
         }
+        // precision == 3 (bf16) skipped: requires __CUDA_ARCH__ >= 800 (sm80+),
+        // current corpus target is sm75. MNN guards with #if (__CUDA_ARCH__ >= 800).
     }
 }
 

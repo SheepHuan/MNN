@@ -113,7 +113,10 @@ if(MNN_CUDA)
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/attention.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/winograd.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/convdw_extra.cu
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/transpose_half.cu)
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/transpose_half.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/plugins.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/int8.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu)
     # CudaOpsFp16.cu includes CudaOps.hpp -> CudaOpAdapter.hpp -> OpAdapter.hpp
     # which live under replay_benchmark/. Expose that path so nvcc can find them.
     target_include_directories(replay_cuda_corpus PRIVATE

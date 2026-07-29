@@ -1330,6 +1330,11 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaMatmulGemvFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaLayerNormC4Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryLayerNormC4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInputLayerNorm320Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInputLayerNorm512Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInputLayerNorm1024Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInputLayerNorm2048Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInputLayerNormAdaptiveFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat22Half2Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaIm2ColFilterCFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWeightPackFillFp32Kernel()));

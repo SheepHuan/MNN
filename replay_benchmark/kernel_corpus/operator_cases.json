@@ -8998,6 +8998,77 @@
       }
     },
     {
+      "name": "cuda_input_layernorm_320_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_320_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_512_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_512_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_1024_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_1024_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_2048_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_2048_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_adaptive_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_adaptive_fp32",
+      "int_params": {
+        "outside": 2,
+        "inside": 768
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
       "name": "cuda_float22half2_fp32_smoke",
       "backend": "cuda",
       "framework": "mnn",
@@ -9742,6 +9813,922 @@
         "channels": 4
       },
       "float_params": {}
+    },
+    {
+      "name": "cuda_flash_decode_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_flash_decode_fp16",
+      "int_params": {
+        "batch": 1,
+        "head_num": 2,
+        "kv_head_num": 1,
+        "head_dim": 32,
+        "key_seq_len": 8,
+        "max_kv_len": 8
+      },
+      "float_params": {
+        "scale": 0.1767766952966369
+      }
+    },
+    {
+      "name": "cuda_flash_decode_with_mask_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_flash_decode_with_mask_fp16",
+      "int_params": {
+        "batch": 1,
+        "head_num": 2,
+        "kv_head_num": 1,
+        "head_dim": 32,
+        "query_seq_len": 2,
+        "key_seq_len": 10,
+        "max_kv_len": 10
+      },
+      "float_params": {
+        "scale": 0.1767766952966369
+      }
+    },
+    {
+      "name": "cuda_flash_decode_splitk_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_flash_decode_splitk_fp16",
+      "int_params": {
+        "batch": 1,
+        "head_num": 2,
+        "kv_head_num": 1,
+        "head_dim": 32,
+        "key_seq_len": 8,
+        "max_kv_len": 8,
+        "parallel_blocks": 2
+      },
+      "float_params": {
+        "scale": 0.1767766952966369
+      }
+    },
+    {
+      "name": "cuda_flash_attn_combine_results_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_flash_attn_combine_results_fp16",
+      "int_params": {
+        "batch": 1,
+        "head_num": 2,
+        "head_dim": 32,
+        "parallel_blocks": 2
+      }
+    },
+    {
+      "name": "cuda_copy_kv_to_cache_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_copy_kv_to_cache_fp16",
+      "int_params": {
+        "batch": 1,
+        "new_kv_seq_len": 4,
+        "kv_num_head": 1,
+        "head_dim": 32,
+        "past_kv_len": 0,
+        "allocated_kv_len": 8
+      }
+    },
+    {
+      "name": "cuda_qk_kernel_tiled_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_qk_kernel_tiled_fp16",
+      "int_params": {
+        "batch": 1,
+        "head_num": 2,
+        "kv_head_num": 1,
+        "head_dim": 32,
+        "query_seq_len": 4,
+        "key_seq_len": 8,
+        "max_kv_len": 8
+      },
+      "float_params": {
+        "scale": 0.1767766952966369
+      }
+    },
+    {
+      "name": "cuda_qkv_kernel_tiled_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "attention",
+      "tag": "3.6.0",
+      "variant": "cuda_qkv_kernel_tiled_fp16",
+      "int_params": {
+        "batch": 1,
+        "head_num": 2,
+        "kv_head_num": 1,
+        "head_dim": 32,
+        "query_seq_len": 4,
+        "key_seq_len": 8,
+        "max_kv_len": 8
+      },
+      "float_params": {
+        "scale": 0.1767766952966369
+      }
+    },
+    {
+      "name": "cuda_conv1d_silu_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "linear_attention",
+      "tag": "3.6.0",
+      "variant": "cuda_conv1d_silu_fp16",
+      "int_params": {
+        "batch": 1,
+        "d": 8,
+        "l": 4,
+        "k_conv": 3
+      }
+    },
+    {
+      "name": "cuda_short_conv_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "linear_attention",
+      "tag": "3.6.0",
+      "variant": "cuda_short_conv_fp16",
+      "int_params": {
+        "batch": 1,
+        "d": 24,
+        "l": 4,
+        "h": 8,
+        "k": 3
+      }
+    },
+    {
+      "name": "cuda_short_conv_output_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "linear_attention",
+      "tag": "3.6.0",
+      "variant": "cuda_short_conv_output_fp16",
+      "int_params": {
+        "batch": 1,
+        "d": 24,
+        "l": 4,
+        "h": 8
+      }
+    },
+    {
+      "name": "cuda_gated_delta_rule_decode_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "linear_attention",
+      "tag": "3.6.0",
+      "variant": "cuda_gated_delta_rule_decode_fp16",
+      "int_params": {
+        "batch": 1,
+        "h_k": 2,
+        "h_v": 4,
+        "d_k": 16,
+        "d_v": 16
+      },
+      "float_params": {
+        "q_scale": 1.0
+      }
+    },
+    {
+      "name": "cuda_rope_c4_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "rope",
+      "tag": "3.6.0",
+      "variant": "cuda_rope_c4_fp16",
+      "int_params": {
+        "seq_len": 2,
+        "num_head": 2,
+        "kv_num_head": 1,
+        "head_dim": 8,
+        "rope_half_dim": 4
+      }
+    },
+    {
+      "name": "cuda_rope_c4_norm_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "rope",
+      "tag": "3.6.0",
+      "variant": "cuda_rope_c4_fp16",
+      "int_params": {
+        "seq_len": 2,
+        "num_head": 2,
+        "kv_num_head": 1,
+        "head_dim": 8,
+        "rope_half_dim": 4,
+        "q_norm": 1,
+        "k_norm": 1
+      },
+      "float_params": {
+        "q_eps": 1e-05,
+        "k_eps": 1e-05
+      }
+    },
+    {
+      "name": "cuda_topkv2_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "topkv2",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_topkv2_fp16",
+      "dtype": "float16",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "k": 3,
+        "length_row": 16,
+        "num_row": 2
+      }
+    },
+    {
+      "name": "cuda_reduction_sum_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_sum_fp16",
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_mean_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_mean_fp16",
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_max_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_max_fp16",
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_min_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_min_fp16",
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_prod_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_prod_fp16",
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_sum_axis_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_sum_axis_fp16",
+      "int_params": {
+        "outside": 2,
+        "axis": 256,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_mean_axis_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_mean_axis_fp16",
+      "int_params": {
+        "outside": 2,
+        "axis": 256,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_interp_nearest_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "interp_nearest",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_nearest_fp16",
+      "int_params": {
+        "channels": 4,
+        "ih": 4,
+        "iw": 4,
+        "oh": 8,
+        "ow": 8
+      }
+    },
+    {
+      "name": "cuda_interp_bilinear_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "interp_bilinear",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_bilinear_fp16",
+      "int_params": {
+        "channels": 4,
+        "ih": 4,
+        "iw": 4,
+        "oh": 8,
+        "ow": 8
+      }
+    },
+    {
+      "name": "cuda_interp_nearest_round_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "interp_nearest_round",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_nearest_round_fp16",
+      "int_params": {
+        "channels": 4,
+        "ih": 4,
+        "iw": 4,
+        "oh": 8,
+        "ow": 8
+      }
+    },
+    {
+      "name": "cuda_interp_bilinear_opt_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "interp_bilinear_opt",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_bilinear_opt_fp16",
+      "int_params": {
+        "batch": 1,
+        "ih": 4,
+        "iw": 4,
+        "oh": 8,
+        "ow": 8,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_grid_sample_nearest_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "grid_sample",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_nearest_fp16",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 4,
+        "ow": 4,
+        "channels": 3
+      }
+    },
+    {
+      "name": "cuda_grid_sample_bilinear_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "grid_sample_bilinear",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_bilinear_fp16",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 4,
+        "ow": 4,
+        "channels": 3
+      }
+    },
+    {
+      "name": "cuda_grid_sample_nearest_3d_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "grid_sample_3d",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_nearest_3d_fp16",
+      "int_params": {
+        "id": 2,
+        "ih": 3,
+        "iw": 3,
+        "od": 2,
+        "oh": 3,
+        "ow": 3,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_grid_sample_bilinear_3d_fp16_smoke",
+      "backend": "cuda",
+      "op_type": "grid_sample_3d",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_bilinear_3d_fp16",
+      "int_params": {
+        "id": 2,
+        "ih": 3,
+        "iw": 3,
+        "od": 2,
+        "oh": 3,
+        "ow": 3,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_layernorm_c4_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_layernorm_c4_fp16",
+      "int_params": {
+        "outside": 4,
+        "inside": 32
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_binary_layernorm_c4_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_layernorm_c4_fp16",
+      "int_params": {
+        "outside": 4,
+        "inside": 32
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_groupnorm_nhwc_sum_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "groupnorm",
+      "tag": "3.6.0",
+      "variant": "cuda_groupnorm_nhwc_sum_fp16",
+      "int_params": {
+        "n": 1,
+        "h": 2,
+        "w": 2,
+        "c": 32,
+        "groups": 4,
+        "with_swish": 0
+      }
+    },
+    {
+      "name": "cuda_groupnorm_nhwc_scale_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "groupnorm",
+      "tag": "3.6.0",
+      "variant": "cuda_groupnorm_nhwc_scale_fp16",
+      "int_params": {
+        "n": 1,
+        "h": 2,
+        "w": 2,
+        "c": 32,
+        "groups": 4,
+        "with_swish": 0
+      }
+    },
+    {
+      "name": "cuda_groupnorm_nhwc_scale_swish_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "groupnorm",
+      "tag": "3.6.0",
+      "variant": "cuda_groupnorm_nhwc_scale_fp16",
+      "int_params": {
+        "n": 1,
+        "h": 2,
+        "w": 2,
+        "c": 32,
+        "groups": 4,
+        "with_swish": 1
+      }
+    },
+    {
+      "name": "cuda_seqlen2spatial_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "seqlen2spatial",
+      "tag": "3.6.0",
+      "variant": "cuda_seqlen2spatial_fp32",
+      "int_params": {
+        "seq": 4,
+        "c": 320
+      }
+    },
+    {
+      "name": "cuda_seqlen2spatial_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "seqlen2spatial",
+      "tag": "3.6.0",
+      "variant": "cuda_seqlen2spatial_fp16",
+      "int_params": {
+        "seq": 4,
+        "c": 320
+      }
+    },
+    {
+      "name": "cuda_splitgelu_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "splitgelu",
+      "tag": "3.6.0",
+      "variant": "cuda_splitgelu_fp32",
+      "int_params": {
+        "seq": 2,
+        "hhs": 1280
+      },
+      "float_params": {
+        "f_div": 1.702,
+        "f_add": 0.0,
+        "f_mul": 0.5
+      }
+    },
+    {
+      "name": "cuda_splitgelu_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "splitgelu",
+      "tag": "3.6.0",
+      "variant": "cuda_splitgelu_fp16",
+      "int_params": {
+        "seq": 2,
+        "hhs": 1280
+      },
+      "float_params": {
+        "f_div": 1.702,
+        "f_add": 0.0,
+        "f_mul": 0.5
+      }
+    },
+    {
+      "name": "cuda_split_fusedqkv_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "split_fusedqkv",
+      "tag": "3.6.0",
+      "variant": "cuda_split_fusedqkv_fp32",
+      "int_params": {
+        "bsh": 4,
+        "d": 64
+      }
+    },
+    {
+      "name": "cuda_split_fusedqkv_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "split_fusedqkv",
+      "tag": "3.6.0",
+      "variant": "cuda_split_fusedqkv_fp16",
+      "int_params": {
+        "bsh": 4,
+        "d": 64
+      }
+    },
+    {
+      "name": "cuda_float2int8_packed_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "float2int8",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_packed_fp32",
+      "int_params": {
+        "channels": 8,
+        "area": 4
+      },
+      "float_params": {
+        "scale": 0.1,
+        "zero_point": 0,
+        "clamp_max": 127,
+        "clamp_min": -128
+      }
+    },
+    {
+      "name": "cuda_float2int8_single_packed_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "float2int8_single",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_single_packed_fp32",
+      "int_params": {
+        "channels": 8,
+        "area": 4
+      },
+      "float_params": {
+        "scale": 0.1,
+        "zero_point": 0,
+        "clamp_max": 127,
+        "clamp_min": -128
+      }
+    },
+    {
+      "name": "cuda_int82float_packed_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "int82float",
+      "tag": "3.6.0",
+      "variant": "cuda_int82float_packed_fp32",
+      "int_params": {
+        "channels": 8,
+        "area": 4
+      },
+      "float_params": {
+        "scale": 0.1,
+        "zero_point": 0
+      }
+    },
+    {
+      "name": "cuda_int82float_single_packed_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "int82float_single",
+      "tag": "3.6.0",
+      "variant": "cuda_int82float_single_packed_fp32",
+      "int_params": {
+        "channels": 8,
+        "area": 4
+      },
+      "float_params": {
+        "scale": 0.1,
+        "zero_point": 0
+      }
+    },
+    {
+      "name": "cuda_dequantize_int8_weight_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "dequantize_int8_weight",
+      "tag": "3.6.0",
+      "variant": "cuda_dequantize_int8_weight_fp16",
+      "int_params": {
+        "oc": 4,
+        "ic": 8,
+        "quan_c": 4
+      },
+      "float_params": {
+        "scale": 0.1,
+        "offset": 0.0
+      }
+    },
+    {
+      "name": "cuda_dequantize_int4_weight_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "dequantize_int4_weight",
+      "tag": "3.6.0",
+      "variant": "cuda_dequantize_int4_weight_fp16",
+      "int_params": {
+        "oc": 4,
+        "ic": 16,
+        "quan_c": 4
+      },
+      "float_params": {
+        "scale": 0.1,
+        "offset": 0.0
+      }
+    },
+    {
+      "name": "cuda_conv_dw_int8_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw_int8",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_int8_fp32",
+      "int_params": {
+        "iw": 4,
+        "ih": 4,
+        "c": 8,
+        "kw": 3,
+        "kh": 3,
+        "sw": 1,
+        "sh": 1,
+        "pw": 1,
+        "ph": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw3x3s1_int8_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw3x3s1_int8",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw3x3s1_int8_fp32",
+      "int_params": {
+        "iw": 4,
+        "ih": 4,
+        "c": 8
+      }
+    },
+    {
+      "name": "cuda_im2col_packc16_int8_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "im2col_packc16_int8",
+      "tag": "3.6.0",
+      "variant": "cuda_im2col_packc16_int8_fp32",
+      "int_params": {
+        "iw": 4,
+        "ih": 4,
+        "ic": 8,
+        "kw": 3,
+        "sw": 1,
+        "pw": 1
+      }
+    },
+    {
+      "name": "cuda_weight_int8_pack_fill_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "weight_int8_pack_fill",
+      "tag": "3.6.0",
+      "variant": "cuda_weight_int8_pack_fill_fp32",
+      "int_params": {
+        "l": 27,
+        "h": 4,
+        "ic": 3
+      }
+    },
+    {
+      "name": "cuda_binary_int8_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_add",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_add_fp32",
+      "int_params": {
+        "count": 64
+      },
+      "float_params": {
+        "scale0": 0.1,
+        "scale1": 0.1,
+        "out_scale": 10.0
+      }
+    },
+    {
+      "name": "cuda_binary_int8_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_mul",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_mul_fp32",
+      "int_params": {
+        "count": 64
+      },
+      "float_params": {
+        "scale0": 0.1,
+        "scale1": 0.1,
+        "out_scale": 10.0
+      }
+    },
+    {
+      "name": "cuda_raster_binary_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_add_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_mul_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_fuseadd_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_add_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0
+    },
+    {
+      "name": "cuda_raster_fuseadd_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_mul_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0
+    },
+    {
+      "name": "cuda_raster_binarymid_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_add_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_mul_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_add_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_mul_fp32",
+      "int_params": {
+        "count": 64
+      }
     }
   ]
 }

@@ -144,11 +144,15 @@ struct AdaptedCase {
     int elementCount = 0;
     int m = 0, n = 0, k = 0;
     int w = 0, h = 0, c = 0;
+    int p = 0, q = 0;  // extra dims (e.g. conv kh/kw for validator)
     int stride = 0;  // pooling/conv stride (0 = unspecified)
     int orderType = 0;
     // Host-side copies of input data for validation (buffers[0] input for unary/matmul)
     std::vector<float> validatorInputA;
     std::vector<float> validatorInputB;
+    std::vector<float> validatorInputC;  // 3rd input (e.g. SeqLen2Spatial residual)
+    // Extra scalar params for validate (e.g. splitGeLU fDiv/fAdd/fMul)
+    std::vector<float> validatorFloats;
 };
 
 struct CaseSpec {

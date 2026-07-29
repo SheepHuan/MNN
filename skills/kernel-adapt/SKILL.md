@@ -7,6 +7,20 @@ description: 将历史 MNN/ncnn 的 OpenCL/Vulkan/CUDA kernel 适配到当前 MN
 
 > **触发条件**：当用户请求适配/运行历史 kernel、扩展算子变体覆盖、为 kernel corpus 新增 adapter 时触发。
 
+## 核心原则（强制）
+
+> **忠实复制 MNN 的 kernel 源码。** adapter 只负责参数转换 + buffer 打包 + 验证。
+>
+> 1. **kernel 实现 = 原样复制 MNN 源码的 `__global__` 函数体**——不简化、不替换逻辑、不改变算法。
+>    如果 MNN 用 `cub::BlockScan`，corpus 也用 `cub::BlockScan`；如果 MNN 用 8-byte 向量化，corpus 也用 8-byte 向量化。
+> 2. **adapter = 参数转换层**——从 `CaseSpec` 读参数，构造 input buffer（填充测试数据），设置 grid/block，
+>    按 shim 签名打包 `ac.args`，调 shim launch。adapter 不包含任何 kernel 逻辑。
+> 3. **验证 = adapter 在 host 端重新计算 expected 值**，与 kernel 输出对比。验证容差按数据类型调整
+>    （fp32: 1e-3~1e-2，fp16: 1e-1~1e-2，int8: 精确匹配）。验证逻辑不依赖 kernel 内部实现细节。
+>
+> **违反此原则的典型错误**：简化 kernel 逻辑导致 corpus 与 MNN 行为不一致、验证逻辑与 kernel
+> 内部数据布局不匹配导致 false negative。
+
 ## 概述
 
 本 SKILL 指导 AI Agent 将 `replay_benchmark/kernel_corpus/sources/` 中的历史 MNN OpenCL `.cl` 和 ncnn Vulkan `.comp` kernel 适配为可在当前 MNN GPU runtime 上编译、dispatch、校验和采集 PMU 的独立 workload。

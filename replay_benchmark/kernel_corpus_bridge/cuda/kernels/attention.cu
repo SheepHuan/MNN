@@ -1085,4 +1085,149 @@ void mnn_corpus_gated_delta_rule_decode_fp32(
         gqa_factor, useL2Norm, qScale, gateC4, betaC4, outputC4);
 }
 
+// ============================================================================
+// fp16 (<half>) variants — mirror fp32 shims, instantiate template with __half.
+// Partial inputs (e.g. flash_attn_combine_results reads float partial_output/
+// partial_meta, writes __half final_output) match MNN's <half> instantiation.
+// ============================================================================
+
+// ---- copy_kv_to_cache_kernel<half> (3D grid) ----
+void mnn_corpus_copy_kv_to_cache_fp16(
+    const void* key_input, const void* value_input,
+    void* key_cache_output, void* value_cache_output,
+    int batch_size, int new_kv_seq_len, int kv_num_head, int head_dim,
+    int past_kv_len, int allocated_kv_len,
+    int gridX, int gridY, int gridZ, int blockX, int blockY, int blockZ,
+    size_t sharedMem, cudaStream_t stream) {
+    dim3 grid(gridX, gridY, gridZ);
+    dim3 block(blockX, blockY, blockZ);
+    MNN::Corpus::copy_kv_to_cache_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)key_input, (const __half*)value_input,
+        (__half*)key_cache_output, (__half*)value_cache_output,
+        batch_size, new_kv_seq_len, kv_num_head, head_dim, past_kv_len, allocated_kv_len);
+}
+
+// ---- flash_decode_kernel<half> (1D grid, shared memory) ----
+void mnn_corpus_flash_decode_fp16(
+    const void* query_input, const void* key_cache, const void* value_cache,
+    void* output, int batch, int head_num, int kv_head_num, int head_dim,
+    int key_seq_len, int max_kv_len, float scale,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::flash_decode_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)query_input, (const __half*)key_cache, (const __half*)value_cache,
+        (__half*)output, batch, head_num, kv_head_num,
+        head_dim, key_seq_len, max_kv_len, scale);
+}
+
+// ---- flash_decode_kernel_with_mask<half> (1D grid, shared memory) ----
+void mnn_corpus_flash_decode_with_mask_fp16(
+    const void* query_input, const void* key_cache, const void* value_cache,
+    void* output, const void* mask, int batch, int head_num, int kv_head_num,
+    int head_dim, int key_seq_len, int max_kv_len, int query_seq_len, float scale,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::flash_decode_kernel_with_mask<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)query_input, (const __half*)key_cache, (const __half*)value_cache,
+        (__half*)output, (const __half*)mask, batch, head_num, kv_head_num,
+        head_dim, key_seq_len, max_kv_len, query_seq_len, scale);
+}
+
+// ---- flash_decode_kernel_splitk<half> (2D grid, shared memory) ----
+// Note: partial_output and partial_meta are float* (matches MNN's <half> kernel).
+void mnn_corpus_flash_decode_splitk_fp16(
+    const void* query_input, const void* key_cache, const void* value_cache,
+    float* partial_output, float* partial_meta,
+    int batch, int head_num, int kv_head_num, int head_dim,
+    int key_seq_len, int max_kv_len, float scale_factor, int parallel_blocks,
+    int gridX, int gridY, int block, size_t sharedMem, cudaStream_t stream) {
+    dim3 grid(gridX, gridY);
+    MNN::Corpus::flash_decode_kernel_splitk<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)query_input, (const __half*)key_cache, (const __half*)value_cache,
+        partial_output, partial_meta,
+        batch, head_num, kv_head_num, head_dim, key_seq_len, max_kv_len,
+        scale_factor, parallel_blocks);
+}
+
+// ---- flash_attn_combine_results<half> (1D grid) ----
+void mnn_corpus_flash_attn_combine_results_fp16(
+    const float* partial_output, const float* partial_meta, void* final_output,
+    int batch, int head_num, int head_dim, int parallel_blocks,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::flash_attn_combine_results<__half><<<grid, block, sharedMem, stream>>>(
+        partial_output, partial_meta, (__half*)final_output, batch, head_num, head_dim, parallel_blocks);
+}
+
+// ---- qk_kernel_tiled<half,float> (3D grid, 2D block) ----
+void mnn_corpus_qk_kernel_tiled_fp16(
+    const void* query_input, const void* key_cache, void* qk_scores_output,
+    const void* mask_tensor_data, const MNN::Corpus::AttentionKernelParam* param,
+    int q_seq_piece_offset, bool has_mask_flag, bool is_add_mask_flag, bool is_causal_mask_flag,
+    int gridX, int gridY, int gridZ, int blockX, int blockY, size_t sharedMem, cudaStream_t stream) {
+    dim3 grid(gridX, gridY, gridZ);
+    dim3 block(blockX, blockY);
+    MNN::Corpus::qk_kernel_tiled<__half, float><<<grid, block, sharedMem, stream>>>(
+        (const __half*)query_input, (const __half*)key_cache, (__half*)qk_scores_output,
+        mask_tensor_data, param,
+        q_seq_piece_offset, has_mask_flag, is_add_mask_flag, is_causal_mask_flag);
+}
+
+// ---- qkv_kernel_tiled<half,float> (3D grid, 2D block) ----
+void mnn_corpus_qkv_kernel_tiled_fp16(
+    const void* softmax_probs, const void* value_cache, void* attention_output,
+    const MNN::Corpus::AttentionKernelParam* param, int q_seq_piece_offset,
+    int gridX, int gridY, int gridZ, int blockX, int blockY, size_t sharedMem, cudaStream_t stream) {
+    dim3 grid(gridX, gridY, gridZ);
+    dim3 block(blockX, blockY);
+    MNN::Corpus::qkv_kernel_tiled<__half, float><<<grid, block, sharedMem, stream>>>(
+        (const __half*)softmax_probs, (const __half*)value_cache, (__half*)attention_output,
+        param, q_seq_piece_offset);
+}
+
+// ---- conv1d_silu_kernel<half> (1D grid, shared memory) ----
+// Note: convState and convOutFp32 are float* (kernel uses float accumulation).
+void mnn_corpus_conv1d_silu_fp16(
+    const void* qkvInput, const void* convWeight, float* convState, float* convOutFp32,
+    int B, int D, int L, int K_conv, int convStateSize, bool inputC4,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::conv1d_silu_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)qkvInput, (const __half*)convWeight,
+        convState, convOutFp32, B, D, L, K_conv, convStateSize, inputC4);
+}
+
+// ---- short_conv_kernel<half> (1D grid, shared memory) ----
+// Note: convState and convOut are float* (kernel uses float accumulation).
+void mnn_corpus_short_conv_fp16(
+    const void* qkvInput, const void* convWeight, float* convState, float* convOut,
+    int B, int D, int L, int H, int K, int convStateSize, bool inputC4,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::short_conv_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)qkvInput, (const __half*)convWeight,
+        convState, convOut, B, D, L, H, K, convStateSize, inputC4);
+}
+
+// ---- short_conv_output_kernel<half> (1D grid) ----
+void mnn_corpus_short_conv_output_fp16(
+    const void* qkvInput, const float* convOut, void* output,
+    int B, int D, int L, int H, bool inputC4, bool outputC4,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::short_conv_output_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        (const __half*)qkvInput, convOut, (__half*)output, B, D, L, H, inputC4, outputC4);
+}
+
+// ---- gated_delta_rule_decode_kernel<half> (1D grid, shared memory) ----
+// Note: convOut and recurrentState are float* (kernel uses float accumulation).
+void mnn_corpus_gated_delta_rule_decode_fp16(
+    const float* convOut, const void* gateInput, const void* betaInput,
+    float* recurrentState, void* output,
+    int B, int H_k, int H_v, int d_k, int d_v,
+    int key_dim, int val_dim, int D,
+    int gqa_factor, bool useL2Norm, float qScale,
+    bool gateC4, bool betaC4, bool outputC4,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::gated_delta_rule_decode_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        convOut, (const __half*)gateInput, (const __half*)betaInput,
+        recurrentState, (__half*)output,
+        B, H_k, H_v, d_k, d_v, key_dim, val_dim, D,
+        gqa_factor, useL2Norm, qScale, gateC4, betaC4, outputC4);
+}
+
 } // extern "C"

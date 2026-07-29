@@ -180,8 +180,14 @@ __global__ void UNARY_HALF2_SIGMOID(const T *input, T *output,
 extern "C" {
 
 // ---- PACKCOMMON_half_4 (fp32 corpus: scalar float variant) ----
-// MNN uses int2* (half2 packed). For the fp32 corpus we use float* scalars
-// with PACK_NUMBER/4 alignment (matching MNN's axisAlign formula).
+// Corpus-only fallback: MNN instantiates this kernel only as
+// `<const int2*, int2*>` (half2 packed, 4 bytes per element), launched from
+// PackBuffer() when bytes==2. The corpus fp32 path cannot use half2 packed
+// I/O (the replay runner operates on float* scalars), so we instantiate
+// `<float, float>` with PACK_NUMBER/4 alignment (matching MNN's axisAlign
+// formula) and replace the `{0, 0}` half2 zero-fill with `T1(0)`. Math is
+// equivalent for the scalar case; the half2 vectorization benefit is lost
+// (this is a correctness corpus, not a perf benchmark for this path).
 void mnn_corpus_packcommon_half_4_fp32(const void* input, void* output,
     int inside, int axis, int outside, int insideStride, int axisStride,
     int d_is, int d_cs, int grid, int block, cudaStream_t stream) {

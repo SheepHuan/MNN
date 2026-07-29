@@ -86,8 +86,18 @@ __global__ void Col2Im(const int n, const Stype* data_col,
 }
 
 // ============================================================================
-// Col2Im_Vec4: vec4 version (oc % 4 == 0), processes 4 channels per thread
+// Col2Im_Vec4: vec4 version (oc % 4 == 0), processes 4 channels per thread.
+// Faithful to MNN DeconvBaseKernel.cu: takes a `precision` argument and routes
+// the final store through DATA_CONVERT_COPY (precision==1 float4, precision==2
+// float4→half4 via two half2 conversions; precision==0/3 bf16 skipped on sm75).
+// Bias load also branches on precision (precision==2 loads 4 scalar half).
 // ============================================================================
+#define DECONV_DATA_CONVERT_COPY(precision) \
+    if (precision == 1) { *((float4*)((float*)data_im + dst_offset)) = val; } \
+    else if (precision == 2) { \
+        float2 t0; t0.x = val.x; t0.y = val.y; *(half2*)((half*)(data_im + dst_offset)) = __float22half2_rn(t0); \
+        float2 t1; t1.x = val.z; t1.y = val.w; *(half2*)((half*)(data_im + dst_offset + 2)) = __float22half2_rn(t1); }
+
 template <typename Stype, typename Dtype>
 __global__ void Col2Im_Vec4(const int n, const Stype* data_col,
     const int batch, const int height, const int width, const int channels,
@@ -98,6 +108,7 @@ __global__ void Col2Im_Vec4(const int n, const Stype* data_col,
     const int activationType,
     const int height_col, const int width_col,
     const Dtype* bias, Dtype* data_im,
+    const int precision,
     DivModFast d_ocp, DivModFast d_ow, DivModFast d_oh, DivModFast d_ob
 ) {
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)n; index += blockDim.x * gridDim.x) {
@@ -112,7 +123,14 @@ __global__ void Col2Im_Vec4(const int n, const Stype* data_col,
         const int w_im = idx_w + pad_w;
         const int h_im = idx_h + pad_h;
         if (nullptr != bias) {
-            val = *((float4*)((float*)bias + c_im));
+            if (precision == 2) {
+                val.x += (float)bias[c_im];
+                val.y += (float)bias[c_im + 1];
+                val.z += (float)bias[c_im + 2];
+                val.w += (float)bias[c_im + 3];
+            } else {
+                val = *((float4*)((float*)bias + c_im));
+            }
         }
         int kernel_extent_w = (kernel_w - 1) * dilation_w + 1;
         int kernel_extent_h = (kernel_h - 1) * dilation_h + 1;
@@ -144,7 +162,7 @@ __global__ void Col2Im_Vec4(const int n, const Stype* data_col,
             val.z = min(max(val.z, 0.0f), 6.0f); val.w = min(max(val.w, 0.0f), 6.0f);
         }
         int dst_offset = index << 2;
-        *((float4*)((float*)data_im + dst_offset)) = val;
+        DECONV_DATA_CONVERT_COPY(precision);
     }
 }
 
@@ -175,20 +193,21 @@ void mnn_corpus_col2im_fp32(const int n, const float* data_col,
         height_col, width_col, bias, data_im, d_ocp, d_ow, d_oh, d_ob);
 }
 
-// ---- Col2Im_Vec4 (fp32, vec4) ----
+// ---- Col2Im_Vec4 (fp32, vec4, precision=1) ----
 void mnn_corpus_col2im_vec4_fp32(const int n, const float* data_col,
                                   int batch, int height, int width, int channels,
                                   int kh, int kw, int pad_h, int pad_w, int stride_h, int stride_w,
                                   int dilation_h, int dilation_w, int activationType,
                                   int height_col, int width_col,
                                   const float* bias, float* data_im,
+                                  int precision,
                                   int d_ocp_val, int d_ow_val, int d_oh_val, int d_ob_val,
                                   int grid, int block, cudaStream_t stream) {
     MNN::Corpus::DivModFast d_ocp(d_ocp_val), d_ow(d_ow_val), d_oh(d_oh_val), d_ob(d_ob_val);
     MNN::Corpus::Col2Im_Vec4<float, float><<<grid, block, 0, stream>>>(
         n, data_col, batch, height, width, channels, kh, kw, pad_h, pad_w,
         stride_h, stride_w, dilation_h, dilation_w, activationType,
-        height_col, width_col, bias, data_im, d_ocp, d_ow, d_oh, d_ob);
+        height_col, width_col, bias, data_im, precision, d_ocp, d_ow, d_oh, d_ob);
 }
 
 } // extern "C"

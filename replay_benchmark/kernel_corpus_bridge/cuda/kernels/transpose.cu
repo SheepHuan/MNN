@@ -108,11 +108,14 @@ __global__ void NHWC8_2_NCHW(const T0* input, T1* output, const int maxCount, co
 template<typename T0, typename T1>
 __global__ void C4NHW4_2_NCHW(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                                const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    const int batch = (maxCount / channel) / area;
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        int c4_idx = chnl_idx >> 2;
+        int cL_idx = chnl_idx & 3;
+        int src_offset = ((c4_idx * batch + batch_idx) * area + area_idx) * 4 + cL_idx;
         output[index] = (T1)input[src_offset];
     }
 }
@@ -130,11 +133,14 @@ __global__ void NHWC8_2_NHWC(const T0* input, T1* output, const int maxCount, co
 template<typename T0, typename T1>
 __global__ void C4NHW4_2_NHWC(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                                const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    const int batch = (maxCount / channel) / area;
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        int c4_idx = chnl_idx >> 2;
+        int cL_idx = chnl_idx & 3;
+        int src_offset = ((c4_idx * batch + batch_idx) * area + area_idx) * 4 + cL_idx;
         output[index] = (T1)input[src_offset];
     }
 }
@@ -145,7 +151,11 @@ __global__ void NHWC_2_NHWC8(const T0* input, T1* output, const int maxCount, co
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * area + area_idx) * channel + chnl_idx;
+        if (chnl_idx >= channel) {
+            output[index] = (T1)0.0f;
+            continue;
+        }
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
         output[index] = (T1)input[src_offset];
     }
 }
@@ -156,56 +166,92 @@ __global__ void NCHW_2_NHWC8(const T0* input, T1* output, const int maxCount, co
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
+        if (chnl_idx >= channel) {
+            output[index] = (T1)0.0f;
+            continue;
+        }
+        int src_offset = (batch_idx * inChannelPack + chnl_idx) * area + area_idx;
         output[index] = (T1)input[src_offset];
     }
 }
 template<typename T0, typename T1>
 __global__ void C4NHW4_2_NHWC8(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                                 const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    const int batch = (maxCount / (UP_DIV(channel, 8) * 8)) / area;
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        if (chnl_idx >= channel) {
+            output[index] = (T1)0.0f;
+            continue;
+        }
+        int c4_idx = chnl_idx >> 2;
+        int cL_idx = chnl_idx & 3;
+        int src_offset = ((c4_idx * batch + batch_idx) * area + area_idx) * 4 + cL_idx;
         output[index] = (T1)input[src_offset];
     }
 }
 template<typename T0, typename T1>
 __global__ void NHWC_2_C4NHW4(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                               const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    const int batch = (maxCount / (UP_DIV(channel, 4) * 4)) / area;
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * area + area_idx) * channel + chnl_idx;
-        output[index] = (T1)input[src_offset];
+        int c4_idx = chnl_idx >> 2;
+        int cL_idx = chnl_idx & 3;
+        int dst_offset = ((c4_idx * batch + batch_idx) * area + area_idx) * 4 + cL_idx;
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        if (chnl_idx >= channel) {
+            output[dst_offset] = (T1)0.0f;
+            continue;
+        }
+        output[dst_offset] = (T1)input[src_offset];
     }
 }
 template<typename T0, typename T1>
 __global__ void NCHW_2_C4NHW4(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                               const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    const int batch = (maxCount / (UP_DIV(channel, 4) * 4)) / area;
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
-        output[index] = (T1)input[src_offset];
+        int c4_idx = chnl_idx >> 2;
+        int cL_idx = chnl_idx & 3;
+        int dst_offset = ((c4_idx * batch + batch_idx) * area + area_idx) * 4 + cL_idx;
+        int src_offset = (batch_idx * inChannelPack + chnl_idx) * area + area_idx;
+        if (chnl_idx >= channel) {
+            output[dst_offset] = (T1)0.0f;
+            continue;
+        }
+        output[dst_offset] = (T1)input[src_offset];
     }
 }
 template<typename T0, typename T1>
 __global__ void NHWC8_2_C4NHW4(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                                 const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
+    const int batch = (maxCount / (UP_DIV(channel, 4) * 4)) / area;
     for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+        int c4_idx = chnl_idx >> 2;
+        int cL_idx = chnl_idx & 3;
+        int dst_offset = ((c4_idx * batch + batch_idx) * area + area_idx) * 4 + cL_idx;
         int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
-        output[index] = (T1)input[src_offset];
+        output[dst_offset] = (T1)input[src_offset];
     }
 }
 
 // ---- PACKCOMMON / UNPACKCOMMON ----
+// Faithful to MNN Transpose.cu PACKCOMMON/UNPACKCOMMON:
+//   axisAlign = UP_DIV(axis, PACK_NUMBER) * PACK_NUMBER
+//   dstOffset = (z * inside + x) * axisAlign + y  (NC4HW4 layout)
+//   srcOffset = x * insideStride + y * axisStride + z * inside * axis
+// Corpus shim hardcodes insideStride=1, axisStride=area (NHWC src layout).
 template<typename T0, typename T1>
 __global__ void PACKCOMMON(const T0* input, T1* output, const int maxCount, const int channel, const int area,
                            const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
@@ -213,8 +259,13 @@ __global__ void PACKCOMMON(const T0* input, T1* output, const int maxCount, cons
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
-        output[index] = (T1)input[src_offset];
+        int dst_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        int src_offset = area_idx + chnl_idx * area + batch_idx * area * channel;
+        if (chnl_idx < channel) {
+            output[dst_offset] = input[src_offset];
+        } else {
+            output[dst_offset] = (T1)0.0;
+        }
     }
 }
 template<typename T0, typename T1>
@@ -224,8 +275,11 @@ __global__ void UNPACKCOMMON(const T0* input, T1* output, const int maxCount, co
         int area_idx, temp, chnl_idx, batch_idx;
         divArea.divmod(index, temp, area_idx);
         divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
-        output[index] = (T1)input[src_offset];
+        if (chnl_idx < channel) {
+            int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+            int dst_offset = area_idx + chnl_idx * area + batch_idx * area * channel;
+            output[dst_offset] = input[src_offset];
+        }
     }
 }
 
@@ -246,17 +300,18 @@ __global__ void blit_2_float(const T* input, T* output, int count,
 }
 
 // ---- PACKCOMMON_4 (vec4 pack C4) ----
-// Corpus adaptation: MNN's _4 variant uses int4* (4-float vectorization). Since
-// the corpus framework operates on float* scalars, we use the same body as
-// MNN's non-_4 PACKCOMMON but keep the _4 parameter list (with DivModFast).
-// axisAlign uses PACK_NUMBER=8 to match MNN's packing convention.
+// Faithful to MNN Transpose.cu PACKCOMMON_4:
+//   axisAlign = UP_DIV(axis, PACK_NUMBER/4) * PACK_NUMBER/4   (PACK_NUMBER=8 → align to 2)
+//   dstOffset = (z * inside + x) * axisAlign + y
+//   srcOffset = x * insideStride + y * axisStride + z * inside * axis
+// Corpus shim hardcodes insideStride=1, axisStride=area (NHWC src layout).
 template<typename T0, typename T1>
 __global__ void PACKCOMMON_4(const T0* input, T1* output,
     int inside, int axis, int outside,
     int insideStride, int axisStride,
     DivModFast is, DivModFast cs
 ) {
-    int axisAlign = UP_DIV(axis, PACK_NUMBER) * PACK_NUMBER;
+    int axisAlign = UP_DIV(axis, PACK_NUMBER / 4) * PACK_NUMBER / 4;
     int total = axisAlign * inside * outside;
     for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)total; i += blockDim.x * gridDim.x) {
         int tmp, x, y, z;
@@ -266,6 +321,8 @@ __global__ void PACKCOMMON_4(const T0* input, T1* output,
         int srcOffset = x * insideStride + y * axisStride + z * inside * axis;
         if (y < axis) {
             output[dstOffset] = input[srcOffset];
+        } else {
+            output[dstOffset] = (T1)0.0;
         }
     }
 }

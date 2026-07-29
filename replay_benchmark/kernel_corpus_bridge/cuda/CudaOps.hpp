@@ -747,6 +747,50 @@ public:
     bool validate(const AdaptedCase&, const std::vector<float>&) const override;
 };
 
+// input_layernorm_<size>: size-specialized LayerNorm variants (3.6.0).
+// Math equivalent to LAYERNORM but with unrolled per-size kernels.
+// n is fixed per variant (320/512/1024/2048); adaptive handles arbitrary n.
+class CudaInputLayerNorm320Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_input_layernorm_320_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInputLayerNorm512Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_input_layernorm_512_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInputLayerNorm1024Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_input_layernorm_1024_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInputLayerNorm2048Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_input_layernorm_2048_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInputLayerNormAdaptiveFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_input_layernorm_adaptive_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
 // ---- ConvBase variants (3.6.0) ----
 // Float22Half2: float→half2 packing (4 elements per thread).
 // Float22BFloat16: float→bfloat16 packing (sm80+).
@@ -1189,6 +1233,492 @@ class CudaGatedDeltaRuleDecodeFp32Kernel : public CudaOpAdapter {
 public:
     const char* opType() const override { return "linear_attention"; }
     const char* variant() const override { return "cuda_gated_delta_rule_decode_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// ============================================================================
+// P0 fp16 variants — Attention / LinearAttention / RoPE / TopKV2
+// Mirror fp32 logic; buffers use __half packing for T-typed I/O.
+// ============================================================================
+class CudaFlashDecodeFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_flash_decode_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaFlashDecodeWithMaskFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_flash_decode_with_mask_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaFlashDecodeSplitkFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_flash_decode_splitk_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaFlashAttnCombineResultsFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_flash_attn_combine_results_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaCopyKvToCacheFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_copy_kv_to_cache_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaQkKernelTiledFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_qk_kernel_tiled_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaQkvKernelTiledFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "attention"; }
+    const char* variant() const override { return "cuda_qkv_kernel_tiled_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaConv1dSiluFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "linear_attention"; }
+    const char* variant() const override { return "cuda_conv1d_silu_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaShortConvFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "linear_attention"; }
+    const char* variant() const override { return "cuda_short_conv_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaShortConvOutputFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "linear_attention"; }
+    const char* variant() const override { return "cuda_short_conv_output_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGatedDeltaRuleDecodeFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "linear_attention"; }
+    const char* variant() const override { return "cuda_gated_delta_rule_decode_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaRopeC4Fp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "rope"; }
+    const char* variant() const override { return "cuda_rope_c4_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaTopKV2Fp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "topkv2"; }
+    const char* variant() const override { return "cuda_topkv2_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// ============================================================================
+// P1 fp16 variants — Reduction(7) / Interp(4) / GridSample(4) / LayerNormC4(2)
+// Only tag 3.6.0 (fp16 support introduced in 3.6.0).
+// ============================================================================
+class CudaReductionSumFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_sum_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaReductionMeanFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_mean_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaReductionMaxFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_max_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaReductionMinFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_min_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaReductionProdFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_prod_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaReductionSumAxisFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_sum_axis_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaReductionMeanAxisFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "reduction"; }
+    const char* variant() const override { return "cuda_reduction_mean_axis_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInterpNearestFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "interp_nearest"; }
+    const char* variant() const override { return "cuda_interp_nearest_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInterpBilinearFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "interp_bilinear"; }
+    const char* variant() const override { return "cuda_interp_bilinear_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInterpNearestRoundFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "interp_nearest_round"; }
+    const char* variant() const override { return "cuda_interp_nearest_round_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInterpBilinearOptFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "interp_bilinear_opt"; }
+    const char* variant() const override { return "cuda_interp_bilinear_opt_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGridSampleNearestFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "grid_sample"; }
+    const char* variant() const override { return "cuda_grid_sample_nearest_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGridSampleBilinearFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "grid_sample_bilinear"; }
+    const char* variant() const override { return "cuda_grid_sample_bilinear_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGridSampleNearest3dFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "grid_sample_3d"; }
+    const char* variant() const override { return "cuda_grid_sample_nearest_3d_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGridSampleBilinear3dFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "grid_sample_3d"; }
+    const char* variant() const override { return "cuda_grid_sample_bilinear_3d_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaLayerNormC4Fp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_layernorm_c4_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryLayerNormC4Fp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "layernorm"; }
+    const char* variant() const override { return "cuda_binary_layernorm_c4_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// ============================================================================
+// P2 plugin kernels — GroupNorm(half) / SeqLen2Spatial / splitGeLU / SPLIT_FusedQKV
+// ============================================================================
+class CudaGroupNormNHWCSumFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "groupnorm"; }
+    const char* variant() const override { return "cuda_groupnorm_nhwc_sum_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaGroupNormNHWCScaleFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "groupnorm"; }
+    const char* variant() const override { return "cuda_groupnorm_nhwc_scale_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSeqLen2SpatialFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "seqlen2spatial"; }
+    const char* variant() const override { return "cuda_seqlen2spatial_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSeqLen2SpatialFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "seqlen2spatial"; }
+    const char* variant() const override { return "cuda_seqlen2spatial_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSplitGeluFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "splitgelu"; }
+    const char* variant() const override { return "cuda_splitgelu_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSplitGeluFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "splitgelu"; }
+    const char* variant() const override { return "cuda_splitgelu_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSplitFusedQKVFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "split_fusedqkv"; }
+    const char* variant() const override { return "cuda_split_fusedqkv_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSplitFusedQKVFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "split_fusedqkv"; }
+    const char* variant() const override { return "cuda_split_fusedqkv_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// ============================================================================
+// P4 int8 kernels — FloatToInt8/Int8ToFloat/DequantWeight/ConvDW/Im2Col/BinaryInt8
+// ============================================================================
+class CudaFloat2Int8Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "float2int8"; }
+    const char* variant() const override { return "cuda_float2int8_packed_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaFloat2Int8SingleFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "float2int8_single"; }
+    const char* variant() const override { return "cuda_float2int8_single_packed_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInt82FloatFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "int82float"; }
+    const char* variant() const override { return "cuda_int82float_packed_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaInt82FloatSingleFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "int82float_single"; }
+    const char* variant() const override { return "cuda_int82float_single_packed_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaDequantizeInt8WeightFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "dequantize_int8_weight"; }
+    const char* variant() const override { return "cuda_dequantize_int8_weight_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaDequantizeInt4WeightFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "dequantize_int4_weight"; }
+    const char* variant() const override { return "cuda_dequantize_int4_weight_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaConvDwInt8Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_dw_int8"; }
+    const char* variant() const override { return "cuda_conv_dw_int8_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaConvDw3x3S1Int8Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "conv_dw3x3s1_int8"; }
+    const char* variant() const override { return "cuda_conv_dw3x3s1_int8_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaIm2ColPackC16Int8Fp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "im2col_packc16_int8"; }
+    const char* variant() const override { return "cuda_im2col_packc16_int8_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaWeightInt8PackFillFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "weight_int8_pack_fill"; }
+    const char* variant() const override { return "cuda_weight_int8_pack_fill_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryInt8AddFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "binary_int8_add"; }
+    const char* variant() const override { return "cuda_binary_int8_add_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryInt8MulFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "binary_int8_mul"; }
+    const char* variant() const override { return "cuda_binary_int8_mul_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// ============================================================================
+// P5 Raster fused binary — BinaryADD/MUL + FuseAddADD/MUL + MidADD/MUL + MidLinear4ADD/MUL
+// ============================================================================
+class CudaBinaryAddRasterFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binary"; }
+    const char* variant() const override { return "cuda_raster_binary_add_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMulRasterFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binary"; }
+    const char* variant() const override { return "cuda_raster_binary_mul_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryFuseAddAddFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binary_fuseadd"; }
+    const char* variant() const override { return "cuda_raster_fuseadd_add_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryFuseAddMulFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binary_fuseadd"; }
+    const char* variant() const override { return "cuda_raster_fuseadd_mul_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMidAddFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymid"; }
+    const char* variant() const override { return "cuda_raster_binarymid_add_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMidMulFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymid"; }
+    const char* variant() const override { return "cuda_raster_binarymid_mul_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMidLinear4AddFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymidlinear4"; }
+    const char* variant() const override { return "cuda_raster_binarymidlinear4_add_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMidLinear4MulFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymidlinear4"; }
+    const char* variant() const override { return "cuda_raster_binarymidlinear4_mul_fp32"; }
     bool adapt(const CaseSpec&, AdaptedCase&) const override;
     cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
     bool validate(const AdaptedCase&, const std::vector<float>&) const override;

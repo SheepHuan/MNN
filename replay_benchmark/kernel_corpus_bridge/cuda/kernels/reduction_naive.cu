@@ -2,6 +2,7 @@
 //   + SUM_120 / MEAN_120 (1.2.0) kernels + shims
 //   source/backend/cuda/execution/ReductionTemplate.cuh
 #include "corpus_common.cuh"
+#include <cuda_fp16.h>
 
 namespace MNN {
 namespace Corpus {
@@ -268,6 +269,42 @@ void mnn_corpus_reduction_mean_axis_fp32(const float* input, float* output, int 
                                          cudaStream_t stream) {
     MNN::Corpus::MEAN_REDUCE_AXIS<float><<<grid, block, 0, stream>>>(input, output, outside, axis, inside,
                                                                      per_block_size, calc_multi_num);
+}
+
+// ============================================================================
+// fp16 (<half>) variants — only 3.6.0 naive + axis (no 1.2.0/1.2.7 fp16 in MNN)
+// ============================================================================
+void mnn_corpus_reduction_sum_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SUM_NAIVE<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside);
+}
+void mnn_corpus_reduction_mean_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                     int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::MEAN_NAIVE<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside);
+}
+void mnn_corpus_reduction_max_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::MAXIMUM<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside);
+}
+void mnn_corpus_reduction_min_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::MINIMUM<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside);
+}
+void mnn_corpus_reduction_prod_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                     int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::PROD<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside);
+}
+void mnn_corpus_reduction_sum_axis_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                        int per_block_size, int calc_multi_num, int grid, int block,
+                                        cudaStream_t stream) {
+    MNN::Corpus::SUM_REDUCE_AXIS<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside,
+                                                                     per_block_size, calc_multi_num);
+}
+void mnn_corpus_reduction_mean_axis_fp16(const void* input, void* output, int outside, int axis, int inside,
+                                         int per_block_size, int calc_multi_num, int grid, int block,
+                                         cudaStream_t stream) {
+    MNN::Corpus::MEAN_REDUCE_AXIS<__half><<<grid, block, 0, stream>>>((const __half*)input, (__half*)output, outside, axis, inside,
+                                                                      per_block_size, calc_multi_num);
 }
 
 } // extern "C"
