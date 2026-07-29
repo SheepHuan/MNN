@@ -126,6 +126,24 @@ void mnn_corpus_binarymidlinear4_mul_fp32(const float*, const float*, float*, in
 void mnn_corpus_maxpool_c8_bf16(const void*, void*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_avgpool_c8_bf16(const void*, void*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_float22bfloat16_fp32(const float*, void*, size_t, int, int, cudaStream_t);
+// weight_only_quant fp16 shims (defined in weight_only_quant.cu)
+void mnn_corpus_precomputegemvparams_fp16(const void*, const void*, float2*, int, int, int, cudaStream_t);
+void mnn_corpus_quanta_fp16(const void*, int8_t*, void*, void*, int32_t*, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_dequantandacc_fp16(const int32_t*, void*, const void*, const void*, const void*, const void*, const int32_t*, int, int, const int32_t*, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_biasandactivation_fp16(void*, const void*, float, float, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemm_fpaint8b_fp16(const void*, const int8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint8b_fp16(const void*, const int8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemm_fpaint4b_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v5_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v9_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v14_fp16(const void*, const uint8_t*, const float2*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v14_mb_fp16(const void*, const uint8_t*, const float2*, const void*, void*, float, float, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint8b_v2_fp16(const void*, const int8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_conv_fpaint8b_fp16(const void*, const int8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_conv_fpaint4b_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// gated_delta_rule_prefill fp16 shim (defined in attention.cu)
+void mnn_corpus_gated_delta_rule_prefill_fp16(const float*, const void*, const void*, float*, void*, int, int, int, int, int, int, int, int, int, int, bool, float, bool, bool, bool, int, int, size_t, cudaStream_t);
 }
 
 namespace MNN {
