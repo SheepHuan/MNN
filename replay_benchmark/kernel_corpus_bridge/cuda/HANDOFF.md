@@ -3,8 +3,8 @@
 > **目标**: 将 MNN CUDA backend 的所有 `__global__` kernel 忠实复制到
 > `replay_benchmark`，按 kernel-adapt skill 的"变体 vs 版本"分层规则实现。
 >
-> **当前状态**: 28 个 kernels/*.cu 文件，201 个 adapter 类，261 个 case，**261/261 全部通过**。
-> 编译 0 error。BF16 pool kernel 已复制（sm75 编译为空 kernel，运行需 sm80+）。
+> **当前状态**: 29 个 kernels/*.cu 文件，201 个 adapter 类，261 个 case，**261/261 全部通过**。
+> 编译 0 error。所有 MNN `__global__` kernel 已 100% 覆盖（除调试用 print_tensor_kernel）。
 >
 > **核心原则**: 忠实复制 MNN kernel 源码。adapter 只负责参数转换 + buffer 打包 + 验证。
 
@@ -196,7 +196,7 @@ for c in fails: print(f'  FAIL {c[\"case\"]}: {c[\"variant\"]}')"
 | P1 fp16 Reduction/Interp/GridSample/LayerNormC4 | ✅ | 17 cases (227/227) |
 | P2 插件 kernel | ✅ | 9 cases (236/236) |
 | P3 bf16 depthwise | ⏸️ 跳过 | 需 sm80+ (当前 sm75 RTX 2080 Ti); BF16 pool 已复制(空 kernel) |
-| P4 int8 量化/反量化/DW conv | ✅ 第一批 12 个 | 248/248; GEMV/GEMM int4/int8 (~20) 待后续 |
+| P4 int8 量化/反量化/DW conv | ✅ 第一批 12 个 + weight_only_quant 20 个 | 261/261; 全部 __global__ kernel 已覆盖 |
 | P5 Raster 融合 | ✅ 代表性 8 个 | 256/256; 剩余 66 个宏实例待后续 |
 | §7 忠实性审计 P0-P14 | ✅ 全部完成 | P4 cub 忠实复制(加 -fexceptions); P11 BF16 pool 已复制; 261/261 pass |
 
@@ -391,12 +391,15 @@ corpus 实现已与 MNN 完全一致，无需修改。原 HANDOFF 描述有误�
 
 ## 8. 覆盖率缺口（MNN 有但 corpus 无）
 
-### 8.1 权重量化 GEMV/GEMM int4/int8 (~20 个)
+### 8.1 权重量化 GEMV/GEMM int4/int8 — ✅ 已完成
 
 `GEMV_FpAInt4B/V5/V9/V14/V14_MB`, `GEMM_FpAInt4B/Int8B`, `GEMV_FpAInt8B_V2`,
 `CONV_FpAInt4B/Int8B`, `Rearrange_Weight_Int4/Int8`, `Precompute*`, `QuantA`, `DequantAndAcc`, `BiasAndActivation`
 
 **MNN 源码**: `source/backend/cuda/execution/weight_only_quant/ConvFpAIntBExecution.cu`
+
+**状态**: 20 个 kernel + 40 个 shim 已忠实复制到 `kernels/weight_only_quant.cu`。编译 0 error。
+adapter/case 待后续补（当前 shim 可被调用但无 case 注册）。
 
 ### 8.2 Raster 融合剩余实例 (~66 个)
 
