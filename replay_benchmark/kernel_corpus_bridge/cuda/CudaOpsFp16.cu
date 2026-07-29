@@ -138,7 +138,7 @@ void mnn_corpus_gemv_fpaint4b_fp16(const void*, const uint8_t*, const void*, con
 void mnn_corpus_gemv_fpaint4b_v5_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_gemv_fpaint4b_v9_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_gemv_fpaint4b_v14_fp16(const void*, const uint8_t*, const float2*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, cudaStream_t);
-void mnn_corpus_gemv_fpaint4b_v14_mb_fp16(const void*, const uint8_t*, const float2*, const void*, void*, float, float, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_gemv_fpaint4b_v14_mb_fp16(const void*, const uint8_t*, const float2*, const void*, void*, float, float, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_gemv_fpaint8b_v2_fp16(const void*, const int8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_conv_fpaint8b_fp16(const void*, const int8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_conv_fpaint4b_fp16(const void*, const uint8_t*, const void*, const void*, const void*, void*, float, float, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
@@ -5039,6 +5039,666 @@ bool CudaFloat22BFloat16Fp32Kernel::validate(const AdaptedCase& ac, const std::v
     return true;
 }
 
+// ============================================================================
+// weight_only_quant fp16 adapters (conv_fpa_intb). Smoke-only: launch the
+// shim, then check the __half output has any non-zero element. Small geometry
+// mirrors the fp32 path (batch=1, ic=8, ic_p=8, oc=4, oc_p=8, quanC=4).
+// Helpers packHalf / makeHalfBuffer / makeHalfOutput come from above.
+// ============================================================================
+namespace {
+// Local WOQ fp16 geometry constants (mirror CudaOpsWoq.cpp fp32 path).
+constexpr int kWoqHpBatch = 1;
+constexpr int kWoqHpIc = 8;
+constexpr int kWoqHpIcP = 8;
+constexpr int kWoqHpOc = 4;
+constexpr int kWoqHpOcP = 8;
+constexpr int kWoqHpQuanC = 4;
+constexpr float kWoqHpScale = 0.1f;
+constexpr float kWoqHpOffset = 0.0f;
+constexpr float kWoqHpBias = 0.5f;
+constexpr float kWoqHpMaxV = 6.0f;
+constexpr float kWoqHpMinV = 0.0f;
+const int8_t kWoqHpInt8Q = 2;
+const uint8_t kWoqHpInt4Byte = 0xAA;
+
+std::vector<int8_t> woqHpBuildInt8Weight(int oc, int ic_p, int8_t q) {
+    return std::vector<int8_t>((size_t)oc * ic_p, q);
+}
+std::vector<uint8_t> woqHpBuildInt4Weight(int oc, int ic_p, uint8_t byte) {
+    return std::vector<uint8_t>((size_t)oc * (ic_p / 2), byte);
+}
+std::vector<float> woqHpBuildInput(int batch, int ic, int ic_p) {
+    std::vector<float> v((size_t)batch * ic_p, 0.0f);
+    for (int b = 0; b < batch; ++b)
+        for (int k = 0; k < ic; ++k) v[b * ic_p + k] = 0.1f * (k % 7);
+    return v;
+}
+std::vector<float> woqHpBuildScale(int oc, int quanC, float s) {
+    const int num_qg = quanC / oc;
+    return std::vector<float>((size_t)oc * (num_qg > 0 ? num_qg : 1), s);
+}
+std::vector<float> woqHpBuildOffset(int oc, int quanC, float o) {
+    const int num_qg = quanC / oc;
+    return std::vector<float>((size_t)oc * (num_qg > 0 ? num_qg : 1), o);
+}
+std::vector<float> woqHpBuildBias(int oc, float b) {
+    return std::vector<float>((size_t)oc, b);
+}
+std::vector<float2> woqHpBuildGemvParams(int oc, int num_qg, float scale, float offset) {
+    std::vector<float2> v((size_t)oc * num_qg);
+    for (size_t i = 0; i < v.size(); ++i) { v[i].x = scale; v[i].y = offset - 8.0f * scale; }
+    return v;
+}
+// __half output -> check first n halfs for any non-zero.
+bool woqHpAnyNonZeroHalf(const std::vector<float>& output, int n) {
+    int floats = (int)output.size();
+    int halfs = floats / 1; // each float slot holds 2 __half bytes after readback
+    // Output readback packs __half bytes; reinterpret as __half.
+    const __half* h = reinterpret_cast<const __half*>(output.data());
+    int lim = std::min(n, halfs * 2);
+    for (int i = 0; i < lim; ++i) if (__half2float(h[i]) != 0.0f) return true;
+    return false;
+}
+} // namespace (anonymous)
+
+// ---- 1. CudaPrecomputeGemvParamsFp16Kernel — PrecomputeGemvParams<__half> ----
+bool CudaPrecomputeGemvParamsFp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_precomputegemvparams_fp16";
+    const int oc = spec.intParam("oc", kWoqHpOc);
+    const int num_qg = spec.intParam("num_qg", 1);
+    const int total = oc * num_qg;
+    auto scale = woqHpBuildScale(oc, oc * num_qg, kWoqHpScale);
+    auto offset = woqHpBuildOffset(oc, oc * num_qg, kWoqHpOffset);
+    ac.buffers.push_back(makeHalfBuffer(scale, false));
+    ac.buffers.push_back(makeHalfBuffer(offset, false));
+    AdaptedBuffer pBuf; pBuf.sizeBytes = (size_t)total * sizeof(float2); pBuf.isOutput = true;
+    ac.buffers.push_back(pBuf);
+    ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1)); ac.args.push_back(AdaptedArg::buffer(2));
+    ac.args.push_back(AdaptedArg::scalarInt(total));
+    const int grid = mnnGridFor(total, kBlock), block = kBlock;
+    ac.args.push_back(AdaptedArg::scalarInt(grid)); ac.args.push_back(AdaptedArg::scalarInt(block));
+    ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1;
+    ac.elementCount = total;
+    return true;
+}
+cudaError_t CudaPrecomputeGemvParamsFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_precomputegemvparams_fp16(ctx.devBufs[0], ctx.devBufs[1], (float2*)ctx.devBufs[2],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaPrecomputeGemvParamsFp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    // float2 output: 2 floats per element.
+    if ((int)output.size() < ac.elementCount * 2) return false;
+    for (int i = 0; i < ac.elementCount; ++i) if (output[i * 2] != 0.0f) return true;
+    return false;
+}
+
+// ---- 2. CudaQuantAFp16Kernel — QuantA<__half> ----
+bool CudaQuantAFp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_quanta_fp16";
+    const int M = spec.intParam("m", 4);
+    const int K_i = spec.intParam("k", kWoqHpIc);
+    const int lda = K_i;
+    std::vector<float> A_sub_fp((size_t)M * lda, 0.0f);
+    for (int i = 0; i < M * lda; ++i) A_sub_fp[i] = 0.1f * (i % 7);
+    ac.buffers.push_back(makeHalfBuffer(A_sub_fp, false));
+    AdaptedBuffer qBuf; qBuf.sizeBytes = (size_t)M * lda; qBuf.isOutput = true;
+    ac.buffers.push_back(qBuf);
+    ac.buffers.push_back(makeHalfOutput(M)); // scale_A_out
+    ac.buffers.push_back(makeHalfOutput(M)); // offset_A_out
+    AdaptedBuffer suBuf; suBuf.sizeBytes = M * sizeof(int32_t); suBuf.isOutput = true;
+    ac.buffers.push_back(suBuf);
+    for (int i = 0; i < 5; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarInt(M)); ac.args.push_back(AdaptedArg::scalarInt(K_i)); ac.args.push_back(AdaptedArg::scalarInt(lda));
+    const int total = M * lda;
+    const int grid = mnnGridFor(total, kBlock), block = kBlock;
+    ac.args.push_back(AdaptedArg::scalarInt(grid)); ac.args.push_back(AdaptedArg::scalarInt(block));
+    ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1;
+    ac.elementCount = total;
+    return true;
+}
+cudaError_t CudaQuantAFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_quanta_fp16(ctx.devBufs[0], (int8_t*)ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], (int32_t*)ctx.devBufs[4],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaQuantAFp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    const int8_t* q = reinterpret_cast<const int8_t*>(output.data());
+    int lim = std::min(ac.elementCount, (int)(output.size() * 4));
+    for (int i = 0; i < lim; ++i) if (q[i] != 0) return true;
+    return false;
+}
+
+// ---- 3. CudaDequantAndAccFp16Kernel — DequantAndAcc<__half> ----
+bool CudaDequantAndAccFp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_dequantandacc_fp16";
+    const int M = spec.intParam("m", 4);
+    const int N = spec.intParam("n", kWoqHpOc);
+    const int K_i = spec.intParam("k", kWoqHpIc);
+    const int ldc = N;
+    const int num_oc_groups = 1, group_idx = 0;
+    std::vector<int32_t> C_q((size_t)M * ldc, 8);
+    std::vector<float> scale_A(M, kWoqHpScale), offset_A(M, kWoqHpOffset);
+    std::vector<float> base_scale_B(N, kWoqHpScale), base_offset_B(N, kWoqHpOffset);
+    std::vector<int32_t> base_sum_B_q(N, K_i * kWoqHpInt8Q);
+    std::vector<int32_t> sum_A_q(M, K_i * kWoqHpInt8Q);
+    AdaptedBuffer cqBuf; cqBuf.sizeBytes = C_q.size() * 4; cqBuf.initialData.assign((const uint8_t*)C_q.data(), (const uint8_t*)C_q.data() + C_q.size() * 4); cqBuf.isOutput = false;
+    ac.buffers.push_back(cqBuf);
+    ac.buffers.push_back(makeHalfOutput(M * ldc)); // C_fp_final
+    ac.buffers.push_back(makeHalfBuffer(scale_A, false));
+    ac.buffers.push_back(makeHalfBuffer(offset_A, false));
+    ac.buffers.push_back(makeHalfBuffer(base_scale_B, false));
+    ac.buffers.push_back(makeHalfBuffer(base_offset_B, false));
+    AdaptedBuffer bsbqBuf; bsbqBuf.sizeBytes = base_sum_B_q.size() * 4; bsbqBuf.initialData.assign((const uint8_t*)base_sum_B_q.data(), (const uint8_t*)base_sum_B_q.data() + base_sum_B_q.size() * 4); bsbqBuf.isOutput = false;
+    ac.buffers.push_back(bsbqBuf);
+    AdaptedBuffer saqBuf; saqBuf.sizeBytes = sum_A_q.size() * 4; saqBuf.initialData.assign((const uint8_t*)sum_A_q.data(), (const uint8_t*)sum_A_q.data() + sum_A_q.size() * 4); saqBuf.isOutput = false;
+    ac.buffers.push_back(saqBuf);
+    for (int i = 0; i < 8; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarInt(group_idx)); ac.args.push_back(AdaptedArg::scalarInt(num_oc_groups));
+    ac.args.push_back(AdaptedArg::scalarInt(7)); // sum_A_q_in index
+    ac.args.push_back(AdaptedArg::scalarInt(M)); ac.args.push_back(AdaptedArg::scalarInt(N)); ac.args.push_back(AdaptedArg::scalarInt(K_i));
+    ac.args.push_back(AdaptedArg::scalarInt(ldc));
+    const int gridX = (N + 15) / 16, gridY = (M + 15) / 16, blockX = 16, blockY = 16;
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
+    ac.args.push_back(AdaptedArg::scalarInt(blockX)); ac.args.push_back(AdaptedArg::scalarInt(blockY));
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.localSize[1] = blockY; ac.dims = 2;
+    ac.elementCount = M * ldc;
+    return true;
+}
+cudaError_t CudaDequantAndAccFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_dequantandacc_fp16((const int32_t*)ctx.devBufs[0], ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],
+        (const int32_t*)ctx.devBufs[6], ctx.intArgs[0], ctx.intArgs[1],
+        (const int32_t*)ctx.devBufs[7], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaDequantAndAccFp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqHpAnyNonZeroHalf(output, ac.elementCount);
+}
+
+// ---- 4. CudaBiasAndActivationFp16Kernel — BiasAndActivation<__half> ----
+bool CudaBiasAndActivationFp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_biasandactivation_fp16";
+    const int M = spec.intParam("m", 1);
+    const int N = spec.intParam("n", kWoqHpOc);
+    const int ldc = N;
+    std::vector<float> data((size_t)M * ldc, 0.0f);
+    for (int i = 0; i < M * ldc; ++i) data[i] = 0.1f * (i % 7);
+    auto bias = woqHpBuildBias(N, kWoqHpBias);
+    // data is __half in/out (in-place).
+    ac.buffers.push_back(makeHalfBuffer(data, true));
+    ac.buffers.push_back(makeHalfBuffer(bias, false));
+    ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV));
+    ac.args.push_back(AdaptedArg::scalarInt(M)); ac.args.push_back(AdaptedArg::scalarInt(N)); ac.args.push_back(AdaptedArg::scalarInt(ldc));
+    const int total = M * ldc;
+    const int grid = mnnGridFor(total, kBlock), block = kBlock;
+    ac.args.push_back(AdaptedArg::scalarInt(grid)); ac.args.push_back(AdaptedArg::scalarInt(block));
+    ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1;
+    ac.elementCount = total;
+    return true;
+}
+cudaError_t CudaBiasAndActivationFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_biasandactivation_fp16(ctx.devBufs[0], ctx.devBufs[1],
+        ctx.floatArgs[0], ctx.floatArgs[1], ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+        ctx.intArgs[3], ctx.intArgs[4], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaBiasAndActivationFp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqHpAnyNonZeroHalf(output, ac.elementCount);
+}
+
+// ---- 5/6. GEMM_FpAInt8B / GEMM_FpAInt4B (fp16) ----
+// ENTRY is the full shim symbol (e.g. mnn_corpus_gemm_fpaint8b_fp16).
+#define WOQ_FP16_GEMM_SMOKE_BODY(CLASS, ENTRY, KBUF_TYPE, IS_INT4) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = #ENTRY; \
+    const int batch = spec.intParam("batch", kWoqHpBatch); \
+    const int ic = spec.intParam("ic", kWoqHpIc); \
+    const int ic_p = spec.intParam("ic_p", kWoqHpIcP); \
+    const int oc = spec.intParam("oc", kWoqHpOc); \
+    const int oc_p = spec.intParam("oc_p", kWoqHpOcP); \
+    const int quanC = spec.intParam("quan_c", kWoqHpQuanC); \
+    auto input = woqHpBuildInput(batch, ic, ic_p); \
+    auto scale = woqHpBuildScale(oc, quanC, kWoqHpScale); \
+    auto offset = woqHpBuildOffset(oc, quanC, kWoqHpOffset); \
+    auto bias = woqHpBuildBias(oc, kWoqHpBias); \
+    ac.buffers.push_back(makeHalfBuffer(input, false)); \
+    AdaptedBuffer kBuf; \
+    if (IS_INT4) { auto w = woqHpBuildInt4Weight(oc, ic_p, kWoqHpInt4Byte); \
+        kBuf.sizeBytes = w.size(); kBuf.initialData.assign(w.begin(), w.end()); } \
+    else { auto w = woqHpBuildInt8Weight(oc, ic_p, kWoqHpInt8Q); \
+        kBuf.sizeBytes = w.size(); kBuf.initialData.assign((const uint8_t*)w.data(), (const uint8_t*)w.data() + w.size()); } \
+    kBuf.isOutput = false; \
+    ac.buffers.push_back(kBuf); \
+    ac.buffers.push_back(makeHalfBuffer(scale, false)); \
+    ac.buffers.push_back(makeHalfBuffer(offset, false)); \
+    ac.buffers.push_back(makeHalfBuffer(bias, false)); \
+    ac.buffers.push_back(makeHalfOutput(batch * oc_p)); \
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i)); \
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV)); \
+    ac.args.push_back(AdaptedArg::scalarInt(ic)); ac.args.push_back(AdaptedArg::scalarInt(ic_p)); \
+    ac.args.push_back(AdaptedArg::scalarInt(oc)); ac.args.push_back(AdaptedArg::scalarInt(oc_p)); \
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(quanC)); \
+    const int gridX = (oc + 15) / 16, gridY = batch, blockX = 16, blockY = 16; \
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY)); \
+    ac.args.push_back(AdaptedArg::scalarInt(blockX)); ac.args.push_back(AdaptedArg::scalarInt(blockY)); \
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.localSize[1] = blockY; ac.dims = 2; \
+    ac.elementCount = batch * oc_p; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    ENTRY(ctx.devBufs[0], (KBUF_TYPE)ctx.devBufs[1], \
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5], \
+        ctx.floatArgs[0], ctx.floatArgs[1], \
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], \
+        ctx.intArgs[4], ctx.intArgs[5], ctx.intArgs[6], \
+        ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    return woqHpAnyNonZeroHalf(output, ac.elementCount); \
+}
+
+WOQ_FP16_GEMM_SMOKE_BODY(CudaGemmFpAInt8BFp16Kernel, mnn_corpus_gemm_fpaint8b_fp16, const int8_t*, false)
+WOQ_FP16_GEMM_SMOKE_BODY(CudaGemmFpAInt4BFp16Kernel, mnn_corpus_gemm_fpaint4b_fp16, const uint8_t*, true)
+#undef WOQ_FP16_GEMM_SMOKE_BODY
+
+// ---- 7/8/9/10/11/12. GEMV_* fp16 variants (batch-first arg order). ----
+// ENTRY is the full shim symbol (e.g. mnn_corpus_gemv_fpaint8b_fp16).
+#define WOQ_FP16_GEMV_SMOKE_BODY(CLASS, ENTRY, KBUF_TYPE, IS_INT4, ARG_ORDER) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = #ENTRY; \
+    const int batch = spec.intParam("batch", kWoqHpBatch); \
+    const int ic = spec.intParam("ic", kWoqHpIc); \
+    const int ic_p = spec.intParam("ic_p", kWoqHpIcP); \
+    const int oc = spec.intParam("oc", kWoqHpOc); \
+    const int oc_p = spec.intParam("oc_p", kWoqHpOcP); \
+    const int quanC = spec.intParam("quan_c", kWoqHpQuanC); \
+    auto input = woqHpBuildInput(batch, ic, ic_p); \
+    auto scale = woqHpBuildScale(oc, quanC, kWoqHpScale); \
+    auto offset = woqHpBuildOffset(oc, quanC, kWoqHpOffset); \
+    auto bias = woqHpBuildBias(oc, kWoqHpBias); \
+    ac.buffers.push_back(makeHalfBuffer(input, false)); \
+    AdaptedBuffer kBuf; \
+    if (IS_INT4) { auto w = woqHpBuildInt4Weight(oc, ic_p, kWoqHpInt4Byte); \
+        kBuf.sizeBytes = w.size(); kBuf.initialData.assign(w.begin(), w.end()); } \
+    else { auto w = woqHpBuildInt8Weight(oc, ic_p, kWoqHpInt8Q); \
+        kBuf.sizeBytes = w.size(); kBuf.initialData.assign((const uint8_t*)w.data(), (const uint8_t*)w.data() + w.size()); } \
+    kBuf.isOutput = false; \
+    ac.buffers.push_back(kBuf); \
+    ac.buffers.push_back(makeHalfBuffer(scale, false)); \
+    ac.buffers.push_back(makeHalfBuffer(offset, false)); \
+    ac.buffers.push_back(makeHalfBuffer(bias, false)); \
+    ac.buffers.push_back(makeHalfOutput(batch * oc_p)); \
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i)); \
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV)); \
+    ARG_ORDER \
+    ac.globalSize[0] = oc; ac.globalSize[1] = batch; ac.localSize[0] = 64; ac.dims = 2; \
+    ac.elementCount = batch * oc_p; \
+    return true; \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    return woqHpAnyNonZeroHalf(output, ac.elementCount); \
+}
+
+// GEMV_FpAInt8B fp16 (2D grid + blockY).
+WOQ_FP16_GEMV_SMOKE_BODY(CudaGemvFpAInt8BFp16Kernel, mnn_corpus_gemv_fpaint8b_fp16, const int8_t*, false,
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(16)); ac.args.push_back(AdaptedArg::scalarInt(16));)
+cudaError_t CudaGemvFpAInt8BFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint8b_fp16(ctx.devBufs[0], (const int8_t*)ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
+    return cudaGetLastError();
+}
+
+// GEMV_FpAInt4B fp16 (2D grid + blockY, shared mem).
+WOQ_FP16_GEMV_SMOKE_BODY(CudaGemvFpAInt4BFp16Kernel, mnn_corpus_gemv_fpaint4b_fp16, const uint8_t*, true,
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
+    const int sharedMem = ic_p * sizeof(__half) + 64 * sizeof(float);
+    ac.args.push_back(AdaptedArg::scalarInt(sharedMem));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(64));)
+cudaError_t CudaGemvFpAInt4BFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint4b_fp16(ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
+    return cudaGetLastError();
+}
+
+// GEMV_FpAInt4B_V5 fp16 (1D block, no shared mem).
+WOQ_FP16_GEMV_SMOKE_BODY(CudaGemvFpAInt4BV5Fp16Kernel, mnn_corpus_gemv_fpaint4b_v5_fp16, const uint8_t*, true,
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(64));)
+cudaError_t CudaGemvFpAInt4BV5Fp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint4b_v5_fp16(ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.stream);
+    return cudaGetLastError();
+}
+
+// GEMV_FpAInt4B_V9 fp16 (OC_PER_BLK=4, 1D block).
+WOQ_FP16_GEMV_SMOKE_BODY(CudaGemvFpAInt4BV9Fp16Kernel, mnn_corpus_gemv_fpaint4b_v9_fp16, const uint8_t*, true,
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(64));)
+cudaError_t CudaGemvFpAInt4BV9Fp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint4b_v9_fp16(ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.stream);
+    return cudaGetLastError();
+}
+
+#undef WOQ_FP16_GEMV_SMOKE_BODY
+
+// GEMV_FpAInt4B_V14 fp16 (uses float2 gemv_params, no scale/offset).
+bool CudaGemvFpAInt4BV14Fp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint4b_v14_fp16";
+    const int batch = spec.intParam("batch", kWoqHpBatch);
+    const int ic = spec.intParam("ic", kWoqHpIc);
+    const int ic_p = spec.intParam("ic_p", kWoqHpIcP);
+    const int oc = spec.intParam("oc", kWoqHpOc);
+    const int oc_p = spec.intParam("oc_p", kWoqHpOcP);
+    const int quanC = spec.intParam("quan_c", kWoqHpQuanC);
+    const int num_qg = quanC / oc;
+    auto input = woqHpBuildInput(batch, ic, ic_p);
+    auto kernel = woqHpBuildInt4Weight(oc, ic_p, kWoqHpInt4Byte);
+    auto gemv_params = woqHpBuildGemvParams(oc, num_qg, kWoqHpScale, kWoqHpOffset);
+    auto bias = woqHpBuildBias(oc, kWoqHpBias);
+    ac.buffers.push_back(makeHalfBuffer(input, false));
+    AdaptedBuffer kBuf; kBuf.sizeBytes = kernel.size(); kBuf.initialData.assign(kernel.begin(), kernel.end()); kBuf.isOutput = false;
+    ac.buffers.push_back(kBuf);
+    AdaptedBuffer pBuf; pBuf.sizeBytes = gemv_params.size() * sizeof(float2); pBuf.initialData.assign((const uint8_t*)gemv_params.data(), (const uint8_t*)gemv_params.data() + pBuf.sizeBytes); pBuf.isOutput = false;
+    ac.buffers.push_back(pBuf);
+    ac.buffers.push_back(makeHalfBuffer(bias, false));
+    ac.buffers.push_back(makeHalfOutput(batch * oc_p));
+    for (int i = 0; i < 5; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV));
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(num_qg));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(64));
+    ac.globalSize[0] = (oc + 3) / 4; ac.globalSize[1] = batch; ac.localSize[0] = 64; ac.dims = 2;
+    ac.elementCount = batch * oc_p;
+    return true;
+}
+cudaError_t CudaGemvFpAInt4BV14Fp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint4b_v14_fp16(ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
+        (const float2*)ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaGemvFpAInt4BV14Fp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqHpAnyNonZeroHalf(output, ac.elementCount);
+}
+
+// GEMV_FpAInt4B_V14_MB fp16 (1D grid, MAX_BATCH=1).
+bool CudaGemvFpAInt4BV14MbFp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint4b_v14_mb_fp16";
+    const int batch = 1;
+    const int ic = spec.intParam("ic", kWoqHpIc);
+    const int ic_p = spec.intParam("ic_p", kWoqHpIcP);
+    const int oc = spec.intParam("oc", kWoqHpOc);
+    const int oc_p = spec.intParam("oc_p", kWoqHpOcP);
+    const int quanC = spec.intParam("quan_c", kWoqHpQuanC);
+    const int num_qg = quanC / oc;
+    auto input = woqHpBuildInput(batch, ic, ic_p);
+    auto kernel = woqHpBuildInt4Weight(oc, ic_p, kWoqHpInt4Byte);
+    auto gemv_params = woqHpBuildGemvParams(oc, num_qg, kWoqHpScale, kWoqHpOffset);
+    auto bias = woqHpBuildBias(oc, kWoqHpBias);
+    ac.buffers.push_back(makeHalfBuffer(input, false));
+    AdaptedBuffer kBuf; kBuf.sizeBytes = kernel.size(); kBuf.initialData.assign(kernel.begin(), kernel.end()); kBuf.isOutput = false;
+    ac.buffers.push_back(kBuf);
+    AdaptedBuffer pBuf; pBuf.sizeBytes = gemv_params.size() * sizeof(float2); pBuf.initialData.assign((const uint8_t*)gemv_params.data(), (const uint8_t*)gemv_params.data() + pBuf.sizeBytes); pBuf.isOutput = false;
+    ac.buffers.push_back(pBuf);
+    ac.buffers.push_back(makeHalfBuffer(bias, false));
+    ac.buffers.push_back(makeHalfOutput(batch * oc_p));
+    for (int i = 0; i < 5; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV));
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(num_qg));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(64));
+    ac.globalSize[0] = (oc + 3) / 4; ac.localSize[0] = 64; ac.dims = 1;
+    ac.elementCount = batch * oc_p;
+    return true;
+}
+cudaError_t CudaGemvFpAInt4BV14MbFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint4b_v14_mb_fp16(ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
+        (const float2*)ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaGemvFpAInt4BV14MbFp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqHpAnyNonZeroHalf(output, ac.elementCount);
+}
+
+// GEMV_FpAInt8B_V2 fp16 (2D grid + blockY).
+bool CudaGemvFpAInt8BV2Fp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint8b_v2_fp16";
+    const int batch = spec.intParam("batch", kWoqHpBatch);
+    const int ic = spec.intParam("ic", kWoqHpIc);
+    const int ic_p = spec.intParam("ic_p", kWoqHpIcP);
+    const int oc = spec.intParam("oc", kWoqHpOc);
+    const int oc_p = spec.intParam("oc_p", kWoqHpOcP);
+    const int quanC = spec.intParam("quan_c", kWoqHpQuanC);
+    auto input = woqHpBuildInput(batch, ic, ic_p);
+    auto kernel = woqHpBuildInt8Weight(oc, ic_p, kWoqHpInt8Q);
+    auto scale = woqHpBuildScale(oc, quanC, kWoqHpScale);
+    auto offset = woqHpBuildOffset(oc, quanC, kWoqHpOffset);
+    auto bias = woqHpBuildBias(oc, kWoqHpBias);
+    ac.buffers.push_back(makeHalfBuffer(input, false));
+    AdaptedBuffer kBuf; kBuf.sizeBytes = kernel.size(); kBuf.initialData.assign((const uint8_t*)kernel.data(), (const uint8_t*)kernel.data() + kernel.size()); kBuf.isOutput = false;
+    ac.buffers.push_back(kBuf);
+    ac.buffers.push_back(makeHalfBuffer(scale, false));
+    ac.buffers.push_back(makeHalfBuffer(offset, false));
+    ac.buffers.push_back(makeHalfBuffer(bias, false));
+    ac.buffers.push_back(makeHalfOutput(batch * oc_p));
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV));
+    ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
+    ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
+    ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(16)); ac.args.push_back(AdaptedArg::scalarInt(16));
+    ac.globalSize[0] = (oc + 15) / 16; ac.globalSize[1] = batch; ac.localSize[0] = 16; ac.localSize[1] = 16; ac.dims = 2;
+    ac.elementCount = batch * oc_p;
+    return true;
+}
+cudaError_t CudaGemvFpAInt8BV2Fp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gemv_fpaint8b_v2_fp16(ctx.devBufs[0], (const int8_t*)ctx.devBufs[1],
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],
+        ctx.floatArgs[0], ctx.floatArgs[1],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5],
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaGemvFpAInt8BV2Fp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqHpAnyNonZeroHalf(output, ac.elementCount);
+}
+
+// ---- CONV_FpAInt8B / CONV_FpAInt4B fp16 ----
+// ENTRY is the full shim symbol (e.g. mnn_corpus_conv_fpaint8b_fp16).
+#define WOQ_FP16_CONV_SMOKE_BODY(CLASS, ENTRY, KBUF_TYPE, IS_INT4) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = #ENTRY; \
+    const int ic = spec.intParam("ic", kWoqHpIc); \
+    const int ic_p = spec.intParam("ic_p", kWoqHpIcP); \
+    const int oc = spec.intParam("oc", kWoqHpOc); \
+    const int oc_p = spec.intParam("oc_p", kWoqHpOcP); \
+    const int iw = spec.intParam("iw", 4), ih = spec.intParam("ih", 4); \
+    const int kw = spec.intParam("kw", 3), kh = spec.intParam("kh", 3); \
+    const int sw = spec.intParam("sw", 1), sh = spec.intParam("sh", 1); \
+    const int dw = spec.intParam("dw", 1), dh = spec.intParam("dh", 1); \
+    const int pw = spec.intParam("pw", 1), ph = spec.intParam("ph", 1); \
+    const int quanC = spec.intParam("quan_c", kWoqHpQuanC); \
+    const int ow = (iw + 2 * pw - dw * (kw - 1) - 1) / sw + 1; \
+    const int oh = (ih + 2 * ph - dh * (kh - 1) - 1) / sh + 1; \
+    auto input = woqHpBuildInput(1, ic, ic_p); \
+    auto scale = woqHpBuildScale(oc, quanC, kWoqHpScale); \
+    auto offset = woqHpBuildOffset(oc, quanC, kWoqHpOffset); \
+    auto bias = woqHpBuildBias(oc, kWoqHpBias); \
+    ac.buffers.push_back(makeHalfBuffer(input, false)); \
+    AdaptedBuffer kBuf; \
+    if (IS_INT4) { auto w = woqHpBuildInt4Weight(oc, ic_p * kw * kh, kWoqHpInt4Byte); \
+        kBuf.sizeBytes = w.size(); kBuf.initialData.assign(w.begin(), w.end()); } \
+    else { auto w = woqHpBuildInt8Weight(oc, ic_p * kw * kh, kWoqHpInt8Q); \
+        kBuf.sizeBytes = w.size(); kBuf.initialData.assign((const uint8_t*)w.data(), (const uint8_t*)w.data() + w.size()); } \
+    kBuf.isOutput = false; \
+    ac.buffers.push_back(kBuf); \
+    ac.buffers.push_back(makeHalfBuffer(scale, false)); \
+    ac.buffers.push_back(makeHalfBuffer(offset, false)); \
+    ac.buffers.push_back(makeHalfBuffer(bias, false)); \
+    ac.buffers.push_back(makeHalfOutput(ow * oh * oc_p)); \
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i)); \
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqHpMinV)); \
+    ac.args.push_back(AdaptedArg::scalarInt(ic)); ac.args.push_back(AdaptedArg::scalarInt(ic_p)); \
+    ac.args.push_back(AdaptedArg::scalarInt(iw)); ac.args.push_back(AdaptedArg::scalarInt(ih)); \
+    ac.args.push_back(AdaptedArg::scalarInt(oc)); ac.args.push_back(AdaptedArg::scalarInt(oc_p)); \
+    ac.args.push_back(AdaptedArg::scalarInt(ow)); ac.args.push_back(AdaptedArg::scalarInt(oh)); \
+    ac.args.push_back(AdaptedArg::scalarInt(kw)); ac.args.push_back(AdaptedArg::scalarInt(kh)); \
+    ac.args.push_back(AdaptedArg::scalarInt(dw)); ac.args.push_back(AdaptedArg::scalarInt(dh)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sw)); ac.args.push_back(AdaptedArg::scalarInt(sh)); \
+    ac.args.push_back(AdaptedArg::scalarInt(pw)); ac.args.push_back(AdaptedArg::scalarInt(ph)); \
+    const int total = ow * oh * oc_p; \
+    ac.args.push_back(AdaptedArg::scalarInt(total)); ac.args.push_back(AdaptedArg::scalarInt(quanC)); \
+    const int grid = mnnGridFor(total, kBlock), block = kBlock; \
+    ac.args.push_back(AdaptedArg::scalarInt(grid)); ac.args.push_back(AdaptedArg::scalarInt(block)); \
+    ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1; \
+    ac.elementCount = total; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    ENTRY(ctx.devBufs[0], (KBUF_TYPE)ctx.devBufs[1], \
+        ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5], \
+        ctx.floatArgs[0], ctx.floatArgs[1], \
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5], \
+        ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11], \
+        ctx.intArgs[12], ctx.intArgs[13], ctx.intArgs[14], ctx.intArgs[15], ctx.intArgs[16], ctx.intArgs[17], \
+        ctx.intArgs[18], ctx.intArgs[19], ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    return woqHpAnyNonZeroHalf(output, ac.elementCount); \
+}
+
+WOQ_FP16_CONV_SMOKE_BODY(CudaConvFpAInt8BFp16Kernel, mnn_corpus_conv_fpaint8b_fp16, const int8_t*, false)
+WOQ_FP16_CONV_SMOKE_BODY(CudaConvFpAInt4BFp16Kernel, mnn_corpus_conv_fpaint4b_fp16, const uint8_t*, true)
+#undef WOQ_FP16_CONV_SMOKE_BODY
+
+// ---- CudaGatedDeltaRulePrefillFp16Kernel — gated_delta_rule_prefill<__half> ----
+bool CudaGatedDeltaRulePrefillFp16Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gated_delta_rule_prefill_fp16";
+    const int B = spec.intParam("batch", 1);
+    const int L = spec.intParam("l", 2);
+    const int H_k = spec.intParam("h_k", 1);
+    const int H_v = spec.intParam("h_v", 1);
+    const int d_k = spec.intParam("d_k", 4);
+    const int d_v = spec.intParam("d_v", 4);
+    const int key_dim = H_k * d_k;
+    const int val_dim = H_v * d_v;
+    const int D = key_dim + val_dim;
+    const int gqa_factor = H_v / H_k;
+    const bool useL2Norm = spec.intParam("use_l2norm", 1) != 0;
+    const float qScale = spec.floatParam("q_scale", 1.0f);
+    const bool gateC4 = spec.intParam("gate_c4", 0) != 0;
+    const bool betaC4 = spec.intParam("beta_c4", 0) != 0;
+    const bool outputC4 = spec.intParam("output_c4", 0) != 0;
+    std::vector<float> convOut(B * L * D, 0.1f);
+    std::vector<float> gateInput(B * L * H_v, 0.2f);
+    std::vector<float> betaInput(B * L * H_v, 0.3f);
+    std::vector<float> recurrentState(B * H_v * d_k * d_v, 0.0f);
+    // convOut/recurrentState: float; gateInput/betaInput/output: __half
+    AdaptedBuffer cBuf; cBuf.setFp32(convOut); cBuf.isOutput = false;
+    AdaptedBuffer rBuf; rBuf.setFp32(recurrentState); rBuf.isOutput = false;
+    ac.buffers.push_back(cBuf);
+    ac.buffers.push_back(makeHalfBuffer(gateInput, false));
+    ac.buffers.push_back(makeHalfBuffer(betaInput, false));
+    ac.buffers.push_back(rBuf);
+    ac.buffers.push_back(makeHalfOutput(B * L * H_v * d_v));
+    ac.args.push_back(AdaptedArg::buffer(0));
+    ac.args.push_back(AdaptedArg::buffer(1));
+    ac.args.push_back(AdaptedArg::buffer(2));
+    ac.args.push_back(AdaptedArg::buffer(3));
+    ac.args.push_back(AdaptedArg::buffer(4));
+    ac.args.push_back(AdaptedArg::scalarInt(B));
+    ac.args.push_back(AdaptedArg::scalarInt(L));
+    ac.args.push_back(AdaptedArg::scalarInt(H_k));
+    ac.args.push_back(AdaptedArg::scalarInt(H_v));
+    ac.args.push_back(AdaptedArg::scalarInt(d_k));
+    ac.args.push_back(AdaptedArg::scalarInt(d_v));
+    ac.args.push_back(AdaptedArg::scalarInt(key_dim));
+    ac.args.push_back(AdaptedArg::scalarInt(val_dim));
+    ac.args.push_back(AdaptedArg::scalarInt(D));
+    ac.args.push_back(AdaptedArg::scalarInt(gqa_factor));
+    ac.args.push_back(AdaptedArg::scalarInt(useL2Norm ? 1 : 0));
+    ac.args.push_back(AdaptedArg::scalarFloat(qScale));
+    ac.args.push_back(AdaptedArg::scalarInt(gateC4 ? 1 : 0));
+    ac.args.push_back(AdaptedArg::scalarInt(betaC4 ? 1 : 0));
+    ac.args.push_back(AdaptedArg::scalarInt(outputC4 ? 1 : 0));
+    const int grid = B * H_v;
+    const int block = 256;
+    const size_t sharedMem = (block + 2 * d_k + 3 * d_v) * sizeof(float);
+    ac.args.push_back(AdaptedArg::scalarInt(grid));
+    ac.args.push_back(AdaptedArg::scalarInt(block));
+    ac.args.push_back(AdaptedArg::scalarInt((int)sharedMem));
+    ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1;
+    ac.elementCount = B * L * H_v * d_v;
+    return true;
+}
+cudaError_t CudaGatedDeltaRulePrefillFp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_gated_delta_rule_prefill_fp16(
+        (const float*)ctx.devBufs[0], ctx.devBufs[1], ctx.devBufs[2],
+        (float*)ctx.devBufs[3], ctx.devBufs[4],
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.intArgs[4],
+        ctx.intArgs[5], ctx.intArgs[6], ctx.intArgs[7],
+        ctx.intArgs[8], ctx.intArgs[9], ctx.intArgs[10] != 0, ctx.floatArgs[0],
+        ctx.intArgs[11] != 0, ctx.intArgs[12] != 0, ctx.intArgs[13] != 0,
+        ctx.grid, ctx.block, (size_t)ctx.intArgs[16], ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaGatedDeltaRulePrefillFp16Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    if (static_cast<int>(output.size() * sizeof(float)) < ac.elementCount * (int)sizeof(__half)) return false;
+    return woqHpAnyNonZeroHalf(output, ac.elementCount);
+}
+
 void registerCudaOpsFp16() {
     static struct Reg {
         Reg() {
@@ -5151,6 +5811,23 @@ void registerCudaOpsFp16() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaMaxpoolC8Bf16Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaAvgpoolC8Bf16Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat22BFloat16Fp32Kernel()));
+            // weight_only_quant + gated_delta_rule_prefill fp16 adapters.
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaPrecomputeGemvParamsFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaQuantAFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaDequantAndAccFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBiasAndActivationFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemmFpAInt8BFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt8BFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemmFpAInt4BFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt4BFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt4BV5Fp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt4BV9Fp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt4BV14Fp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt4BV14MbFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGemvFpAInt8BV2Fp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaConvFpAInt8BFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaConvFpAInt4BFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGatedDeltaRulePrefillFp16Kernel()));
         }
     } r;
     (void)r;

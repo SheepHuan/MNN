@@ -1395,6 +1395,9 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaAvgpool120Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionSum120Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionMean120Fp32Kernel()));
+            // weight_only_quant + gated_delta_rule_prefill fp32 adapters
+            // (implemented in CudaOpsWoq.cpp).
+            registerWoqAdapters(r);
         }
     } r;
     (void)r;

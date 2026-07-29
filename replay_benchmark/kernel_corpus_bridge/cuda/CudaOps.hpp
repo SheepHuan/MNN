@@ -401,6 +401,9 @@ public:
 // fp16 variants and extra cast types register in CudaOpsFp16.cu.
 void registerCudaOps();
 void registerCudaOpsFp16();
+// weight_only_quant (conv_fpa_intb) + gated_delta_rule_prefill fp32 adapters
+// (defined in CudaOpsWoq.cpp, compiled by g++ alongside CudaOps.cpp).
+void registerWoqAdapters(OpAdapterRegistry& r);
 // ---- B-class: GatherV2 / ArgMax / ArgMin / Interp / Transpose ----
 class CudaGatherV2Fp32Kernel : public CudaOpAdapter {
 public:
