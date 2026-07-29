@@ -11,6 +11,7 @@
 #include "ops/ConvOps.hpp"
 #include "ops/ArgmaxOp.hpp"
 #include "ops/ComplexOps.hpp"
+#include "ops/VulkanMiscOps.hpp"
 
 #include <cstring>
 #include <fstream>
@@ -99,6 +100,7 @@ void registerMnnBridge() {
             MnnOps::registerConvOps();
             MnnOps::registerArgmaxOp();
             MnnOps::registerComplexOps();
+            MnnOps::registerVulkanMiscOps();
             registerFallbackAdapter();
             registerBridge(std::unique_ptr<Bridge>(new MnnBridge()));
         }

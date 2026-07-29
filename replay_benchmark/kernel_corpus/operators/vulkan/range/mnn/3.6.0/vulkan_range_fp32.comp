@@ -1,0 +1,40 @@
+// Baked from MNN historical Vulkan shader. SPDX-License-Identifier: Apache-2.0.
+// FP32 path: FLOAT=float, FLOAT4=vec4. See bake_mnn_vulkan_shaders.py.
+#version 450
+
+#define FLOAT float
+#define FLOAT2 vec2
+#define FLOAT4 vec4
+#define FLOAT8 mat4x2
+#define FLOAT16 mat4
+
+#ifdef USE_INT
+#define DATA_TYPE int
+#else
+#define DATA_TYPE FLOAT
+#endif
+layout(set=0, binding=0) writeonly buffer destBuffer{
+    DATA_TYPE data[];
+} uOutput;
+
+layout(set=0, binding=1) readonly buffer sourceBuffer0{
+    DATA_TYPE data[];
+} uStart;
+
+layout(set=0, binding=2) readonly buffer sourceBuffer1{
+    DATA_TYPE data[];
+} uDelta;
+
+layout(push_constant) uniform constBuffer {
+    ivec4 size;
+} uConst;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+
+    if(i < uConst.size.w) {
+        uOutput.data[i] = DATA_TYPE(i) * uDelta.data[0] + uStart.data[0];
+    }
+}

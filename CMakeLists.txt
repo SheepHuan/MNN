@@ -997,7 +997,10 @@ ENDIF()
 IF(MNN_BUILD_BENCHMARK)
 include(${CMAKE_CURRENT_LIST_DIR}/benchmark/CMakeLists.txt)
 IF(MNN_REPLAY_ENABLE_PERFCOUNTER)
-if(MNN_CUDA)
+# NVIDIA CUPTI Range Profiler backend requires CUDA >= 12.5 (cupti_range_profiler.h
+# and matching libnvperf_cuda_host). Ubuntu 24.04's nvidia-cuda-toolkit ships 12.0
+# which lacks these headers. Skip the NVIDIA backend; Adreno/Mali PMU still works.
+if(MNN_CUDA AND NOT MNN_REPLAY_PERFCOUNTER_SKIP_NVIDIA)
   set(MNN_PERFCOUNTER_HAS_CUDA ON CACHE BOOL "" FORCE)
   find_package(CUDA 8.0 QUIET)
   if(CUDA_FOUND)

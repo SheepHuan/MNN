@@ -34,10 +34,16 @@ add_library(MNNPerfCounter STATIC
 # (pointing at a CUDA toolkit). The NvRangeProfiler.cpp TU must be added
 # explicitly here so the static lib carries the NVPA/CUPTI symbols.
 option(MNN_PERFCOUNTER_HAS_CUDA "Enable NVIDIA CUPTI Range Profiler backend" OFF)
+# Allow an extra CUPTI include dir for newer headers (e.g. cupti_range_profiler.h)
+# not shipped by Ubuntu's libcupti-dev. Passed from the parent project.
+set(MNN_PERFCOUNTER_EXTRA_CUPTI_INCLUDE "" CACHE PATH "Extra CUPTI include dir")
 if(MNN_PERFCOUNTER_HAS_CUDA)
     target_sources(MNNPerfCounter PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/NvRangeProfiler.cpp)
     target_compile_definitions(MNNPerfCounter PUBLIC MNN_PERFCOUNTER_HAS_CUDA)
     target_include_directories(MNNPerfCounter PRIVATE ${CUDA_INCLUDE_DIRS})
+    if(MNN_PERFCOUNTER_EXTRA_CUPTI_INCLUDE)
+        target_include_directories(MNNPerfCounter PRIVATE ${MNN_PERFCOUNTER_EXTRA_CUPTI_INCLUDE})
+    endif()
     target_link_libraries(MNNPerfCounter PUBLIC ${CUDA_LIBRARIES})
     find_library(NV_CUDA_DRIVER_LIB cuda HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib/stubs)
     if(NV_CUDA_DRIVER_LIB)

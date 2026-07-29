@@ -58,12 +58,28 @@ LICENSE_HEADER = (
 OP_MAP = {
     "unary": [("unary.comp", "vulkan_unary_buf_exp_fp32", ["EXP"])],
     "binary": [("binary.comp", "vulkan_binary_buf_add_fp32", ["ADD"])],
-    "raster": [("blit.comp", "vulkan_blit_c4_fp32", ["C4"])],
+    "raster": [
+        ("blit.comp", "vulkan_blit_c4_fp32", ["C4"]),
+        ("nc4hw4Tonchw.comp", "vulkan_nc4hw4_to_nchw_fp32", []),
+    ],
     "reduction": [("reduce.comp", "vulkan_reduce_buf_sum_fp32", ["SUM"])],
     "pooling": [
         ("maxpool.comp", "vulkan_maxpool_fp32", []),
         ("avgpool.comp", "vulkan_avgpool_fp32", []),
     ],
+    "select": [("select.comp", "vulkan_select_fp32", [])],
+    "range": [("range.comp", "vulkan_range_fp32", [])],
+    "cast": [("cast_float_int.comp", "vulkan_cast_float_int_fp32", [])],
+    "scale": [("scale.comp", "vulkan_scale_fp32", [])],
+    "prelu": [("preluWithChannel.comp", "vulkan_prelu_fp32", [])],
+    "argmax": [("argmax.comp", "vulkan_argmax_fp32", [])],
+    "softmax": [("softmaxHeight_NHWC.comp", "vulkan_softmax_height_fp32", [])],
+    "layernorm": [("norm.comp", "vulkan_norm_fp32", [])],
+    "interp": [
+        ("resizeNearest.comp", "vulkan_resize_nearest_fp32", []),
+        ("resizeBilinear.comp", "vulkan_resize_bilinear_fp32", []),
+    ],
+    "grid_sample": [("gridSampleNearest.comp", "vulkan_grid_sample_nearest_fp32", [])],
 }
 
 
@@ -77,7 +93,7 @@ def bake_shader(source_path: Path, out_dir: Path, variant: str,
     # `layout(push_constant) uniform`. Rewrite the declaration at bake time so
     # the pre-compiled SPIR-V matches the runner's push-constant path.
     raw = re.sub(
-        r'layout\(set\s*=\s*0\s*,\s*binding\s*=\s*\d+\)\s*uniform\s+constBuffer',
+        r'layout\(set\s*=\s*0\s*,\s*binding\s*=\s*\d+\)\s*(readonly\s+)?uniform\s+\w+',
         'layout(push_constant) uniform constBuffer',
         raw,
     )
