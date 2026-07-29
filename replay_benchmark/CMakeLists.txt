@@ -124,7 +124,8 @@ if(MNN_CUDA)
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/plugins.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/int8.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/weight_only_quant.cu)
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/weight_only_quant.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/legacy_kernels.cu)
     # CudaOpsFp16.cu includes CudaOps.hpp -> CudaOpAdapter.hpp -> OpAdapter.hpp
     # which live under replay_benchmark/. Expose that path so nvcc can find them.
     target_include_directories(replay_cuda_corpus PRIVATE
