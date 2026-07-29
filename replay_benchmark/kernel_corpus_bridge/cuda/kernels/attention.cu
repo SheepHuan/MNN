@@ -930,7 +930,158 @@ __global__ void gated_delta_rule_decode_kernel(
     for (int j = threadIdx.x; j < d_v; j += blockDim.x) {
         float sum = 0.0f;
         for (int i = 0; i < d_k; i++) sum += state[i * d_v + j] * q_s[i];
-        write_token_channel(output, b * H_v + h, j, d_v, outputC4, sum);
+         write_token_channel(output, b * H_v + h, j, d_v, outputC4, sum);
+     }
+ }
+
+// ============================================================================
+// gated_delta_rule_prefill_kernel<T> (LinearAttentionExecution.cu:318-473)
+// Faithful copy: register-tiled prefill (L>1), __launch_bounds__(256,1),
+// MAX_HALF_DK=64 register array, even/odd partial_buf reduction.
+// ============================================================================
+#define MAX_HALF_DK 64
+template<typename T>
+__global__ __launch_bounds__(256, 1)
+void gated_delta_rule_prefill_kernel(
+    const float* __restrict__ convOutTransposed,
+    const T* __restrict__ gateInput,
+    const T* __restrict__ betaInput,
+    float* __restrict__ recurrentState,
+    T* __restrict__ output,
+    int B, int L, int H_k, int H_v, int d_k, int d_v,
+    int key_dim, int val_dim, int D,
+    int gqa_factor, bool useL2Norm, float qScale,
+    bool gateC4, bool betaC4, bool outputC4
+) {
+    int idx = blockIdx.x;
+    if (idx >= B * H_v) return;
+
+    int b = idx / H_v;
+    int h = idx % H_v;
+    int k_head = h / gqa_factor;
+
+    const bool stateThread = threadIdx.x < 2 * d_v;
+    int myJ = stateThread ? threadIdx.x % d_v : 0;
+    int myPart = stateThread ? threadIdx.x / d_v : 0;
+
+    extern __shared__ float smem[];
+    float* partial_buf = smem;
+    float* q_s = partial_buf + blockDim.x;
+    float* k_s = q_s + d_k;
+    float* v_s = k_s + d_k;
+    float* delta_s = v_s + d_v;
+
+    float* globalState = recurrentState + (b * H_v + h) * d_k * d_v;
+    float S[MAX_HALF_DK];
+    #pragma unroll
+    for (int e = 0; e < MAX_HALF_DK; e++) {
+        int myI = myPart + e * 2;
+        S[e] = (stateThread && myI < d_k) ? globalState[myI * d_v + myJ] : 0.0f;
+    }
+
+    const float* convBase = convOutTransposed + b * L * D;
+
+    for (int t = 0; t < L; ++t) {
+        const float* convT = convBase + t * D;
+        for (int i = threadIdx.x; i < d_k; i += blockDim.x) {
+            q_s[i] = convT[k_head * d_k + i];
+            k_s[i] = convT[key_dim + k_head * d_k + i];
+        }
+        for (int i = threadIdx.x; i < d_v; i += blockDim.x)
+            v_s[i] = convT[2 * key_dim + h * d_v + i];
+        __syncthreads();
+
+        if (useL2Norm) {
+            __shared__ float normQ, normK;
+            float sumSqQ = 0.0f, sumSqK = 0.0f;
+            for (int i = threadIdx.x; i < d_k; i += blockDim.x) {
+                sumSqQ += q_s[i] * q_s[i];
+                sumSqK += k_s[i] * k_s[i];
+            }
+            for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+                sumSqQ += __shfl_down_sync(0xffffffff, sumSqQ, offset);
+                sumSqK += __shfl_down_sync(0xffffffff, sumSqK, offset);
+            }
+            __shared__ float warpSumsQ[8], warpSumsK[8];
+            int wid = threadIdx.x / warpSize, lid = threadIdx.x % warpSize;
+            if (lid == 0) { warpSumsQ[wid] = sumSqQ; warpSumsK[wid] = sumSqK; }
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                int nw = (blockDim.x + warpSize - 1) / warpSize;
+                float tQ = 0, tK = 0;
+                for (int w = 0; w < nw; w++) { tQ += warpSumsQ[w]; tK += warpSumsK[w]; }
+                normQ = 1.0f / sqrtf(tQ + 1e-6f);
+                normK = 1.0f / sqrtf(tK + 1e-6f);
+            }
+            __syncthreads();
+            for (int i = threadIdx.x; i < d_k; i += blockDim.x) { q_s[i] *= normQ; k_s[i] *= normK; }
+            __syncthreads();
+        }
+
+        for (int i = threadIdx.x; i < d_k; i += blockDim.x) q_s[i] *= qScale;
+        __syncthreads();
+
+        float decay = expf(read_token_channel(gateInput, b, t, h, L, H_v, gateC4));
+        float beta_t = read_token_channel(betaInput, b, t, h, L, H_v, betaC4);
+
+        float vec_reg[MAX_HALF_DK];
+        #pragma unroll
+        for (int e = 0; e < MAX_HALF_DK; e++) {
+            int myI = myPart + e * 2;
+            vec_reg[e] = (stateThread && myI < d_k) ? k_s[myI] : 0.0f;
+        }
+
+        #pragma unroll
+        for (int e = 0; e < MAX_HALF_DK; e++)
+            S[e] *= decay;
+
+        float partial_read = 0.0f;
+        #pragma unroll
+        for (int e = 0; e < MAX_HALF_DK; e++)
+            partial_read += S[e] * vec_reg[e];
+        partial_buf[threadIdx.x] = partial_read;
+        __syncthreads();
+
+        float vpred;
+        if (threadIdx.x < d_v)
+            vpred = partial_buf[threadIdx.x] + partial_buf[threadIdx.x + d_v];
+        if (threadIdx.x < d_v)
+            delta_s[threadIdx.x] = beta_t * (v_s[threadIdx.x] - vpred);
+        __syncthreads();
+
+        if (stateThread) {
+            float my_delta = delta_s[myJ];
+            #pragma unroll
+            for (int e = 0; e < MAX_HALF_DK; e++)
+                S[e] += vec_reg[e] * my_delta;
+        }
+
+        #pragma unroll
+        for (int e = 0; e < MAX_HALF_DK; e++) {
+            int myI = myPart + e * 2;
+            vec_reg[e] = (stateThread && myI < d_k) ? q_s[myI] : 0.0f;
+        }
+
+        float partial_query = 0.0f;
+        #pragma unroll
+        for (int e = 0; e < MAX_HALF_DK; e++)
+            partial_query += S[e] * vec_reg[e];
+        partial_buf[threadIdx.x] = partial_query;
+        __syncthreads();
+
+        if (threadIdx.x < d_v) {
+            float result = partial_buf[threadIdx.x] + partial_buf[threadIdx.x + d_v];
+            const int outputToken = (b * L + t) * H_v + h;
+            write_token_channel(output, outputToken, threadIdx.x, d_v, outputC4, result);
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int e = 0; e < MAX_HALF_DK; e++) {
+        int myI = myPart + e * 2;
+        if (stateThread && myI < d_k)
+            globalState[myI * d_v + myJ] = S[e];
     }
 }
 
@@ -1227,6 +1378,36 @@ void mnn_corpus_gated_delta_rule_decode_fp16(
         convOut, (const __half*)gateInput, (const __half*)betaInput,
         recurrentState, (__half*)output,
         B, H_k, H_v, d_k, d_v, key_dim, val_dim, D,
+        gqa_factor, useL2Norm, qScale, gateC4, betaC4, outputC4);
+}
+
+// ---- gated_delta_rule_prefill_kernel (L>1 register-tiled, __launch_bounds__(256,1)) ----
+void mnn_corpus_gated_delta_rule_prefill_fp32(
+    const float* convOutTransposed, const void* gateInput, const void* betaInput,
+    float* recurrentState, void* output,
+    int B, int L, int H_k, int H_v, int d_k, int d_v,
+    int key_dim, int val_dim, int D,
+    int gqa_factor, bool useL2Norm, float qScale,
+    bool gateC4, bool betaC4, bool outputC4,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::gated_delta_rule_prefill_kernel<float><<<grid, block, sharedMem, stream>>>(
+        convOutTransposed, (const float*)gateInput, (const float*)betaInput,
+        recurrentState, (float*)output,
+        B, L, H_k, H_v, d_k, d_v, key_dim, val_dim, D,
+        gqa_factor, useL2Norm, qScale, gateC4, betaC4, outputC4);
+}
+void mnn_corpus_gated_delta_rule_prefill_fp16(
+    const float* convOutTransposed, const void* gateInput, const void* betaInput,
+    float* recurrentState, void* output,
+    int B, int L, int H_k, int H_v, int d_k, int d_v,
+    int key_dim, int val_dim, int D,
+    int gqa_factor, bool useL2Norm, float qScale,
+    bool gateC4, bool betaC4, bool outputC4,
+    int grid, int block, size_t sharedMem, cudaStream_t stream) {
+    MNN::Corpus::gated_delta_rule_prefill_kernel<__half><<<grid, block, sharedMem, stream>>>(
+        convOutTransposed, (const __half*)gateInput, (const __half*)betaInput,
+        recurrentState, (__half*)output,
+        B, L, H_k, H_v, d_k, d_v, key_dim, val_dim, D,
         gqa_factor, useL2Norm, qScale, gateC4, betaC4, outputC4);
 }
 

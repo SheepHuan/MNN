@@ -6,6 +6,7 @@
 //   Im2Col_FilterC_Vec4: im2col with vec4 copy (precision-aware)
 //   WeightPackFill: weight reordering [Co,Ci,KhKw]→[Co,KhKw,Ci]
 #include "corpus_common.cuh"
+#include <cuda_bf16.h>
 
 namespace MNN {
 namespace Corpus {
@@ -108,6 +109,11 @@ __global__ void Im2Col_FilterC_Vec4(
             } else if (precision == 2) {
                 // half4 -> half4 via int64 copy (faithful to MNN DATA_CONVERT_COPY)
                 *((int64_t*)((half*)AP + dst_offset)) = *((int64_t*)((half*)A + src_offset));
+            } else if (precision == 3) {
+                // bf16: same int64 copy as precision==2 (MNN DATA_CONVERT_COPY L77)
+                #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+                *((int64_t*)((half*)AP + dst_offset)) = *((int64_t*)((half*)A + src_offset));
+                #endif
             } else if (precision == 0) {
                 *((half2*)((half*)AP + dst_offset))     = __float22half2_rn(*((float2*)((float*)A + src_offset)));
                 *((half2*)((half*)AP + dst_offset + 2)) = __float22half2_rn(*((float2*)((float*)A + src_offset + 2)));
@@ -121,9 +127,14 @@ __global__ void Im2Col_FilterC_Vec4(
             half2 zeros; zeros.x = (half)0.0f; zeros.y = (half)0.0f;
             *((half2*)((half*)AP + dst_offset))     = zeros;
             *((half2*)((half*)AP + dst_offset + 2)) = zeros;
+        } else if (precision == 3) {
+            // bf16 zero-fill: __nv_bfloat162 (MNN DATA_MEMSET_ZERO + extra bf16 path)
+            #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+            __nv_bfloat162 zeros; zeros.x = (__nv_bfloat16)0.0f; zeros.y = (__nv_bfloat16)0.0f;
+            *((__nv_bfloat162*)((__nv_bfloat16*)AP + dst_offset)) = zeros;
+            *((__nv_bfloat162*)((__nv_bfloat16*)AP + dst_offset + 2)) = zeros;
+            #endif
         }
-        // precision == 3 (bf16) skipped: requires __CUDA_ARCH__ >= 800 (sm80+),
-        // current corpus target is sm75. MNN guards with #if (__CUDA_ARCH__ >= 800).
     }
 }
 
@@ -170,13 +181,30 @@ __global__ void PackPadFill(
                 tempA[index] = A[bIndex * e * l + lpIndex * e + eIndex];
             }
         } else {
-            const int maxCount = batchA * e * lp;
-            for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
-                int lpIndex, eIndex, bIndex, tmp;
-                d_lp.divmod(index, tmp, lpIndex);
-                d_e.divmod(tmp, bIndex, eIndex);
-                if (lpIndex >= l || eIndex >= e) { tempA[index] = zero; continue; }
-                tempA[index] = A[bIndex * e * l + eIndex * l + lpIndex];
+            if (l & 1 == 0) {
+                // vec2 packed path (faithful to MNN): 2 elements per thread
+                const int maxCount = batchA * e * (lp >> 1);
+                for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
+                    int lp2Index, eIndex, bIndex, tmp;
+                    d_lp2.divmod(index, tmp, lp2Index);
+                    d_e.divmod(tmp, bIndex, eIndex);
+                    if (lp2Index + lp2Index >= l) {
+                        tempA[index + index] = zero;
+                        tempA[index + index + 1] = zero;
+                        continue;
+                    }
+                    tempA[index + index] = A[bIndex * e * l + eIndex * l + lp2Index + lp2Index];
+                    tempA[index + index + 1] = A[bIndex * e * l + eIndex * l + lp2Index + lp2Index + 1];
+                }
+            } else {
+                const int maxCount = batchA * e * lp;
+                for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
+                    int lpIndex, eIndex, bIndex, tmp;
+                    d_lp.divmod(index, tmp, lpIndex);
+                    d_e.divmod(tmp, bIndex, eIndex);
+                    if (lpIndex >= l || eIndex >= e) { tempA[index] = zero; continue; }
+                    tempA[index] = A[bIndex * e * l + eIndex * l + lpIndex];
+                }
             }
         }
     }
@@ -201,13 +229,30 @@ __global__ void PackPadFill(
                 }
             }
         } else {
-            const int maxCount = batchB * h * lp;
-            for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
-                int lpIndex, hIndex, bIndex, tmp;
-                d_lp.divmod(index, tmp, lpIndex);
-                d_h.divmod(tmp, bIndex, hIndex);
-                if (lpIndex >= l || hIndex >= h) { tempB[index] = zero; continue; }
-                tempB[index] = B[bIndex * h * l + hIndex * l + lpIndex];
+            if (l & 1 == 0) {
+                // vec2 packed path (faithful to MNN): 2 elements per thread
+                const int maxCount = batchB * h * (lp >> 1);
+                for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
+                    int lp2Index, hIndex, bIndex, tmp;
+                    d_lp2.divmod(index, tmp, lp2Index);
+                    d_h.divmod(tmp, bIndex, hIndex);
+                    if (lp2Index + lp2Index >= l) {
+                        tempB[index + index] = zero;
+                        tempB[index + index + 1] = zero;
+                        continue;
+                    }
+                    tempB[index + index] = B[bIndex * h * l + hIndex * l + lp2Index + lp2Index];
+                    tempB[index + index + 1] = B[bIndex * h * l + hIndex * l + lp2Index + lp2Index + 1];
+                }
+            } else {
+                const int maxCount = batchB * h * lp;
+                for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
+                    int lpIndex, hIndex, bIndex, tmp;
+                    d_lp.divmod(index, tmp, lpIndex);
+                    d_h.divmod(tmp, bIndex, hIndex);
+                    if (lpIndex >= l || hIndex >= h) { tempB[index] = zero; continue; }
+                    tempB[index] = B[bIndex * h * l + hIndex * l + lpIndex];
+                }
             }
         }
     }
