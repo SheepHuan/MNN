@@ -5,6 +5,11 @@
 namespace MNN {
 namespace Corpus {
 
+// 1.2.7-era ReduceParam {inside, axis, outside} (from legacy_kernels.cu).
+// Distinct from ReduceParam_127 (also {inside, axis, outside}) — kept under a
+// separate name to mirror the legacy source verbatim.
+struct ReduceParam { int inside; int axis; int outside; };
+
 // ============================================================================
 // Softmax: source/backend/cuda/execution/SoftmaxExecution.cu
 // ============================================================================
@@ -189,6 +194,47 @@ __global__ void SOFTMAX_AXIS_REDUCE_242(const T *input, T *output,
             dst[(tid + i * per_block_size) * inside] = (T)(tmp_exp * divSumValue);
         }
     }
+}
+
+// ============================================================================
+// 2.2.2-era legacy softmax kernels (from legacy_kernels.cu)
+// ============================================================================
+template <typename T>
+__global__ void DIVSUM(const T *input, const T* maxV, T *output, const ReduceParam* param) {
+    int inside = param->inside;
+    int axis = param->axis;
+    int outside = param->outside;
+    int count = inside * axis * outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (count); i += blockDim.x * gridDim.x) {
+        int tmp = i / inside;
+        int x = i % inside;
+        int y = tmp / axis;
+        int c = tmp % axis;
+        float sumValue = 0.0;
+        const float basicInput = input[i];
+        const float value = maxV[x + y * inside];
+        output[i] = (T)(basicInput / value);
+    }
+    return;
+}
+
+template <typename T>
+__global__ void EXPSUB(const T *input, const T* maxV, T *output, const ReduceParam* param) {
+    int inside = param->inside;
+    int axis = param->axis;
+    int outside = param->outside;
+    int count = inside * axis * outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (count); i += blockDim.x * gridDim.x) {
+        int tmp = i / inside;
+        int x = i % inside;
+        int y = tmp / axis;
+        int c = tmp % axis;
+        float sumValue = 0.0;
+        const float basicInput = input[i];
+        const float maxValue = maxV[x + y * inside];
+        output[i] = (T)(exp(basicInput - maxValue));
+    }
+    return;
 }
 
 } // namespace Corpus

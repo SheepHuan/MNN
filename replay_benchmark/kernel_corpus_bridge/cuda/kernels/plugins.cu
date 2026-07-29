@@ -243,6 +243,24 @@ __global__ void SPLIT_FusedQKV(const size_t count, const T* fused_qkv,
     }
 }
 
+// ============================================================================
+// 2.x-era legacy plugin kernel (from legacy_kernels.cu)
+// ============================================================================
+template <typename T>
+__global__ void SPLIT_FusedKV(const size_t count, const T* fused_kv,
+        T* ptr_k, T* ptr_v,
+        int head_size
+    ) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (count); i += blockDim.x * gridDim.x) {
+        //[B, S, H, 2, D] -> [B, S, H, D]
+        const int bsh = i / head_size;
+        const int d = i % head_size;
+
+        ptr_k[i] =  fused_kv[(bsh * 2 + 0) * head_size + d];
+        ptr_v[i] =  fused_kv[(bsh * 2 + 1) * head_size + d];
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 

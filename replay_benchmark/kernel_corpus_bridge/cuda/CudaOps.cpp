@@ -1374,6 +1374,27 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaShortConvFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaShortConvOutputFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGatedDeltaRuleDecodeFp32Kernel()));
+            // New fp32 adapters: format conversion / fuseblit_4 / transpose_local / castmidfloat_f32_i32 / float2int8 / int82float / pool 1.2.0 / reduction 1.2.0
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaC4nhw4ToNchwFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaC4nhw4ToNhwc8Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaC4nhw4ToNhwcFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNchwToNchwFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNchwToC4nhw4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNchwToNhwc8Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc8ToC4nhw4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc8ToNchwFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc8ToNhwcFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwcToC4nhw4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwcToNhwc8Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFuseBlit4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaTransposeLocalFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaCastMidFloatF32I32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat2Int8ScalarFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInt82FloatScalarFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaMaxpool120Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaAvgpool120Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionSum120Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionMean120Fp32Kernel()));
         }
     } r;
     (void)r;

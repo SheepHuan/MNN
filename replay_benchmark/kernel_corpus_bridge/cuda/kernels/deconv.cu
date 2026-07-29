@@ -6,6 +6,19 @@ namespace MNN {
 namespace Corpus {
 
 // ============================================================================
+// 1.2.0-era deconv parameter structs (from legacy_kernels.cu)
+// ============================================================================
+struct ConstBuffer_120 {
+    int pad[2]; int kernelSize[2]; int stride[2]; int dilate[2];
+    int inputSize[2]; int outputSize[2];
+    int channel; int subChannel; int total; int activationType;
+};
+struct InputReorderParameter {
+    int ic_stride; int ib_stride; int oc_stride; int ob_stride;
+    int hw_size; int l_size; int h_size; int lpack_size; int hpack_size;
+};
+
+// ============================================================================
 // DeconvKernelReorder: [Ci,Co,KhKw] → [KhKw,Co,Cip] weight reordering
 // ============================================================================
 template<typename T0, typename T1>
@@ -163,6 +176,115 @@ __global__ void Col2Im_Vec4(const int n, const Stype* data_col,
         }
         int dst_offset = index << 2;
         DECONV_DATA_CONVERT_COPY(precision);
+    }
+}
+
+// ============================================================================
+// 1.2.0-era legacy deconv kernels (from legacy_kernels.cu)
+// ============================================================================
+template <typename T>
+__global__ void cutPad(const size_t size, const T* input, const int old_height,
+                    const int old_width, const int height, const int width, const int pad_top,
+                    const int pad_left, T* output) {
+    for (size_t pos = blockIdx.x * blockDim.x + threadIdx.x; pos < (size); pos += blockDim.x * gridDim.x) {
+        int block_num = pos / (width*height);
+        int left = pos % (width*height);
+        const int out_w = left % width;
+        const int out_h = left / width % height;
+
+        output[pos] = input[(block_num * old_height + out_h + pad_top) * old_width + out_w + pad_left];
+    }
+    return;
+}
+
+__global__ void DECONV_DW(const float* input, const float* kernel, const float* bias, float *output, const ConstBuffer_120* uConstant) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < uConstant->total; i += blockDim.x * gridDim.x) {
+        {
+            int iw = uConstant->inputSize[0];
+            int ih = uConstant->inputSize[1];
+            int c = uConstant->channel;
+            int ow = uConstant->outputSize[0];
+            int oh = uConstant->outputSize[1];
+            int kw = uConstant->kernelSize[0];
+            int kh = uConstant->kernelSize[1];
+            int dw = uConstant->dilate[0];
+            int dh = uConstant->dilate[1];
+            int sw = uConstant->stride[0];
+            int sh = uConstant->stride[1];
+            int pw = uConstant->pad[0];
+            int ph = uConstant->pad[1];
+
+            int oz = i / (ow * oh);
+            int tmp = i % (ow * oh);
+            int oy = tmp / ow;
+            int ox = tmp % ow;
+            int kz = oz % uConstant->subChannel;
+            
+            int ix = ox + pw;
+            int iy = oy + ph;
+            float color = 0.0;
+            if (bias != nullptr) {
+                color = bias[kz];
+            }
+
+            int fx, fy, fz;
+            for (fy=0; fy<kh; ++fy) {
+                int sy = iy - fy*dh;
+                int y = sy / sh;
+                if (sy % sh == 0 && y >= 0 && y < ih) {
+                    for (int fx=0; fx<kw; ++fx) {
+                        int sx = ix - fx*dw;
+                        int x = sx / sw;
+                        if (sx % sw == 0 && x >= 0 && x < iw) {
+                            float inputValue = input[0
+                                + x
+                                + y * iw
+                                + oz * iw * ih
+                            ];
+                            float k = kernel[0
+                                + fx
+                                + fy * kw
+                                + kz * kw * kh
+                            ];
+                            color  += k*inputValue;                            
+                        }
+                    }
+                }
+            }
+            output[0
+                + ox
+                + oy * ow
+                + oz * ow * oh
+            ] = color;
+        }
+    }
+    return;
+}
+
+__global__ void DeconvInputRerange(const int count,
+        const InputReorderParameter* param,
+        const float* Inp,
+        __half* InpRe
+        ) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += blockDim.x * gridDim.x) {
+        int l = param->l_size;
+        int h = param->h_size;
+        int lIndex = i % l;
+        int hIndex = i / l;
+        int lU = lIndex / 16;
+        int lR = lIndex % 16;
+        int hU = hIndex / 16;
+        int hR = hIndex % 16;
+
+        int bIndex = hIndex / param->hw_size;
+        int hwIndex = hIndex % param->hw_size;
+
+        float value = Inp[bIndex * param->ib_stride + lIndex * param->ic_stride + hwIndex];
+        //inpRe[lIndex * param->oc_stride + bIndex * param->ob_stride + hwIndex] = value;
+
+        //__half* dst = InpRe + lU * param->hpack_size * 16 * 16 + hU * 16 * 16 + hR + lR * 16;
+        __half* dst = InpRe + hU * param->lpack_size * 16 * 16 + lU * 16 * 16 + lR + hR * 16;
+        dst[0] = value;
     }
 }
 
