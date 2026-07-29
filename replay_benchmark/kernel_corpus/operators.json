@@ -3886,6 +3886,39 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_blit_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/1.2.0/vulkan_blit_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "vulkan_blit_120_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_nc4hw4_to_nchw_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/1.2.0/vulkan_nc4hw4_to_nchw_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "vulkan_nc4hw4_to_nchw_120_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_nchw_to_nc4hw4_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/1.2.0/vulkan_nchw_to_nc4hw4_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "vulkan_nchw_to_nc4hw4_120_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "vulkan_blit_c4_fp32",
       "execution_spec": "manual",
       "file": "operators/vulkan/raster/mnn/3.6.0/vulkan_blit_c4_fp32.comp",
@@ -3905,6 +3938,17 @@
       "op_type": "raster",
       "tag": "3.6.0",
       "variant": "vulkan_nc4hw4_to_nchw_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_reduce_sum_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/reduction/mnn/1.2.0/vulkan_reduce_sum_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "reduction",
+      "tag": "1.2.0",
+      "variant": "vulkan_reduce_sum_120_fp32"
     },
     {
       "backend": "vulkan",
@@ -4499,6 +4543,17 @@
       "op_type": "slice",
       "tag": "20260526",
       "variant": "slice_pack4"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_softmax_height_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/softmax/mnn/1.2.0/vulkan_softmax_height_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "softmax",
+      "tag": "1.2.0",
+      "variant": "vulkan_softmax_height_120_fp32"
     },
     {
       "backend": "vulkan",

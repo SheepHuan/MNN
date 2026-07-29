@@ -9946,6 +9946,91 @@
         "h": 4,
         "w": 4
       }
+    },
+    {
+      "name": "vulkan_blit_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_blit_120_fp32",
+      "dtype": "float32",
+      "validator": "identity_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_nc4hw4_to_nchw_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_nc4hw4_to_nchw_120_fp32",
+      "dtype": "float32",
+      "validator": "nc4hw4_to_nchw_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_nchw_to_nc4hw4_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_nchw_to_nc4hw4_120_fp32",
+      "dtype": "float32",
+      "validator": "nchw_to_nc4hw4_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_reduce_sum_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_reduce_sum_120_fp32",
+      "dtype": "float32",
+      "validator": "reduction_sum_scalar_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 8,
+        "c": 2
+      }
+    },
+    {
+      "name": "vulkan_softmax_height_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "softmax",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_softmax_height_120_fp32",
+      "dtype": "float32",
+      "validator": "softmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 16,
+        "c": 2
+      }
     }
   ]
 }

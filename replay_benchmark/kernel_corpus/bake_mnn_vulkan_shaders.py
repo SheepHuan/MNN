@@ -56,30 +56,41 @@ LICENSE_HEADER = (
 # every operator variant that is selected by a #ifdef must be baked as a
 # separate .comp/.spv pair).
 OP_MAP = {
-    "unary": [("unary.comp", "vulkan_unary_buf_exp_fp32", ["EXP"])],
-    "binary": [("binary.comp", "vulkan_binary_buf_add_fp32", ["ADD"])],
+    "unary": [("unary.comp", "vulkan_unary_buf_exp_fp32", ["EXP"], ["3.6.0"])],
+    "binary": [("binary.comp", "vulkan_binary_buf_add_fp32", ["ADD"], ["3.6.0"])],
     "raster": [
-        ("blit.comp", "vulkan_blit_c4_fp32", ["C4"]),
-        ("nc4hw4Tonchw.comp", "vulkan_nc4hw4_to_nchw_fp32", []),
+        ("blit.comp", "vulkan_blit_c4_fp32", ["C4"], ["3.6.0"]),
+        ("nc4hw4Tonchw.comp", "vulkan_nc4hw4_to_nchw_fp32", [], ["3.6.0"]),
+        # 1.2.0 variants (separate variant names; some share source shader names
+        # with 3.6.0 but produce different .spv under tag 1.2.0)
+        ("blit.comp", "vulkan_blit_120_fp32", [], ["1.2.0"]),
+        ("nc4hw4Tonchw.comp", "vulkan_nc4hw4_to_nchw_120_fp32", [], ["1.2.0"]),
+        ("nchwTonc4hw4.comp", "vulkan_nchw_to_nc4hw4_120_fp32", [], ["1.2.0"]),
     ],
-    "reduction": [("reduce.comp", "vulkan_reduce_buf_sum_fp32", ["SUM"])],
+    "reduction": [
+        ("reduce.comp", "vulkan_reduce_buf_sum_fp32", ["SUM"], ["3.6.0"]),
+        ("reduce.comp", "vulkan_reduce_sum_120_fp32", ["SUM"], ["1.2.0"]),
+    ],
     "pooling": [
-        ("maxpool.comp", "vulkan_maxpool_fp32", []),
-        ("avgpool.comp", "vulkan_avgpool_fp32", []),
+        ("maxpool.comp", "vulkan_maxpool_fp32", [], ["3.6.0"]),
+        ("avgpool.comp", "vulkan_avgpool_fp32", [], ["3.6.0"]),
     ],
-    "select": [("select.comp", "vulkan_select_fp32", [])],
-    "range": [("range.comp", "vulkan_range_fp32", [])],
-    "cast": [("cast_float_int.comp", "vulkan_cast_float_int_fp32", [])],
-    "scale": [("scale.comp", "vulkan_scale_fp32", [])],
-    "prelu": [("preluWithChannel.comp", "vulkan_prelu_fp32", [])],
-    "argmax": [("argmax.comp", "vulkan_argmax_fp32", [])],
-    "softmax": [("softmaxHeight_NHWC.comp", "vulkan_softmax_height_fp32", [])],
-    "layernorm": [("norm.comp", "vulkan_norm_fp32", [])],
+    "select": [("select.comp", "vulkan_select_fp32", [], ["3.6.0"])],
+    "range": [("range.comp", "vulkan_range_fp32", [], ["3.6.0"])],
+    "cast": [("cast_float_int.comp", "vulkan_cast_float_int_fp32", [], ["3.6.0"])],
+    "scale": [("scale.comp", "vulkan_scale_fp32", [], ["3.6.0"])],
+    "prelu": [("preluWithChannel.comp", "vulkan_prelu_fp32", [], ["3.6.0"])],
+    "argmax": [("argmax.comp", "vulkan_argmax_fp32", [], ["3.6.0"])],
+    "softmax": [
+        ("softmaxHeight_NHWC.comp", "vulkan_softmax_height_fp32", [], ["3.6.0"]),
+        ("softmaxHeight_NHWC.comp", "vulkan_softmax_height_120_fp32", [], ["1.2.0"]),
+    ],
+    "layernorm": [("norm.comp", "vulkan_norm_fp32", [], ["3.6.0"])],
     "interp": [
-        ("resizeNearest.comp", "vulkan_resize_nearest_fp32", []),
-        ("resizeBilinear.comp", "vulkan_resize_bilinear_fp32", []),
+        ("resizeNearest.comp", "vulkan_resize_nearest_fp32", [], ["3.6.0"]),
+        ("resizeBilinear.comp", "vulkan_resize_bilinear_fp32", [], ["3.6.0"]),
     ],
-    "grid_sample": [("gridSampleNearest.comp", "vulkan_grid_sample_nearest_fp32", [])],
+    "grid_sample": [("gridSampleNearest.comp", "vulkan_grid_sample_nearest_fp32", [], ["3.6.0"])],
 }
 
 
@@ -87,6 +98,10 @@ def bake_shader(source_path: Path, out_dir: Path, variant: str,
                 macros: list, glslang: str) -> int:
     """Bake one .comp + .spv. Returns 0 on success, nonzero on failure."""
     raw = source_path.read_text(encoding="utf-8", errors="replace")
+    # MNN 1.2.0 shaders have `#version 440 core` on the first line. The bake
+    # preamble already provides `#version 450`, so drop the original to avoid
+    # a duplicate-#version compile error.
+    raw = re.sub(r'^\s*#version[^\n]*\n', '', raw, count=1)
     # MNN Vulkan shaders declare constants as `layout(set=0, binding=N) uniform
     # constBuffer { ... }`. The replay runner passes constants via push constants
     # (vkCmdPushConstants), which requires the shader to declare them as
@@ -140,24 +155,35 @@ def main(argv=None):
     baked_count = 0
 
     for tag in args.tags:
-        glsl_dir = sources_root / "mnn" / tag / "source" / "backend" / "vulkan" \
-            / "buffer" / "execution" / "glsl"
-        if not glsl_dir.is_dir():
-            sys.stderr.write("WARN: no MNN Vulkan glsl dir for tag {}: {}\n".format(tag, glsl_dir))
+        # MNN 1.2.0 uses execution/glsl/ (image-based + a few buffer-based
+        # shaders); 3.6.0 uses buffer/execution/glsl/ (all buffer-based).
+        glsl_candidates = [
+            sources_root / "mnn" / tag / "source" / "backend" / "vulkan" / "buffer" / "execution" / "glsl",
+            sources_root / "mnn" / tag / "source" / "backend" / "vulkan" / "execution" / "glsl",
+        ]
+        glsl_dir = None
+        for cand in glsl_candidates:
+            if cand.is_dir():
+                glsl_dir = cand
+                break
+        if glsl_dir is None:
+            sys.stderr.write("WARN: no MNN Vulkan glsl dir for tag {} (tried {})\n".format(tag, glsl_candidates))
             continue
         for op_type, variants in OP_MAP.items():
-            for src_name, variant, macros in variants:
+            for src_name, variant, macros, variant_tags in variants:
+                if tag not in variant_tags:
+                    continue
                 src = glsl_dir / src_name
                 if not src.is_file():
                     sys.stderr.write("WARN: missing source {} for op {} tag {}\n".format(src, op_type, tag))
                     continue
                 out_dir = operators_root / "vulkan" / op_type / "mnn" / tag
                 rc = bake_shader(src, out_dir, variant, macros, args.glslang)
-            if rc != 0:
-                failures += 1
-            else:
-                baked_count += 1
-                print("OK {}/{}/{}/{}.comp (+.spv)".format(op_type, "mnn", tag, variant))
+                if rc != 0:
+                    failures += 1
+                else:
+                    baked_count += 1
+                    print("OK {}/{}/{}/{}.comp (+.spv)".format(op_type, "mnn", tag, variant))
 
     print("\nBaked {} shader(s), {} failure(s).".format(baked_count, failures))
     return 1 if failures else 0
