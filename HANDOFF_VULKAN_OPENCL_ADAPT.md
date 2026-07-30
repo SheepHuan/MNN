@@ -1,18 +1,18 @@
-# GPU Kernel Corpus 适配完成记录 — OpenCL / Vulkan
+# GPU Kernel Corpus 适配完成记录 — OpenCL / Vulkan / CUDA
 
-> 本文档记录接手 `HANDOFF.md` 后，在本机（有 glslangValidator + OpenCL/Vulkan runtime）完成的全部适配工作。
+> 本文档记录接手 `HANDOFF.md` 后，在本机（有 glslangValidator + OpenCL/Vulkan runtime + nvcc）完成的全部适配工作。
 > 参考 skill：`skills/kernel-adapt/SKILL.md`
-> 推送目标：`origin/tmp`，最终 commit `92d5b64af`
+> 推送目标：`origin/tmp`，最新 commit 含 CUDA 扩展（merge `kernel-agent-3.6.1` 后）
 
 ## 完成情况总览
 
-| Backend / Framework | Tags | Cases | Compiled | Unsupported | Validation Passed | HANDOFF 基线 | 备注 |
-|---------------------|------|-------|----------|-------------|-------------------|--------------|------|
-| OpenCL / mnn        | 1.2.0 + 3.6.0 | 62 | 55 | 7 | **53** | 51 | +2 (reduction_buf 3.6.0 修复) |
-| Vulkan / mnn        | **1.2.0 + 3.6.0** | 23 | 23 | 0 | **23** | 6 (3.6.0) | 新增 12 个 3.6.0 + 5 个 1.2.0 |
-| Vulkan / ncnn       | 20190611 + 20260526 | 361 | 358 | 0 | **358** | 14 | compile_failed 353→3 (cm shader) |
-| CUDA / mnn          | 多 tag | 196 | not_found | 196 | 0 | 0 | host 无 nvcc，预期 |
-| **总计** | — | **642** | — | — | **434** | — | — |
+| Backend / Framework | Tags | Cases | Compiled | Unsupported | Validation Passed | 备注 |
+|---------------------|------|-------|----------|-------------|-------------------|------|
+| OpenCL / mnn        | 1.2.0 + 3.6.0 | 62 | 55 | 7 | **53** | +2 (reduction_buf 3.6.0 修复) |
+| Vulkan / mnn        | **1.2.0 + 3.6.0** | 23 | 23 | 0 | **23** | 12 个 3.6.0 + 5 个 1.2.0 |
+| Vulkan / ncnn       | 20190611 + 20260526 | 361 | 358 | 0 | **358** | 3 个 cm shader unsupported |
+| CUDA / mnn          | 1.2.0 ~ 3.6.0 | **309** | precompiled | 0 | **309** | **本次扩展 261 → 309 (+48, +18.4%)** |
+| **总计** | — | **755** | — | — | **743** | — |
 
 ## 完成的工作
 
@@ -98,6 +98,66 @@
 
 **验证**：5/5 `validation_passed`。
 
+### 任务 5：CUDA 覆盖率扩展（本次，261 → 309，+48 cases）
+
+**前置**：merge `kernel-agent-3.6.1` 后，CUDA 适配层已存在 28 个 `kernels/*.cu`、201 个 adapter、261 个 case 全部通过。本次在 sm_89 RTX 4080 + CUDA 12.5 + g++-12 host compiler 环境下扩展覆盖率。
+
+#### P1: Raster 融合宏实例批量补齐 (+34 cases)
+
+| 类别 | 新增 op | 数量 |
+|------|---------|------|
+| `raster_binary` | SUB / DIV / MINIMUM / MAXIMUM / FLOORDIV / FLOORMOD / SquaredDifference / POW | 8 |
+| `raster_binary_fuseadd` | 同上 8 个 | 8 |
+| `raster_binarymid` | 同上 8 个 + MUL_SILU | 9 |
+| `raster_binarymidlinear4` | 同上 8 个 + MUL_SILU | 9 |
+
+**重构**：`raster_fuse.cu` 的 extern "C" shim 区从手写改为宏驱动（`SHIM_BINARY` / `SHIM_BINARY_FUSEADD` / `SHIM_BINARYMID` / `SHIM_BINARYMIDLINEAR4`)，便于批量实例化。
+**注意**: `raster_binary_fuseadd` 是 `atomicAdd(output, OP(x,y))`，非幂等，case 必须 `warmup_runs=0` 且用 `--kernel-corpus-runs 1` 运行（CLI 参数会覆盖 case 内 `workload_runs` 字段）。
+
+#### P2: PACK_NUMBER 向量化变体 (+6 cases)
+
+| 变体 | 数据类型 | PACK | 说明 |
+|------|---------|------|------|
+| `BinaryMid4_<ADD/MUL>` | fp32 | float4 | 3D stride,stride 不含 X 维（X 内嵌 `ix<<2`) |
+| `BinaryMidHalf2_<ADD/MUL>` | fp16 | half2 | 同上，PACK_NUMBER=2 |
+| `BinaryMidLinearHalf4_<ADD/MUL>` | fp16 | half2×2 | 1D linear，每线程 4 half |
+
+**关键 fp16 validator 修复**：`output.data()` 是 raw bytes，需 `reinterpret_cast<const __half*>` + `__half2float` 才能与 fp32 expected 比较。
+
+#### P3: BINARY_INT8 完整覆盖 (+6 cases)
+
+| 类别 | 新增 |
+|------|------|
+| `BINARY_INT8` (single-scale) | SUB / DIV / MINIMUM / MAXIMUM |
+| `BINARY_INT8_CHANNELWISE` (per-channel scale) | ADD / MUL |
+
+**关键修复**：
+1. `int8.cu` 的 `BINARY_INT8_ADD/MUL` 从手写重构为 `BINARY_INT8_FUNC` 宏驱动，便于批量实例化。
+2. **`host_float2int_rn` 语义修正**：从 `(int)roundf` 改为 `(int)rintf`(banker's rounding),匹配 device `__float2int_rn` 的 round-to-nearest-even。原先 DIV `0.25*10=2.5` 时 host 期望 3、device 给 2 导致 false negative。
+3. DIV 的输入数据 `in1[i] = 1 + (i % 5)` 避免 y=0 触发 inf/NaN 的 host-device 行为分歧。
+
+#### P4: SPLIT_FusedKV (+2 cases)
+
+`plugin/FmhaCommon/FmhaV2CommonExecution.cu:30`,fp32 + fp16 两 adapter,validator 检查 v 输出（k 不读回）。
+
+#### 未覆盖项（已记录，留后续）
+
+| 类别 | 数量 | 状态 | 备注 |
+|------|------|------|------|
+| 权重量化 GEMV/GEMM int4/int8 | ~20 | ⏸️ 跳过 | cutlass 集成复杂，一次性投入大 |
+| Raster 融合剩余实例 | ~22 | ⏸️ 跳过 | GREATER/LESS/EQUAL/NOTEQUAL/LOGICALOR 返回 int 类型，需独立 validator;REALDIV/ATAN2/MOD 已存在或冗余 |
+| BF16 原生算子 | 8 | ⏸️ 跳过 | 需 `MNN_CUDA_BF16=ON` 重编 backend；当前 sm89 可跑但需配置切换 |
+| `BinaryMid4_` SUB/DIV/... 8 个 op | 8 | ⏸️ 可选 | 已覆盖 ADD/MUL 两个代表性，剩余宏实例遵循同一模式可批量加 |
+
+**CUDA 验证命令**：
+```bash
+cd build && cmake --build . --target replay_benchmark.out -j$(nproc)
+LD_LIBRARY_PATH=.:source/backend/cuda:. ./replay_benchmark.out \
+  --kernel-corpus-bench --kernel-corpus-root ../replay_benchmark/kernel_corpus \
+  --kernel-corpus-runs 1 --perf-counter-output /tmp/kc_cuda.json
+# 309/309 passed
+```
+
 ## 不可适配项验证（HANDOFF 是否高估）
 
 | 项目 | HANDOFF 判断 | 实际验证 | 结论 |
@@ -105,7 +165,7 @@
 | OpenCL subgroup 9 个不可适配 | 正确 | 7 个确实不可适配（用 `INTEL_SUB_GROUP_READ*` Intel 专用扩展），1 个文件名带 subgroup 但源码无 subgroup API 实际通过，1 个数字错误 | ✅ 判断正确，数字错 |
 | OpenCL image-based `scale_nobias_fp32` (1.2.0) | 不可适配 | 确实不可适配（kernel 用 `image2d_t`，runner 只支持 buffer），但状态是 `compiled/not_run` 而非 `unsupported` | ✅ 判断正确 |
 | Vulkan/mnn 1.2.0 全不可适配 | **错误** | 41 个中 6 个 buffer-based，5 个已适配 | ❌ **过度估计** |
-| CUDA host 196 unsupported | 预期 | 无 nvcc，host build 不含 CUDA，预期 | ✅ 正确 |
+| CUDA host 196 unsupported | 预期 | 有 nvcc 后实际 261/261 通过，本次扩到 309/309 | ❌ **过度估计**（本机有 CUDA） |
 
 ## 关键技术点
 
@@ -134,6 +194,14 @@ shader 的 `binding=N` 声明顺序与 `ac.buffers` 数组顺序不一定一致�
 
 SKILL 规则：即使签名相同，`__global__` 函数体有实质差异就必须独立 kernel + 独立 shim。1.2.0 的 softmax 与 3.6.0 的差异（maxValue 初始值）足够小，可以共用 validator，但 adapter 和 `.spv` 必须独立。
 
+### 6. CUDA validator 的 round-to-nearest-even
+
+device 端 `__float2int_rn` 用 banker's rounding（如 `2.5 → 2`),host 端若用 `(int)roundf`（如 `2.5 → 3`）会导致 false negative。统一用 `(int)rintf`。
+
+### 7. fp16 validator 的 output 解码
+
+`output.data()` 是 raw bytes，需 `reinterpret_cast<const __half*>` + `__half2float` 转换回 fp32 才能与 expected 比较。
+
 ## 关键文件变更
 
 | 用途 | 路径 | 变更 |
@@ -144,11 +212,18 @@ SKILL 规则：即使签名相同，`__global__` 函数体有实质差异就必�
 | 1.2.0 adapter | `replay_benchmark/kernel_corpus_bridge/mnn/ops/VulkanTag120Ops.hpp/.cpp` | **新增**，5 个 adapter |
 | OpenCL reduction | `replay_benchmark/kernel_corpus_bridge/mnn/ops/ElementwiseOps.cpp` | 1.2.0/3.6.0 compileMacros 分支修复 |
 | Bridge 注册 | `replay_benchmark/kernel_corpus_bridge/mnn/MnnBridge.cpp` | 注册 `registerVulkanMiscOps()` + `registerVulkanTag120Ops()` |
-| CMake | `replay_benchmark/CMakeLists.txt` | 加新 .cpp、CudaOps 包到 MNN_CUDA 块 |
-| cases | `replay_benchmark/kernel_corpus/operator_cases.json` | +17 case (12 个 3.6.0 + 5 个 1.2.0) |
-| operators.json | `replay_benchmark/kernel_corpus/operators.json` | +17 entry |
+| CMake | `replay_benchmark/CMakeLists.txt` | 加新 .cpp、CudaOps 包到 MNN_CUDA 块、CUDA 12.5 + GCC 13 host compiler 兼容、`-Xcompiler -fexceptions` 镜像 MNN backend 覆盖、传播 `CUDA_ARCH_FLAGS` 启用 `__hfma2` |
+| **CUDA kernel 扩展** | `replay_benchmark/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu` | extern "C" shim 宏重构（`SHIM_BINARY`/`SHIM_BINARY_FUSEADD`/`SHIM_BINARYMID`/`SHIM_BINARYMIDLINEAR4`)，新增 36 个 shim；新增 BinaryMid4/Half2/LinearHalf4 6 个 shim |
+| **CUDA kernel 扩展** | `replay_benchmark/kernel_corpus_bridge/cuda/kernels/int8.cu` | `BINARY_INT8_ADD/MUL` 重构为 `BINARY_INT8_FUNC` 宏驱动，新增 SUB/DIV/MINIMUM/MAXIMUM；新增 CHANNELWISE ADD/MUL |
+| **CUDA kernel 扩展** | `replay_benchmark/kernel_corpus_bridge/cuda/kernels/plugins.cu` | 新增 `SPLIT_FusedKV` kernel + fp32/fp16 shim |
+| **CUDA adapter** | `replay_benchmark/kernel_corpus_bridge/cuda/CudaOps.hpp` | 新增 5 个 `DECL_*_ADAPTER` 宏（批量声明类）;48 个新 adapter 类声明 |
+| **CUDA adapter** | `replay_benchmark/kernel_corpus_bridge/cuda/CudaOpsFp16.cu` | 48 个 adapter 实现（宏驱动）+ 注册；**`host_float2int_rn` 改为 `(int)rintf`** |
+| cases | `replay_benchmark/kernel_corpus/operator_cases.json` | 755 cases（其中 CUDA 309) |
+| operators.json | `replay_benchmark/kernel_corpus/operators.json` | 751 entries（其中 CUDA 309 + 历史 442) |
 
 ## 验证命令
+
+### OpenCL / Vulkan (host, 无 nvcc)
 
 ```bash
 # Host build
@@ -163,12 +238,28 @@ export LD_LIBRARY_PATH=$(pwd)/build-host/source/backend/opencl:$(pwd)/build-host
 ./build-host/replay_benchmark.out \
   --kernel-corpus-bench --kernel-corpus-root replay_benchmark/kernel_corpus \
   --kernel-corpus-runs 5 --perf-counter-output /tmp/kc.json
+```
 
-# 统计
+### CUDA (host with nvcc)
+
+```bash
+cd build
+cmake .. -DMNN_CUDA=ON -DMNN_BUILD_BENCHMARK=ON -DMNN_REPLAY_ENABLE_PERFCOUNTER=ON
+cmake --build . --target replay_benchmark.out -j$(nproc)
+
+LD_LIBRARY_PATH=.:source/backend/cuda:. ./replay_benchmark.out \
+  --kernel-corpus-bench --kernel-corpus-root ../replay_benchmark/kernel_corpus \
+  --kernel-corpus-runs 1 --perf-counter-output /tmp/kc_cuda.json
+# 309/309 passed (runs=1 因 fuseadd 非幂等)
+```
+
+### 统计脚本
+
+```bash
 python3 -c "
 import json
 from collections import Counter
-d=json.load(open('/tmp/kc.json'))
+d=json.load(open('/tmp/kc_cuda.json'))
 cs=d['cases']
 for b in ['opencl','vulkan','cuda']:
     bc=[c for c in cs if c['backend']==b]
@@ -180,9 +271,11 @@ for b in ['opencl','vulkan','cuda']:
 "
 ```
 
-## 提交记录
+## 提交记录（含本次）
 
 ```
+[本次] [GPU:Feature] CUDA kernel corpus 扩展 261→309 (+48 cases) — Raster 宏实例批量补齐 + BinaryMid4/Half2/LinearHalf4 + BINARY_INT8 完整覆盖 + SPLIT_FusedKV
+7cf11202b Merge branch 'kernel-agent-3.6.1' into tmp
 92d5b64af [GPU:Feature] Add Vulkan/mnn 1.2.0 adapter coverage (5 buffer-based variants)
 14d5c3aa3 [GPU:Chore] Add pre-compiled ncnn source .spv artifacts for runtime loading
 234ff746b [GPU:Feature] Complete Vulkan/mnn 3.6.0 adapter coverage + rebake ncnn .spv + fix OpenCL reduction 3.6.0
@@ -194,5 +287,8 @@ b7d9fee1b [Doc:Chore] Add GPU kernel corpus adapter handoff doc for OpenCL/Vulka
 
 1. **OpenCL image-based kernel 支持**：若需要让 `scale_nobias_fp32` (1.2.0) 等 image-based kernel 跑起来，runner 需要加 `clCreateImage2D` 支持。这超出 HANDOFF 范围。
 2. **Vulkan/mnn 1.2.0 `buffer2Image1D.comp`**：同上，需要 image 支持。
-3. **CUDA host 验证**：当前 host 无 nvcc，196 个 case 预期 unsupported。在 CUDA 设备上跑通后可确认 196/196。
-4. **更多 3.6.0 shader**：HANDOFF 标记"低优先级"的 `topkv2.comp` / `gemm_m8n4.comp` / `matmulunit.comp` 因签名复杂未适配，可按需补做。
+3. **更多 3.6.0 shader**：HANDOFF 标记"低优先级"的 `topkv2.comp` / `gemm_m8n4.comp` / `matmulunit.comp` 因签名复杂未适配，可按需补做。
+4. **CUDA BF16 原生算子**：8 个 (`CONV_DW_BF16` / `WeightTransToBf16` / `maxpool_C8_BF16` 等），需 `MNN_CUDA_BF16=ON` 重编 backend;sm_89 已可跑。
+5. **CUDA 权重量化 GEMV/GEMM int4/int8** (~20 个）:`GEMV_FpAInt4B/V5/V9` / `GEMM_FpAInt4B/Int8B` / `Rearrange_Weight_Int4/Int8` / `Precompute*` / `QuantA` / `DequantAndAcc` / `BiasAndActivation`,cutlass 集成复杂，一次性投入大。
+6. **CUDA Raster 剩余宏实例** (~22 个）：返回 int 类型的 GREATER/LESS/EQUAL/NOTEQUAL/LOGICALOR，需独立 validator 处理 int 输出；以及 `BinaryMid4_` 的 SUB/DIV/MIN/MAX 等扩展（已覆盖 ADD/MUL 两个代表性，剩余遵循同一模式可批量加）。
+7. **fuseadd runner framework 改造**：当前 `raster_binary_fuseadd` 因 `atomicAdd` 非幂等只能在 `--kernel-corpus-runs 1` 下验证。若要让这类 case 在 runs>1 下也能验证，需在 runner 中支持"每次 dispatch 前重置 output buffer 为 initialData"(in-place 模式）。

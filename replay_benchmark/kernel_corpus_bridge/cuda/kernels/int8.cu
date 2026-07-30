@@ -566,35 +566,69 @@ __global__ void WeightInt8PackFill(const int8_t* param, T* output, const int max
 }
 
 // ============================================================================
-// BINARY_INT8_ADD / BINARY_INT8_MUL: element-wise int8 binary ops.
+// BINARY_INT8_*: element-wise int8 binary ops (macro-driven for coverage)
+// 忠实复制 MNN BinaryInt8Execution.cu 的 BINARY_INT8_FUNC / BINARY_INT8_CHANNEL_FUNC
 // ============================================================================
-__global__ void BINARY_INT8_ADD(const int maxCount, const int8_t* input0_addr, const float input0_scale,
-                                  const int8_t* input1_addr, const float input1_scale,
-                                  int8_t* output_addr, const float output_scale,
-                                  const int s0, const int s1) {
-    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
-        float x = (float)input0_addr[index*s0] * input0_scale;
-        float y = (float)input1_addr[index*s1] * input1_scale;
-        float val = x + y;
-        int res = __float2int_rn(output_scale * val);
-        res = min(res, 127); res = max(res, -128);
-        output_addr[index] = (int8_t)res;
-    }
+#define BINARY_INT8_FUNC(Name, Func)\
+__global__ void BINARY_INT8_##Name(\
+    const int maxCount,\
+    const int8_t* input0_addr,\
+    const float input0_scale,\
+    const int8_t* input1_addr,\
+    const float input1_scale,\
+    int8_t* output_addr,\
+    const float output_scale,\
+    const int s0,\
+    const int s1\
+) {\
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {\
+        float x = (float)input0_addr[index*s0] * input0_scale;\
+        float y = (float)input1_addr[index*s1] * input1_scale;\
+        float val = Func;\
+        int res = __float2int_rn(output_scale * val);\
+        res = min(res, 127);\
+        res = max(res, -128);\
+        output_addr[index] = (int8_t)res;\
+    }\
 }
 
-__global__ void BINARY_INT8_MUL(const int maxCount, const int8_t* input0_addr, const float input0_scale,
-                                  const int8_t* input1_addr, const float input1_scale,
-                                  int8_t* output_addr, const float output_scale,
-                                  const int s0, const int s1) {
-    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
-        float x = (float)input0_addr[index*s0] * input0_scale;
-        float y = (float)input1_addr[index*s1] * input1_scale;
-        float val = x * y;
-        int res = __float2int_rn(output_scale * val);
-        res = min(res, 127); res = max(res, -128);
-        output_addr[index] = (int8_t)res;
-    }
+BINARY_INT8_FUNC(ADD, x+y)
+BINARY_INT8_FUNC(SUB, x-y)
+BINARY_INT8_FUNC(MUL, x*y)
+BINARY_INT8_FUNC(DIV, x/y)
+BINARY_INT8_FUNC(MINIMUM, min(x, y))
+BINARY_INT8_FUNC(MAXIMUM, max(x, y))
+
+// ============================================================================
+// BINARY_INT8_CHANNELWISE_*: per-channel scale int8 binary ops
+// ============================================================================
+#define BINARY_INT8_CHANNEL_FUNC(Name, Func)\
+__global__ void BINARY_INT8_CHANNELWISE_##Name(\
+    const int maxCount,\
+    const int channelPack,\
+    const int8_t* input0_addr,\
+    const float* input0_scale,\
+    const int8_t* input1_addr,\
+    const float* input1_scale,\
+    int8_t* output_addr,\
+    const float* output_scale,\
+    DivModFast d_cp\
+) {\
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {\
+        int cpIndex, nhwIndex;\
+        d_cp.divmod(index, nhwIndex, cpIndex);\
+        float x = (float)input0_addr[index] * input0_scale[cpIndex];\
+        float y = (float)input1_addr[index] * input1_scale[cpIndex];\
+        float val = Func;\
+        int res = __float2int_rn(output_scale[cpIndex] * val);\
+        res = min(res, 127);\
+        res = max(res, -128);\
+        output_addr[index] = (int8_t)res;\
+    }\
 }
+
+BINARY_INT8_CHANNEL_FUNC(ADD, x+y)
+BINARY_INT8_CHANNEL_FUNC(MUL, x*y)
 
 } // namespace Corpus
 } // namespace MNN
@@ -729,5 +763,35 @@ void mnn_corpus_binary_int8_mul_fp32(const int8_t* in0, float in0_scale,
     MNN::Corpus::BINARY_INT8_MUL<<<grid, block, 0, stream>>>(
         maxCount, in0, in0_scale, in1, in1_scale, out, out_scale, s0, s1);
 }
+
+// ---- P3 扩展：BINARY_INT8 其余操作 ----
+#define SHIM_BINARY_INT8(Op, OpLower) \
+void mnn_corpus_binary_int8_##OpLower##_fp32(const int8_t* in0, float in0_scale, \
+                                              const int8_t* in1, float in1_scale, \
+                                              int8_t* out, float out_scale, int s0, int s1, \
+                                              int maxCount, int grid, int block, cudaStream_t stream) { \
+    MNN::Corpus::BINARY_INT8_##Op<<<grid, block, 0, stream>>>( \
+        maxCount, in0, in0_scale, in1, in1_scale, out, out_scale, s0, s1); \
+}
+
+SHIM_BINARY_INT8(SUB, sub)
+SHIM_BINARY_INT8(DIV, div)
+SHIM_BINARY_INT8(MINIMUM, minimum)
+SHIM_BINARY_INT8(MAXIMUM, maximum)
+
+// ---- P3 扩展：BINARY_INT8_CHANNELWISE (per-channel scale) ----
+#define SHIM_BINARY_INT8_CHANNELWISE(Op, OpLower) \
+void mnn_corpus_binary_int8_channelwise_##OpLower##_fp32( \
+    const int8_t* in0, const float* in0_scale, \
+    const int8_t* in1, const float* in1_scale, \
+    int8_t* out, const float* out_scale, \
+    int channelPack, int maxCount, int grid, int block, cudaStream_t stream) { \
+    MNN::Corpus::DivModFast d_cp(channelPack); \
+    MNN::Corpus::BINARY_INT8_CHANNELWISE_##Op<<<grid, block, 0, stream>>>( \
+        maxCount, channelPack, in0, in0_scale, in1, in1_scale, out, out_scale, d_cp); \
+}
+
+SHIM_BINARY_INT8_CHANNELWISE(ADD, add)
+SHIM_BINARY_INT8_CHANNELWISE(MUL, mul)
 
 } // extern "C"

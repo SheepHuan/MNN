@@ -7,6 +7,7 @@
 #include "kernel_corpus_bridge/ncnn/NcnnBridge.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -118,6 +119,10 @@ struct PmuScope {
 #endif
     uint64_t workloadDelta = 0;
     std::string status = "unavailable";
+    // Wall-clock time of the workload section (ns), captured by the runner via
+    // chrono/cudaEvent/clGetEventProfilingInfo/vkCmdWriteTimestamp depending on
+    // backend. Always filled when the runner supports timing; not a PMC metric.
+    uint64_t workloadNs = 0;
 };
 
 static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
@@ -176,6 +181,20 @@ static void endPmu(PmuScope& s) {
         const char* e = s.session ? s.session->error() : nullptr;
         s.status = std::string("stop_failed") + (e ? (": " + std::string(e)) : "");
     }
+#endif
+}
+
+// Transfer all collected PMC counter name/value pairs from PmuScope into
+// CaseReport::pmuCounters. Call after endPmu(); no-op if PMU was unavailable.
+static void fillPmuCounters(const PmuScope& pmu, CaseReport& report) {
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    if (!pmu.started || pmu.values.size() != pmu.names.size()) return;
+    report.pmuCounters.reserve(pmu.names.size());
+    for (size_t i = 0; i < pmu.names.size(); ++i) {
+        report.pmuCounters.emplace_back(pmu.names[i], pmu.values[i].value);
+    }
+#else
+    (void)pmu; (void)report;
 #endif
 }static bool makeParentDirectories(const std::string& path) {
     const std::string::size_type slash = path.find_last_of("/\\");
@@ -554,6 +573,7 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
 
     // workload + PMU
     PmuScope pmu = beginPmu();
+    const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) {
         cl::NDRange g = ac.dims == 2
             ? cl::NDRange(ac.globalSize[0], ac.globalSize[1])
@@ -566,9 +586,14 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
         }
     }
     queue.finish();
+    const auto wallEnd = std::chrono::steady_clock::now();
+    pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
+    report.workloadNs = pmu.workloadNs;
+    report.runs = runs;
+    fillPmuCounters(pmu, report);
 
     // readback output buffers
     std::vector<float> output;
@@ -817,6 +842,7 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
 
     // workload + PMU
     PmuScope pmu = beginPmu();
+    const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) {
         // For in-place buffers, re-write initial data before each dispatch so
         // the output after N runs equals a single transformation of the input.
@@ -833,16 +859,21 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
         cmdbuf->bindDescriptorSets(pipelineLayout, 0, 1, &descSet);
         if (!ac.pushConstants.empty()) {
             cmdbuf->pushConstants(pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                                 ac.pushConstants.size(), ac.pushConstants.data());
+                                  ac.pushConstants.size(), ac.pushConstants.data());
         }
         cmdbuf->dispatch(ac.globalSize[0], ac.globalSize[1], ac.globalSize[2]);
         cmdbuf->end();
         cmdPool.submitAndWait(cmdbuf->get());
         delete cmdbuf;
     }
+    const auto wallEnd = std::chrono::steady_clock::now();
+    pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
+    report.workloadNs = pmu.workloadNs;
+    report.runs = runs;
+    fillPmuCounters(pmu, report);
 
     // readback output buffers
     std::vector<float> output;
@@ -957,6 +988,7 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     PmuScope pmu = beginPmu(perfCounterEvents);
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     if (pmu.started) {
+        const auto wallStart = std::chrono::steady_clock::now();
         for (int r = 0; r < runs; ++r) {
             char rangeName[64];
             std::snprintf(rangeName, sizeof(rangeName), "%s_run%d", ac.entry.c_str(), r);
@@ -964,6 +996,9 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
             cudaAdapter->launch(ac, ctx);
             pmu.session->endRange();
         }
+        cudaStreamSynchronize(stream);
+        const auto wallEnd = std::chrono::steady_clock::now();
+        pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
         // stop() is called by endPmu() below; do not call it here (would
         // double-stop and set started=false prematurely).
     } else {
@@ -981,6 +1016,7 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         cudaEventDestroy(evStart);
         cudaEventDestroy(evStop);
         pmu.workloadDelta = static_cast<uint64_t>(elapsedMs * 1000.0f);
+        pmu.workloadNs = static_cast<uint64_t>(elapsedMs * 1e6);
         // Keep pmu.status from beginPmu so the failure reason is visible.
         if (pmu.status.empty() || pmu.status == "unavailable") {
             pmu.status = "cuda_event_fallback";
@@ -1001,11 +1037,15 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     cudaEventDestroy(evStart);
     cudaEventDestroy(evStop);
     pmu.workloadDelta = static_cast<uint64_t>(elapsedMs * 1000.0f);
+    pmu.workloadNs = static_cast<uint64_t>(elapsedMs * 1e6);
     pmu.status = "cuda_event";
 #endif
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
+    report.workloadNs = pmu.workloadNs;
+    report.runs = runs;
+    fillPmuCounters(pmu, report);
 
     // readback output buffers (as float; int kernels are compared bit-exact)
     std::vector<float> output;
@@ -1241,6 +1281,23 @@ bool runKernelCorpusBenchmark(const Options& options) {
             addString(caseValue, "pmu_status", report.pmuStatus, allocator);
             caseValue.AddMember("control_delta", report.controlDelta, allocator);
             caseValue.AddMember("workload_delta", report.workloadDelta, allocator);
+            // Timing: workload wall-clock for the entire `runs` dispatches (ns),
+            // and per-dispatch derived value for easy cross-case comparison.
+            caseValue.AddMember("workload_ns", report.workloadNs, allocator);
+            caseValue.AddMember("runs", report.runs, allocator);
+            const uint64_t nsPerDispatch = report.runs > 0 ? report.workloadNs / (uint64_t)report.runs : 0;
+            caseValue.AddMember("ns_per_dispatch", nsPerDispatch, allocator);
+            // PMC counters: array of {name, value} pairs collected during workload.
+            if (!report.pmuCounters.empty()) {
+                rapidjson::Value metrics(rapidjson::kArrayType);
+                for (const auto& kv : report.pmuCounters) {
+                    rapidjson::Value m(rapidjson::kObjectType);
+                    addString(m, "name", kv.first, allocator);
+                    m.AddMember("value", kv.second, allocator);
+                    metrics.PushBack(m, allocator);
+                }
+                caseValue.AddMember("pmu_metrics", metrics, allocator);
+            }
             caseValue.AddMember("responsive", report.responsive, allocator);
             caseValue.AddMember("valid", report.valid, allocator);
             if (!report.error.empty()) addString(caseValue, "error", report.error, allocator);

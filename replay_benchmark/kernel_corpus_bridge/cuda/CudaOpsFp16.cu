@@ -14,7 +14,7 @@
 #define INT8_PACK_NUMBER 4
 #endif
 // __float2int_rn is __device__ only; use host-side roundf + cast for validation.
-static inline int host_float2int_rn(float x) { return (int)roundf(x); }
+static inline int host_float2int_rn(float x) { return (int)rintf(x); }
 
 extern "C" {
 void mnn_corpus_relu_fp16(const void*, void*, size_t, float, int, int, cudaStream_t);
@@ -100,6 +100,9 @@ void mnn_corpus_splitgelu_fp32(const void*, const void*, void*, int, float, floa
 void mnn_corpus_splitgelu_fp16(const void*, const void*, void*, int, float, float, float, int, int, cudaStream_t);
 void mnn_corpus_split_fusedqkv_fp32(size_t, const void*, void*, void*, void*, int, int, int, cudaStream_t);
 void mnn_corpus_split_fusedqkv_fp16(size_t, const void*, void*, void*, void*, int, int, int, cudaStream_t);
+// P4 扩展：SPLIT_FusedKV shims
+void mnn_corpus_split_fusedkv_fp32(size_t, const void*, void*, void*, int, int, int, cudaStream_t);
+void mnn_corpus_split_fusedkv_fp16(size_t, const void*, void*, void*, int, int, int, cudaStream_t);
 // P4: int8 kernels — FloatToInt8/Int8ToFloat/DequantWeight/ConvDW/Im2Col/BinaryInt8
 void mnn_corpus_float2int8_packed_fp32(const float*, int8_t*, int, int, int, int, const float*, int8_t, int8_t, int8_t, int, int, cudaStream_t);
 void mnn_corpus_float2int8_single_packed_fp32(const float*, int8_t*, int, int, int, int, float, int8_t, int8_t, int8_t, int, int, cudaStream_t);
@@ -113,6 +116,14 @@ void mnn_corpus_im2col_packc16_int8(int, int, int, int, int, int, int, int, int,
 void mnn_corpus_weight_int8_pack_fill_fp32(const int8_t*, int8_t*, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_binary_int8_add_fp32(const int8_t*, float, const int8_t*, float, int8_t*, float, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_binary_int8_mul_fp32(const int8_t*, float, const int8_t*, float, int8_t*, float, int, int, int, int, int, cudaStream_t);
+// P3 扩展：BINARY_INT8 其余操作 shims
+void mnn_corpus_binary_int8_sub_fp32(const int8_t*, float, const int8_t*, float, int8_t*, float, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_int8_div_fp32(const int8_t*, float, const int8_t*, float, int8_t*, float, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_int8_minimum_fp32(const int8_t*, float, const int8_t*, float, int8_t*, float, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_int8_maximum_fp32(const int8_t*, float, const int8_t*, float, int8_t*, float, int, int, int, int, int, cudaStream_t);
+// P3 扩展：BINARY_INT8_CHANNELWISE shims (per-channel scale pointers)
+void mnn_corpus_binary_int8_channelwise_add_fp32(const int8_t*, const float*, const int8_t*, const float*, int8_t*, const float*, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_int8_channelwise_mul_fp32(const int8_t*, const float*, const int8_t*, const float*, int8_t*, const float*, int, int, int, int, cudaStream_t);
 // P5: Raster fused binary shims
 void mnn_corpus_binary_add_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_binary_mul_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
@@ -122,6 +133,55 @@ void mnn_corpus_binarymid_add_fp32(const float*, const float*, float*, int, int,
 void mnn_corpus_binarymid_mul_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_binarymidlinear4_add_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_binarymidlinear4_mul_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+// P5 扩展：Raster 融合批量 shim 声明
+// raster_binary 扩展
+void mnn_corpus_binary_sub_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_div_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_minimum_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_maximum_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_floordiv_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_floormod_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_squared_difference_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_pow_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// raster_binary_fuseadd 扩展
+void mnn_corpus_binary_fuseadd_sub_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_div_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_minimum_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_maximum_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_floordiv_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_floormod_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_squared_difference_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binary_fuseadd_pow_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// raster_binarymid 扩展
+void mnn_corpus_binarymid_sub_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_mul_silu_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_div_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_minimum_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_maximum_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_floordiv_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_floormod_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_squared_difference_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid_pow_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// raster_binarymidlinear4 扩展
+void mnn_corpus_binarymidlinear4_sub_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_mul_silu_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_div_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_minimum_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_maximum_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_floordiv_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_floormod_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_squared_difference_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinear4_pow_fp32(const float*, const float*, float*, int, int, int, int, int, int, cudaStream_t);
+// P2 扩展：BinaryMid4 / BinaryMidHalf2 / BinaryMidLinearHalf4 shims
+// BinaryMid4: 3 ptr + 12 int + grid + block + stream
+void mnn_corpus_binarymid4_add_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymid4_mul_fp32(const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// BinaryMidHalf2: 3 ptr + 12 int + grid + block + stream (same layout as Mid4)
+void mnn_corpus_binarymidhalf2_add_fp16(const __half*, const __half*, __half*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidhalf2_mul_fp16(const __half*, const __half*, __half*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
+// BinaryMidLinearHalf4: 3 ptr + 4 int + grid + block + stream
+void mnn_corpus_binarymidlinearhalf4_add_fp16(const __half*, const __half*, __half*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_binarymidlinearhalf4_mul_fp16(const __half*, const __half*, __half*, int, int, int, int, int, int, cudaStream_t);
 }
 
 namespace MNN {
@@ -3686,6 +3746,65 @@ bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) co
 SPLIT_FUSEDQKV_ADAPTER(CudaSplitFusedQKVFp32Kernel, split_fusedqkv_fp32, 0)
 SPLIT_FUSEDQKV_ADAPTER(CudaSplitFusedQKVFp16Kernel, split_fusedqkv_fp16, 1)
 
+// ---- SPLIT_FusedKV fp32 / fp16 (P4) ----
+#define SPLIT_FUSEDKV_ADAPTER(CLASS, SHIM, IS_FP16) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = "mnn_corpus_" #SHIM; \
+    const int bsh = spec.intParam("bsh", 4); \
+    const int D = spec.intParam("d", 64); \
+    const int count = bsh * D; \
+    const int inputSize = bsh * 2 * D; \
+    std::vector<float> input(inputSize); \
+    for (int i = 0; i < inputSize; ++i) input[i] = 0.1f * (i % 7); \
+    if (IS_FP16) { \
+        ac.buffers.push_back(makeHalfBuffer(input, false)); \
+        ac.buffers.push_back(makeHalfOutput(count)); /* k */ \
+        ac.buffers.back().isOutput = false; \
+        ac.buffers.push_back(makeHalfOutput(count)); /* v (read back) */ \
+    } else { \
+        AdaptedBuffer inB; inB.setFp32(input); inB.isOutput = false; \
+        AdaptedBuffer kB; kB.sizeBytes = count * sizeof(float); kB.isOutput = false; \
+        AdaptedBuffer vB; vB.sizeBytes = count * sizeof(float); vB.isOutput = true; \
+        ac.buffers.push_back(inB); ac.buffers.push_back(kB); ac.buffers.push_back(vB); \
+    } \
+    ac.args.push_back(AdaptedArg::buffer(0)); \
+    ac.args.push_back(AdaptedArg::buffer(1)); \
+    ac.args.push_back(AdaptedArg::buffer(2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(count)); \
+    ac.args.push_back(AdaptedArg::scalarInt(D)); \
+    const int grid = (count + 255) / 256; \
+    const int block = 256; \
+    ac.args.push_back(AdaptedArg::scalarInt(grid)); \
+    ac.args.push_back(AdaptedArg::scalarInt(block)); \
+    ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1; \
+    ac.validatorInputA = input; \
+    ac.elementCount = count; ac.k = D; ac.w = bsh; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    mnn_corpus_##SHIM((size_t)ctx.intArgs[0], ctx.devBufs[0], \
+                       ctx.devBufs[1], ctx.devBufs[2], \
+                       ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    const int D = ac.k; \
+    if (static_cast<int>(output.size() * sizeof(float)) < ac.elementCount * (int)(IS_FP16 ? sizeof(__half) : sizeof(float))) return false; \
+    for (int i = 0; i < ac.elementCount; ++i) { \
+        int bshd_i = i / D; \
+        int d = i % D; \
+        /* v[i] = fused_kv[(bsh*2+1)*D + d] */ \
+        float expected = ac.validatorInputA[(bshd_i * 2 + 1) * D + d]; \
+        float actual = (IS_FP16) ? __half2float(reinterpret_cast<const __half*>(output.data())[i]) : output[i]; \
+        if (std::fabs(actual - expected) > 1e-2f) return false; \
+    } \
+    return true; \
+}
+
+SPLIT_FUSEDKV_ADAPTER(CudaSplitFusedKVFp32Kernel, split_fusedkv_fp32, 0)
+SPLIT_FUSEDKV_ADAPTER(CudaSplitFusedKVFp16Kernel, split_fusedkv_fp16, 1)
+
 // ============================================================================
 // P4 int8 adapters — FloatToInt8/Int8ToFloat/DequantWeight/ConvDW/Im2Col/BinaryInt8
 // ============================================================================
@@ -4399,6 +4518,126 @@ bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) co
 
 BINARY_INT8_ADAPTER(CudaBinaryInt8AddFp32Kernel, binary_int8_add, x + y)
 BINARY_INT8_ADAPTER(CudaBinaryInt8MulFp32Kernel, binary_int8_mul, x * y)
+// P3 扩展：BINARY_INT8 其余操作
+BINARY_INT8_ADAPTER(CudaBinaryInt8SubFp32Kernel, binary_int8_sub, x - y)
+
+// DIV 专用：validator 模拟 __float2int_rn 行为，y=0 时 val=+inf → 127
+bool CudaBinaryInt8DivFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_binary_int8_div_fp32";
+    const int count = spec.intParam("count", 64);
+    const float s0 = spec.floatParam("scale0", 0.1f);
+    const float s1 = spec.floatParam("scale1", 0.1f);
+    const float os = spec.floatParam("out_scale", 10.0f);
+    std::vector<int8_t> in0(count), in1(count);
+    for (int i = 0; i < count; ++i) { in0[i] = (int8_t)(i % 7); in1[i] = (int8_t)(1 + (i % 5)); } // 1..5 避免 0
+    ac.buffers.push_back(makeInt8Buffer(in0, false));
+    ac.buffers.push_back(makeInt8Buffer(in1, false));
+    ac.buffers.push_back(makeInt8Output(count));
+    ac.args.push_back(AdaptedArg::buffer(0));
+    ac.args.push_back(AdaptedArg::scalarFloat(s0));
+    ac.args.push_back(AdaptedArg::buffer(1));
+    ac.args.push_back(AdaptedArg::scalarFloat(s1));
+    ac.args.push_back(AdaptedArg::buffer(2));
+    ac.args.push_back(AdaptedArg::scalarFloat(os));
+    ac.args.push_back(AdaptedArg::scalarInt(1));
+    ac.args.push_back(AdaptedArg::scalarInt(1));
+    ac.args.push_back(AdaptedArg::scalarInt(count));
+    ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
+    ac.validatorInputA = std::vector<float>(in0.begin(), in0.end());
+    ac.validatorInputB = std::vector<float>(in1.begin(), in1.end());
+    ac.elementCount = count;
+    ac.validatorFloats = {s0, s1, os};
+    return true;
+}
+cudaError_t CudaBinaryInt8DivFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_binary_int8_div_fp32((const int8_t*)ctx.devBufs[0], ctx.floatArgs[0],
+                                     (const int8_t*)ctx.devBufs[1], ctx.floatArgs[1],
+                                     (int8_t*)ctx.devBufs[2], ctx.floatArgs[2],
+                                     ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2],
+                                     ctx.grid, ctx.block, ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaBinaryInt8DivFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    const int count = ac.elementCount;
+    if ((int)output.size() * (int)sizeof(float) < count * (int)sizeof(int8_t)) return false;
+    const int8_t* out = reinterpret_cast<const int8_t*>(output.data());
+    const float s0 = ac.validatorFloats[0], s1 = ac.validatorFloats[1], os = ac.validatorFloats[2];
+    for (int i = 0; i < std::min(10, count); ++i) {
+        float x = ac.validatorInputA[i] * s0;
+        float y = ac.validatorInputB[i] * s1;
+        float val = x / y;
+        int expected = host_float2int_rn(os * val);
+        expected = std::min(expected, 127); expected = std::max(expected, -128);
+        if (out[i] != (int8_t)expected) return false;
+    }
+    return true;
+}
+BINARY_INT8_ADAPTER(CudaBinaryInt8MinimumFp32Kernel, binary_int8_minimum, min(x, y))
+BINARY_INT8_ADAPTER(CudaBinaryInt8MaximumFp32Kernel, binary_int8_maximum, max(x, y))
+
+// ---- BINARY_INT8_CHANNELWISE (per-channel scale) ----
+#define BINARY_INT8_CHANNELWISE_ADAPTER(CLASS, SHIM, OP) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = "mnn_corpus_" #SHIM "_fp32"; \
+    const int channelPack = spec.intParam("channel_pack", 4); \
+    const int nhwCount = spec.intParam("nhw_count", 16); \
+    const int count = channelPack * nhwCount; \
+    std::vector<int8_t> in0(count), in1(count); \
+    for (int i = 0; i < count; ++i) { in0[i] = (int8_t)(i % 7); in1[i] = (int8_t)(i % 5); } \
+    std::vector<float> s0(channelPack), s1(channelPack), os(channelPack); \
+    for (int c = 0; c < channelPack; ++c) { s0[c] = 0.1f; s1[c] = 0.1f; os[c] = 10.0f; } \
+    ac.buffers.push_back(makeInt8Buffer(in0, false)); \
+    AdaptedBuffer s0Buf; s0Buf.setFp32(s0); s0Buf.isOutput = false; ac.buffers.push_back(s0Buf); \
+    ac.buffers.push_back(makeInt8Buffer(in1, false)); \
+    AdaptedBuffer s1Buf; s1Buf.setFp32(s1); s1Buf.isOutput = false; ac.buffers.push_back(s1Buf); \
+    ac.buffers.push_back(makeInt8Output(count)); \
+    AdaptedBuffer osBuf; osBuf.setFp32(os); osBuf.isOutput = false; ac.buffers.push_back(osBuf); \
+    ac.args.push_back(AdaptedArg::buffer(0)); /* input0_addr */ \
+    ac.args.push_back(AdaptedArg::buffer(1)); /* input0_scale */ \
+    ac.args.push_back(AdaptedArg::buffer(2)); /* input1_addr */ \
+    ac.args.push_back(AdaptedArg::buffer(3)); /* input1_scale */ \
+    ac.args.push_back(AdaptedArg::buffer(4)); /* output_addr */ \
+    ac.args.push_back(AdaptedArg::buffer(5)); /* output_scale */ \
+    ac.args.push_back(AdaptedArg::scalarInt(channelPack)); \
+    ac.args.push_back(AdaptedArg::scalarInt(count)); \
+    ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1; \
+    ac.validatorInputA = std::vector<float>(in0.begin(), in0.end()); \
+    ac.validatorInputB = std::vector<float>(in1.begin(), in1.end()); \
+    ac.elementCount = count; \
+    ac.validatorFloats = {0.1f, 0.1f, 10.0f}; /* per-channel same */ \
+    ac.k = channelPack; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    mnn_corpus_##SHIM##_fp32((const int8_t*)ctx.devBufs[0], (const float*)ctx.devBufs[1], \
+                              (const int8_t*)ctx.devBufs[2], (const float*)ctx.devBufs[3], \
+                              (int8_t*)ctx.devBufs[4], (const float*)ctx.devBufs[5], \
+                              ctx.intArgs[0], ctx.intArgs[1], \
+                              ctx.grid, ctx.block, ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    const int count = ac.elementCount; \
+    const int channelPack = ac.k; \
+    if ((int)output.size() * (int)sizeof(float) < count * (int)sizeof(int8_t)) return false; \
+    const int8_t* out = reinterpret_cast<const int8_t*>(output.data()); \
+    const float s0 = ac.validatorFloats[0], s1 = ac.validatorFloats[1], os = ac.validatorFloats[2]; \
+    for (int i = 0; i < std::min(10, count); ++i) { \
+        int cpIndex = i % channelPack; (void)cpIndex; \
+        float x = ac.validatorInputA[i] * s0; \
+        float y = ac.validatorInputB[i] * s1; \
+        float val = (OP); \
+        int expected = host_float2int_rn(os * val); \
+        expected = min(expected, 127); expected = max(expected, -128); \
+        if (out[i] != (int8_t)expected) return false; \
+    } \
+    return true; \
+}
+
+BINARY_INT8_CHANNELWISE_ADAPTER(CudaBinaryInt8ChannelwiseAddFp32Kernel, binary_int8_channelwise_add, x + y)
+BINARY_INT8_CHANNELWISE_ADAPTER(CudaBinaryInt8ChannelwiseMulFp32Kernel, binary_int8_channelwise_mul, x * y)
 
 // ============================================================================
 // P5 Raster fused binary adapters
@@ -4631,6 +4870,218 @@ bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) co
 RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4AddFp32Kernel, binarymidlinear4_add, (ac.validatorInputA[i] + ac.validatorInputB[i]))
 RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MulFp32Kernel, binarymidlinear4_mul, (ac.validatorInputA[i] * ac.validatorInputB[i]))
 
+// ============================================================================
+// P5 扩展：Raster 融合宏实例批量实例化
+// ============================================================================
+
+// raster_binary 扩展 (SUB/DIV/MIN/MAX/FLOORDIV/FLOORMOD/SQUAREDDIFF/POW)
+RASTER_BINARY_ADAPTER(CudaBinarySubRasterFp32Kernel, binary_sub, (ac.validatorInputA[i] - ac.validatorInputB[i]))
+RASTER_BINARY_ADAPTER(CudaBinaryDivRasterFp32Kernel, binary_div, (ac.validatorInputA[i] / ac.validatorInputB[i]))
+RASTER_BINARY_ADAPTER(CudaBinaryMinimumRasterFp32Kernel, binary_minimum, (std::min(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_BINARY_ADAPTER(CudaBinaryMaximumRasterFp32Kernel, binary_maximum, (std::max(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_BINARY_ADAPTER(CudaBinaryFloordivRasterFp32Kernel, binary_floordiv, (floorf(ac.validatorInputA[i] / ac.validatorInputB[i])))
+RASTER_BINARY_ADAPTER(CudaBinaryFloormodRasterFp32Kernel, binary_floormod, (ac.validatorInputA[i] - floorf(ac.validatorInputA[i] / ac.validatorInputB[i]) * ac.validatorInputB[i]))
+RASTER_BINARY_ADAPTER(CudaBinarySquaredDifferenceRasterFp32Kernel, binary_squared_difference, ((ac.validatorInputA[i] - ac.validatorInputB[i]) * (ac.validatorInputA[i] - ac.validatorInputB[i])))
+RASTER_BINARY_ADAPTER(CudaBinaryPowRasterFp32Kernel, binary_pow, (powf(ac.validatorInputA[i], ac.validatorInputB[i])))
+
+// raster_binary_fuseadd 扩展 (validator: initial=0, output = 0 OP val = OP val)
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddSubFp32Kernel, binary_fuseadd_sub, (ac.validatorInputA[i] - ac.validatorInputB[i]))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddDivFp32Kernel, binary_fuseadd_div, (ac.validatorInputA[i] / ac.validatorInputB[i]))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddMinimumFp32Kernel, binary_fuseadd_minimum, (std::min(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddMaximumFp32Kernel, binary_fuseadd_maximum, (std::max(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddFloordivFp32Kernel, binary_fuseadd_floordiv, (floorf(ac.validatorInputA[i] / ac.validatorInputB[i])))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddFloormodFp32Kernel, binary_fuseadd_floormod, (ac.validatorInputA[i] - floorf(ac.validatorInputA[i] / ac.validatorInputB[i]) * ac.validatorInputB[i]))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddSquaredDifferenceFp32Kernel, binary_fuseadd_squared_difference, ((ac.validatorInputA[i] - ac.validatorInputB[i]) * (ac.validatorInputA[i] - ac.validatorInputB[i])))
+RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddPowFp32Kernel, binary_fuseadd_pow, (powf(ac.validatorInputA[i], ac.validatorInputB[i])))
+
+// raster_binarymid 扩展
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidSubFp32Kernel, binarymid_sub, (ac.validatorInputA[i] - ac.validatorInputB[i]))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidMulSiluFp32Kernel, binarymid_mul_silu, (ac.validatorInputA[i] * (ac.validatorInputB[i] / (1.0f + expf(-ac.validatorInputB[i])))))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidDivFp32Kernel, binarymid_div, (ac.validatorInputA[i] / ac.validatorInputB[i]))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidMinimumFp32Kernel, binarymid_minimum, (std::min(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidMaximumFp32Kernel, binarymid_maximum, (std::max(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidFloordivFp32Kernel, binarymid_floordiv, (floorf(ac.validatorInputA[i] / ac.validatorInputB[i])))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidFloormodFp32Kernel, binarymid_floormod, (ac.validatorInputA[i] - floorf(ac.validatorInputA[i] / ac.validatorInputB[i]) * ac.validatorInputB[i]))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidSquaredDifferenceFp32Kernel, binarymid_squared_difference, ((ac.validatorInputA[i] - ac.validatorInputB[i]) * (ac.validatorInputA[i] - ac.validatorInputB[i])))
+RASTER_BINARYMID_ADAPTER(CudaBinaryMidPowFp32Kernel, binarymid_pow, (powf(ac.validatorInputA[i], ac.validatorInputB[i])))
+
+// raster_binarymidlinear4 扩展
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4SubFp32Kernel, binarymidlinear4_sub, (ac.validatorInputA[i] - ac.validatorInputB[i]))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MulSiluFp32Kernel, binarymidlinear4_mul_silu, (ac.validatorInputA[i] * (ac.validatorInputB[i] / (1.0f + expf(-ac.validatorInputB[i])))))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4DivFp32Kernel, binarymidlinear4_div, (ac.validatorInputA[i] / ac.validatorInputB[i]))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MinimumFp32Kernel, binarymidlinear4_minimum, (std::min(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MaximumFp32Kernel, binarymidlinear4_maximum, (std::max(ac.validatorInputA[i], ac.validatorInputB[i])))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4FloordivFp32Kernel, binarymidlinear4_floordiv, (floorf(ac.validatorInputA[i] / ac.validatorInputB[i])))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4FloormodFp32Kernel, binarymidlinear4_floormod, (ac.validatorInputA[i] - floorf(ac.validatorInputA[i] / ac.validatorInputB[i]) * ac.validatorInputB[i]))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4SquaredDifferenceFp32Kernel, binarymidlinear4_squared_difference, ((ac.validatorInputA[i] - ac.validatorInputB[i]) * (ac.validatorInputA[i] - ac.validatorInputB[i])))
+RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4PowFp32Kernel, binarymidlinear4_pow, (powf(ac.validatorInputA[i], ac.validatorInputB[i])))
+
+// ============================================================================
+// P2 扩展：BinaryMid4 / BinaryMidHalf2 / BinaryMidLinearHalf4 adapter
+// ============================================================================
+
+// ---- BinaryMid4 (fp32, float4, PACK_NUMBER=4) ----
+// stride 不含 X 维度（X 通过 ix<<2 内嵌在 offset 内）
+#define RASTER_BINARYMID4_ADAPTER(CLASS, SHIM, OP) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = "mnn_corpus_" #SHIM "_fp32"; \
+    /* 固定 sizeX=1, X 维度通过 ix<<2 内嵌；sizeY*sizeZ*sizeX_4 是 4 倍组数 */ \
+    const int sizeZ = spec.intParam("size_z", 2); \
+    const int sizeY = spec.intParam("size_y", 4); \
+    const int sizeX = spec.intParam("size_x", 4); /* 每个 4-float 组的个数 */ \
+    const int total = sizeZ * sizeY * sizeX * 4; /* 实际 float 数 */ \
+    std::vector<float> in0(total), in1(total); \
+    for (int i = 0; i < total; ++i) { in0[i] = 0.1f * (i % 7); in1[i] = 0.1f * (i % 5); } \
+    AdaptedBuffer b0; b0.setFp32(in0); b0.isOutput = false; \
+    AdaptedBuffer b1; b1.setFp32(in1); b1.isOutput = false; \
+    AdaptedBuffer out; out.sizeBytes = total * sizeof(float); out.isOutput = true; \
+    ac.buffers.push_back(b0); ac.buffers.push_back(b1); ac.buffers.push_back(out); \
+    ac.args.push_back(AdaptedArg::buffer(0)); \
+    ac.args.push_back(AdaptedArg::buffer(1)); \
+    ac.args.push_back(AdaptedArg::buffer(2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeZ)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX)); \
+    /* strideZ/strideY 不含 X 维度（X 已融入 linear 布局）*/ \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY * sizeX * 4)); /* strideZ */ \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX * 4));         /* strideY */ \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY * sizeX * 4)); /* strideZ1 */ \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX * 4));         /* strideY1 */ \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY * sizeX * 4)); /* dstStrideZ */ \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX * 4));         /* dstStrideY */ \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); /* activationType */ \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); /* inp0Broadcast */ \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); /* inp1Broadcast */ \
+    ac.globalSize[0] = gridFor(sizeZ * sizeY * sizeX); ac.localSize[0] = kBlock; ac.dims = 1; \
+    ac.validatorInputA = in0; ac.validatorInputB = in1; \
+    ac.elementCount = total; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    mnn_corpus_##SHIM##_fp32((const float*)ctx.devBufs[0], (const float*)ctx.devBufs[1], (float*)ctx.devBufs[2], \
+                              ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], \
+                              ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5], \
+                              ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], \
+                              ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11], \
+                              ctx.grid, ctx.block, ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    if ((int)output.size() < ac.elementCount) return false; \
+    for (int i = 0; i < std::min(10, ac.elementCount); ++i) { \
+        float expected = OP; \
+        if (std::fabs(output[i] - expected) > 1e-3f) return false; \
+    } \
+    return true; \
+}
+
+RASTER_BINARYMID4_ADAPTER(CudaBinaryMid4AddFp32Kernel, binarymid4_add, (ac.validatorInputA[i] + ac.validatorInputB[i]))
+RASTER_BINARYMID4_ADAPTER(CudaBinaryMid4MulFp32Kernel, binarymid4_mul, (ac.validatorInputA[i] * ac.validatorInputB[i]))
+
+// ---- BinaryMidHalf2 (fp16) ----
+#define RASTER_BINARYMIDHALF2_ADAPTER(CLASS, SHIM, OP) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = "mnn_corpus_" #SHIM "_fp16"; \
+    const int sizeZ = spec.intParam("size_z", 2); \
+    const int sizeY = spec.intParam("size_y", 4); \
+    const int sizeX = spec.intParam("size_x", 4); \
+    const int total = sizeZ * sizeY * sizeX * 2; \
+    std::vector<float> in0(total), in1(total); \
+    for (int i = 0; i < total; ++i) { in0[i] = 0.1f * (i % 7); in1[i] = 0.1f * (i % 5); } \
+    auto h0 = packHalf(in0); auto h1 = packHalf(in1); \
+    AdaptedBuffer b0; b0.sizeBytes = h0.size(); b0.initialData = h0; b0.isOutput = false; \
+    AdaptedBuffer b1; b1.sizeBytes = h1.size(); b1.initialData = h1; b1.isOutput = false; \
+    AdaptedBuffer out; out.sizeBytes = total * sizeof(__half); out.isOutput = true; \
+    ac.buffers.push_back(b0); ac.buffers.push_back(b1); ac.buffers.push_back(out); \
+    ac.args.push_back(AdaptedArg::buffer(0)); \
+    ac.args.push_back(AdaptedArg::buffer(1)); \
+    ac.args.push_back(AdaptedArg::buffer(2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeZ)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY * sizeX * 2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX * 2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY * sizeX * 2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX * 2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeY * sizeX * 2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(sizeX * 2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.globalSize[0] = gridFor(sizeZ * sizeY * sizeX); ac.localSize[0] = kBlock; ac.dims = 1; \
+    ac.validatorInputA = in0; ac.validatorInputB = in1; \
+    ac.elementCount = total; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    mnn_corpus_##SHIM##_fp16((const __half*)ctx.devBufs[0], (const __half*)ctx.devBufs[1], (__half*)ctx.devBufs[2], \
+                              ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], \
+                              ctx.intArgs[3], ctx.intArgs[4], ctx.intArgs[5], \
+                              ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], \
+                              ctx.intArgs[9], ctx.intArgs[10], ctx.intArgs[11], \
+                              ctx.grid, ctx.block, ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    if (static_cast<int>(output.size() * sizeof(float)) < ac.elementCount * (int)sizeof(__half)) return false; \
+    const __half* outHalf = reinterpret_cast<const __half*>(output.data()); \
+    for (int i = 0; i < std::min(10, ac.elementCount); ++i) { \
+        float expected = OP; \
+        if (std::fabs(__half2float(outHalf[i]) - expected) > 1e-2f) return false; \
+    } \
+    return true; \
+}
+
+RASTER_BINARYMIDHALF2_ADAPTER(CudaBinaryMidHalf2AddFp16Kernel, binarymidhalf2_add, (ac.validatorInputA[i] + ac.validatorInputB[i]))
+RASTER_BINARYMIDHALF2_ADAPTER(CudaBinaryMidHalf2MulFp16Kernel, binarymidhalf2_mul, (ac.validatorInputA[i] * ac.validatorInputB[i]))
+
+// ---- BinaryMidLinearHalf4 (fp16, 1D linear) ----
+#define RASTER_BINARYMIDLINEARHALF4_ADAPTER(CLASS, SHIM, OP) \
+bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
+    if (spec.tag != "3.6.0") return false; \
+    ac.entry = "mnn_corpus_" #SHIM "_fp16"; \
+    const int count = spec.intParam("count", 64); \
+    const int count_4 = count / 4; \
+    std::vector<float> in0(count), in1(count); \
+    for (int i = 0; i < count; ++i) { in0[i] = 0.1f * (i % 7); in1[i] = 0.1f * (i % 5); } \
+    auto h0 = packHalf(in0); auto h1 = packHalf(in1); \
+    AdaptedBuffer b0; b0.sizeBytes = h0.size(); b0.initialData = h0; b0.isOutput = false; \
+    AdaptedBuffer b1; b1.sizeBytes = h1.size(); b1.initialData = h1; b1.isOutput = false; \
+    AdaptedBuffer out; out.sizeBytes = count * sizeof(__half); out.isOutput = true; \
+    ac.buffers.push_back(b0); ac.buffers.push_back(b1); ac.buffers.push_back(out); \
+    ac.args.push_back(AdaptedArg::buffer(0)); \
+    ac.args.push_back(AdaptedArg::buffer(1)); \
+    ac.args.push_back(AdaptedArg::buffer(2)); \
+    ac.args.push_back(AdaptedArg::scalarInt(count_4)); \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.args.push_back(AdaptedArg::scalarInt(0)); \
+    ac.globalSize[0] = gridFor(count_4); ac.localSize[0] = kBlock; ac.dims = 1; \
+    ac.validatorInputA = in0; ac.validatorInputB = in1; \
+    ac.elementCount = count; \
+    return true; \
+} \
+cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
+    mnn_corpus_##SHIM##_fp16((const __half*)ctx.devBufs[0], (const __half*)ctx.devBufs[1], (__half*)ctx.devBufs[2], \
+                              ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3], \
+                              ctx.grid, ctx.block, ctx.stream); \
+    return cudaGetLastError(); \
+} \
+bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
+    if (static_cast<int>(output.size() * sizeof(float)) < ac.elementCount * (int)sizeof(__half)) return false; \
+    const __half* outHalf = reinterpret_cast<const __half*>(output.data()); \
+    for (int i = 0; i < std::min(10, ac.elementCount); ++i) { \
+        float expected = OP; \
+        if (std::fabs(__half2float(outHalf[i]) - expected) > 1e-2f) return false; \
+    } \
+    return true; \
+}
+
+RASTER_BINARYMIDLINEARHALF4_ADAPTER(CudaBinaryMidLinearHalf4AddFp16Kernel, binarymidlinearhalf4_add, (ac.validatorInputA[i] + ac.validatorInputB[i]))
+RASTER_BINARYMIDLINEARHALF4_ADAPTER(CudaBinaryMidLinearHalf4MulFp16Kernel, binarymidlinearhalf4_mul, (ac.validatorInputA[i] * ac.validatorInputB[i]))
+
 void registerCudaOpsFp16() {
     static struct Reg {
         Reg() {
@@ -4712,6 +5163,9 @@ void registerCudaOpsFp16() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSplitGeluFp16Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSplitFusedQKVFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSplitFusedQKVFp16Kernel()));
+            // P4 扩展：SPLIT_FusedKV
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSplitFusedKVFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaSplitFusedKVFp16Kernel()));
             // P4: int8 kernels
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat2Int8Fp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat2Int8SingleFp32Kernel()));
@@ -4725,6 +5179,13 @@ void registerCudaOpsFp16() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaWeightInt8PackFillFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8AddFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8MulFp32Kernel()));
+            // P3 扩展：BINARY_INT8 其余 + CHANNELWISE
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8SubFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8DivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8MinimumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8MaximumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8ChannelwiseAddFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryInt8ChannelwiseMulFp32Kernel()));
             // P5: Raster fused binary
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryAddRasterFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMulRasterFp32Kernel()));
@@ -4734,6 +5195,48 @@ void registerCudaOpsFp16() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidMulFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4AddFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4MulFp32Kernel()));
+            // P5 扩展：Raster 融合宏实例批量注册
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinarySubRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryDivRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMinimumRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMaximumRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFloordivRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFloormodRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinarySquaredDifferenceRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryPowRasterFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddSubFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddDivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddMinimumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddMaximumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddFloordivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddFloormodFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddSquaredDifferenceFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryFuseAddPowFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidSubFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidMulSiluFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidDivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidMinimumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidMaximumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidFloordivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidFloormodFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidSquaredDifferenceFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidPowFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4SubFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4MulSiluFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4DivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4MinimumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4MaximumFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4FloordivFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4FloormodFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4SquaredDifferenceFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinear4PowFp32Kernel()));
+            // P2 扩展：BinaryMid4 / BinaryMidHalf2 / BinaryMidLinearHalf4
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMid4AddFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMid4MulFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidHalf2AddFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidHalf2MulFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinearHalf4AddFp16Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaBinaryMidLinearHalf4MulFp16Kernel()));
         }
     } r;
     (void)r;

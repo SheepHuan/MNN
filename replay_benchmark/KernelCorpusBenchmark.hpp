@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace MNN {
@@ -36,6 +37,16 @@ struct CaseReport {
     bool responsive = false;
     bool valid = false;
     std::string error;
+
+    // Per-case wall-clock timing (nanoseconds). workloadNs is total time for
+    // `runs` dispatches; nsPerDispatch = workloadNs / runs.
+    uint64_t workloadNs = 0;
+    int runs = 0;
+
+    // Per-metric PMC values collected during workload dispatch. Names match
+    // the metric names passed to beginPmu(); values[i] corresponds to names[i].
+    // Empty when the PMU backend is unavailable or not compiled in.
+    std::vector<std::pair<std::string, uint64_t>> pmuCounters;
 };
 
 // Run the kernel corpus benchmark and return false only on unrecoverable
