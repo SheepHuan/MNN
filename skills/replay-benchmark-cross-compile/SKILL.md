@@ -138,12 +138,13 @@ build-tree RPATH is host-specific, so set `LD_LIBRARY_PATH` on the device.
 
 ### 5. Deploy to the Rhino Pi-X1
 
-The device is `root@192.168.101.227`, architecture `aarch64`, and the required
-workspace is `/mnt/nvme/workspace`. Use an SSH key for non-interactive runs:
+The device is `${RHINO_PI_USER}@${RHINO_PI_HOST}` (see `.env`), architecture
+`aarch64`, and the required workspace is `$RHINO_PI_WORKSPACE`. Use an SSH
+key for non-interactive runs:
 
 ```bash
-device=root@192.168.101.227
-remote_root=/mnt/nvme/workspace/replay-benchmark
+device="${RHINO_PI_USER:-root}@${RHINO_PI_HOST:?source .env first}"
+remote_root="${RHINO_PI_WORKSPACE:-/mnt/nvme/workspace}/replay-benchmark"
 ssh "$device" "mkdir -p $remote_root/bin $remote_root/lib $remote_root/models $remote_root/records"
 scp "$artifact" "$device:$remote_root/bin/"
 scp "$repo_root/build-aarch64-gnueabihf/libMNN.so" \

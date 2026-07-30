@@ -11713,6 +11713,1455 @@
       "float_params": {
         "q_scale": 1.0
       }
+    },
+    {
+      "name": "cuda_conv_dw_bf16_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_bf16_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 1,
+        "kw": 3,
+        "kh": 3
+      }
+    },
+    {
+      "name": "cuda_conv_dw_bf162_opt_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_bf162_opt_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 1,
+        "kw": 3,
+        "kh": 3
+      }
+    },
+    {
+      "name": "cuda_conv_dw3x3_bf162_opt_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw3x3_bf162_opt_fp32",
+      "int_params": {
+        "iw": 10,
+        "ih": 10,
+        "channels": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_bf16_multi_width4_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_bf16_multi_width4_fp32",
+      "int_params": {
+        "iw": 12,
+        "ih": 12,
+        "channels": 1,
+        "kw": 5,
+        "kh": 1
+      }
+    },
+    {
+      "name": "cuda_weight_trans_to_bf16_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "cuda_weight_trans_to_bf16_fp32",
+      "int_params": {
+        "oc": 4,
+        "khw": 9
+      }
+    },
+    {
+      "name": "cuda_bias_trans_to_bf16_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "cuda_bias_trans_to_bf16_fp32",
+      "int_params": {
+        "oc": 4
+      }
+    },
+    {
+      "name": "float2int8_fp32_small",
+      "backend": "cuda",
+      "op_type": "cast",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_fp32",
+      "dtype": "float32",
+      "validator": "identity_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 16,
+        "scale": 1.0
+      }
+    },
+    {
+      "name": "float2int8_fp32_large",
+      "backend": "cuda",
+      "op_type": "cast",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_fp32",
+      "dtype": "float32",
+      "validator": "identity_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256,
+        "scale": 1.0
+      }
+    },
+    {
+      "name": "cuda_float2int8_cast_pack_fp32_ch4",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_cast_pack_fp32",
+      "int_params": {
+        "c": 4,
+        "count": 4
+      },
+      "float_params": {
+        "scale": 0.1
+      }
+    },
+    {
+      "name": "cuda_float2int8_cast_pack_fp32_ch16",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_cast_pack_fp32",
+      "int_params": {
+        "c": 16,
+        "count": 4
+      },
+      "float_params": {
+        "scale": 0.1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_kw5_pad2",
+      "backend": "cuda",
+      "op_type": "conv_dw",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "iw": 10,
+        "ih": 10,
+        "channels": 4,
+        "kw": 5,
+        "kh": 5,
+        "pw": 2,
+        "ph": 2
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_stride2",
+      "backend": "cuda",
+      "op_type": "conv_dw",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "iw": 16,
+        "ih": 16,
+        "channels": 4,
+        "kw": 3,
+        "kh": 3,
+        "sw": 2,
+        "sh": 2
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_ch8",
+      "backend": "cuda",
+      "op_type": "conv_dw",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "dtype": "float32",
+      "validator": "",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 8,
+        "kw": 3,
+        "kh": 3
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_ch16",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 16,
+        "kw": 3,
+        "kh": 3,
+        "pw": 1,
+        "ph": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_stride2_pad0",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 16,
+        "ih": 16,
+        "channels": 4,
+        "kw": 3,
+        "kh": 3,
+        "sw": 2,
+        "sh": 2,
+        "pw": 0,
+        "ph": 0
+      }
+    },
+    {
+      "name": "cuda_maxpool_fp32_k5",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "maxpool",
+      "tag": "3.6.0",
+      "variant": "cuda_maxpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 12,
+        "w": 12,
+        "kernel_size": 5,
+        "stride": 2,
+        "pad": 2
+      }
+    },
+    {
+      "name": "cuda_reduction_sum_fp32_axis256",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_sum_fp32",
+      "int_params": {
+        "outside": 2,
+        "axis": 256,
+        "inside": 4
+      }
+    },
+    {
+      "name": "cuda_softmax_fp32_axis64",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0",
+      "variant": "cuda_softmax_fp32",
+      "int_params": {
+        "outside": 2,
+        "axis": 64,
+        "inside": 4
+      }
+    },
+    {
+      "name": "cuda_layernorm_fp32_size512",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_layernorm_fp32",
+      "int_params": {
+        "size": 512,
+        "channels": 512
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_kw1",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 8,
+        "kw": 1,
+        "kh": 1,
+        "pw": 0,
+        "ph": 0
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_conv_dw_fp32_kw5_s2",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 16,
+        "ih": 16,
+        "channels": 4,
+        "kw": 5,
+        "kh": 5,
+        "sw": 2,
+        "sh": 2,
+        "pw": 2,
+        "ph": 2
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_conv_dw_fp32_s1_p0",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 8,
+        "kw": 3,
+        "kh": 3,
+        "sw": 1,
+        "sh": 1,
+        "pw": 0,
+        "ph": 0
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_conv_dw_fp32_ch32",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 4,
+        "ih": 4,
+        "channels": 32,
+        "kw": 3,
+        "kh": 3,
+        "pw": 1,
+        "ph": 1
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_general_batch_matmul_fp32_small",
+      "variant": "cuda_general_batch_matmul_fp32",
+      "int_params": {
+        "batch": 1,
+        "m": 4,
+        "n": 4,
+        "k": 4
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_general_batch_matmul_fp32_largek",
+      "variant": "cuda_general_batch_matmul_fp32",
+      "int_params": {
+        "batch": 1,
+        "m": 8,
+        "n": 8,
+        "k": 64
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_general_batch_matmul_fp32_batch2",
+      "variant": "cuda_general_batch_matmul_fp32",
+      "int_params": {
+        "batch": 2,
+        "m": 4,
+        "n": 4,
+        "k": 8
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_matmul_gemv_fp32_n16",
+      "variant": "cuda_matmul_gemv_fp32",
+      "int_params": {
+        "batch": 1,
+        "n": 16,
+        "k": 8
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_matmul_gemv_fp32_n32",
+      "variant": "cuda_matmul_gemv_fp32",
+      "int_params": {
+        "batch": 1,
+        "n": 32,
+        "k": 16
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_gemm_fpaint8b_fp32_oc8",
+      "variant": "cuda_gemm_fpaint8b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 8,
+        "oc_p": 8,
+        "quan_c": 8
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_gemm_fpaint4b_fp32_ic16",
+      "variant": "cuda_gemm_fpaint4b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 4,
+        "oc_p": 8,
+        "quan_c": 4
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_gemv_fpaint8b_fp32_batch2",
+      "variant": "cuda_gemv_fpaint8b_fp32",
+      "int_params": {
+        "batch": 2,
+        "ic": 8,
+        "oc": 4,
+        "quan_c": 4
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v5_fp32_oc8",
+      "variant": "cuda_gemv_fpaint4b_v5_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 8,
+        "quan_c": 8
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_gemv_fpaint8b_v2_fp32_oc8",
+      "variant": "cuda_gemv_fpaint8b_v2_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "oc": 8,
+        "quan_c": 8
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_maxpool_fp32_k5_s2",
+      "variant": "cuda_maxpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 12,
+        "w": 12,
+        "kernel_size": 5,
+        "stride": 2,
+        "pad": 2
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "maxpool",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_avgpool_fp32_k3_s1",
+      "variant": "cuda_avgpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 8,
+        "w": 8,
+        "kernel_size": 3,
+        "stride": 1,
+        "pad": 1
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "avgpool",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_maxpool_fp32_k1",
+      "variant": "cuda_maxpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 4,
+        "h": 8,
+        "w": 8,
+        "kernel_size": 1,
+        "stride": 1,
+        "pad": 0
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "maxpool",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_reduction_sum_fp32_axis64",
+      "variant": "cuda_reduction_sum_fp32",
+      "int_params": {
+        "outside": 2,
+        "axis": 64,
+        "inside": 4
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_reduction_mean_fp32_axis32",
+      "variant": "cuda_reduction_mean_fp32",
+      "int_params": {
+        "outside": 4,
+        "axis": 32,
+        "inside": 2
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_reduction_max_fp32_axis128",
+      "variant": "cuda_reduction_max_fp32",
+      "int_params": {
+        "outside": 2,
+        "axis": 128,
+        "inside": 1
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_softmax_fp32_axis8",
+      "variant": "cuda_softmax_fp32",
+      "int_params": {
+        "outside": 4,
+        "axis": 8,
+        "inside": 2
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_softmax_warp32_fp32_axis16",
+      "variant": "cuda_softmax_warp32_fp32",
+      "int_params": {
+        "outside": 4,
+        "axis": 16,
+        "inside": 2
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_layernorm_fp32_size128",
+      "variant": "cuda_layernorm_fp32",
+      "int_params": {
+        "size": 128,
+        "channels": 128
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_layernorm_fp32_size256",
+      "variant": "cuda_layernorm_fp32",
+      "int_params": {
+        "size": 256,
+        "channels": 256
+      },
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0"
+    },
+    {
+      "name": "cuda_conv_dw_fp32_mb_3.6.0",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 32,
+        "ih": 32,
+        "channels": 8,
+        "kw": 1,
+        "kh": 1,
+        "pw": 0,
+        "ph": 0,
+        "sw": 1,
+        "sh": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_fp32_cb_3.6.0",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 8,
+        "kw": 5,
+        "kh": 5,
+        "pw": 2,
+        "ph": 2,
+        "sw": 1,
+        "sh": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_opt_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_opt_fp32",
+      "int_params": {
+        "iw": 32,
+        "ih": 32,
+        "channels": 1,
+        "kw": 1,
+        "kh": 1,
+        "pw": 0,
+        "ph": 0,
+        "sw": 1,
+        "sh": 1
+      }
+    },
+    {
+      "name": "cuda_conv_dw_opt_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_opt_fp32",
+      "int_params": {
+        "iw": 8,
+        "ih": 8,
+        "channels": 1,
+        "kw": 5,
+        "kh": 5,
+        "pw": 2,
+        "ph": 2,
+        "sw": 1,
+        "sh": 1
+      }
+    },
+    {
+      "name": "cuda_general_batch_matmul_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0",
+      "variant": "cuda_general_batch_matmul_fp32",
+      "int_params": {
+        "batch": 1,
+        "m": 64,
+        "n": 64,
+        "k": 4
+      }
+    },
+    {
+      "name": "cuda_general_batch_matmul_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0",
+      "variant": "cuda_general_batch_matmul_fp32",
+      "int_params": {
+        "batch": 1,
+        "m": 4,
+        "n": 4,
+        "k": 128
+      }
+    },
+    {
+      "name": "cuda_matmul_gemv_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0",
+      "variant": "cuda_matmul_gemv_fp32",
+      "int_params": {
+        "batch": 1,
+        "n": 4,
+        "k": 64
+      }
+    },
+    {
+      "name": "cuda_matmul_gemv_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "matmul",
+      "tag": "3.6.0",
+      "variant": "cuda_matmul_gemv_fp32",
+      "int_params": {
+        "batch": 1,
+        "n": 64,
+        "k": 4
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint8b_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint8b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 4,
+        "ic_p": 8,
+        "oc": 8,
+        "oc_p": 8,
+        "quan_c": 8
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint8b_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint8b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 4,
+        "oc_p": 8,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint4b_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint4b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 4,
+        "ic_p": 8,
+        "oc": 8,
+        "oc_p": 8,
+        "quan_c": 8
+      }
+    },
+    {
+      "name": "cuda_gemm_fpaint4b_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemm_fpaint4b_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 4,
+        "oc_p": 8,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v5_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v5_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 4,
+        "ic_p": 8,
+        "oc": 4,
+        "oc_p": 8,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v5_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v5_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 8,
+        "oc_p": 8,
+        "quan_c": 8
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v9_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v9_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 4,
+        "ic_p": 8,
+        "oc": 4,
+        "oc_p": 8,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v9_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v9_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 8,
+        "oc_p": 8,
+        "quan_c": 8
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v14_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v14_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 4,
+        "ic_p": 8,
+        "oc": 4,
+        "oc_p": 8,
+        "quan_c": 4
+      }
+    },
+    {
+      "name": "cuda_gemv_fpaint4b_v14_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "conv_fpa_intb",
+      "tag": "3.6.0",
+      "variant": "cuda_gemv_fpaint4b_v14_fp32",
+      "int_params": {
+        "batch": 1,
+        "ic": 8,
+        "ic_p": 8,
+        "oc": 8,
+        "oc_p": 8,
+        "quan_c": 8
+      }
+    },
+    {
+      "name": "cuda_maxpool_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "maxpool",
+      "tag": "3.6.0",
+      "variant": "cuda_maxpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 32,
+        "w": 32,
+        "kernel_size": 1,
+        "stride": 1,
+        "pad": 0
+      }
+    },
+    {
+      "name": "cuda_maxpool_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "maxpool",
+      "tag": "3.6.0",
+      "variant": "cuda_maxpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 8,
+        "w": 8,
+        "kernel_size": 5,
+        "stride": 1,
+        "pad": 2
+      }
+    },
+    {
+      "name": "cuda_avgpool_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "avgpool",
+      "tag": "3.6.0",
+      "variant": "cuda_avgpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 32,
+        "w": 32,
+        "kernel_size": 1,
+        "stride": 1,
+        "pad": 0
+      }
+    },
+    {
+      "name": "cuda_avgpool_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "avgpool",
+      "tag": "3.6.0",
+      "variant": "cuda_avgpool_fp32",
+      "int_params": {
+        "batch": 1,
+        "channels": 8,
+        "h": 8,
+        "w": 8,
+        "kernel_size": 5,
+        "stride": 1,
+        "pad": 2
+      }
+    },
+    {
+      "name": "cuda_reduction_sum_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_sum_fp32",
+      "int_params": {
+        "outside": 64,
+        "axis": 4,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_sum_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_sum_fp32",
+      "int_params": {
+        "outside": 1,
+        "axis": 256,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_mean_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_mean_fp32",
+      "int_params": {
+        "outside": 64,
+        "axis": 4,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_mean_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_mean_fp32",
+      "int_params": {
+        "outside": 1,
+        "axis": 256,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_max_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_max_fp32",
+      "int_params": {
+        "outside": 64,
+        "axis": 4,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_reduction_max_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "reduction",
+      "tag": "3.6.0",
+      "variant": "cuda_reduction_max_fp32",
+      "int_params": {
+        "outside": 1,
+        "axis": 256,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_softmax_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0",
+      "variant": "cuda_softmax_fp32",
+      "int_params": {
+        "outside": 32,
+        "axis": 4,
+        "inside": 4
+      }
+    },
+    {
+      "name": "cuda_softmax_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0",
+      "variant": "cuda_softmax_fp32",
+      "int_params": {
+        "outside": 1,
+        "axis": 128,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_softmax_warp32_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0",
+      "variant": "cuda_softmax_warp32_fp32",
+      "int_params": {
+        "outside": 32,
+        "axis": 8,
+        "inside": 4
+      }
+    },
+    {
+      "name": "cuda_softmax_warp32_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "softmax",
+      "tag": "3.6.0",
+      "variant": "cuda_softmax_warp32_fp32",
+      "int_params": {
+        "outside": 1,
+        "axis": 32,
+        "inside": 1
+      }
+    },
+    {
+      "name": "cuda_layernorm_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_layernorm_fp32",
+      "int_params": {
+        "size": 64,
+        "channels": 64
+      }
+    },
+    {
+      "name": "cuda_layernorm_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_layernorm_fp32",
+      "int_params": {
+        "size": 1024,
+        "channels": 1024
+      }
+    },
+    {
+      "name": "cuda_interp_nearest_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "interp_nearest",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_nearest_fp32",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 5,
+        "ow": 5,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_interp_nearest_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "interp_nearest",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_nearest_fp32",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 32,
+        "ow": 32,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_interp_bilinear_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "interp_bilinear",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_bilinear_fp32",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 5,
+        "ow": 5,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_interp_bilinear_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "interp_bilinear",
+      "tag": "3.6.0",
+      "variant": "cuda_interp_bilinear_fp32",
+      "int_params": {
+        "ih": 4,
+        "iw": 4,
+        "oh": 32,
+        "ow": 32,
+        "channels": 4
+      }
+    },
+    {
+      "name": "cuda_grid_sample_nearest_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "grid_sample",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_nearest_fp32",
+      "int_params": {
+        "channels": 4,
+        "ih": 4,
+        "iw": 4,
+        "oh": 4,
+        "ow": 4
+      }
+    },
+    {
+      "name": "cuda_grid_sample_nearest_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "grid_sample",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_nearest_fp32",
+      "int_params": {
+        "channels": 4,
+        "ih": 16,
+        "iw": 16,
+        "oh": 16,
+        "ow": 16
+      }
+    },
+    {
+      "name": "cuda_grid_sample_bilinear_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "grid_sample_bilinear",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_bilinear_fp32",
+      "int_params": {
+        "channels": 4,
+        "ih": 4,
+        "iw": 4,
+        "oh": 4,
+        "ow": 4
+      }
+    },
+    {
+      "name": "cuda_grid_sample_bilinear_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "grid_sample_bilinear",
+      "tag": "3.6.0",
+      "variant": "cuda_grid_sample_bilinear_fp32",
+      "int_params": {
+        "channels": 4,
+        "ih": 16,
+        "iw": 16,
+        "oh": 16,
+        "ow": 16
+      }
+    },
+    {
+      "name": "cuda_prelu_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "prelu",
+      "tag": "3.6.0",
+      "variant": "cuda_prelu_fp32",
+      "int_params": {
+        "channels": 8,
+        "size": 4096
+      }
+    },
+    {
+      "name": "cuda_prelu_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "prelu",
+      "tag": "3.6.0",
+      "variant": "cuda_prelu_fp32",
+      "int_params": {
+        "channels": 256,
+        "size": 128
+      }
+    },
+    {
+      "name": "cuda_scale_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "scale",
+      "tag": "3.6.0",
+      "variant": "cuda_scale_fp32",
+      "int_params": {
+        "channels": 8,
+        "size": 4096
+      }
+    },
+    {
+      "name": "cuda_scale_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "scale",
+      "tag": "3.6.0",
+      "variant": "cuda_scale_fp32",
+      "int_params": {
+        "channels": 256,
+        "size": 256
+      }
+    },
+    {
+      "name": "cuda_relu_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "relu",
+      "tag": "3.6.0",
+      "variant": "cuda_relu_fp32",
+      "int_params": {
+        "size": 8192
+      }
+    },
+    {
+      "name": "cuda_relu_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "relu",
+      "tag": "3.6.0",
+      "variant": "cuda_relu_fp32",
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "cuda_float2int8_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_fp32",
+      "int_params": {
+        "size": 1024
+      }
+    },
+    {
+      "name": "cuda_float2int8_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "cuda_float2int8_fp32",
+      "int_params": {
+        "size": 64
+      }
+    },
+    {
+      "name": "cuda_castmidfloat_f32_i32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "cuda_castmidfloat_f32_i32",
+      "int_params": {
+        "size": 4096
+      }
+    },
+    {
+      "name": "cuda_castmidfloat_f32_i32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "cuda_castmidfloat_f32_i32",
+      "int_params": {
+        "size": 64
+      }
+    },
+    {
+      "name": "cuda_gatherv2_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "gatherv2",
+      "tag": "3.6.0",
+      "variant": "cuda_gatherv2_fp32",
+      "int_params": {
+        "outside": 2,
+        "inside": 256,
+        "i_num": 4,
+        "o_num": 2
+      }
+    },
+    {
+      "name": "cuda_gatherv2_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "gatherv2",
+      "tag": "3.6.0",
+      "variant": "cuda_gatherv2_fp32",
+      "int_params": {
+        "outside": 64,
+        "inside": 1,
+        "i_num": 4,
+        "o_num": 2
+      }
+    },
+    {
+      "name": "cuda_argmax_fp32_mb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "argmax",
+      "tag": "3.6.0",
+      "variant": "cuda_argmax_fp32",
+      "int_params": {
+        "outside": 64,
+        "inside": 1,
+        "dim": 8
+      }
+    },
+    {
+      "name": "cuda_argmax_fp32_cb",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "argmax",
+      "tag": "3.6.0",
+      "variant": "cuda_argmax_fp32",
+      "int_params": {
+        "outside": 1,
+        "inside": 1,
+        "dim": 512
+      }
     }
   ]
 }

@@ -44,19 +44,22 @@ description: 在 Rhino Pi-X1（AArch64，OpenCL/Vulkan）和 x86 CUDA 主机上�
 
 ## 设备与路径清单
 
-| 角色 | 主机 | 用户 | 密码环境变量 | 远端工作目录 | 状态 |
-|------|------|------|--------------|---------------|------|
-| Rhino Pi-X1（Adreno OpenCL/Vulkan） | `192.168.101.227` | `root` | `RHINO_PI_PASSWORD`（`aidlux`） | `/mnt/nvme/workspace/benchmark-model` | 在线；Ubuntu，主机名 `kalama`，Adreno GPU，预装 libvulkan.so.1 + libvulkan_adreno.so |
-| Orange Pi 5 Plus（OpenCL） | `192.168.101.113` | `root` | `ORANGE_PI_PASSWORD`（`orangepi`） | `/root/benchmark-model` | 当前不可达；可达后同流程 |
-| x86 CUDA | `localhost` | — | — | `<repo>/build-x86-cuda` | CUDA toolkit 在 `/usr/local/cuda` |
-| 模型本地缓存 | `localhost` | — | — | `/mnt/hdd_4tb/kernflow-models` | modelscope 下载目标 |
+> **所有设备凭据（IP / 用户 / 密码 / workspace）统一记录在仓库根 `.env`，
+> 不要在本文件或脚本里硬编码。** 使用前置 `source ./.env`。
+
+| 角色 | 环境变量前缀 | 远端工作目录（skill 专属子目录） | 状态 |
+|------|--------------|----------------------------------|------|
+| Rhino Pi-X1（Adreno OpenCL/Vulkan） | `RHINO_PI_*`（`$RHINO_PI_HOST` / `$RHINO_PI_USER` / `$RHINO_PI_PASSWORD`） | `$RHINO_PI_WORKSPACE/benchmark-model` | 在线；Ubuntu，主机名 `kalama`，Adreno GPU，预装 libvulkan.so.1 + libvulkan_adreno.so |
+| Orange Pi 5 Plus（OpenCL） | `ORANGE_PI_*`（`$ORANGE_PI_HOST` / `$ORANGE_PI_USER` / `$ORANGE_PI_PASSWORD`） | `$ORANGE_PI_WORKSPACE/benchmark-model` | 当前不可达；可达后同流程 |
+| x86 CUDA | — | `<repo>/build-x86-cuda` | CUDA toolkit 在 `/usr/local/cuda` |
+| 模型本地缓存 | — | `/mnt/hdd_4tb/kernflow-models` | modelscope 下载目标 |
 
 > 两台设备均默认 `root` 登录，密码登录（无 SSH key）。所有 `ssh`/`rsync`
 > 调用必须前置 `sshpass -p "$<DEVICE>_PASSWORD"`。Orange Pi 不可达时跳过该设备，
 > 只跑 Rhino + x86，并在结果里标注「Orange Pi 未跑（不可达）」。
 >
-> 下文示例用 `device=root@192.168.101.227` + `sshpass` 演示；Orange Pi 把
-> IP/密码变量/工作目录替换即可。`sshpass` 缺失先 `apt-get install -y sshpass`。
+> 下文示例用 `device=${RHINO_PI_USER}@${RHINO_PI_HOST}` + `sshpass` 演示；Orange Pi 把
+> 环境变量前缀换成 `ORANGE_PI_*` 即可。`sshpass` 缺失先 `apt-get install -y sshpass`。
 
 ---
 
@@ -208,10 +211,10 @@ ldd "$b/benchmark.out" | rg 'libMNN|libcudart'
 首次部署用 rsync 把 bin/lib 同步到设备工作目录（幂等，重复执行安全）：
 
 ```bash
-device_user=root
-device_host=192.168.101.227
+device_user="${RHINO_PI_USER:-root}"
+device_host="${RHINO_PI_HOST:?RHINO_PI_HOST missing in .env}"
 device="${device_user}@${device_host}"
-remote_root=/mnt/nvme/workspace/benchmark-model
+remote_root="${RHINO_PI_WORKSPACE:-/mnt/nvme/workspace}/benchmark-model"
 b="$repo_root/build-aarch64-gnueabihf"
 
 command -v sshpass >/dev/null || sudo apt-get install -y sshpass
@@ -235,7 +238,7 @@ SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no "$device
 ```
 
 > 用 `sshpass -e` 从环境变量 `SSHPASS` 读密码，避免密码出现在 `ps`/命令行。
-> Orange Pi 部署同形：`device_host=192.168.101.113`、
+> Orange Pi 部署同形：`device_host="${ORANGE_PI_HOST}"`、
 > `remote_root=/root/benchmark-model`、`SSHPASS="$ORANGE_PI_PASSWORD"`。
 > 二进制与库变化后重跑此步即可，rsync `--inplace` 避免重传整文件。
 
@@ -277,10 +280,10 @@ MODELSCOPE_API_TOKEN="$MODELSCOPE_API_TOKEN" \
 **只同步用户点名的那一个 `.mnn`**，避免整目录覆盖设备上其他文件：
 
 ```bash
-device_user=root
-device_host=192.168.101.227
+device_user="${RHINO_PI_USER:-root}"
+device_host="${RHINO_PI_HOST:?RHINO_PI_HOST missing in .env}"
 device="${device_user}@${device_host}"
-remote_root=/mnt/nvme/workspace/benchmark-model
+remote_root="${RHINO_PI_WORKSPACE:-/mnt/nvme/workspace}/benchmark-model"
 local_models=/mnt/hdd_4tb/kernflow-models/artifacts
 model=${1:?usage: model=<name>.mnn}
 
@@ -336,7 +339,7 @@ SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no "$device
     bin/benchmark.out models 20 10 0 4 2 2>&1 | tee result/cpu_\$(date +%s).log"
 ```
 
-> Orange Pi 5 Plus：可达时把 `device_host=192.168.101.113`、
+> Orange Pi 5 Plus：可达时把 `device_host="${ORANGE_PI_HOST}"`、
 > `remote_root=/root/benchmark-model`、`SSHPASS="$ORANGE_PI_PASSWORD"` 替换进
 > 7.1/7.3（Orange Pi 只测 OpenCL + CPU，不测 Vulkan）。当前 113 不可达，跳过。
 
@@ -397,7 +400,7 @@ SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no "$device
 | 模型下发慢 | 确认 rsync 走的是局域网 IP，不是公网；`--inplace` 已开 |
 | modelscope 401/403 | token 过期或无数据集权限；让用户重新设 `MODELSCOPE_API_TOKEN` |
 | `modelscope: command not found` | 没用 `.venv/bin/modelscope`；或没装：`uv pip install --python .venv/bin/python "modelscope>=1.18.0"` |
-| Orange Pi 不可达 | 当前 `192.168.101.113` 离线；不重试到卡死，跳过并在结果标注「未跑」 |
+| Orange Pi 不可达 | 当前 `$ORANGE_PI_HOST` 离线；不重试到卡死，跳过并在结果标注「未跑」 |
 | SSH 密码认证失败 | 确认 `RHINO_PI_PASSWORD`/`ORANGE_PI_PASSWORD` 已设；`sshpass` 已装 |
 | `sshpass: command not found` | `sudo apt-get install -y sshpass` |
 

@@ -92,14 +92,14 @@ run_remote() {
 # ---------------------------------------------------------------------------
 # 1. Rhino Pi-X1: OpenCL / Vulkan / CPU
 # ---------------------------------------------------------------------------
-RHINO_HOST=192.168.101.227
-RHINO_REMOTE=/mnt/nvme/workspace/benchmark-model
+RHINO_HOST="${RHINO_PI_HOST:?RHINO_PI_HOST missing in .env}"
+RHINO_REMOTE="${RHINO_PI_WORKSPACE:-/mnt/nvme/workspace}/benchmark-model"
 RHINO_NAME=rhino-pi-x1
 
 echo "=== Locking freq on $RHINO_NAME ==="
 freq_log="$RESULT_DIR/${RHINO_NAME}_freq.log"
 SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no \
-    "root@$RHINO_HOST" "bash /data/local/tmp/schedule_rhino.sh set; bash /data/local/tmp/schedule_rhino.sh status" \
+    "${RHINO_PI_USER:-root}@$RHINO_HOST" "bash /data/local/tmp/schedule_rhino.sh set; bash /data/local/tmp/schedule_rhino.sh status" \
     2>&1 | tee "$freq_log" | tail -10
 RHINO_FREQS=$(get_rhino_freqs "$freq_log")
 echo "  freqs: $RHINO_FREQS"
@@ -109,7 +109,7 @@ run_remote "$RHINO_NAME" "$RHINO_HOST" RHINO_PI_PASSWORD "$RHINO_REMOTE" "opencl
 # Vulkan: Rhino Pi-X1 (Ubuntu, Adreno) needs libvulkan.so symlink in lib/
 # (system only has libvulkan.so.1; MNN dlopens "libvulkan.so")
 SSHPASS="$RHINO_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no \
-    "root@$RHINO_HOST" \
+    "${RHINO_PI_USER:-root}@$RHINO_HOST" \
     "ln -sf /usr/lib/aarch64-linux-gnu/libvulkan.so.1 $RHINO_REMOTE/lib/libvulkan.so 2>/dev/null; \
      ls /usr/lib/libvulkan.so.1 /lib/aarch64-linux-gnu/libvulkan.so.1 2>/dev/null | head -1" || true
 run_remote "$RHINO_NAME" "$RHINO_HOST" RHINO_PI_PASSWORD "$RHINO_REMOTE" "vulkan" 7 "$RHINO_FREQS"
@@ -118,14 +118,14 @@ run_remote "$RHINO_NAME" "$RHINO_HOST" RHINO_PI_PASSWORD "$RHINO_REMOTE" "cpu" 0
 # ---------------------------------------------------------------------------
 # 2. Orange pi 5+: OpenCL / CPU
 # ---------------------------------------------------------------------------
-ORANGE_HOST=192.168.101.113
+ORANGE_HOST="${ORANGE_PI_HOST:?ORANGE_PI_HOST missing in .env}"
 ORANGE_REMOTE=/root/benchmark-model
 ORANGE_NAME=orange-pi-5plus
 
 echo "=== Locking freq on $ORANGE_NAME ==="
 freq_log="$RESULT_DIR/${ORANGE_NAME}_freq.log"
 SSHPASS="$ORANGE_PI_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no \
-    "root@$ORANGE_HOST" "bash /tmp/schedule_orangepi.sh set; bash /tmp/schedule_orangepi.sh status" \
+    "${ORANGE_PI_USER:-root}@$ORANGE_HOST" "bash /tmp/schedule_orangepi.sh set; bash /tmp/schedule_orangepi.sh status" \
     2>&1 | tee "$freq_log" | tail -10
 ORANGE_FREQS=$(get_orangepi_freqs "$freq_log")
 echo "  freqs: $ORANGE_FREQS"

@@ -1,6 +1,7 @@
 // CudaOpsMisc.cpp - B-class CUDA corpus adapters (Gather/Argmax/Argmin/
 // Interp/Transpose/GridSample). Split from CudaOps.cpp.
 #include "CudaOps.hpp"
+#include "../CpuReference.hpp"
 #include <cmath>
 #include <cstring>
 
@@ -884,7 +885,7 @@ void mnn_corpus_reduction_mean_120_fp32(const float*, float*, int, int, int, int
         mnn_corpus_##SHIM_BASE##_127_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1], \
                       (const void*)ctx.devBufs[2], ctx.grid, ctx.block, ctx.stream)
 
-#define REDUCTION_ADAPTER(CLASS, SHIM_BASE, REDUCE_EXPR) \
+#define REDUCTION_ADAPTER(CLASS, SHIM_BASE, REDUCE_OP) \
 bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
     if (spec.tag == "1.2.0") { \
         ac.entry = "mnn_corpus_" #SHIM_BASE "_120_fp32"; \
@@ -948,21 +949,16 @@ bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) co
     const int outside = ac.m, axis = ac.n, inside = ac.k; \
     const int count = outside * inside; \
     if ((int)output.size() < count) return false; \
-    for (int o = 0; o < outside; ++o) \
-      for (int x = 0; x < inside; ++x) { \
-        const float* src = ac.validatorInputA.data() + o * axis * inside + x; \
-        float expected = REDUCE_EXPR; \
-        if (std::fabs(output[o * inside + x] - expected) > 1e-2f) return false; \
-      } \
-    return true; \
+    auto expected = cpuReduce(REDUCE_OP, ac.validatorInputA, outside, axis, inside); \
+    return compareWithTolerance(output, expected, 1e-2f); \
 }
 
-REDUCTION_ADAPTER(CudaReductionSumFp32Kernel, reduction_sum, ([&]{float s=0;for(int v=0;v<axis;++v)s+=src[v*inside];return s;}()))
-REDUCTION_ADAPTER(CudaReductionMeanFp32Kernel, reduction_mean, ([&]{float s=0;for(int v=0;v<axis;++v)s+=src[v*inside];return s/axis;}()))
+REDUCTION_ADAPTER(CudaReductionSumFp32Kernel, reduction_sum, ReduceOp::Sum)
+REDUCTION_ADAPTER(CudaReductionMeanFp32Kernel, reduction_mean, ReduceOp::Mean)
 // MAX/MIN/PROD: 1.2.0 and 3.6.0 have identical logic. For 1.2.0 the adapter
 // stores params as (inside, axis, outside) but the 3.6.0 shim expects
 // (outside, axis, inside), so launch swaps [0] and [2].
-#define REDUCTION_ADAPTER_REUSE(CLASS, SHIM_BASE, REDUCE_EXPR) \
+#define REDUCTION_ADAPTER_REUSE(CLASS, SHIM_BASE, REDUCE_OP) \
 bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
     const int outside = spec.intParam("outside", 4); \
     const int axis = spec.intParam("axis", 16); \
@@ -1024,18 +1020,13 @@ bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) co
     const int outside = ac.m, axis = ac.n, inside = ac.k; \
     const int count = outside * inside; \
     if ((int)output.size() < count) return false; \
-    for (int o = 0; o < outside; ++o) \
-      for (int x = 0; x < inside; ++x) { \
-        const float* src = ac.validatorInputA.data() + o * axis * inside + x; \
-        float expected = REDUCE_EXPR; \
-        if (std::fabs(output[o * inside + x] - expected) > 1e-2f) return false; \
-      } \
-    return true; \
+    auto expected = cpuReduce(REDUCE_OP, ac.validatorInputA, outside, axis, inside); \
+    return compareWithTolerance(output, expected, 1e-2f); \
 }
 
-REDUCTION_ADAPTER_REUSE(CudaReductionMaxFp32Kernel, reduction_max, ([&]{float m=src[0];for(int v=1;v<axis;++v)m=std::max(m,src[v*inside]);return m;}()))
-REDUCTION_ADAPTER_REUSE(CudaReductionMinFp32Kernel, reduction_min, ([&]{float m=src[0];for(int v=1;v<axis;++v)m=std::min(m,src[v*inside]);return m;}()))
-REDUCTION_ADAPTER_REUSE(CudaReductionProdFp32Kernel, reduction_prod, ([&]{float p=1;for(int v=0;v<axis;++v)p*=src[v*inside];return p;}()))
+REDUCTION_ADAPTER_REUSE(CudaReductionMaxFp32Kernel, reduction_max, ReduceOp::Max)
+REDUCTION_ADAPTER_REUSE(CudaReductionMinFp32Kernel, reduction_min, ReduceOp::Min)
+REDUCTION_ADAPTER_REUSE(CudaReductionProdFp32Kernel, reduction_prod, ReduceOp::Prod)
 
 // ---- Reduction axis-reduce variant (SUM_REDUCE_AXIS / MEAN_REDUCE_AXIS) ----
 // Independent adapter classes: different kernel signature (per_block_size,
@@ -1043,30 +1034,15 @@ REDUCTION_ADAPTER_REUSE(CudaReductionProdFp32Kernel, reduction_prod, ([&]{float 
 // Tag 2.5.1 through 3.6.0 share the same kernel body (one shim, no tag diff).
 static bool reductionSumValidateHelper(const AdaptedCase& ac, const std::vector<float>& output) {
     const int outside = ac.m, axis = ac.n, inside = ac.k;
-    const int count = outside * inside;
-    if ((int)output.size() < count) return false;
-    for (int o = 0; o < outside; ++o)
-        for (int x = 0; x < inside; ++x) {
-            const float* src = ac.validatorInputA.data() + o * axis * inside + x;
-            float expected = 0.0f;
-            for (int v = 0; v < axis; ++v) expected += src[v * inside];
-            if (std::fabs(output[o * inside + x] - expected) > 1e-2f) return false;
-        }
-    return true;
+    if ((int)output.size() < outside * inside) return false;
+    auto expected = cpuReduce(ReduceOp::Sum, ac.validatorInputA, outside, axis, inside);
+    return compareWithTolerance(output, expected, 1e-2f);
 }
 static bool reductionMeanValidateHelper(const AdaptedCase& ac, const std::vector<float>& output) {
     const int outside = ac.m, axis = ac.n, inside = ac.k;
-    const int count = outside * inside;
-    if ((int)output.size() < count) return false;
-    for (int o = 0; o < outside; ++o)
-        for (int x = 0; x < inside; ++x) {
-            const float* src = ac.validatorInputA.data() + o * axis * inside + x;
-            float expected = 0.0f;
-            for (int v = 0; v < axis; ++v) expected += src[v * inside];
-            expected /= axis;
-            if (std::fabs(output[o * inside + x] - expected) > 1e-2f) return false;
-        }
-    return true;
+    if ((int)output.size() < outside * inside) return false;
+    auto expected = cpuReduce(ReduceOp::Mean, ac.validatorInputA, outside, axis, inside);
+    return compareWithTolerance(output, expected, 1e-2f);
 }
 bool CudaReductionSumAxisFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag < "2.5.1") return false;
@@ -1643,12 +1619,8 @@ cudaError_t CudaBlitRegionFp32Kernel::launch(const AdaptedCase& ac, const CudaLa
     return cudaGetLastError();
 }
 bool CudaBlitRegionFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    // Identity blit: output should equal input
     if ((int)output.size() < ac.elementCount) return false;
-    for (int i = 0; i < ac.elementCount; ++i) {
-        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-3f) return false;
-    }
-    return true;
+    return compareWithTolerance(output, ac.validatorInputA, 1e-3f);
 }
 
 // ---- GridSample 3D + Conv DW extern C ----
@@ -1754,7 +1726,8 @@ bool CudaConvDwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     AdaptedBuffer outBuf; outBuf.sizeBytes = oh * ow * c_p * sizeof(float); outBuf.isOutput = true;
     ac.validatorInputA = input;
     ac.elementCount = oh * ow * c_p;
-    ac.h = ih; ac.w = iw; ac.c = c_p; ac.k = kw; ac.stride = sw; ac.orderType = pw;
+    ac.h = ih; ac.w = iw; ac.c = c_p; ac.p = kh; ac.q = kw; ac.k = kw; ac.stride = sw; ac.orderType = pw;
+    ac.m = 1;  // batch
 
     if (spec.tag == "1.2.0") {
         // 1.2.0: float kernel/bias, constBuffer struct param, NCHW layout
@@ -1843,9 +1816,10 @@ bool CudaConvDwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
         for (int v : {iw, ih, c, c_p, ow, oh, kw, kh, 1, 1, sw, sh, pw, ph, total})
             ac.args.push_back(AdaptedArg::scalarInt(v));
         ac.globalSize[0] = gridFor(total / 2); ac.localSize[0] = kBlock;
-        // stash kernel fp32 for validator (host recompute)
+        // stash kernel fp32 + bias fp32 for validator (shared CPU recompute)
         ac.validatorInputB = kernelF;
-        ac.p = kh; ac.q = kw; ac.orderType = 1;  // dilate dw=dh=1 (corpus default)
+        ac.validatorInputC = biasF;
+        // ac.p/ac.q/ac.orderType already set above (kh/kw/pad)
     }
     ac.dims = 1;
     return true;
@@ -1885,41 +1859,26 @@ bool CudaConvDwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<flo
     const int total = ac.elementCount;
     if ((int)output.size() < total) return false;
     // 3.6.0 path: validatorInputB holds fp32 weight in [kh][kw][c_p] layout.
-    // Recompute depthwise conv on host and compare.
+    // Use shared CPU reference (CpuReference.hpp) — same math across all backends.
     if (!ac.validatorInputB.empty()) {
-        const int iw = ac.w, ih = ac.h, c_p = ac.c, kh = ac.p, kw = ac.q;
-        const int dw = ac.orderType, sw = ac.stride, sh = ac.stride;
-        const int pw = 1, ph = 1;  // adapt() defaults pw=ph=1
-        const int ow = (iw + 2 * pw - kw) / sw + 1;
-        const int oh = (ih + 2 * ph - kh) / sh + 1;
-        const auto& inp = ac.validatorInputA;
-        const auto& ker = ac.validatorInputB;
-        // kernel processes 2 channels per thread; verify every channel.
-        for (int ob = 0; ob < 1; ++ob)
-            for (int oy = 0; oy < oh; ++oy)
-                for (int ox = 0; ox < ow; ++ox)
-                    for (int oz = 0; oz < c_p; ++oz) {
-                        const int ix = ox * sw - pw;
-                        const int iy = oy * sh - ph;
-                        float color = 0.5f;  // bias
-                        int fxSta = std::max(0, (-ix + dw - 1) / dw);
-                        int fySta = std::max(0, (-iy + dw - 1) / dw);
-                        int fxEnd = std::min(kw, (iw - ix + dw - 1) / dw);
-                        int fyEnd = std::min(kh, (ih - iy + dw - 1) / dw);
-                        for (int fy = fySta; fy < fyEnd; ++fy) {
-                            int sy = fy * dw + iy;
-                            for (int fx = fxSta; fx < fxEnd; ++fx) {
-                                int sx = fx * dw + ix;
-                                int src = ((ob * ih + sy) * iw + sx) * c_p + oz;
-                                float k = ker[(fy * kw + fx) * c_p + oz];
-                                color += inp[src] * k;
-                            }
-                        }
-                        int dst = ((ob * oh + oy) * ow + ox) * c_p + oz;
-                        if (std::fabs(output[dst] - color) > 1e-2f) return false;
-        }
-    return true;
-}
+        DepthwiseConvSpec spec;
+        spec.batch = ac.m > 0 ? ac.m : 1;
+        spec.iw = ac.w; spec.ih = ac.h;
+        spec.c_p = ac.c;
+        spec.kw = ac.q; spec.kh = ac.p;
+        spec.sw = ac.stride > 0 ? ac.stride : 1;
+        spec.sh = spec.sw;
+        spec.dw = 1; spec.dh = 1;
+        spec.pw = ac.orderType; spec.ph = ac.orderType;
+        spec.maxV = 1e30f; spec.minV = -1e30f;
+        // bias: adapter stores 0.5f in validatorInputC for 3.6.0 path.
+        // If not set, use a constant bias matching the adapter default.
+        std::vector<float> bias = ac.validatorInputC.empty()
+            ? std::vector<float>(spec.c_p, 0.5f)
+            : ac.validatorInputC;
+        auto expected = cpuDepthwiseConv(spec, ac.validatorInputA, ac.validatorInputB, bias);
+        return compareWithTolerance(output, expected, 1e-2f);
+    }
 
     // Smoke test (1.2.0 / 2.0.4): output is not all zero
     for (int i = 0; i < std::min(10, total); ++i) {
@@ -2029,9 +1988,8 @@ cudaError_t CudaAddBiasFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCt
     return cudaGetLastError();
 }
 bool CudaAddBiasFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    const int e = ac.m, h = ac.k;
-    for (int i = 0; i < e * h; ++i) { int hi = i % h; if (std::fabs(output[i] - (ac.validatorInputA[i] + 0.5f)) > 1e-3f) return false; }
-    return true;
+    auto expected = cpuAddScalar(ac.validatorInputA, 0.5f);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ---- RoPE (ropeC4Kernel, 3.6.0) ----
@@ -2888,11 +2846,8 @@ cudaError_t CudaBlit2FloatFp32Kernel::launch(const AdaptedCase& ac, const CudaLa
     return cudaGetLastError();
 }
 bool CudaBlit2FloatFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    // Identity blit (src=dst strides)
-    for (int i = 0; i < ac.elementCount; ++i) {
-        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-3f) return false;
-    }
-    return true;
+    if ((int)output.size() < ac.elementCount) return false;
+    return compareWithTolerance(output, ac.validatorInputA, 1e-3f);
 }
 
 // ---- fuseblit (fused multi-region blit, 3.6.0) ----
@@ -2951,11 +2906,8 @@ cudaError_t CudaFuseBlitFp32Kernel::launch(const AdaptedCase& ac, const CudaLaun
     return cudaGetLastError();
 }
 bool CudaFuseBlitFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    // Identity blit (src=dst layout), just check output == input
-    for (int i = 0; i < ac.elementCount; ++i) {
-        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-3f) return false;
-    }
-    return true;
+    if ((int)output.size() < ac.elementCount) return false;
+    return compareWithTolerance(output, ac.validatorInputA, 1e-3f);
 }
 
 // ---- fuseblitLimit (fused blit with boundary check, 3.6.0) ----
@@ -3010,24 +2962,25 @@ cudaError_t CudaFuseBlitLimitFp32Kernel::launch(const AdaptedCase& ac, const Cud
     return cudaGetLastError();
 }
 bool CudaFuseBlitLimitFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    for (int i = 0; i < ac.elementCount; ++i) {
-        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-3f) return false;
-    }
-    return true;
+    if ((int)output.size() < ac.elementCount) return false;
+    return compareWithTolerance(output, ac.validatorInputA, 1e-3f);
 }
 
 // ---- FLOAT_2_INT8_CAST_PACK (packed quantization cast, 2.5.3+) ----
 bool CudaFloat2Int8CastPackFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag < "2.5.3") return false;
     const int channels = spec.intParam("c", 4);
-    const int channelPackFloat = (channels + 3) / 4 * 4;
-    const int channelPackInt8 = channelPackFloat;  // same pack for int8
+    // MNN CastExecution: channelPackInt8 = UP_DIV(channel, INT8_PACK_NUMBER=16) * 16
+    //                    channelPackFloat = UP_DIV(channel, PACK_NUMBER=8) * 8
+    //                    count = area * channelPackInt8
+    //                    d_cp = DivModFast(channelPackInt8)
+    const int channelPackInt8 = (channels + 15) / 16 * 16;
+    const int channelPackFloat = (channels + 7) / 8 * 8;
     const int count = spec.intParam("count", 16) * channelPackInt8;  // nhw * cp
-    const float scale = spec.floatParam("scale", 0.1f);
+    const float scale = spec.floatParam("scale", 1.0f);
     const int8_t zeroPoint = (int8_t)spec.intParam("zero_point", 0);
     const int8_t clampMax = 127, clampMin = -128;
-    std::vector<float> input(spec.intParam("count", 16) * channelPackFloat);
-    for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 13);
+    std::vector<float> input = fillInputRand(spec.intParam("count", 16) * channelPackFloat, 0x533d, -5.0f, 5.0f);
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
     AdaptedBuffer outBuf; outBuf.sizeBytes = count * sizeof(int8_t); outBuf.isOutput = true;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
@@ -3045,7 +2998,7 @@ bool CudaFloat2Int8CastPackFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& 
     ac.entry = "mnn_corpus_float2int8_cast_pack_fp32";
     ac.globalSize[0] = gridFor(count); ac.localSize[0] = kBlock; ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = count;
-    ac.n = channels; ac.w = channelPackFloat;
+    ac.n = channels; ac.w = channelPackFloat; ac.k = channelPackInt8;
     ac.stride = (int)(scale * 1e6f);  // pack scale for validator
     return true;
 }
@@ -3063,21 +3016,19 @@ bool CudaFloat2Int8CastPackFp32Kernel::validate(const AdaptedCase& ac, const std
     // Output is int8_t — reinterpret as int8
     const int8_t* out = reinterpret_cast<const int8_t*>(output.data());
     const int count = ac.elementCount;
-    const int channels = ac.n, cp = ac.w;
+    const int channels = ac.n, channelPackFloat = ac.w, channelPackInt8 = ac.k;
     const float scale = (float)ac.stride * 1e-6f;
     const int8_t zeroPoint = 0, clampMax = 127, clampMin = -128;
     for (int index = 0; index < count; ++index) {
-        int nhw_idx = index / cp;
-        int c_idx = index % cp;
+        int nhw_idx = index / channelPackInt8;
+        int c_idx = index % channelPackInt8;
         if (c_idx >= channels) {
             if (out[index] != 0) return false;
             continue;
         }
-        float inp = ac.validatorInputA[nhw_idx * cp + c_idx];
-        int res = (int)roundf(inp * scale) + zeroPoint;
-        res = std::min(res, (int)clampMax);
-        res = std::max(res, (int)clampMin);
-        if (out[index] != (int8_t)res) return false;
+        float inp = ac.validatorInputA[nhw_idx * channelPackFloat + c_idx];
+        int8_t expected = cpuFloatToInt8(inp, scale, zeroPoint, clampMax, clampMin);
+        if (out[index] != expected) return false;
     }
     return true;
 }
@@ -3652,14 +3603,9 @@ cudaError_t CudaBlit2HalfFp32Kernel::launch(const AdaptedCase& ac, const CudaLau
     return cudaGetLastError();
 }
 bool CudaBlit2HalfFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    // kernel writes even-indexed floats; odd positions stay zero (zero-init).
-    for (int i = 0; i < ac.elementCount; i += 2) {
-        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-3f) return false;
-    }
-    for (int i = 1; i < ac.elementCount; i += 2) {
-        if (std::fabs(output[i]) > 1e-6f) return false;
-    }
-    return true;
+    if ((int)output.size() < ac.elementCount) return false;
+    auto expected = cpuBlitEvenOddZero(ac.validatorInputA);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -4864,9 +4810,7 @@ cudaError_t CudaNchwToNchwFp32Kernel::launch(const AdaptedCase&, const CudaLaunc
 }
 bool CudaNchwToNchwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     if ((int)output.size() < ac.elementCount) return false;
-    for (int i = 0; i < ac.elementCount; ++i)
-        if (std::fabs(output[i] - ac.validatorInputA[i]) > 1e-3f) return false;
-    return true;
+    return compareWithTolerance(output, ac.validatorInputA, 1e-3f);
 }
 
 bool CudaNchwToC4nhw4Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
@@ -5234,10 +5178,7 @@ cudaError_t CudaFuseBlit4Fp32Kernel::launch(const AdaptedCase&, const CudaLaunch
 bool CudaFuseBlit4Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int count = ac.elementCount;
     if ((int)output.size() * sizeof(float) < count * sizeof(int32_t)) return false;
-    const int32_t* in = reinterpret_cast<const int32_t*>(ac.validatorInputA.data());
-    const int32_t* out = reinterpret_cast<const int32_t*>(output.data());
-    for (int i = 0; i < count; ++i) if (out[i] != in[i]) return false;
-    return true;
+    return compareExact(output, ac.validatorInputA);
 }
 
 // ---- transpose_local (8x8 shared memory transpose) ----
@@ -5291,7 +5232,7 @@ bool CudaTransposeLocalFp32Kernel::validate(const AdaptedCase& ac, const std::ve
 bool CudaCastMidFloatF32I32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "mnn_corpus_castmidfloat_f32_i32";
     const int count = spec.intParam("size", 64);
-    std::vector<float> input = fmtInput(count);
+    std::vector<float> input = fillInputRand(count, 0x533d, -5.0f, 5.0f);  // [-5,5] → int32 cast non-zero
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
     AdaptedBuffer outBuf; outBuf.sizeBytes = count * sizeof(int32_t); outBuf.isOutput = true;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
@@ -5312,8 +5253,7 @@ bool CudaCastMidFloatF32I32Kernel::validate(const AdaptedCase& ac, const std::ve
     if ((int)output.size() * sizeof(float) < count * sizeof(int32_t)) return false;
     const int32_t* out = reinterpret_cast<const int32_t*>(output.data());
     for (int i = 0; i < count; ++i) {
-        // CASTMIDFLOAT<float,int32_t>: output[i] = (int32_t)((float)input[i]) — truncating cast
-        int32_t expected = (int32_t)ac.validatorInputA[i];
+        int32_t expected = cpuFloatToInt32(ac.validatorInputA[i]);
         if (out[i] != expected) return false;
     }
     return true;
@@ -5323,10 +5263,10 @@ bool CudaCastMidFloatF32I32Kernel::validate(const AdaptedCase& ac, const std::ve
 bool CudaFloat2Int8ScalarFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     ac.entry = "mnn_corpus_float2int8_fp32";
     const int count = spec.intParam("size", 64);
-    const float scale = spec.floatParam("scale", 0.1f);
+    const float scale = spec.floatParam("scale", 1.0f);
     const int8_t zeroPoint = (int8_t)spec.intParam("zero_point", 0);
     const int8_t clampMax = 127, clampMin = -128;
-    std::vector<float> input = fmtInput(count);
+    std::vector<float> input = fillInputRand(count, 0x533d, -5.0f, 5.0f);
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
     AdaptedBuffer outBuf; outBuf.sizeBytes = count * sizeof(int8_t); outBuf.isOutput = true;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
@@ -5356,10 +5296,8 @@ bool CudaFloat2Int8ScalarFp32Kernel::validate(const AdaptedCase& ac, const std::
     const int8_t zeroPoint = (int8_t)ac.validatorFloats[1];
     const int8_t clampMax = (int8_t)ac.validatorFloats[2], clampMin = (int8_t)ac.validatorFloats[3];
     for (int i = 0; i < count; ++i) {
-        // FLOAT_2_INT8_CAST: res = roundf(input * scale) + zeroPoint, then clamp
-        int v = (int)roundf(ac.validatorInputA[i] * scale) + zeroPoint;
-        if (v < (int)clampMin) v = clampMin; if (v > (int)clampMax) v = clampMax;
-        if (out[i] != (int8_t)v) return false;
+        int8_t expected = cpuFloatToInt8(ac.validatorInputA[i], scale, zeroPoint, clampMax, clampMin);
+        if (out[i] != expected) return false;
     }
     return true;
 }
@@ -5628,81 +5566,8 @@ std::vector<float> woqBuildInput(int batch, int ic, int ic_p) {
         for (int k = 0; k < ic; ++k) v[b * ic_p + k] = 0.1f * (k % 7);
     return v;
 }
-// Host reference: dequantize int8 weight (w*scale+offset) and do matmul+bias+clamp.
-// input[batch, ic_p], weight[oc, ic_p], output[batch, oc_p].
-std::vector<float> woqRefInt8(const std::vector<float>& input, const std::vector<int8_t>& weight,
-                              const std::vector<float>& scale, const std::vector<float>& offset,
-                              const std::vector<float>& bias, int batch, int ic, int ic_p,
-                              int oc, int oc_p, int quanC, float maxV, float minV) {
-    const int num_qg = (quanC > 0) ? (quanC / oc) : 1;
-    const int ic_per_group = (num_qg > 0) ? (ic / num_qg) : ic;
-    std::vector<float> out((size_t)batch * oc_p, 0.0f);
-    for (int b = 0; b < batch; ++b)
-        for (int n = 0; n < oc; ++n) {
-            float acc = bias[n];
-            for (int k = 0; k < ic; ++k) {
-                int g = k / ic_per_group;
-                int qpi = n * num_qg + g;
-                float w_fp = (float)weight[n * ic_p + k] * scale[qpi] + offset[qpi];
-                acc += input[b * ic_p + k] * w_fp;
-            }
-            acc = std::max(acc, minV);
-            acc = std::min(acc, maxV);
-            out[b * oc_p + n] = acc;
-        }
-    return out;
-}
-// Host reference for packed int4 weight (two nibbles per byte).
-std::vector<float> woqRefInt4(const std::vector<float>& input, const std::vector<uint8_t>& weight,
-                              const std::vector<float>& scale, const std::vector<float>& offset,
-                              const std::vector<float>& bias, int batch, int ic, int ic_p,
-                              int oc, int oc_p, int quanC, float maxV, float minV) {
-    const int num_qg = (quanC > 0) ? (quanC / oc) : 1;
-    const int ic_per_group = (num_qg > 0) ? (ic / num_qg) : ic;
-    std::vector<float> out((size_t)batch * oc_p, 0.0f);
-    for (int b = 0; b < batch; ++b)
-        for (int n = 0; n < oc; ++n) {
-            float acc = bias[n];
-            for (int k = 0; k < ic; ++k) {
-                int g = k / ic_per_group;
-                int qpi = n * num_qg + g;
-                uint8_t pb = weight[n * (ic_p / 2) + k / 2];
-                int8_t q = (k % 2 == 0) ? (int8_t)((pb >> 4) - 8) : (int8_t)((pb & 0x0F) - 8);
-                float w_fp = (float)q * scale[qpi] + offset[qpi];
-                acc += input[b * ic_p + k] * w_fp;
-            }
-            acc = std::max(acc, minV);
-            acc = std::min(acc, maxV);
-            out[b * oc_p + n] = acc;
-        }
-    return out;
-}
-// V14 reference uses precomputed float2 params (.x=scale, .y=offset-8*scale).
-// V14 computes acc += in*(nibble*scale + adj). nibble=q+8, adj=offset-8*scale,
-// so in*((q+8)*scale + offset - 8*scale) = in*(q*scale + offset). Same as standard.
-std::vector<float> woqRefInt4V14(const std::vector<float>& input, const std::vector<uint8_t>& weight,
-                                 const std::vector<float2>& gemv_params, const std::vector<float>& bias,
-                                 int batch, int ic, int ic_p, int oc, int oc_p, int num_qg,
-                                 float maxV, float minV) {
-    const int ic_per_group = ic / num_qg;
-    std::vector<float> out((size_t)batch * oc_p, 0.0f);
-    for (int b = 0; b < batch; ++b)
-        for (int n = 0; n < oc; ++n) {
-            float acc = bias[n];
-            for (int k = 0; k < ic; ++k) {
-                int g = k / ic_per_group;
-                float2 p = gemv_params[n * num_qg + g];
-                uint8_t pb = weight[n * (ic_p / 2) + k / 2];
-                int nibble = (k % 2 == 0) ? (pb >> 4) : (pb & 0x0F);
-                float w_fp = (float)nibble * p.x + p.y;
-                acc += input[b * ic_p + k] * w_fp;
-            }
-            acc = std::max(acc, minV);
-            acc = std::min(acc, maxV);
-            out[b * oc_p + n] = acc;
-        }
-    return out;
-}
+// Host reference helpers woqRefInt8/woqRefInt4/woqRefInt4V14 are now shared
+// from CudaOps.hpp (inline) so CudaOpsWoq.cpp can reuse them for real validators.
 } // namespace (anonymous)
 
 // ============================================================================

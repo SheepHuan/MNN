@@ -9,6 +9,7 @@
 // Weight int8 value=2; int4 packed=0xAA (both nibbles = q+8 = 2+8 = 10);
 // scale=0.1f, offset=0.0f, bias=0.5f; input 0.1f*(i%7) pattern.
 #include "CudaOps.hpp"
+#include "../CpuReference.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -96,6 +97,137 @@ bool woqAnyNonZeroFp32(const std::vector<float>& output, int n) {
     int lim = std::min(n, (int)output.size());
     for (int i = 0; i < lim; ++i) if (output[i] != 0.0f) return true;
     return false;
+}
+
+// ---- Real validators (host recompute via shared woqRefInt8/Int4/Int4V14) ----
+// Storage convention shared by all standard WOQ GEMM/GEMV fp32 adapters:
+//   validatorInputA = input  (float, [batch*ic_p])
+//   validatorInputB = weight bytes reinterpreted as float slots
+//                     (int8: oc*ic_p bytes; int4: oc*(ic_p/2) packed bytes)
+//   validatorInputC = [scale (oc*num_qg floats), offset (oc*num_qg floats),
+//                      bias (oc_p floats)]
+//   m=batch, n=oc, k=ic, c=ic_p, w=oc_p, h=quanC
+//   validatorFloats = {maxV, minV}
+//   orderType = 0 (int8 standard), 1 (int4 standard)
+// V14 (orderType=2) stores: validatorInputB = weight bytes, validatorInputC =
+// float2 gemv_params reinterpreted as float, validatorFloats = {maxV, minV, bias...}
+// Tolerance: WOQ kernels dequantize int8/int4 weights via scale/offset and
+// accumulate in fp32; host reference matches bit-exactly except for fp32
+// reduction order, so a 1e-3 absolute tolerance is sufficient.
+void woqStoreStdValidator(AdaptedCase& ac, const std::vector<float>& input,
+                          const std::vector<uint8_t>& weightBytes,
+                          const std::vector<float>& scale, const std::vector<float>& offset,
+                          const std::vector<float>& bias, int batch, int ic, int ic_p,
+                          int oc, int oc_p, int quanC, float maxV, float minV, bool isInt4) {
+    ac.validatorInputA = input;
+    const size_t wb = weightBytes.size();
+    const size_t fslots = (wb + sizeof(float) - 1) / sizeof(float);
+    ac.validatorInputB.assign(fslots, 0.0f);
+    std::memcpy(ac.validatorInputB.data(), weightBytes.data(), wb);
+    ac.validatorInputC.clear();
+    ac.validatorInputC.insert(ac.validatorInputC.end(), scale.begin(), scale.end());
+    ac.validatorInputC.insert(ac.validatorInputC.end(), offset.begin(), offset.end());
+    ac.validatorInputC.insert(ac.validatorInputC.end(), bias.begin(), bias.end());
+    ac.validatorFloats = {maxV, minV};
+    ac.m = batch; ac.n = oc; ac.k = ic; ac.c = ic_p; ac.w = oc_p; ac.h = quanC;
+    ac.orderType = isInt4 ? 1 : 0;
+}
+// V14 validator storage: validatorInputB = weight bytes, validatorInputC =
+// float2 gemv_params reinterpreted as float, validatorFloats = {maxV, minV, bias...}.
+void woqStoreV14Validator(AdaptedCase& ac, const std::vector<float>& input,
+                          const std::vector<uint8_t>& weightBytes,
+                          const std::vector<float2>& gemv_params,
+                          const std::vector<float>& bias, int batch, int ic, int ic_p,
+                          int oc, int oc_p, int quanC, float maxV, float minV) {
+    ac.validatorInputA = input;
+    const size_t wb = weightBytes.size();
+    const size_t fslots = (wb + sizeof(float) - 1) / sizeof(float);
+    ac.validatorInputB.assign(fslots, 0.0f);
+    std::memcpy(ac.validatorInputB.data(), weightBytes.data(), wb);
+    const size_t paramBytes = gemv_params.size() * sizeof(float2);
+    const size_t pslots = (paramBytes + sizeof(float) - 1) / sizeof(float);
+    ac.validatorInputC.assign(pslots, 0.0f);
+    std::memcpy(ac.validatorInputC.data(), gemv_params.data(), paramBytes);
+    ac.validatorFloats.clear();
+    ac.validatorFloats.push_back(maxV);
+    ac.validatorFloats.push_back(minV);
+    ac.validatorFloats.insert(ac.validatorFloats.end(), bias.begin(), bias.end());
+    ac.m = batch; ac.n = oc; ac.k = ic; ac.c = ic_p; ac.w = oc_p; ac.h = quanC;
+    ac.orderType = 2;
+}
+bool woqValidateStd(const AdaptedCase& ac, const std::vector<float>& output) {
+    const int batch = ac.m, ic = ac.k, ic_p = ac.c, oc = ac.n, oc_p = ac.w;
+    const int quanC = ac.h;
+    const float maxV = ac.validatorFloats.size() >= 1 ? ac.validatorFloats[0] : 6.0f;
+    const float minV = ac.validatorFloats.size() >= 2 ? ac.validatorFloats[1] : 0.0f;
+    if ((int)output.size() < batch * oc_p) return false;
+    const int num_qg = (quanC > 0) ? (quanC / oc) : 1;
+    const int soCount = oc * num_qg;
+    if ((int)ac.validatorInputC.size() < soCount * 2 + oc) return false;
+    std::vector<float> scale(ac.validatorInputC.begin(), ac.validatorInputC.begin() + soCount);
+    std::vector<float> offset(ac.validatorInputC.begin() + soCount, ac.validatorInputC.begin() + soCount * 2);
+    std::vector<float> bias(ac.validatorInputC.begin() + soCount * 2, ac.validatorInputC.begin() + soCount * 2 + oc);
+    // Dequantize weight to fp32 [oc][ic_p], then use shared cpuMatmul.
+    std::vector<float> weightF((size_t)oc * ic_p, 0.0f);
+    if (ac.orderType == 0) {
+        // int8 weight
+        const size_t weightBytes = (size_t)oc * ic_p;
+        if (ac.validatorInputB.size() * sizeof(float) < weightBytes) return false;
+        std::vector<int8_t> weight(weightBytes);
+        std::memcpy(weight.data(), ac.validatorInputB.data(), weightBytes);
+        for (int n = 0; n < oc; ++n)
+            for (int k = 0; k < ic; ++k) {
+                int g = (num_qg > 0) ? (k / (ic / num_qg)) : 0;
+                int qpi = n * num_qg + g;
+                weightF[n * ic_p + k] = (float)weight[n * ic_p + k] * scale[qpi] + offset[qpi];
+            }
+    } else {
+        // int4 weight (packed)
+        const size_t weightBytes = (size_t)oc * (ic_p / 2);
+        if (ac.validatorInputB.size() * sizeof(float) < weightBytes) return false;
+        std::vector<uint8_t> weight(weightBytes);
+        std::memcpy(weight.data(), ac.validatorInputB.data(), weightBytes);
+        for (int n = 0; n < oc; ++n)
+            for (int k = 0; k < ic; ++k) {
+                int g = (num_qg > 0) ? (k / (ic / num_qg)) : 0;
+                int qpi = n * num_qg + g;
+                uint8_t pb = weight[n * (ic_p / 2) + k / 2];
+                int8_t q = (k % 2 == 0) ? (int8_t)((pb >> 4) - 8) : (int8_t)((pb & 0x0F) - 8);
+                weightF[n * ic_p + k] = (float)q * scale[qpi] + offset[qpi];
+            }
+    }
+    MatmulSpec ms;
+    ms.batch = batch; ms.m = batch; ms.k = ic; ms.k_p = ic_p;
+    ms.n = oc; ms.n_p = oc_p;
+    ms.maxV = maxV; ms.minV = minV;
+    auto expected = cpuMatmul(ms, ac.validatorInputA, weightF, bias);
+    return compareWithTolerance(output, expected, 1e-3f);
+}
+// V14 validator: validatorInputB = weight bytes, validatorInputC = float2
+// gemv_params (oc*num_qg pairs) reinterpreted as float, validatorFloats =
+// {maxV, minV, bias[0..oc_p-1]}. m=batch, n=oc, k=ic, c=ic_p, w=oc_p, h=quanC.
+bool woqValidateV14(const AdaptedCase& ac, const std::vector<float>& output) {
+    const int batch = ac.m, ic = ac.k, ic_p = ac.c, oc = ac.n, oc_p = ac.w;
+    const int quanC = ac.h;
+    const int num_qg = (quanC > 0) ? (quanC / oc) : 1;
+    const float maxV = ac.validatorFloats.size() >= 1 ? ac.validatorFloats[0] : 6.0f;
+    const float minV = ac.validatorFloats.size() >= 2 ? ac.validatorFloats[1] : 0.0f;
+    if ((int)output.size() < batch * oc_p) return false;
+    if ((int)ac.validatorFloats.size() < 2 + oc) return false;
+    std::vector<float> bias(ac.validatorFloats.begin() + 2, ac.validatorFloats.begin() + 2 + oc);
+    const size_t weightBytes = (size_t)oc * (ic_p / 2);
+    if (ac.validatorInputB.size() * sizeof(float) < weightBytes) return false;
+    std::vector<uint8_t> weight(weightBytes);
+    std::memcpy(weight.data(), ac.validatorInputB.data(), weightBytes);
+    const size_t paramBytes = (size_t)oc * num_qg * sizeof(float2);
+    if (ac.validatorInputC.size() * sizeof(float) < paramBytes) return false;
+    std::vector<float2> gemv_params((size_t)oc * num_qg);
+    std::memcpy(gemv_params.data(), ac.validatorInputC.data(), paramBytes);
+    auto expected = woqRefInt4V14(ac.validatorInputA, weight, gemv_params, bias,
+                                  batch, ic, ic_p, oc, oc_p, num_qg, maxV, minV);
+    for (int i = 0; i < batch * oc_p; ++i)
+        if (std::fabs(output[i] - expected[i]) > 1e-3f) return false;
+    return true;
 }
 } // namespace (anonymous)
 
@@ -468,6 +600,8 @@ bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
     EXTRA_GRID \
     ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.localSize[1] = blockY; ac.dims = 2; \
     ac.elementCount = batch * oc_p; \
+    woqStoreStdValidator(ac, input, kBuf.initialData, scale, offset, bias, \
+                         batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV, IS_INT4); \
     return true; \
 } \
 cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { \
@@ -480,7 +614,7 @@ cudaError_t CLASS::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const { 
     return cudaGetLastError(); \
 } \
 bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
-    return woqAnyNonZeroFp32(output, ac.elementCount); \
+    return woqValidateStd(ac, output); \
 }
 
 // 9. CudaGemmFpAInt8BFp32Kernel — GEMM_FpAInt8B<float> (2D grid, blockY present).
@@ -495,53 +629,52 @@ WOQ_FP32_SMOKE_BODY(CudaGemmFpAInt4BFp32Kernel, mnn_corpus_gemm_fpaint4b_fp32, c
 
 // ----------------------------------------------------------------------------
 // GEMV_* adapters (batch-first arg order; 1D-block V5/V9/V14 variants).
-// ENTRY is the full shim symbol (e.g. mnn_corpus_gemv_fpaint8b_fp32).
-// ----------------------------------------------------------------------------
-#define WOQ_GEMV_FP32_SMOKE_BODY(CLASS, ENTRY, KBUF_TYPE, IS_INT4, ARG_ORDER) \
-bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
-    if (spec.tag != "3.6.0") return false; \
-    ac.entry = #ENTRY; \
-    const int batch = spec.intParam("batch", kWoqBatch); \
-    const int ic = spec.intParam("ic", kWoqIc); \
-    const int ic_p = spec.intParam("ic_p", kWoqIcP); \
-    const int oc = spec.intParam("oc", kWoqOc); \
-    const int oc_p = spec.intParam("oc_p", kWoqOcP); \
-    const int quanC = spec.intParam("quan_c", kWoqQuanC); \
-    auto input = woqBuildInput(batch, ic, ic_p); \
-    auto scale = woqBuildScale(oc, quanC, kWoqScale); \
-    auto offset = woqBuildOffset(oc, quanC, kWoqOffset); \
-    auto bias = woqBuildBias(oc, kWoqBias); \
-    AdaptedBuffer iBuf; iBuf.setFp32(input); iBuf.isOutput = false; \
-    AdaptedBuffer kBuf; \
-    if (IS_INT4) { auto w = woqBuildInt4Weight(oc, ic_p, kWoqInt4Byte); \
-        kBuf.sizeBytes = w.size(); kBuf.initialData.assign(w.begin(), w.end()); } \
-    else { auto w = woqBuildInt8Weight(oc, ic_p, kWoqInt8Q); \
-        kBuf.sizeBytes = w.size(); kBuf.initialData.assign((const uint8_t*)w.data(), (const uint8_t*)w.data() + w.size()); } \
-    kBuf.isOutput = false; \
-    AdaptedBuffer sBuf; sBuf.setFp32(scale); sBuf.isOutput = false; \
-    AdaptedBuffer oBuf_; oBuf_.setFp32(offset); oBuf_.isOutput = false; \
-    AdaptedBuffer bBuf; bBuf.setFp32(bias); bBuf.isOutput = false; \
-    AdaptedBuffer outBuf; outBuf.sizeBytes = (size_t)batch * oc_p * sizeof(float); outBuf.isOutput = true; \
-    ac.buffers.push_back(iBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(sBuf); \
-    ac.buffers.push_back(oBuf_); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf); \
-    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i)); \
-    ac.args.push_back(AdaptedArg::scalarFloat(kWoqMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqMinV)); \
-    ARG_ORDER \
-    ac.globalSize[0] = oc; ac.globalSize[1] = batch; ac.localSize[0] = 64; ac.dims = 2; \
-    ac.elementCount = batch * oc_p; \
-    return true; \
-} \
-bool CLASS::validate(const AdaptedCase& ac, const std::vector<float>& output) const { \
-    return woqAnyNonZeroFp32(output, ac.elementCount); \
-}
+// Each variant is inlined (not macro'd) because grid/block differ:
+//   V1  (int8):      grid(oc, batch), block(64)         — 1 OC/block
+//   V1  (int4):      grid(oc, batch), block(64) + shared mem
+//   V5  (int4):      grid(oc, batch), block(128)         — 1 OC/block
+//   V9  (int4):      grid((oc+3)/4, batch), block(128)   — 4 OC/block
+// Common buffer layout: input, weight, scale, offset, bias, output;
+// arg order: 6 buffers + maxV + minV + (batch, ic, ic_p, oc, oc_p, quanC) +
+// variant-specific grid/block scalars.
 
-// 11. CudaGemvFpAInt8BFp32Kernel — GEMV_FpAInt8B (2D grid + blockY).
-WOQ_GEMV_FP32_SMOKE_BODY(CudaGemvFpAInt8BFp32Kernel, mnn_corpus_gemv_fpaint8b_fp32, const int8_t*, false,
+// 11. CudaGemvFpAInt8BFp32Kernel — GEMV_FpAInt8B (legacy V1, 1 OC/block, block=GEMV_TILE=64).
+bool CudaGemvFpAInt8BFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint8b_fp32";
+    const int batch = spec.intParam("batch", kWoqBatch);
+    const int ic = spec.intParam("ic", kWoqIc);
+    const int ic_p = spec.intParam("ic_p", kWoqIcP);
+    const int oc = spec.intParam("oc", kWoqOc);
+    const int oc_p = spec.intParam("oc_p", kWoqOcP);
+    const int quanC = spec.intParam("quan_c", kWoqQuanC);
+    auto input = woqBuildInput(batch, ic, ic_p);
+    auto scale = woqBuildScale(oc, quanC, kWoqScale);
+    auto offset = woqBuildOffset(oc, quanC, kWoqOffset);
+    auto bias = woqBuildBias(oc, kWoqBias);
+    auto weight = woqBuildInt8Weight(oc, ic_p, kWoqInt8Q);
+    AdaptedBuffer iBuf; iBuf.setFp32(input); iBuf.isOutput = false;
+    AdaptedBuffer kBuf; kBuf.sizeBytes = weight.size(); kBuf.initialData.assign((const uint8_t*)weight.data(), (const uint8_t*)weight.data() + weight.size()); kBuf.isOutput = false;
+    AdaptedBuffer sBuf; sBuf.setFp32(scale); sBuf.isOutput = false;
+    AdaptedBuffer oBuf_; oBuf_.setFp32(offset); oBuf_.isOutput = false;
+    AdaptedBuffer bBuf; bBuf.setFp32(bias); bBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = (size_t)batch * oc_p * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(iBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(sBuf);
+    ac.buffers.push_back(oBuf_); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqMinV));
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(16)); ac.args.push_back(AdaptedArg::scalarInt(16));)
+    const int gridX = oc, gridY = batch, blockX = 64, blockY = 1;
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
+    ac.args.push_back(AdaptedArg::scalarInt(blockX)); ac.args.push_back(AdaptedArg::scalarInt(blockY));
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.localSize[1] = blockY; ac.dims = 2;
+    ac.elementCount = batch * oc_p;
+    woqStoreStdValidator(ac, input, kBuf.initialData, scale, offset, bias,
+                         batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV, /*isInt4=*/false);
+    return true;
+}
 cudaError_t CudaGemvFpAInt8BFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
     mnn_corpus_gemv_fpaint8b_fp32((const float*)ctx.devBufs[0], (const int8_t*)ctx.devBufs[1],
         (const float*)ctx.devBufs[2], (const float*)ctx.devBufs[3], (const float*)ctx.devBufs[4], (float*)ctx.devBufs[5],
@@ -550,16 +683,49 @@ cudaError_t CudaGemvFpAInt8BFp32Kernel::launch(const AdaptedCase&, const CudaLau
         ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
     return cudaGetLastError();
 }
+bool CudaGemvFpAInt8BFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqValidateStd(ac, output);
+}
 
-// 12. CudaGemvFpAInt4BFp32Kernel — GEMV_FpAInt4B (2D grid + blockY, shared mem).
-WOQ_GEMV_FP32_SMOKE_BODY(CudaGemvFpAInt4BFp32Kernel, mnn_corpus_gemv_fpaint4b_fp32, const uint8_t*, true,
+// 12. CudaGemvFpAInt4BFp32Kernel — GEMV_FpAInt4B (legacy V1, shared mem, block=64).
+bool CudaGemvFpAInt4BFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint4b_fp32";
+    const int batch = spec.intParam("batch", kWoqBatch);
+    const int ic = spec.intParam("ic", kWoqIc);
+    const int ic_p = spec.intParam("ic_p", kWoqIcP);
+    const int oc = spec.intParam("oc", kWoqOc);
+    const int oc_p = spec.intParam("oc_p", kWoqOcP);
+    const int quanC = spec.intParam("quan_c", kWoqQuanC);
+    auto input = woqBuildInput(batch, ic, ic_p);
+    auto scale = woqBuildScale(oc, quanC, kWoqScale);
+    auto offset = woqBuildOffset(oc, quanC, kWoqOffset);
+    auto bias = woqBuildBias(oc, kWoqBias);
+    auto weight = woqBuildInt4Weight(oc, ic_p, kWoqInt4Byte);
+    AdaptedBuffer iBuf; iBuf.setFp32(input); iBuf.isOutput = false;
+    AdaptedBuffer kBuf; kBuf.sizeBytes = weight.size(); kBuf.initialData.assign(weight.begin(), weight.end()); kBuf.isOutput = false;
+    AdaptedBuffer sBuf; sBuf.setFp32(scale); sBuf.isOutput = false;
+    AdaptedBuffer oBuf_; oBuf_.setFp32(offset); oBuf_.isOutput = false;
+    AdaptedBuffer bBuf; bBuf.setFp32(bias); bBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = (size_t)batch * oc_p * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(iBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(sBuf);
+    ac.buffers.push_back(oBuf_); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqMinV));
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
+    const int gridX = oc, gridY = batch, blockX = 64;
     const int sharedMem = ic_p * sizeof(float) + 64 * sizeof(float);
     ac.args.push_back(AdaptedArg::scalarInt(sharedMem));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(64));)
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
+    ac.args.push_back(AdaptedArg::scalarInt(blockX));
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.dims = 2;
+    ac.elementCount = batch * oc_p;
+    woqStoreStdValidator(ac, input, kBuf.initialData, scale, offset, bias,
+                         batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV, /*isInt4=*/true);
+    return true;
+}
 cudaError_t CudaGemvFpAInt4BFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
     mnn_corpus_gemv_fpaint4b_fp32((const float*)ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
         (const float*)ctx.devBufs[2], (const float*)ctx.devBufs[3], (const float*)ctx.devBufs[4], (float*)ctx.devBufs[5],
@@ -568,14 +734,47 @@ cudaError_t CudaGemvFpAInt4BFp32Kernel::launch(const AdaptedCase&, const CudaLau
         ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.intArgs[9], ctx.stream);
     return cudaGetLastError();
 }
+bool CudaGemvFpAInt4BFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqValidateStd(ac, output);
+}
 
-// 13. CudaGemvFpAInt4BV5Fp32Kernel — GEMV_FpAInt4B_V5 (1D block, no shared mem).
-WOQ_GEMV_FP32_SMOKE_BODY(CudaGemvFpAInt4BV5Fp32Kernel, mnn_corpus_gemv_fpaint4b_v5_fp32, const uint8_t*, true,
+// 13. CudaGemvFpAInt4BV5Fp32Kernel — GEMV_FpAInt4B_V5 (1 OC/block, block=128).
+bool CudaGemvFpAInt4BV5Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint4b_v5_fp32";
+    const int batch = spec.intParam("batch", kWoqBatch);
+    const int ic = spec.intParam("ic", kWoqIc);
+    const int ic_p = spec.intParam("ic_p", kWoqIcP);
+    const int oc = spec.intParam("oc", kWoqOc);
+    const int oc_p = spec.intParam("oc_p", kWoqOcP);
+    const int quanC = spec.intParam("quan_c", kWoqQuanC);
+    auto input = woqBuildInput(batch, ic, ic_p);
+    auto scale = woqBuildScale(oc, quanC, kWoqScale);
+    auto offset = woqBuildOffset(oc, quanC, kWoqOffset);
+    auto bias = woqBuildBias(oc, kWoqBias);
+    auto weight = woqBuildInt4Weight(oc, ic_p, kWoqInt4Byte);
+    AdaptedBuffer iBuf; iBuf.setFp32(input); iBuf.isOutput = false;
+    AdaptedBuffer kBuf; kBuf.sizeBytes = weight.size(); kBuf.initialData.assign(weight.begin(), weight.end()); kBuf.isOutput = false;
+    AdaptedBuffer sBuf; sBuf.setFp32(scale); sBuf.isOutput = false;
+    AdaptedBuffer oBuf_; oBuf_.setFp32(offset); oBuf_.isOutput = false;
+    AdaptedBuffer bBuf; bBuf.setFp32(bias); bBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = (size_t)batch * oc_p * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(iBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(sBuf);
+    ac.buffers.push_back(oBuf_); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqMinV));
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(64));)
+    const int gridX = oc, gridY = batch, blockX = 128;
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
+    ac.args.push_back(AdaptedArg::scalarInt(blockX));
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.dims = 2;
+    ac.elementCount = batch * oc_p;
+    woqStoreStdValidator(ac, input, kBuf.initialData, scale, offset, bias,
+                         batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV, /*isInt4=*/true);
+    return true;
+}
 cudaError_t CudaGemvFpAInt4BV5Fp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
     mnn_corpus_gemv_fpaint4b_v5_fp32((const float*)ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
         (const float*)ctx.devBufs[2], (const float*)ctx.devBufs[3], (const float*)ctx.devBufs[4], (float*)ctx.devBufs[5],
@@ -584,14 +783,47 @@ cudaError_t CudaGemvFpAInt4BV5Fp32Kernel::launch(const AdaptedCase&, const CudaL
         ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.stream);
     return cudaGetLastError();
 }
+bool CudaGemvFpAInt4BV5Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqValidateStd(ac, output);
+}
 
-// 14. CudaGemvFpAInt4BV9Fp32Kernel — GEMV_FpAInt4B_V9 (OC_PER_BLK=4, 1D block).
-WOQ_GEMV_FP32_SMOKE_BODY(CudaGemvFpAInt4BV9Fp32Kernel, mnn_corpus_gemv_fpaint4b_v9_fp32, const uint8_t*, true,
+// 14. CudaGemvFpAInt4BV9Fp32Kernel — GEMV_FpAInt4B_V9 (OC_PER_BLK=4, block=128).
+bool CudaGemvFpAInt4BV9Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag != "3.6.0") return false;
+    ac.entry = "mnn_corpus_gemv_fpaint4b_v9_fp32";
+    const int batch = spec.intParam("batch", kWoqBatch);
+    const int ic = spec.intParam("ic", kWoqIc);
+    const int ic_p = spec.intParam("ic_p", kWoqIcP);
+    const int oc = spec.intParam("oc", kWoqOc);
+    const int oc_p = spec.intParam("oc_p", kWoqOcP);
+    const int quanC = spec.intParam("quan_c", kWoqQuanC);
+    auto input = woqBuildInput(batch, ic, ic_p);
+    auto scale = woqBuildScale(oc, quanC, kWoqScale);
+    auto offset = woqBuildOffset(oc, quanC, kWoqOffset);
+    auto bias = woqBuildBias(oc, kWoqBias);
+    auto weight = woqBuildInt4Weight(oc, ic_p, kWoqInt4Byte);
+    AdaptedBuffer iBuf; iBuf.setFp32(input); iBuf.isOutput = false;
+    AdaptedBuffer kBuf; kBuf.sizeBytes = weight.size(); kBuf.initialData.assign(weight.begin(), weight.end()); kBuf.isOutput = false;
+    AdaptedBuffer sBuf; sBuf.setFp32(scale); sBuf.isOutput = false;
+    AdaptedBuffer oBuf_; oBuf_.setFp32(offset); oBuf_.isOutput = false;
+    AdaptedBuffer bBuf; bBuf.setFp32(bias); bBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = (size_t)batch * oc_p * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(iBuf); ac.buffers.push_back(kBuf); ac.buffers.push_back(sBuf);
+    ac.buffers.push_back(oBuf_); ac.buffers.push_back(bBuf); ac.buffers.push_back(outBuf);
+    for (int i = 0; i < 6; ++i) ac.args.push_back(AdaptedArg::buffer(i));
+    ac.args.push_back(AdaptedArg::scalarFloat(kWoqMaxV)); ac.args.push_back(AdaptedArg::scalarFloat(kWoqMinV));
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(64));)
+    const int gridX = (oc + 3) / 4, gridY = batch, blockX = 128;
+    ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
+    ac.args.push_back(AdaptedArg::scalarInt(blockX));
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.dims = 2;
+    ac.elementCount = batch * oc_p;
+    woqStoreStdValidator(ac, input, kBuf.initialData, scale, offset, bias,
+                         batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV, /*isInt4=*/true);
+    return true;
+}
 cudaError_t CudaGemvFpAInt4BV9Fp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
     mnn_corpus_gemv_fpaint4b_v9_fp32((const float*)ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
         (const float*)ctx.devBufs[2], (const float*)ctx.devBufs[3], (const float*)ctx.devBufs[4], (float*)ctx.devBufs[5],
@@ -600,8 +832,9 @@ cudaError_t CudaGemvFpAInt4BV9Fp32Kernel::launch(const AdaptedCase&, const CudaL
         ctx.intArgs[6], ctx.intArgs[7], ctx.intArgs[8], ctx.stream);
     return cudaGetLastError();
 }
-
-#undef WOQ_GEMV_FP32_SMOKE_BODY
+bool CudaGemvFpAInt4BV9Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    return woqValidateStd(ac, output);
+}
 
 // 15. CudaGemvFpAInt4BV14Fp32Kernel — GEMV_FpAInt4B_V14 (uses float2 gemv_params,
 //     no scale/offset; args: input, kernel, gemv_params, bias, output, ...).
@@ -631,9 +864,11 @@ bool CudaGemvFpAInt4BV14Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac)
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(num_qg));
     ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(64));
-    ac.globalSize[0] = (oc + 3) / 4; ac.globalSize[1] = batch; ac.localSize[0] = 64; ac.dims = 2;
+    ac.args.push_back(AdaptedArg::scalarInt(128));
+    ac.globalSize[0] = (oc + 3) / 4; ac.globalSize[1] = batch; ac.localSize[0] = 128; ac.dims = 2;
     ac.elementCount = batch * oc_p;
+    woqStoreV14Validator(ac, input, kBuf.initialData, gemv_params, bias,
+                          batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV);
     return true;
 }
 cudaError_t CudaGemvFpAInt4BV14Fp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
@@ -645,7 +880,7 @@ cudaError_t CudaGemvFpAInt4BV14Fp32Kernel::launch(const AdaptedCase&, const Cuda
     return cudaGetLastError();
 }
 bool CudaGemvFpAInt4BV14Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    return woqAnyNonZeroFp32(output, ac.elementCount);
+    return woqValidateV14(ac, output);
 }
 
 // 16. CudaGemvFpAInt4BV14MbFp32Kernel — GEMV_FpAInt4B_V14_MB (1D grid, MAX_BATCH=1).
@@ -674,9 +909,11 @@ bool CudaGemvFpAInt4BV14MbFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& a
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(num_qg));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(64));
-    ac.globalSize[0] = (oc + 3) / 4; ac.localSize[0] = 64; ac.dims = 1;
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(128));
+    ac.globalSize[0] = (oc + 3) / 4; ac.localSize[0] = 128; ac.dims = 1;
     ac.elementCount = batch * oc_p;
+    woqStoreV14Validator(ac, input, kBuf.initialData, gemv_params, bias,
+                          batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV);
     return true;
 }
 cudaError_t CudaGemvFpAInt4BV14MbFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
@@ -688,7 +925,7 @@ cudaError_t CudaGemvFpAInt4BV14MbFp32Kernel::launch(const AdaptedCase&, const Cu
     return cudaGetLastError();
 }
 bool CudaGemvFpAInt4BV14MbFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    return woqAnyNonZeroFp32(output, ac.elementCount);
+    return woqValidateV14(ac, output);
 }
 
 // 17. CudaGemvFpAInt8BV2Fp32Kernel — GEMV_FpAInt8B_V2 (2D grid + blockY).
@@ -718,10 +955,13 @@ bool CudaGemvFpAInt8BV2Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) 
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 15) / 16)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(16)); ac.args.push_back(AdaptedArg::scalarInt(16));
-    ac.globalSize[0] = (oc + 15) / 16; ac.globalSize[1] = batch; ac.localSize[0] = 16; ac.localSize[1] = 16; ac.dims = 2;
+    // V2: grid(UP_DIV(oc, GEMV_OC_PER_BLOCK=4), batch), block(WARP_SIZE=32, GEMV_OC_PER_BLOCK=4)
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(32)); ac.args.push_back(AdaptedArg::scalarInt(4));
+    ac.globalSize[0] = (oc + 3) / 4; ac.globalSize[1] = batch; ac.localSize[0] = 32; ac.localSize[1] = 4; ac.dims = 2;
     ac.elementCount = batch * oc_p;
+    woqStoreStdValidator(ac, input, kBuf.initialData, scale, offset, bias,
+                          batch, ic, ic_p, oc, oc_p, quanC, kWoqMaxV, kWoqMinV, /*isInt4=*/false);
     return true;
 }
 cudaError_t CudaGemvFpAInt8BV2Fp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
@@ -733,7 +973,7 @@ cudaError_t CudaGemvFpAInt8BV2Fp32Kernel::launch(const AdaptedCase&, const CudaL
     return cudaGetLastError();
 }
 bool CudaGemvFpAInt8BV2Fp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    return woqAnyNonZeroFp32(output, ac.elementCount);
+    return woqValidateStd(ac, output);
 }
 
 // ----------------------------------------------------------------------------

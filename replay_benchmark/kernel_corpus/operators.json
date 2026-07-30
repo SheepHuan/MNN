@@ -8261,6 +8261,72 @@
       "op_type": "linear_attention",
       "tag": "3.6.0",
       "variant": "cuda_gated_delta_rule_prefill_fp16"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_conv_dw_bf16_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/bf16/ConvDepthWiseBf16.cuh",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_bf16_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_conv_dw_bf162_opt_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/bf16/ConvDepthWiseBf16.cuh",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_bf162_opt_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_conv_dw3x3_bf162_opt_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/bf16/ConvDepthWiseBf16.cuh",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw3x3_bf162_opt_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_conv_dw_bf16_multi_width4_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/bf16/ConvDepthWiseBf16.cuh",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "conv_dw",
+      "tag": "3.6.0",
+      "variant": "cuda_conv_dw_bf16_multi_width4_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_weight_trans_to_bf16_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/bf16/ConvDepthWiseBf16.cuh",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "cuda_weight_trans_to_bf16_fp32"
+    },
+    {
+      "backend": "cuda",
+      "entry": "mnn_corpus_bias_trans_to_bf16_fp32",
+      "execution_spec": "shim",
+      "file": "source/backend/cuda/execution/bf16/ConvDepthWiseBf16.cuh",
+      "framework": "mnn",
+      "language": "cuda",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "cuda_bias_trans_to_bf16_fp32"
     }
   ],
   "version": 1
