@@ -3,6 +3,7 @@
 //   Complete re-implementation including QNorm/KNorm (RMSNorm) path.
 //   gamma=nullptr + useNorm=false when no norm is configured.
 #include "corpus_common.cuh"
+#include <cuda_fp16.h>
 
 namespace MNN {
 namespace Corpus {
@@ -86,6 +87,21 @@ void mnn_corpus_rope_c4_fp32(const float* q, const float* k, const float* cos, c
                              int grid, int block, cudaStream_t stream) {
     MNN::Corpus::ropeC4Kernel<float><<<grid, block, 0, stream>>>(
         q, k, cos, sin, qOut, kOut, qGamma, kGamma, seqLen, numHead, kvNumHead,
+        headDim, ropeHalfDim, qHiddenPack, kHiddenPack, qEps, kEps, qNorm, kNorm);
+}
+
+// ---- ropeC4Kernel<half> (fp16 variant) ----
+// Note: cos/sin are __half (T), gamma stays float (MNN keeps gamma as float).
+void mnn_corpus_rope_c4_fp16(const void* q, const void* k, const void* cos, const void* sin,
+                              void* qOut, void* kOut, const float* qGamma, const float* kGamma,
+                              int seqLen, int numHead, int kvNumHead, int headDim, int ropeHalfDim,
+                              int qHiddenPack, int kHiddenPack, float qEps, float kEps,
+                              bool qNorm, bool kNorm,
+                              int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::ropeC4Kernel<__half><<<grid, block, 0, stream>>>(
+        (const __half*)q, (const __half*)k, (const __half*)cos, (const __half*)sin,
+        (__half*)qOut, (__half*)kOut, qGamma, kGamma,
+        seqLen, numHead, kvNumHead,
         headDim, ropeHalfDim, qHiddenPack, kHiddenPack, qEps, kEps, qNorm, kNorm);
 }
 

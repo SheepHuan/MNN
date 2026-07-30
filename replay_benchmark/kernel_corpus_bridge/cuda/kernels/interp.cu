@@ -325,4 +325,34 @@ void mnn_corpus_interp_bilinear_opt_fp32(const int n, int ih, int iw, int oh, in
         n, ih, iw, oh, ow, sh, sw, ohf, owf, in, out, owD, ohD);
 }
 
+// ============================================================================
+// fp16 (<half>) variants — only 3.6.0 (nearest, bilinear, nearest_round, opt)
+// ============================================================================
+void mnn_corpus_interp_nearest_fp16(const int total, const int c_p, int ih, int iw, int oh, int ow,
+                                     float sh, float sw, float ohf, float owf,
+                                     const void* in, void* out, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::INTERP_NERAEST<__half><<<grid, block, 0, stream>>>(total, c_p, ih, iw, oh, ow, sh, sw, ohf, owf,
+                                                                     (const __half*)in, (__half*)out);
+}
+void mnn_corpus_interp_bilinear_fp16(const int total, const int c_p, int ih, int iw, int oh, int ow,
+                                      float sh, float sw, float ohf, float owf,
+                                      const void* in, void* out, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::INTERP_BILINEAR<__half><<<grid, block, 0, stream>>>(total, c_p, ih, iw, oh, ow, sh, sw, ohf, owf,
+                                                                      (const __half*)in, (__half*)out);
+}
+void mnn_corpus_interp_nearest_round_fp16(const int total, const int c_p, int ih, int iw, int oh, int ow,
+                                           float sh, float sw, float ohf, float owf,
+                                           const void* in, void* out, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::INTERP_NERAEST_ROUND<__half><<<grid, block, 0, stream>>>(total, c_p, ih, iw, oh, ow, sh, sw, ohf, owf,
+                                                                           (const __half*)in, (__half*)out);
+}
+void mnn_corpus_interp_bilinear_opt_fp16(const int n, int ih, int iw, int oh, int ow,
+                                          float sh, float sw, float ohf, float owf,
+                                          const void* in, void* out,
+                                          int d_ow, int d_oh, int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::DivModFast owD(d_ow), ohD(d_oh);
+    MNN::Corpus::INTERP_BILINEAR_OPT<__half><<<grid, block, 0, stream>>>(
+        n, ih, iw, oh, ow, sh, sw, ohf, owf, (const __half*)in, (__half*)out, owD, ohD);
+}
+
 } // extern "C"

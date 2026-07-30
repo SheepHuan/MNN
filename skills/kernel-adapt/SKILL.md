@@ -7,6 +7,20 @@ description: 将历史 MNN/ncnn 的 OpenCL/Vulkan/CUDA kernel 适配到当前 MN
 
 > **触发条件**：当用户请求适配/运行历史 kernel、扩展算子变体覆盖、为 kernel corpus 新增 adapter 时触发。
 
+## 核心原则（强制）
+
+> **忠实复制 MNN 的 kernel 源码。** adapter 只负责参数转换 + buffer 打包 + 验证。
+>
+> 1. **kernel 实现 = 原样复制 MNN 源码的 `__global__` 函数体**——不简化、不替换逻辑、不改变算法。
+>    如果 MNN 用 `cub::BlockScan`，corpus 也用 `cub::BlockScan`；如果 MNN 用 8-byte 向量化，corpus 也用 8-byte 向量化。
+> 2. **adapter = 参数转换层**——从 `CaseSpec` 读参数，构造 input buffer（填充测试数据），设置 grid/block，
+>    按 shim 签名打包 `ac.args`，调 shim launch。adapter 不包含任何 kernel 逻辑。
+> 3. **验证 = adapter 在 host 端重新计算 expected 值**，与 kernel 输出对比。验证容差按数据类型调整
+>    （fp32: 1e-3~1e-2，fp16: 1e-1~1e-2，int8: 精确匹配）。验证逻辑不依赖 kernel 内部实现细节。
+>
+> **违反此原则的典型错误**：简化 kernel 逻辑导致 corpus 与 MNN 行为不一致、验证逻辑与 kernel
+> 内部数据布局不匹配导致 false negative。
+
 ## 概述
 
 本 SKILL 指导 AI Agent 将 `replay_benchmark/kernel_corpus/sources/` 中的历史 MNN OpenCL `.cl` 和 ncnn Vulkan `.comp` kernel 适配为可在当前 MNN GPU runtime 上编译、dispatch、校验和采集 PMU 的独立 workload。
@@ -427,6 +441,12 @@ for c in opencl:
 11. **OpenCL `-D` 不支持函数式宏**：`CONVERT_FLOAT4(x)` 等必须 `#define` 在 preamble 里，不能用 `-D` 传。
 12. **OpenCL runner 已支持 compileMacros**：`clBuildProgram` 接受 `ac.compileMacros` 拼成的 build options 字符串。
 13. **backend-specific validator**：validator 需按 backend 数据布局适配。OpenCL 用 NC4HW4 FLOAT4 布局，Vulkan 可能用标量 FLOAT（如 reduce）。已有 `reduction_sum_fp32`（NC4HW4）和 `reduction_sum_scalar_fp32`（标量）两个版本。新增 backend 的 case 时需确认 validator 与该 backend 的实际数据布局匹配。
+14. **忠实性审计方法论（强制）**：遇到"无法忠实复制 MNN kernel"的结论前，必须按以下顺序排查，**禁止仅凭环境限制就放弃**：
+    1. **编译失败 → 查 MNN CMake flag 覆盖**：MNN 各 backend 子目录的 `CMakeLists.txt` 可能对顶层 flag 做局部覆盖。最典型的例子：`source/backend/cuda/CMakeLists.txt:110` 显式 `set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")` 覆盖顶层 `-fno-exceptions`，使 `cub::BlockScan`/thrust 能编译。corpus 必须镜像同一覆盖（在 `replay_benchmark/CMakeLists.txt` 里加对应 flag），而非声明"无法编译"。验证方法：`grep -rn "set(CMAKE_CXX_FLAGS\|target_compile_options\|add_compile_options" source/backend/<backend>/CMakeLists.txt`。
+    2. **架构不支持 → 验证 `#if __CUDA_ARCH__` 守卫下类型是否仍可用**：BF16 等"高架构"类型在低架构下**类型定义仍可用**（通过 `#include <cuda_bf16.h>`），只是计算指令不可用。kernel body 用 `#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))` 守卫后，低架构编译为**空 kernel**（声明存在、body 不生成），仍可链接/调用（不产生输出）。这意味着"需 sm80+ 运行"≠"不能在 sm75 编译"——kernel 应复制，标注运行环境而非跳过。
+    3. **runner 不兼容 → 区分"编译限制"与"架构限制"**：若 kernel 类型实例化（如 `int2*` = 8 字节 4-half 打包）与 corpus runner 的 buffer 模型（float 标量）不兼容，先确认这是**runner 架构限制**（需重构 buffer 管理）而非**编译限制**（换个实例化即可）。只有 runner 架构限制才允许保留数学等价的 corpus 适配，且必须标注为"corpus 适配"并说明限制根因。
+    4. **HANDOFF/审计描述与源码不符 → 以 `git log`/源码为准**：审计文档可能过时或描述错误。例：曾标注"MNN MOD 用 fmod"，但 `git log -p -S "fmod" -- source/backend/cuda/execution/BinaryExecution.cu` 确认 MNN 从未用 fmod（一直是 `x - x/y`）。遇描述与实现不一致时，**以 MNN 源码为准**，修正文档而非"修复"已正确的 corpus。
+    5. **黄金法则**：MNN 能编译的 kernel，corpus 理论上也能编译（同一 nvcc + 同一 CUDA toolkit）。遇编译失败先找 flag 差异，不要归因于"环境限制"。
 
 ## 已知编译失败分类及修复方向
 

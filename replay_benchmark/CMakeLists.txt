@@ -132,7 +132,10 @@ if(MNN_CUDA)
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/attention.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/winograd.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/convdw_extra.cu
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/transpose_half.cu)
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/transpose_half.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/plugins.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/int8.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu)
     # CudaOps.cpp / CudaOpsMisc.cpp (fp32 adapters) reference mnn_corpus_* shims
     # compiled by nvcc. Only include them when CUDA is enabled so host builds
     # without nvcc still link cleanly.

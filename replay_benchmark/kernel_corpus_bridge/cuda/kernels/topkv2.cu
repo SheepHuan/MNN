@@ -1,6 +1,7 @@
 // topkv2.cu - TopKAllRows / GetResultAllRows kernels + helpers + shim
 //   source/backend/cuda/execution/TopKV2Execution.cu
 #include "corpus_common.cuh"
+#include <cuda_fp16.h>
 
 namespace MNN {
 namespace Corpus {
@@ -28,7 +29,26 @@ template<typename indexT, typename valueT>
 __device__ void topk_TopKInThread(const valueT* inputDevice, indexT* indicesThread, valueT* valuesThread, const int K, const int numElePerRow, const valueT minValue, const int descendFlag) {
     for (int i = 0; i < K; i++) { indicesThread[i] = -1; valuesThread[i] = (valueT)(descendFlag) * minValue; }
     int idxFirstEleInRow = threadIdx.x + blockIdx.x * blockDim.x;
-    for (indexT i = idxFirstEleInRow; i < numElePerRow; i += gridDim.x * blockDim.x) {
+    // Main loop with 4x unrolling for ILP (faithful to MNN TopKInThread).
+    indexT i = idxFirstEleInRow;
+    for (; i + gridDim.x * blockDim.x * 3 < numElePerRow; i += gridDim.x * blockDim.x * 4) {
+        valueT data[4];
+        data[0] = inputDevice[i];
+        data[1] = inputDevice[i + gridDim.x * blockDim.x];
+        data[2] = inputDevice[i + gridDim.x * blockDim.x * 2];
+        data[3] = inputDevice[i + gridDim.x * blockDim.x * 3];
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            valueT val = data[k];
+            if ((valueT)(descendFlag) * val > (valueT)(descendFlag) * valuesThread[0]) {
+                valuesThread[0] = val;
+                indicesThread[0] = i + gridDim.x * blockDim.x * k;
+                topk_siftDown<indexT, valueT>(K, descendFlag, valuesThread, indicesThread);
+            }
+        }
+    }
+    // Remaining elements
+    for (; i < numElePerRow; i += gridDim.x * blockDim.x) {
         valueT data = inputDevice[i];
         if ((valueT)(descendFlag) * data > (valueT)(descendFlag) * valuesThread[0]) {
             valuesThread[0] = data; indicesThread[0] = i; topk_siftDown<indexT, valueT>(K, descendFlag, valuesThread, indicesThread);
@@ -147,6 +167,31 @@ void mnn_corpus_topkv2_fp32(const float* input, int* outIndices, float* outValue
     dim3 b2((unsigned)block2);
     MNN::Corpus::GetResultAllRows<int, float><<<g2, b2, smem2 * (sizeof(float) + sizeof(int)), stream>>>(
         outIndices, outValues, tempIndices, tempValues, K, numBlockPerRow, descendFlag);
+    cudaStreamSynchronize(stream);
+    cudaFree(tempIndices);
+    cudaFree(tempValues);
+}
+
+// ---- TopKV2 fp16 (TopKAllRows<int,__half> + GetResultAllRows<int,__half>) ----
+void mnn_corpus_topkv2_fp16(const void* input, int* outIndices, void* outValues,
+                             int K, int lengthRow, int numRow, int descendFlag,
+                             int grid1x, int grid1y, int block1, int smem1,
+                             int grid2, int block2, int smem2,
+                             cudaStream_t stream) {
+    int numBlockPerRow = grid1x;
+    int numBlockTotal = numBlockPerRow * numRow;
+    int* tempIndices;
+    __half* tempValues;
+    cudaMalloc(&tempIndices, numBlockTotal * K * sizeof(int));
+    cudaMalloc(&tempValues, numBlockTotal * K * sizeof(__half));
+    dim3 g1((unsigned)grid1x, (unsigned)grid1y);
+    dim3 b1((unsigned)block1);
+    MNN::Corpus::TopKAllRows<int, __half><<<g1, b1, smem1 * (sizeof(__half) + sizeof(int)), stream>>>(
+        (const __half*)input, tempIndices, tempValues, K, lengthRow, __float2half(-1e30f), descendFlag);
+    dim3 g2((unsigned)grid2);
+    dim3 b2((unsigned)block2);
+    MNN::Corpus::GetResultAllRows<int, __half><<<g2, b2, smem2 * (sizeof(__half) + sizeof(int)), stream>>>(
+        outIndices, (__half*)outValues, tempIndices, tempValues, K, numBlockPerRow, descendFlag);
     cudaStreamSynchronize(stream);
     cudaFree(tempIndices);
     cudaFree(tempValues);

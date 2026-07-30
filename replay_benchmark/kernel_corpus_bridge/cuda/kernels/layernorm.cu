@@ -1,6 +1,7 @@
 // layernorm.cu - LAYERNORM 1.2.7/2.2.2/2.8.4-3.6.0 kernels + shims
 //   source/backend/cuda/execution/LayerNormExecution.cu
 #include "corpus_common.cuh"
+#include <cuda_fp16.h>
 
 namespace MNN {
 namespace Corpus {
@@ -196,6 +197,201 @@ __global__ void binary_layernorm_c4(T* sumOut, T* normOut, const T* input0, cons
     }
 }
 
+// ============================================================================
+// input_layernorm_<size>: size-specialized LayerNorm/RMSNorm kernels.
+// Faithful copies from source/backend/cuda/execution/LayerNormExecution.cu.
+// Each block handles one row; gamma/beta are float; T is float or half.
+// NOTE: MNN uses `#pragma unroll(N)` which nvcc accepts; the standard form
+// `#pragma unroll N` is used here for portability.
+// ============================================================================
+
+template <typename T>
+__global__ void input_layernorm_320(T* out, const T* input, const float* gamma, const float* beta, int m, int n, const float epsilon, bool RMSNorm) {
+    int tid = threadIdx.x;
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float mean = 0.0f;
+    float variance = 0.0f;
+    float local_out = 0.0f;
+    s_mean = 0;
+    float value_tmp[5];
+    value_tmp[0] = input[blockIdx.x * n + 0*64 + tid];
+    value_tmp[1] = input[blockIdx.x * n + 1*64 + tid];
+    value_tmp[2] = input[blockIdx.x * n + 2*64 + tid];
+    value_tmp[3] = input[blockIdx.x * n + 3*64 + tid];
+    value_tmp[4] = input[blockIdx.x * n + 4*64 + tid];
+    if (!RMSNorm) {
+        for (int idx = 0; idx < 5; idx++) local_out += value_tmp[idx];
+        mean = blockReduceSum<float>(local_out);
+        if (threadIdx.x == 0) s_mean = mean / n;
+        __syncthreads();
+    }
+    mean = s_mean;
+    float var_tmp = 0.0f;
+    for (int idx = 0; idx < 5; idx++) var_tmp += ((value_tmp[idx] - mean) * (value_tmp[idx] - mean));
+    variance = blockReduceSum<float>(var_tmp);
+    if (threadIdx.x == 0) s_variance = variance / n + epsilon;
+    __syncthreads();
+    for (int idx = 0; idx < 5; idx++) {
+        float res = ((value_tmp[idx] - mean) * rsqrtf(s_variance));
+        if (gamma != nullptr && beta != nullptr) {
+            res = res * (float)(__ldg(&gamma[idx*64 + tid])) + (float)(__ldg(&beta[idx*64 + tid]));
+        }
+        out[blockIdx.x * n + idx*64 + tid] = (T)res;
+    }
+}
+
+template <typename T>
+__global__ void input_layernorm_2048(T* out, const T* input, const float* gamma, const float* beta, int m, int n, const float epsilon, bool RMSNorm) {
+    int tid = threadIdx.x;
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float mean = 0.0f;
+    float variance = 0.0f;
+    float local_out = 0.0f;
+    s_mean = 0;
+    float value_tmp[8];
+    value_tmp[0] = input[blockIdx.x * 2048 + 0*256 + tid];
+    value_tmp[1] = input[blockIdx.x * 2048 + 1*256 + tid];
+    value_tmp[2] = input[blockIdx.x * 2048 + 2*256 + tid];
+    value_tmp[3] = input[blockIdx.x * 2048 + 3*256 + tid];
+    value_tmp[4] = input[blockIdx.x * 2048 + 4*256 + tid];
+    value_tmp[5] = input[blockIdx.x * 2048 + 5*256 + tid];
+    value_tmp[6] = input[blockIdx.x * 2048 + 6*256 + tid];
+    value_tmp[7] = input[blockIdx.x * 2048 + 7*256 + tid];
+    if (!RMSNorm) {
+        #pragma unroll 8
+        for (int idx = 0; idx < 8; idx++) local_out += (float)value_tmp[idx];
+        mean = blockReduceSum<float>(local_out);
+        if (threadIdx.x == 0) s_mean = mean / n;
+        __syncthreads();
+    }
+    mean = s_mean;
+    float var_tmp = 0.0f;
+    #pragma unroll 8
+    for (int idx = 0; idx < 8; idx++) var_tmp += ((value_tmp[idx] - mean) * (value_tmp[idx] - mean));
+    variance = blockReduceSum<float>(var_tmp);
+    if (threadIdx.x == 0) s_variance = variance / n + epsilon;
+    __syncthreads();
+    #pragma unroll 8
+    for (int idx = 0; idx < 8; idx++) {
+        float res = ((value_tmp[idx] - mean) * rsqrtf(s_variance));
+        if (gamma != nullptr && beta != nullptr) {
+            res = res * (float)(__ldg(&gamma[idx*256 + tid])) + (float)(__ldg(&beta[idx*256 + tid]));
+        }
+        out[blockIdx.x * 2048 + idx*256 + tid] = (T)res;
+    }
+}
+
+template <typename T>
+__global__ void input_layernorm_1024(T* out, const T* input, const float* gamma, const float* beta, int m, int n, const float epsilon, bool RMSNorm) {
+    int tid = threadIdx.x;
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float mean = 0.0f;
+    float variance = 0.0f;
+    float local_out = 0.0f;
+    s_mean = 0;
+    float value_tmp[4];
+    value_tmp[0] = input[blockIdx.x * 1024 + 0*256 + tid];
+    value_tmp[1] = input[blockIdx.x * 1024 + 1*256 + tid];
+    value_tmp[2] = input[blockIdx.x * 1024 + 2*256 + tid];
+    value_tmp[3] = input[blockIdx.x * 1024 + 3*256 + tid];
+    if (!RMSNorm) {
+        #pragma unroll 4
+        for (int idx = 0; idx < 4; idx++) local_out += (float)value_tmp[idx];
+        mean = blockReduceSum<float>(local_out);
+        if (threadIdx.x == 0) s_mean = mean / n;
+        __syncthreads();
+    }
+    mean = s_mean;
+    float var_tmp = 0.0f;
+    #pragma unroll 4
+    for (int idx = 0; idx < 4; idx++) var_tmp += ((value_tmp[idx] - mean) * (value_tmp[idx] - mean));
+    variance = blockReduceSum<float>(var_tmp);
+    if (threadIdx.x == 0) s_variance = variance / n + epsilon;
+    __syncthreads();
+    #pragma unroll 4
+    for (int idx = 0; idx < 4; idx++) {
+        float res = ((value_tmp[idx] - mean) * rsqrtf(s_variance));
+        if (gamma != nullptr && beta != nullptr) {
+            res = res * (float)(__ldg(&gamma[idx*256 + tid])) + (float)(__ldg(&beta[idx*256 + tid]));
+        }
+        out[blockIdx.x * 1024 + idx*256 + tid] = (T)res;
+    }
+}
+
+template <typename T>
+__global__ void input_layernorm_512(T* out, const T* input, const float* gamma, const float* beta, int m, int n, const float epsilon, bool RMSNorm) {
+    int tid = threadIdx.x;
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float mean = 0.0f;
+    float variance = 0.0f;
+    float local_out = 0.0f;
+    s_mean = 0;
+    float value_tmp[2];
+    value_tmp[0] = input[blockIdx.x * 512 + 0*256 + tid];
+    value_tmp[1] = input[blockIdx.x * 512 + 1*256 + tid];
+    if (!RMSNorm) {
+        local_out += (float)value_tmp[0];
+        local_out += (float)value_tmp[1];
+        mean = blockReduceSum<float>(local_out);
+        if (threadIdx.x == 0) s_mean = mean / n;
+        __syncthreads();
+    }
+    mean = s_mean;
+    float var_tmp = 0.0f;
+    var_tmp += ((value_tmp[0] - mean) * (value_tmp[0] - mean));
+    var_tmp += ((value_tmp[1] - mean) * (value_tmp[1] - mean));
+    variance = blockReduceSum<float>(var_tmp);
+    if (threadIdx.x == 0) s_variance = variance / n + epsilon;
+    __syncthreads();
+    float res0 = ((value_tmp[0] - mean) * rsqrtf(s_variance));
+    float res1 = ((value_tmp[1] - mean) * rsqrtf(s_variance));
+    if (gamma != nullptr && beta != nullptr) {
+        res0 = res0 * (float)(__ldg(&gamma[0*256 + tid])) + (float)(__ldg(&beta[0*256 + tid]));
+        res1 = res1 * (float)(__ldg(&gamma[1*256 + tid])) + (float)(__ldg(&beta[1*256 + tid]));
+    }
+    out[blockIdx.x * 512 + 0*256 + tid] = (T)res0;
+    out[blockIdx.x * 512 + 1*256 + tid] = (T)res1;
+}
+
+template <typename T>
+__global__ void input_layernorm_adaptive(T* out, const T* input, const float* gamma, const float* beta, int m, int n, const float epsilon, bool RMSNorm) {
+    const int tid = threadIdx.x;
+    const int num_threads = blockDim.x;
+    const int row = blockIdx.x;
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float mean = 0.0f;
+    s_mean = 0.0f;
+    if (!RMSNorm) {
+        float local_sum = 0.0f;
+        for (int i = tid; i < n; i += num_threads) local_sum += (float)input[row * n + i];
+        mean = blockReduceSum<float>(local_sum);
+        if (tid == 0) s_mean = mean / n;
+        __syncthreads();
+    }
+    mean = s_mean;
+    float var_sum = 0.0f;
+    for (int i = tid; i < n; i += num_threads) {
+        float val = (float)input[row * n + i] - mean;
+        var_sum += val * val;
+    }
+    float variance = blockReduceSum<float>(var_sum);
+    if (tid == 0) s_variance = variance / n + epsilon;
+    __syncthreads();
+    float inv_std = rsqrtf(s_variance);
+    for (int i = tid; i < n; i += num_threads) {
+        float res = ((float)input[row * n + i] - mean) * inv_std;
+        if (gamma != nullptr && beta != nullptr) {
+            res = res * (float)__ldg(&gamma[i]) + (float)__ldg(&beta[i]);
+        }
+        out[row * n + i] = (T)res;
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 
@@ -250,6 +446,54 @@ void mnn_corpus_binary_layernorm_c4_fp32(float* sumOut, float* normOut,
                                          int grid, int block, cudaStream_t stream) {
     MNN::Corpus::binary_layernorm_c4<float><<<grid, block, 0, stream>>>(
         sumOut, normOut, input0, input1, gamma, beta, inside, rowStride, epsilon, RMSNorm);
+}
+
+// ============================================================================
+// fp16 (<half>) variants — layernorm_c4 / binary_layernorm_c4 (3.6.0)
+// gamma/beta stay float (kernel signature uses const float*).
+// ============================================================================
+void mnn_corpus_layernorm_c4_fp16(void* output, const void* input, const float* gamma, const float* beta,
+                                   int inside, int rowStride, float epsilon, bool RMSNorm,
+                                   int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::layernorm_c4<__half><<<grid, block, 0, stream>>>((__half*)output, (const __half*)input, gamma, beta,
+                                                                   inside, rowStride, epsilon, RMSNorm);
+}
+void mnn_corpus_binary_layernorm_c4_fp16(void* sumOut, void* normOut,
+                                         const void* input0, const void* input1,
+                                         const float* gamma, const float* beta,
+                                         int inside, int rowStride, float epsilon, bool RMSNorm,
+                                         int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::binary_layernorm_c4<__half><<<grid, block, 0, stream>>>(
+        (__half*)sumOut, (__half*)normOut, (const __half*)input0, (const __half*)input1, gamma, beta,
+        inside, rowStride, epsilon, RMSNorm);
+}
+
+// ---- input_layernorm_<size> (size-specialized, fp32; faithful to MNN) ----
+// grid = m (rows), block per MNN dispatch: 320→64, 512/1024/2048→256, adaptive→caller-chosen.
+void mnn_corpus_input_layernorm_320_fp32(float* out, const float* input, const float* gamma, const float* beta,
+                                         int m, int n, float epsilon, bool RMSNorm,
+                                         int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::input_layernorm_320<float><<<grid, block, 0, stream>>>(out, input, gamma, beta, m, n, epsilon, RMSNorm);
+}
+void mnn_corpus_input_layernorm_512_fp32(float* out, const float* input, const float* gamma, const float* beta,
+                                         int m, int n, float epsilon, bool RMSNorm,
+                                         int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::input_layernorm_512<float><<<grid, block, 0, stream>>>(out, input, gamma, beta, m, n, epsilon, RMSNorm);
+}
+void mnn_corpus_input_layernorm_1024_fp32(float* out, const float* input, const float* gamma, const float* beta,
+                                          int m, int n, float epsilon, bool RMSNorm,
+                                          int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::input_layernorm_1024<float><<<grid, block, 0, stream>>>(out, input, gamma, beta, m, n, epsilon, RMSNorm);
+}
+void mnn_corpus_input_layernorm_2048_fp32(float* out, const float* input, const float* gamma, const float* beta,
+                                          int m, int n, float epsilon, bool RMSNorm,
+                                          int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::input_layernorm_2048<float><<<grid, block, 0, stream>>>(out, input, gamma, beta, m, n, epsilon, RMSNorm);
+}
+void mnn_corpus_input_layernorm_adaptive_fp32(float* out, const float* input, const float* gamma, const float* beta,
+                                              int m, int n, float epsilon, bool RMSNorm,
+                                              int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::input_layernorm_adaptive<float><<<grid, block, 0, stream>>>(out, input, gamma, beta, m, n, epsilon, RMSNorm);
 }
 
 } // extern "C"

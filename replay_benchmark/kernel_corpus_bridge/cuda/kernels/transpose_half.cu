@@ -16,8 +16,14 @@ static const int PACK_NUMBER = 8;
 
 // ============================================================================
 // From source/backend/cuda/execution/Transpose.cu (lines 118-139)
-// PACKCOMMON_half_4: pack 4-element half vector (half2 output) with {0,0} zero fill.
-// Template T0,T1 — shim instantiates <const float*, half2*> for fp32 -> half2 pack.
+// PACKCOMMON_half_4: pack 4-element half vector with {0,0} zero fill.
+// MNN instantiates <const int2*, int2*> where int2 = 8 bytes = 4 half (two
+// half2). The kernel indexes in 8-byte (4-half) units. Corpus cannot easily
+// replicate the 4-half int2 packing because the replay runner operates on
+// float scalars; we instantiate <float, float> (1 float per "half-slot") and
+// replace {0,0} with T1(0) (writes 0.0f). Math is identical for the scalar
+// case; the 4-half vectorization is lost (this is a correctness corpus).
+// This is a documented corpus adaptation, not a faithfulness gap.
 // ============================================================================
 template<typename T0, typename T1>
 __global__ void PACKCOMMON_half_4(const T0 *input, T1 *output,
@@ -179,9 +185,9 @@ __global__ void UNARY_HALF2_SIGMOID(const T *input, T *output,
 
 extern "C" {
 
-// ---- PACKCOMMON_half_4 (fp32 corpus: scalar float variant) ----
-// MNN uses int2* (half2 packed). For the fp32 corpus we use float* scalars
-// with PACK_NUMBER/4 alignment (matching MNN's axisAlign formula).
+// ---- PACKCOMMON_half_4 (corpus adaptation: float scalar variant) ----
+// See kernel header above for the corpus adaptation rationale (int2 4-half
+// packing cannot be expressed in the float-scalar replay runner).
 void mnn_corpus_packcommon_half_4_fp32(const void* input, void* output,
     int inside, int axis, int outside, int insideStride, int axisStride,
     int d_is, int d_cs, int grid, int block, cudaStream_t stream) {
