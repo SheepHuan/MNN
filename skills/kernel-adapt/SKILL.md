@@ -494,10 +494,10 @@ for c in opencl:
 
 ## 设备信息
 
-- **Rhinopi-X1**：`root@192.168.101.227`，`/mnt/nvme/workspace/replay-benchmark`，Adreno 740
-  - Vulkan lib: `/mnt/nvme/workspace/replay-benchmark-vulkan/lib/libvulkan.so`
-- **OrangePi**：`root@192.168.101.113`，`/mnt/ssd/workspace`，Mali-G610
-- 凭据只从环境读取，不写入仓库
+- **Rhinopi-X1**：`${RHINO_PI_USER}@${RHINO_PI_HOST}`，`$RHINO_PI_WORKSPACE/replay-benchmark`，Adreno 740
+  - Vulkan lib: `$RHINO_PI_WORKSPACE/replay-benchmark-vulkan/lib/libvulkan.so`
+- **OrangePi**：`${ORANGE_PI_USER}@${ORANGE_PI_HOST}`，`$ORANGE_PI_WORKSPACE`，Mali-G610
+- 凭据（IP/用户/密码/workspace）统一记录在仓库根 `.env`，使用前 `source ./.env`；不写入本 skill
 
 ---
 

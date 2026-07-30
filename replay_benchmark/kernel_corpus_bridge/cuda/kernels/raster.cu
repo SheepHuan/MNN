@@ -184,6 +184,26 @@ __global__ void fuseblitLimit(const T0* input, T1* output, const FuseRegion* inf
     }
 }
 
+// ============================================================================
+// 1.2.0-era legacy raster/scatternd kernel (from legacy_kernels.cu)
+// ============================================================================
+template<typename T>
+__global__ void SCATTERND(const int n, const int indicesLastDim, const int accNumber, const int* indicesPtr,
+    const T* updatesPtr, T* outputPtr, const int32_t* dimsToCount) {
+    CUDA_KERNEL_LOOP(index, n) {
+        int pos = 0;
+        for (int j = 0; j < indicesLastDim; ++j) {
+            auto curIndex = (int)indicesPtr[index * indicesLastDim + j];
+            // MNN_ASSERT(curIndex >= 0 && curIndex < output->length(j));
+            pos += curIndex * dimsToCount[j];
+        }
+        for (int k = 0; k < accNumber; ++k) {
+            float updateValue = updatesPtr[index * accNumber + k];
+            atomicAdd(outputPtr + pos + k, updateValue);
+        }
+    }
+}
+
 } // namespace Corpus
 } // namespace MNN
 

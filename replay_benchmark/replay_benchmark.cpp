@@ -234,6 +234,8 @@ static bool parseOptions(int argc, const char* argv[], Options& options) {
                 return false;
             }
             options.kernelCorpusRuns = std::max(1, std::atoi(value.c_str()));
+        } else if (arg == "--kernel-corpus-no-latency") {
+            options.kernelCorpusMeasureLatency = false;
         } else {
             positional.emplace_back(arg);
         }
@@ -333,6 +335,7 @@ static void printUsage(const char* program) {
               << "  " << program << " --opencl-pmu-list-events\n"
               << "  " << program << " --kernel-corpus-bench --kernel-corpus-root <dir>\n"
               << "      [--kernel-corpus-case name] [--kernel-corpus-runs N]\n"
+              << "      [--kernel-corpus-no-latency]\n"
               << "      [--perf-counter-output path.json] [--perf-counter-events name1,name2]\n"
               << "\n"
               << "forward: 0 CPU, 3 OpenCL, 7 Vulkan; precision: 0 normal, 1 high, 2 low FP16, 3 low BF16\n";
@@ -512,6 +515,7 @@ int main(int argc, const char* argv[]) {
         kccOptions.corpusRoot = options.kernelCorpusRoot;
         kccOptions.caseFilter = options.kernelCorpusCase;
         kccOptions.runs = options.kernelCorpusRuns;
+        kccOptions.measureLatency = options.kernelCorpusMeasureLatency;
         kccOptions.perfCounterOutput = options.perfCounterOutput;
         kccOptions.perfCounterEvents = options.perfCounterEvents;
         return MNN::Replay::KernelCorpus::runKernelCorpusBenchmark(kccOptions) ? 0 : 1;

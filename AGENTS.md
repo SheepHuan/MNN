@@ -113,4 +113,6 @@ Public skills are listed below. Environment-dependent skills may exist under `sk
 | Bugfix / debugging | `skills/general-debug/SKILL.md` | Diagnose correctness bugs / regressions in MNN — organized by bug category. |
 | Run tests / CI | `skills/test-ci/SKILL.md` | Run the regression / CI suite (host or on-device), or add / select / retune a test stage |
 | Replay benchmark cross-compile | `skills/replay-benchmark-cross-compile/SKILL.md` | Cross-compile `replay_benchmark` with the ARM GNU Toolchain 11.3 archive |
+| Corpus audit | `skills/corpus-audit/SKILL.md` | Audit replay_benchmark kernel corpus for faithfulness (kernel body vs MNN source) and correctness (adapter params, launch geometry, validator effectiveness). Use after kernel-adapt to verify additions. |
+| GPU PMU sweep | `skills/gpu-pmu-sweep/SKILL.md` | Sweep PMU metrics (Adreno/Mali/NVIDIA) on replay_benchmark kernel corpus cases, collect per-kernel control/workload delta. Covers OpenCL, Vulkan, CUDA backends. |
 | Retrospective | `skills/retrospective/SKILL.md` | After non-trivial tasks with reusable lessons |

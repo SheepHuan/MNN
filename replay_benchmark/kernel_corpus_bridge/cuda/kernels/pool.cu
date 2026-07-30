@@ -12,6 +12,17 @@
 #include "corpus_common.cuh"
 #include <cuda_bf16.h>
 
+// 1.2.7-era pool/TensorCore used PACK_NUMBER=16 (corpus_common.cuh does not
+// define PACK_NUMBER; other .cu files define their own). Legacy half/float
+// C16 pool kernels below rely on this value.
+#ifndef PACK_NUMBER
+#define PACK_NUMBER 16
+#endif
+#define PACK_NUMBER_C2 (PACK_NUMBER/2)
+// half2 min/max helpers used by the legacy maxpool_halfC16/avgpool_halfC16 kernels
+#define HALF2_MIN half2(-65504, -65504)
+#define MNN_CUDA_HALF2_MAX(a, b) do { (a).x = __hgt((a).x, (b).x) ? (a).x : (b).x; (a).y = __hgt((a).y, (b).y) ? (a).y : (b).y; } while (0)
+
 namespace MNN {
 namespace Corpus {
 
@@ -286,6 +297,199 @@ __global__ void avgpool_C8_BF16(const T* uInput, T* uOutput,
         *dst = sumValue;
     }
     #endif
+}
+
+// ============================================================================
+// 1.2.7-era legacy pool kernels (PACK_NUMBER=16, from legacy_kernels.cu)
+// ============================================================================
+__global__ void maxpool_halfC16(const half* uInput, half* uOutput,
+    int bc,
+    int ih, int iw,
+    int oh, int ow,
+    int padX, int padY,
+    int kernelX, int kernelY,
+    int strideX, int strideY
+    ) {
+    int total = bc * oh * ow * 8;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int x = i % ow;
+        int tmp = i / ow;
+        int y = tmp % oh;
+        int z = tmp / oh;
+        int zC = z / 8;
+        int zR = z % 8;
+        int ix = x * strideX - padX;
+        int iy = y * strideY - padY;
+        int sx = max(0, -ix);
+        int sy = max(0, -iy);
+        int ex = min(kernelX, iw - ix);
+        int ey = min(kernelY, ih - iy);
+        float div = (float)(ey-sy)* (float)(ex-sx);
+        half2 sumValue = HALF2_MIN;
+        for (int fy=sy; fy<ey; ++fy) {
+            for (int fx=sx; fx<ex; ++fx) {
+                int currentX = ix + fx;
+                int currentY = iy + fy;
+                const half2* input = (const half2*)(uInput
+                    + zR * 2
+                    + currentX * 16
+                    + currentY * iw * 16
+                    + zC * iw * ih * 16
+                );
+                half2 inputV = *input;
+                MNN_CUDA_HALF2_MAX(sumValue, inputV);
+            }
+        }
+        half2* dst = (half2*)(uOutput
+            + zC * ow * oh * 16
+            + y * ow * 16
+            + x * 16
+            + zR * 2
+        );
+        *dst = sumValue;
+    }
+}
+
+__global__ void avgpool_halfC16(const half* uInput, half* uOutput,
+    int bc,
+    int ih, int iw,
+    int oh, int ow,
+    int padX, int padY,
+    int kernelX, int kernelY,
+    int strideX, int strideY
+    ) {
+    int total = bc * oh * ow * 8;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int x = i % ow;
+        int tmp = i / ow;
+        int y = tmp % oh;
+        int z = tmp / oh;
+        int zC = z / 8;
+        int zR = z % 8;
+        int ix = x * strideX - padX;
+        int iy = y * strideY - padY;
+        int sx = max(0, -ix);
+        int sy = max(0, -iy);
+        int ex = min(kernelX, iw - ix);
+        int ey = min(kernelY, ih - iy);
+        float div = (float)(ey-sy)* (float)(ex-sx);
+        half2 sumValue = half2(0.0f, 0.0f);
+        half2 mulValue = half2(1.0f / div, 1.0f/div);
+        for (int fy=sy; fy<ey; ++fy) {
+            for (int fx=sx; fx<ex; ++fx) {
+                int currentX = ix + fx;
+                int currentY = iy + fy;
+                const half2* input = (const half2*)(uInput
+                    + zR * 2
+                    + currentX * 16
+                    + currentY * iw * 16
+                    + zC * iw * ih * 16
+                );
+                sumValue = __hadd2(sumValue, (*input) * mulValue);
+            }
+        }
+        half2* dst = (half2*)(uOutput
+            + zC * ow * oh * 16
+            + y * ow * 16
+            + x * 16
+            + zR * 2
+        );
+        *dst = sumValue;
+    }
+}
+
+__global__ void maxpool_floatC16(const float* uInput, float* uOutput,
+    int bc,
+    int ih, int iw,
+    int oh, int ow,
+    int padX, int padY,
+    int kernelX, int kernelY,
+    int strideX, int strideY
+    ) {
+    int total = bc * oh * ow * PACK_NUMBER;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int x = i % ow;
+        int tmp = i / ow;
+        int y = tmp % oh;
+        int z = tmp / oh;
+        int zC = z / PACK_NUMBER;
+        int zR = z % PACK_NUMBER;
+        int ix = x * strideX - padX;
+        int iy = y * strideY - padY;
+        int sx = max(0, -ix);
+        int sy = max(0, -iy);
+        int ex = min(kernelX, iw - ix);
+        int ey = min(kernelY, ih - iy);
+        float maxValue = -FLT_MAX;
+        for (int fy=sy; fy<ey; ++fy) {
+            for (int fx=sx; fx<ex; ++fx) {
+                int currentX = ix + fx;
+                int currentY = iy + fy;
+                const float* input = (const float*)(uInput
+                    + zR
+                    + currentX * PACK_NUMBER
+                    + currentY * iw * PACK_NUMBER
+                    + zC * iw * ih * PACK_NUMBER
+                );
+                maxValue = max(maxValue, *input);
+            }
+        }
+        float* dst = (float*)(uOutput
+            + zC * ow * oh * PACK_NUMBER
+            + y * ow * PACK_NUMBER
+            + x * PACK_NUMBER
+            + zR
+        );
+        *dst = maxValue;
+    }
+}
+
+__global__ void avgpool_floatC16(const float* uInput, float* uOutput,
+    int bc,
+    int ih, int iw,
+    int oh, int ow,
+    int padX, int padY,
+    int kernelX, int kernelY,
+    int strideX, int strideY
+    ) {
+    int total = bc * oh * ow * PACK_NUMBER;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int x = i % ow;
+        int tmp = i / ow;
+        int y = tmp % oh;
+        int z = tmp / oh;
+        int zC = z / PACK_NUMBER;
+        int zR = z % PACK_NUMBER;
+        int ix = x * strideX - padX;
+        int iy = y * strideY - padY;
+        int sx = max(0, -ix);
+        int sy = max(0, -iy);
+        int ex = min(kernelX, iw - ix);
+        int ey = min(kernelY, ih - iy);
+        float div = (float)(ey-sy)* (float)(ex-sx);
+        float sumValue = 0.0f;
+        float mulValue = 1.0f/div;
+        for (int fy=sy; fy<ey; ++fy) {
+            for (int fx=sx; fx<ex; ++fx) {
+                int currentX = ix + fx;
+                int currentY = iy + fy;
+                const float* input = (const float*)(uInput
+                    + zR
+                    + currentX * PACK_NUMBER
+                    + currentY * iw * PACK_NUMBER
+                    + zC * iw * ih * PACK_NUMBER
+                );
+                sumValue = sumValue + (*input) * mulValue;
+            }
+        }
+        float* dst = (float*)(uOutput
+            + zC * ow * oh * 16
+            + y * ow * 16
+            + x * 16
+            + zR
+        );
+        *dst = sumValue;
+    }
 }
 
 } // namespace Corpus

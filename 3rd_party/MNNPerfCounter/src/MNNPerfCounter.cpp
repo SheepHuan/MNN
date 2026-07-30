@@ -281,6 +281,7 @@ struct Session::Impl {
     void* nvRangeObj = nullptr;  // CUpti_RangeProfiler_Object*
     void* nvCtx = nullptr;       // CUcontext
     int nvRangeDepth = 0;
+    size_t nvNumPasses = 1;      // actual passes needed (from GetNumPasses)
     bool started = false;
 };
 
@@ -551,9 +552,17 @@ bool Session::start() {
                 mImpl->error = "cuptiProfilerInitialize failed";
                 return false;
             }
-            if (!nvBuildConfigImage(mImpl->nvChipName, mImpl->nvMetricNames, &mImpl->nvConfigImage, &mImpl->error)) {
+            size_t numPasses = 1;
+            if (!nvBuildConfigImage(mImpl->nvChipName, mImpl->nvMetricNames, &mImpl->nvConfigImage, &numPasses, &mImpl->error)) {
                 return false;
             }
+            // If this metric configuration needs multiple passes (kernel replays
+            // due to raw-counter conflicts), log it so the caller knows the
+            // values come from N separate kernel executions.
+            if (numPasses > 1) {
+                std::fprintf(stderr, "[PMU] metric config requires %zu passes (metrics share hardware counter slots)\n", numPasses);
+            }
+            mImpl->nvNumPasses = numPasses;
             std::vector<uint8_t> prefix;
             if (!nvBuildCounterDataPrefix(mImpl->nvChipName, mImpl->nvMetricNames, &prefix, &mImpl->error)) {
                 return false;
@@ -729,6 +738,10 @@ bool Session::stop(CounterValue* values, size_t count) {
 
 const char* Session::error() const {
     return mImpl == nullptr ? kUnavailable : mImpl->error.c_str();
+}
+
+size_t Session::numPasses() const {
+    return mImpl == nullptr ? 1 : mImpl->nvNumPasses;
 }
 
 bool Session::beginRange(const char* rangeName) {

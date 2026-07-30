@@ -8,8 +8,31 @@
 #include "corpus_common.cuh"
 #include <cuda_bf16.h>
 
+// 1.2.7-era legacy im2col macros (from legacy_kernels.cu). conv_base.cu itself
+// does not otherwise define PACK_NUMBER.
+#ifndef PACK_NUMBER
+#define PACK_NUMBER 16
+#endif
+#define PACK_NUMBER_C2 (PACK_NUMBER/2)
+#define MATMULPACK 16
+#define MATMULPACK2 (MATMULPACK * MATMULPACK)
+#define BLOCK_INT4 2
+
 namespace MNN {
 namespace Corpus {
+
+// 1.2.7-era MatMul + Im2Col parameter structs (from legacy_kernels.cu)
+struct MatMulParam {
+    int elh[3]; int elhPack[3]; int aStride[3]; int bStride[3]; int cStride[3];
+    int aPStride[3]; int bPStride[3]; int batch; float minValue; float maxValue;
+};
+struct Im2ColParameter {
+    int32_t padX; int32_t padY; int32_t dilateX; int32_t dilateY;
+    int32_t strideX; int32_t strideY; int32_t kernelX; int32_t kernelY;
+    int32_t icDiv4; int32_t kernelCountUnit; int32_t iw; int32_t ih;
+    int32_t ow; int32_t oh; int32_t srcZStep; int32_t srcYStep;
+    int32_t packCUnit; int32_t destICStride;
+};
 
 // ============================================================================
 // Float22Half2: convert float array to half array (4 elements per thread)
@@ -275,6 +298,622 @@ __global__ void WeightPackFill_Implicit(const float* param, T* output,
             continue;
         }
         output[index] = param[(copIndex * ci + cipIndex) * khw + khwIndex];
+    }
+}
+
+// ============================================================================
+// 1.2.7-era legacy im2col kernels (from legacy_kernels.cu)
+// ============================================================================
+__global__ void Im2Col1x1(const Im2ColParameter* param,
+    const MatMulParam* matmulParam,
+    const float* A,
+    half* AP,
+    DivModFast eAlignD,
+    DivModFast owD,
+    DivModFast ohD
+    ) {
+    int eAlign = matmulParam->elhPack[0] * MATMULPACK;
+    int lAlign = matmulParam->elhPack[1];
+    int maxCount = eAlign * lAlign * BLOCK_INT4;
+    int kernelCount = 1;
+    for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+        int index = indexO >> 1;
+        int lR = indexO & 1;
+        int eIndex, lIndex;
+        eAlignD.divmod(index, lIndex, eIndex);
+        int eU = eIndex >> 4;
+        int eR = eIndex & 15;
+        int dstOffset = eU * matmulParam->elhPack[1] * (MATMULPACK * MATMULPACK) + lIndex * (MATMULPACK * MATMULPACK) + eR * MATMULPACK + lR * 8;
+        int4* dst = (int4*)(AP + dstOffset);
+        if (eIndex >= matmulParam->elh[0]) {
+            *dst = {0, 0, 0, 0};
+            continue;
+        }
+        // Compute for source
+        int ox, oy, ob;
+        owD.divmod(eIndex, oy, ox);
+        ohD.divmod(oy, ob, oy);
+        int sz = lIndex;
+        int sx = ox * param->strideX - param->padX;
+        int sy = oy * param->strideY - param->padY;
+        if (sx >= 0 && sx < param->iw) {
+            if (sy >=0 && sy < param->ih) {
+                int offset = sz * param->srcZStep + (ob * param->iw * param->ih + sy * param->iw + sx) * PACK_NUMBER + lR * 8;
+                float2* srcF = (float2*)(A + offset);
+                half2* dstH = (half2*)dst;
+                dstH[0] = __float22half2_rn(srcF[0]);
+                dstH[1] = __float22half2_rn(srcF[1]);
+                dstH[2] = __float22half2_rn(srcF[2]);
+                dstH[3] = __float22half2_rn(srcF[3]);
+                continue;
+            }
+        }
+        *dst = {0, 0, 0, 0};
+    }
+}
+
+__global__ void Im2Col1x1_OPT(const Im2ColParameter* param,
+    const MatMulParam* matmulParam,
+    const int maxCount, 
+    const float* A,
+    half* AP,
+    DivModFast eAlignD,
+    DivModFast owD,
+    DivModFast ohD
+    ) {
+    for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+        int index = indexO >> 3;
+        int lR = indexO & 7;
+        int eIndex, lIndex;
+        eAlignD.divmod(index, lIndex, eIndex);
+        int eU = eIndex >> 4;
+        int eR = eIndex & 15;
+        int dstOffset = ((eU * matmulParam->elhPack[1] + lIndex) << 8) + (eR << 4) + (lR << 1);
+
+        int offset = lIndex * param->srcZStep + (eIndex << 4) + (lR << 1);
+        float2* srcF = (float2*)(A + offset);
+        half2* dstH = (half2*)(AP + dstOffset);
+        dstH[0] = __float22half2_rn(srcF[0]);
+    }
+}
+
+__global__ void Im2Col1x1_half(const Im2ColParameter* param,
+    const MatMulParam* matmulParam,
+    const half* A,
+    half* AP,
+    DivModFast eAlignD,
+    DivModFast owD,
+    DivModFast ohD
+    ) {
+int eAlign = matmulParam->elhPack[0] * MATMULPACK;
+int lAlign = matmulParam->elhPack[1];
+int maxCount = eAlign * lAlign * BLOCK_INT4;
+int kernelCount = 1;
+for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+    int index = indexO / BLOCK_INT4;
+    int lR = indexO % BLOCK_INT4;
+    int eIndex, lIndex;
+    eAlignD.divmod(index, lIndex, eIndex);
+    int eU = eIndex / MATMULPACK;
+    int eR = eIndex % MATMULPACK;
+    int dstOffset = eU * matmulParam->elhPack[1] * (MATMULPACK * MATMULPACK) + lIndex * (MATMULPACK * MATMULPACK) + eR * MATMULPACK + lR * 8;
+    int4* dst = (int4*)(AP + dstOffset);
+    if (eIndex >= matmulParam->elh[0]) {
+        *dst = {0, 0, 0, 0};
+        continue;
+    }
+    // Compute for source
+    int ox, oy, ob;
+    owD.divmod(eIndex, oy, ox);
+    ohD.divmod(oy, ob, oy);
+    int sz = lIndex;
+    int sx = ox * param->strideX - param->padX;
+    int sy = oy * param->strideY - param->padY;
+    if (sx >= 0 && sx < param->iw) {
+        if (sy >=0 && sy < param->ih) {
+            int offset = sz * param->srcZStep + (ob * param->iw * param->ih + sy * param->iw + sx) * PACK_NUMBER + lR * 8;
+            int4* src = (int4*)(A + offset);
+            *dst = *src;
+            continue;
+        }
+    }
+    *dst = {0, 0, 0, 0};
+}
+}
+
+__global__ void Im2Col1x1_half_OPT(const Im2ColParameter* param,
+const MatMulParam* matmulParam,
+const int maxCount, 
+const half* A,
+half* AP,
+DivModFast eAlignD,
+DivModFast owD,
+DivModFast ohD
+) {
+for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+    int index = indexO >> 3;
+    int lR = indexO & 7;
+    int eIndex, lIndex;
+    eAlignD.divmod(index, lIndex, eIndex);
+    int eU = eIndex >> 4;
+    int eR = eIndex & 15;
+    int dstOffset = ((eU * matmulParam->elhPack[1] + lIndex) << 8) + (eR << 4) + (lR << 1);
+
+    int offset = lIndex * param->srcZStep + (eIndex << 4) + (lR << 1);
+    int* srcF = (int*)(A + offset);
+    int* dstH = (int*)(AP + dstOffset);
+    dstH[0] = srcF[0];
+}
+}
+
+__global__ void Im2Col_half(const Im2ColParameter* param,
+    const MatMulParam* matmulParam,
+    const int maxCount,
+    const half* A,
+    half* AP,
+    DivModFast d_eA,
+    DivModFast d_ow,
+    DivModFast d_oh,
+    DivModFast d_fxy,
+    DivModFast d_fx
+    ) {
+int eAlign = matmulParam->elhPack[0] << 4;
+int lAlign = matmulParam->elhPack[1];
+int kernelCount = param->kernelX * param->kernelY;
+for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+    size_t index = indexO >> 1;
+    size_t lR = indexO & 1;
+    int eIndex, lIndex;
+    d_eA.divmod(index, lIndex, eIndex);
+    size_t eU = eIndex >> 4;
+    size_t eR = eIndex & 15;
+    size_t dstOffset = ((((eU * matmulParam->elhPack[1] + lIndex) << 4) + eR) << 4) + (lR << 3);
+    int4* dst = (int4*)(AP + dstOffset);
+    if (eIndex >= matmulParam->elh[0]) {
+        *dst = {0, 0, 0, 0};
+        continue;
+    }
+    // Compute for source
+    int ox, oby, ob, oy, sz, kI, ksx, ksy;
+    d_ow.divmod(eIndex, oby, ox);
+    d_oh.divmod(oby, ob, oy);
+    d_fxy.divmod(lIndex, sz, kI);
+    d_fx.divmod(kI, ksy, ksx);
+
+    size_t sx = ox * param->strideX + ksx * param->dilateX - param->padX;
+    size_t sy = oy * param->strideY + ksy * param->dilateY - param->padY;
+    if (sx >= 0 && sx < param->iw) {
+        if (sy >=0 && sy < param->ih) {
+            size_t offset = sz * param->srcZStep + (((ob * param->ih + sy) * param->iw + sx) << 4) + lR * 8;
+            int4* src = (int4*)(A + offset);
+            *dst = *src;
+            continue;
+        }
+    }
+    *dst = {0, 0, 0, 0};
+}
+}
+
+__global__ void Im2Col_half_OPT(const Im2ColParameter* param,
+    const MatMulParam* matmulParam,
+    const size_t maxCount,
+    const half* A,
+    half* AP,
+    DivModFast d_eA,
+    DivModFast d_ow,
+    DivModFast d_oh,
+    DivModFast d_fxy,
+    DivModFast d_fx
+) {
+size_t eAlign = matmulParam->elhPack[0] << 4;
+size_t lAlign = matmulParam->elhPack[1];
+size_t kernelCount = param->kernelX * param->kernelY;
+for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+    size_t index = indexO >> 2;
+    size_t lR = indexO & 3;
+    int eIndex, lIndex;
+    d_eA.divmod(index, lIndex, eIndex);
+    size_t eU = eIndex >> 4;
+    size_t eR = eIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex) << 4) + eR) << 4) + (lR << 2);
+    int2* dst = (int2*)(AP + dstOffset);
+    if (eIndex >= matmulParam->elh[0]) {
+        *dst = {0, 0};
+        continue;
+    }
+
+    // Compute for source
+    int ox, oby, ob, oy, sz, kI, ksx, ksy;
+    d_ow.divmod(eIndex, oby, ox);
+    d_oh.divmod(oby, ob, oy);
+    d_fxy.divmod(lIndex, sz, kI);
+    d_fx.divmod(kI, ksy, ksx);
+
+    size_t sx = ox * param->strideX + ksx * param->dilateX - param->padX;
+    size_t sy = oy * param->strideY + ksy * param->dilateY - param->padY;
+    if (sx >= 0 && sx < param->iw) {
+        if (sy >=0 && sy < param->ih) {
+            size_t offset = sz * param->srcZStep + (((ob * param->ih + sy) * param->iw + sx) << 4) + (lR << 2);
+            int2* src = (int2*)(A + offset);
+            *dst = *src;
+            continue;
+        }
+    }
+    *dst = {0, 0};
+}
+}
+
+__global__ void Im2Col_half_3x3S1D1P1_OPT2(const Im2ColParameter* param,
+const MatMulParam* matmulParam,
+const size_t maxCount,
+const half* A,
+half* AP,
+DivModFast d_eA,
+DivModFast d_ow,
+DivModFast d_oh
+) {
+for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+size_t index = indexO >> 3;
+size_t lR = indexO & 7;
+int eIndex, lIndex;
+d_eA.divmod(index, lIndex, eIndex);
+
+int ix, oby, ob, iy;
+d_ow.divmod(eIndex, oby, ix);
+d_oh.divmod(oby, ob, iy);
+size_t sz = lIndex;
+
+size_t offset = sz * param->srcZStep + (((ob * param->ih + iy) * param->iw + ix) << 4) + (lR << 1);
+int src = *((int*)(A + offset));
+
+// Pixel (iy-1, ix-1)
+if(iy-1 >=0 && ix-1 >=0) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy-1) * param->iw + (ix-1));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 8) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy-1 ==0) {
+        size_t index[3] = {0, 1, 2};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix-1 ==0) {
+        size_t index[3] = {0, 3, 6};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+// Pixel (iy-1, ix+0)
+if(iy-1 >=0) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy-1) * param->iw + (ix+0));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 7) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy-1 ==0) {
+        size_t index[3] = {0, 1, 2};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix ==0) {
+        size_t index[3] = {0, 3, 6};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix == param->iw-1) {
+        size_t index[3] = {2, 5, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+// Pixel (iy-1, ix+1)
+if(iy-1 >=0 && ix+1 < param->iw) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy-1) * param->iw + (ix+1));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 6) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy-1 ==0) {
+        size_t index[3] = {0, 1, 2};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix+1 == param->iw-1) {
+        size_t index[3] = {2, 5, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+// Pixel (iy+0, ix-1)
+if(ix-1 >=0) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy+0) * param->iw + (ix-1));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 5) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy ==0) {
+        size_t index[3] = {0, 1, 2};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(iy == param->ih-1) {
+        size_t index[3] = {6, 7, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix-1 ==0) {
+        size_t index[3] = {0, 3, 6};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+// Pixel (iy, ix)
+if(1) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy+0) * param->iw + (ix+0));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 4) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy ==0) {
+        size_t index[3] = {0, 1, 2};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(iy == param->ih-1) {
+        size_t index[3] = {6, 7, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix ==0) {
+        size_t index[3] = {0, 3, 6};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix == param->iw-1) {
+        size_t index[3] = {2, 5, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+// Pixel (iy, ix+1)
+if(ix+1 < param->iw) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy+0) * param->iw + (ix+1));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 3) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy ==0) {
+        size_t index[3] = {0, 1, 2};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(iy == param->ih-1) {
+        size_t index[3] = {6, 7, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix+1 == param->iw-1) {
+        size_t index[3] = {2, 5, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+// Pixel (iy+1, ix-1)
+if(iy+1 < param->ih && ix-1 >=0) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy+1) * param->iw + (ix-1));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 2) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy+1 == param->ih-1) {
+        size_t index[3] = {6, 7, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix-1 ==0) {
+        size_t index[3] = {0, 3, 6};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }  
+}
+
+// Pixel (iy+1, ix)
+if(iy+1 < param->ih) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy+1) * param->iw + (ix+0));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 1) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy+1 == param->ih-1) {
+        size_t index[3] = {6, 7, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix ==0) {
+        size_t index[3] = {0, 3, 6};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix == param->iw-1) {
+        size_t index[3] = {2, 5, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+
+//Pixel (iy+1, ix+1)
+if(iy+1 < param->ih && ix+1 < param->iw) {
+    size_t oeIndex = (ob * param->ih * param->iw + (iy+1) * param->iw + (ix+1));
+    size_t eU = oeIndex >> 4;
+    size_t eR = oeIndex & 15;
+    size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + 0) << 4) + eR) << 4) + (lR << 1);
+    int* dst = (int*)(AP + dstOffset);
+    *dst = src;
+
+    // Corner case
+    if(iy+1 == param->ih-1) {
+        size_t index[3] = {6, 7, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+    if(ix+1 == param->iw-1) {
+        size_t index[3] = {2, 5, 8};
+        for(size_t i=0; i<3; i++) {
+            size_t dstOffset = ((((eU * (size_t)matmulParam->elhPack[1] + lIndex*9 + index[i]) << 4) + eR) << 4) + (lR << 1);
+            int* dst = (int*)(AP + dstOffset);
+            *dst = 0;
+        }
+    }
+}
+}
+}
+
+__global__ void Im2Col(const Im2ColParameter* param,
+    const MatMulParam* matmulParam,
+    const float* A,
+    half* AP) {
+    int eAlign = matmulParam->elhPack[0] * MATMULPACK;
+    int lAlign = matmulParam->elhPack[1];
+    int maxCount = eAlign * lAlign * BLOCK_INT4;
+    int kernelCount = param->kernelX * param->kernelY;
+    for (size_t indexO = blockIdx.x * blockDim.x + threadIdx.x; indexO < maxCount; indexO += blockDim.x * gridDim.x) {
+        int index = indexO / BLOCK_INT4;
+        int lR = indexO % BLOCK_INT4;
+        int eIndex = index % eAlign;
+        int lIndex = index / eAlign;
+        int eU = eIndex / MATMULPACK;
+        int eR = eIndex % MATMULPACK;
+        int dstOffset = eU * matmulParam->elhPack[1] * (MATMULPACK * MATMULPACK) + lIndex * (MATMULPACK * MATMULPACK) + eR * MATMULPACK + lR * 8;
+        int4* dst = (int4*)(AP + dstOffset);
+        if (eIndex >= matmulParam->elh[0]) {
+            *dst = {0, 0, 0, 0};
+            continue;
+        }
+        // Compute for source
+        int ox = eIndex % param->ow;
+        int oy = eIndex / param->ow;
+        int ob = oy / param->oh;
+        oy = oy % param->oh;
+        int sz = lIndex / kernelCount;
+        int kI = lIndex % kernelCount;
+        int ksx = kI % param->kernelX;
+        int ksy = kI / param->kernelX;
+
+        int sx = ox * param->strideX + ksx * param->dilateX - param->padX;
+        int sy = oy * param->strideY + ksy * param->dilateY - param->padY;
+        if (sx >= 0 && sx < param->iw) {
+            if (sy >=0 && sy < param->ih) {
+                int offset = sz * param->srcZStep + (ob * param->iw * param->ih + sy * param->iw + sx) * PACK_NUMBER + lR * 8;
+                float2* srcF = (float2*)(A + offset);
+                half2* dstH = (half2*)dst;
+                dstH[0] = __float22half2_rn(srcF[0]);
+                dstH[1] = __float22half2_rn(srcF[1]);
+                dstH[2] = __float22half2_rn(srcF[2]);
+                dstH[3] = __float22half2_rn(srcF[3]);
+                continue;
+            }
+        }
+        *dst = {0, 0, 0, 0};
     }
 }
 

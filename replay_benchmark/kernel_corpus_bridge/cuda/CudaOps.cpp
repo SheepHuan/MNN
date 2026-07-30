@@ -1,4 +1,5 @@
 #include "CudaOps.hpp"
+#include "../CpuReference.hpp"
 #include <cuda_fp16.h>
 #include <cmath>
 #include <cstring>
@@ -81,8 +82,7 @@ bool CudaReluFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float
     if (ac.validatorInputA.size() != output.size()) return false;
     const float slope = ac.args.size() >= 4 ? ac.args[3].floatVal : 0.0f;
     for (size_t i = 0; i < output.size(); ++i) {
-        const float x = ac.validatorInputA[i];
-        const float expected = x > 0.0f ? x : x * slope;
+        float expected = cpuRelu(ac.validatorInputA[i], slope);
         if (std::fabs(output[i] - expected) > 1e-3f) return false;
     }
     return true;
@@ -273,11 +273,10 @@ cudaError_t CudaCastI322F32Kernel::launch(const AdaptedCase&, const CudaLaunchCt
 bool CudaCastI322F32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int count = ac.elementCount;
     if (static_cast<int>(output.size()) < count) return false;
-    for (int i = 0; i < count; ++i) {
-        const float expected = (float)((int32_t)ac.validatorInputA[i]);
-        if (std::fabs(output[i] - expected) > 1e-3f) return false;
-    }
-    return true;
+    std::vector<float> expected(count);
+    for (int i = 0; i < count; ++i)
+        expected[i] = cpuInt32ToFloat((int32_t)ac.validatorInputA[i]);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -308,12 +307,8 @@ cudaError_t CudaBinaryAtan2Kernel::launch(const AdaptedCase&, const CudaLaunchCt
     return cudaGetLastError();
 }
 bool CudaBinaryAtan2Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    if (ac.validatorInputA.size() != output.size()) return false;
-    for (size_t i = 0; i < output.size(); ++i) {
-        const float expected = atan2f(ac.validatorInputA[i], ac.validatorInputB[i]);
-        if (std::fabs(output[i] - expected) > 1e-3f) return false;
-    }
-    return true;
+    auto expected = cpuBinaryAtan2(ac.validatorInputA, ac.validatorInputB);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -345,13 +340,8 @@ cudaError_t CudaBinaryModKernel::launch(const AdaptedCase&, const CudaLaunchCtx&
     return cudaGetLastError();
 }
 bool CudaBinaryModKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    if (ac.validatorInputA.size() != output.size()) return false;
-    for (size_t i = 0; i < output.size(); ++i) {
-        const float x = ac.validatorInputA[i], y = ac.validatorInputB[i];
-        const float expected = x - x / y;
-        if (std::fabs(output[i] - expected) > 1e-3f) return false;
-    }
-    return true;
+    auto expected = cpuBinaryMod(ac.validatorInputA, ac.validatorInputB);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -382,12 +372,8 @@ cudaError_t CudaBinaryLogicalOrKernel::launch(const AdaptedCase&, const CudaLaun
     return cudaGetLastError();
 }
 bool CudaBinaryLogicalOrKernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    if (ac.validatorInputA.size() != output.size()) return false;
-    for (size_t i = 0; i < output.size(); ++i) {
-        const float expected = (ac.validatorInputA[i] || ac.validatorInputB[i]) ? 1.0f : 0.0f;
-        if (std::fabs(output[i] - expected) > 1e-3f) return false;
-    }
-    return true;
+    auto expected = cpuBinaryLogicalOr(ac.validatorInputA, ac.validatorInputB);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -418,11 +404,8 @@ cudaError_t CudaRangeFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx&
 bool CudaRangeFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int count = ac.elementCount;
     if (static_cast<int>(output.size()) < count) return false;
-    const float start = ac.validatorInputA[0], step = ac.validatorInputB[0];
-    for (int i = 0; i < count; ++i) {
-        if (std::fabs(output[i] - (start + i * step)) > 1e-3f) return false;
-    }
-    return true;
+    auto expected = cpuRange(ac.validatorInputA[0], ac.validatorInputB[0], count);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -469,11 +452,8 @@ cudaError_t CudaSelectFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunch
 bool CudaSelectFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int count = ac.elementCount;
     if (static_cast<int>(output.size()) < count) return false;
-    for (int i = 0; i < count; ++i) {
-        const float expected = (i % 2 > 0) ? ac.validatorInputA[i] : ac.validatorInputB[i];
-        if (std::fabs(output[i] - expected) > 1e-3f) return false;
-    }
-    return true;
+    auto expected = cpuSelect(ac.validatorInputA, ac.validatorInputB, count);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 // ============================================================================
@@ -487,28 +467,8 @@ bool CudaSelectFp32Kernel::validate(const AdaptedCase& ac, const std::vector<flo
 static bool softmaxValidate(const AdaptedCase& ac, const std::vector<float>& output) {
     const int outside = ac.m, axis = ac.n, inside = ac.k;
     if ((int)output.size() < outside * axis * inside) return false;
-    for (int o = 0; o < outside; ++o) {
-        for (int x = 0; x < inside; ++x) {
-            const float* src = ac.validatorInputA.data() + o * axis * inside + x;
-            float maxV = src[0];
-            for (int z = 1; z < axis; ++z) maxV = std::max(maxV, src[z * inside]);
-            float sum = 0.0f;
-            for (int z = 0; z < axis; ++z) {
-                float t = src[z * inside] - maxV;
-                if (t < -87.0f) t = -87.0f;
-                sum += expf(t);
-            }
-            sum = 1.0f / sum;
-            for (int z = 0; z < axis; ++z) {
-                float t = src[z * inside] - maxV;
-                if (t < -87.0f) t = -87.0f;
-                const float expected = expf(t) * sum;
-                const float got = output[(o * axis + z) * inside + x];
-                if (std::fabs(got - expected) > 1e-3f) return false;
-            }
-        }
-    }
-    return true;
+    auto expected = cpuSoftmax(ac.validatorInputA, outside, axis, inside, /*expCutoff=*/true);
+    return compareWithTolerance(output, expected, 1e-3f);
 }
 
 bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
@@ -860,54 +820,37 @@ cudaError_t CudaPreluFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchC
 bool CudaPreluFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int total = ac.elementCount, channelsPack = ac.n;
     if ((int)output.size() < total) return false;
-    const int PACK = 4;
     if (ac.tag == "1.2.0") {
         const int dim = ac.args[2].intVal;
         const int div_factor = ac.args[6].intVal;
         for (int i = 0; i < total; ++i) {
-            const int c_idx = (i / dim) % channelsPack / div_factor;
-            const float x = ac.validatorInputA[i];
-            const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
+            int c_idx = (i / dim) % channelsPack / div_factor;
+            float expected = cpuPreluElem(ac.validatorInputA[i], ac.validatorInputB[c_idx]);
             if (std::fabs(output[i] - expected) > 1e-3f) return false;
         }
     } else if (ac.tag == "1.2.7") {
-        // 1.2.7: mChannel = UP_DIV(channels,PACK), c = (index/mArea) % mChannel / div_factor
-        const int PACK = 4;
-        const int mChannel = ac.n;
-        const int mArea = ac.args[2].intVal;
-        const int div_factor = ac.args[6].intVal;
+        const int PACK = 4, mChannel = ac.n, mArea = ac.args[2].intVal, div_factor = ac.args[6].intVal;
         for (int t = 0; t < total; ++t) {
-            int index = t / PACK;
-            int r = t % PACK;
+            int index = t / PACK, r = t % PACK;
             int c = (index / mArea) % mChannel / div_factor;
             int c_idx = c * PACK + r;
-            const float x = ac.validatorInputA[t];
-            const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
+            float expected = cpuPreluElem(ac.validatorInputA[t], ac.validatorInputB[c_idx]);
             if (std::fabs(output[t] - expected) > 1e-3f) return false;
         }
     } else if (ac.tag == "1.2.8") {
-        // 1.2.8: mChannel = UP_DIV(channels,PACK), c = (index/mArea) % mChannel
-        const int PACK = 4;
-        const int mChannel = ac.n;
-        const int mArea = ac.args[2].intVal;
-        const int share_factor = ac.args[6].intVal;
+        const int PACK = 4, mChannel = ac.n, mArea = ac.args[2].intVal, share_factor = ac.args[6].intVal;
         for (int t = 0; t < total; ++t) {
-            int index = t / PACK;
-            int r = t % PACK;
+            int index = t / PACK, r = t % PACK;
             int c = (index / mArea) % mChannel;
             int c_idx = share_factor ? 0 : (c * PACK + r);
-            const float x = ac.validatorInputA[t];
-            const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
+            float expected = cpuPreluElem(ac.validatorInputA[t], ac.validatorInputB[c_idx]);
             if (std::fabs(output[t] - expected) > 1e-3f) return false;
         }
     } else {
-        // 2.0.4 / 3.6.0: c_idx = index % channelsPack
         const int share_factor = ac.args[6].intVal;
         for (int i = 0; i < total; ++i) {
-            int c_idx = i % channelsPack;
-            c_idx = share_factor ? 0 : c_idx;
-            const float x = ac.validatorInputA[i];
-            const float expected = x > 0.0f ? x : x * ac.validatorInputB[c_idx];
+            int c_idx = share_factor ? 0 : (i % channelsPack);
+            float expected = cpuPreluElem(ac.validatorInputA[i], ac.validatorInputB[c_idx]);
             if (std::fabs(output[i] - expected) > 1e-3f) return false;
         }
     }
@@ -975,19 +918,15 @@ cudaError_t CudaScaleFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchC
 bool CudaScaleFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int total = ac.elementCount, channelsPack = ac.n;
     if ((int)output.size() < total) return false;
-    // validatorInputB holds scale; reconstruct bias as 1.0 (we set it so)
     for (int i = 0; i < total; ++i) {
         int c;
         if (ac.tag == "1.2.7") {
-            // PACK_NUMBER=4: index = i/4, r = i%4, c = (index/dim)*4 + r, dim = total/channelsPack
             const int dim = total / channelsPack;
-            const int index = i / 4;
-            const int r = i % 4;
-            c = (index / dim) * 4 + r;
+            c = ((i / 4) / dim) * 4 + (i % 4);
         } else {
             c = i % channelsPack;
         }
-        const float expected = ac.validatorInputA[i] * ac.validatorInputB[c] + 1.0f;
+        float expected = cpuScaleElem(ac.validatorInputA[i], ac.validatorInputB[c], 1.0f);
         if (std::fabs(output[i] - expected) > 1e-3f) return false;
     }
     return true;
@@ -1060,39 +999,31 @@ cudaError_t CudaMaxPoolFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunc
 }
 bool CudaMaxPoolFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int ib = ac.m, ic_p = ac.n, ih = ac.h, iw = ac.w;
-    const int kx = ac.k, ky = kx, sx = ac.stride, padX = ac.orderType, padY = padX;
-    const int oh = (ih + 2 * padY - ky) / sx + 1;
+    const int kx = ac.k, sx = ac.stride, padX = ac.orderType;
+    PoolingSpec ps; ps.ih = ih; ps.iw = iw; ps.channel = ic_p;
+    ps.kh = kx; ps.kw = kx; ps.stride = sx; ps.pad = padX;
+    if (ac.tag == "1.2.0") {
+        auto expected = cpuMaxPoolNCHW(ps, ac.validatorInputA, ib, ic_p);
+        return compareWithTolerance(output, expected, 1e-3f);
+    }
+    // 3.6.0: NC4HW4 — use single-element comparison per channel
+    const int oh = (ih + 2 * padX - kx) / sx + 1;
     const int ow = (iw + 2 * padX - kx) / sx + 1;
-    const int bc = ib * ic_p;
     for (int b = 0; b < ib; ++b)
-      for (int c = 0; c < ic_p; ++c)
-        for (int oy = 0; oy < oh; ++oy)
-          for (int ox = 0; ox < ow; ++ox) {
-            float maxV = -65504.0f;
-            for (int fy = 0; fy < ky; ++fy)
-              for (int fx = 0; fx < kx; ++fx) {
-                int iy = oy * sx - padY + fy, ix = ox * sx - padX + fx;
-                if (iy < 0 || iy >= ih || ix < 0 || ix >= iw) continue;
-                int off;
-                if (ac.tag == "1.2.0") {
-                    // NCHW: [bc, ih, iw], bc = b*ic_p+c
-                    int z = b * ic_p + c;
-                    off = z * ih * iw + iy * iw + ix;
-                } else {
-                    // NC4HW4: [b, ih, iw, ic_p]
-                    off = ((b * ih + iy) * iw + ix) * ic_p + c;
+        for (int c = 0; c < ic_p; ++c)
+            for (int oy = 0; oy < oh; ++oy)
+                for (int ox = 0; ox < ow; ++ox) {
+                    float mx = -65504.0f;
+                    for (int fy = 0; fy < kx; ++fy)
+                        for (int fx = 0; fx < kx; ++fx) {
+                            int iy = oy * sx - padX + fy, ix = ox * sx - padX + fx;
+                            if (iy < 0 || iy >= ih || ix < 0 || ix >= iw) continue;
+                            int off = ((b * ih + iy) * iw + ix) * ic_p + c;
+                            mx = std::max(mx, ac.validatorInputA[off]);
+                        }
+                    int outOff = ((b * oh + oy) * ow + ox) * ic_p + c;
+                    if (std::fabs(output[outOff] - mx) > 1e-3f) return false;
                 }
-                maxV = std::max(maxV, ac.validatorInputA[off]);
-              }
-            int outOff;
-            if (ac.tag == "1.2.0") {
-                int z = b * ic_p + c;
-                outOff = z * oh * ow + oy * ow + ox;
-            } else {
-                outOff = ((b * oh + oy) * ow + ox) * ic_p + c;
-            }
-            if (std::fabs(output[outOff] - maxV) > 1e-3f) return false;
-          }
     return true;
 }
 
@@ -1160,35 +1091,31 @@ cudaError_t CudaAvgPoolFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunc
 bool CudaAvgPoolFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int ib = ac.m, ic_p = ac.n, ih = ac.h, iw = ac.w;
     const int kx = ac.k, sx = ac.stride, padX = ac.orderType;
-    const int oh = (ih + 2 * padX - kx) / sx + 1, ow = oh;
+    PoolingSpec ps; ps.ih = ih; ps.iw = iw; ps.channel = ic_p;
+    ps.kh = kx; ps.kw = kx; ps.stride = sx; ps.pad = padX;
+    if (ac.tag == "1.2.0") {
+        auto expected = cpuAvgPoolNCHW(ps, ac.validatorInputA, ib, ic_p);
+        return compareWithTolerance(output, expected, 1e-3f);
+    }
+    // 3.6.0: NC4HW4
+    const int oh = (ih + 2 * padX - kx) / sx + 1;
+    const int ow = (iw + 2 * padX - kx) / sx + 1;
     for (int b = 0; b < ib; ++b)
-      for (int c = 0; c < ic_p; ++c)
-        for (int oy = 0; oy < oh; ++oy)
-          for (int ox = 0; ox < ow; ++ox) {
-            float sum = 0.0f; int cnt = 0;
-            for (int fy = 0; fy < kx; ++fy)
-              for (int fx = 0; fx < kx; ++fx) {
-                int iy = oy * sx - padX + fy, ix = ox * sx - padX + fx;
-                if (iy < 0 || iy >= ih || ix < 0 || ix >= iw) continue;
-                int off;
-                if (ac.tag == "1.2.0") {
-                    int z = b * ic_p + c;
-                    off = z * ih * iw + iy * iw + ix;
-                } else {
-                    off = ((b * ih + iy) * iw + ix) * ic_p + c;
+        for (int c = 0; c < ic_p; ++c)
+            for (int oy = 0; oy < oh; ++oy)
+                for (int ox = 0; ox < ow; ++ox) {
+                    float sum = 0.0f; int cnt = 0;
+                    for (int fy = 0; fy < kx; ++fy)
+                        for (int fx = 0; fx < kx; ++fx) {
+                            int iy = oy * sx - padX + fy, ix = ox * sx - padX + fx;
+                            if (iy < 0 || iy >= ih || ix < 0 || ix >= iw) continue;
+                            int off = ((b * ih + iy) * iw + ix) * ic_p + c;
+                            sum += ac.validatorInputA[off]; ++cnt;
+                        }
+                    int outOff = ((b * oh + oy) * ow + ox) * ic_p + c;
+                    if (cnt == 0) cnt = 1;
+                    if (std::fabs(output[outOff] - sum / cnt) > 1e-3f) return false;
                 }
-                sum += ac.validatorInputA[off]; ++cnt;
-              }
-            if (cnt == 0) cnt = 1;
-            int outOff;
-            if (ac.tag == "1.2.0") {
-                int z = b * ic_p + c;
-                outOff = z * oh * ow + oy * ow + ox;
-            } else {
-                outOff = ((b * oh + oy) * ow + ox) * ic_p + c;
-            }
-            if (std::fabs(output[outOff] - sum / cnt) > 1e-3f) return false;
-          }
     return true;
 }
 
@@ -1374,6 +1301,30 @@ void registerCudaOps() {
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaShortConvFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaShortConvOutputFp32Kernel()));
             r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaGatedDeltaRuleDecodeFp32Kernel()));
+            // New fp32 adapters: format conversion / fuseblit_4 / transpose_local / castmidfloat_f32_i32 / float2int8 / int82float / pool 1.2.0 / reduction 1.2.0
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaC4nhw4ToNchwFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaC4nhw4ToNhwc8Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaC4nhw4ToNhwcFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNchwToNchwFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNchwToC4nhw4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNchwToNhwc8Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc8ToC4nhw4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc8ToNchwFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwc8ToNhwcFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwcToC4nhw4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaNhwcToNhwc8Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFuseBlit4Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaTransposeLocalFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaCastMidFloatF32I32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaFloat2Int8ScalarFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaInt82FloatScalarFp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaMaxpool120Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaAvgpool120Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionSum120Fp32Kernel()));
+            r.registerAdapter(std::unique_ptr<OpAdapter>(new CudaReductionMean120Fp32Kernel()));
+            // weight_only_quant + gated_delta_rule_prefill fp32 adapters
+            // (implemented in CudaOpsWoq.cpp).
+            registerWoqAdapters(r);
         }
     } r;
     (void)r;

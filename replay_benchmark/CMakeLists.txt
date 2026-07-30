@@ -32,7 +32,11 @@ add_executable(replay_benchmark.out
 target_include_directories(replay_benchmark.out PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp/
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/
-    ${CMAKE_CURRENT_SOURCE_DIR}/replay_benchmark/)
+    ${CMAKE_CURRENT_SOURCE_DIR}/replay_benchmark/
+    ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/spdlog/include)
+# spdlog requires -fexceptions; MNN global uses -fno-exceptions but
+# replay_benchmark is a standalone tool and can use exceptions.
+target_compile_options(replay_benchmark.out PRIVATE -fexceptions)
 target_link_libraries(replay_benchmark.out ${MNN_DEPS})
 
 if(MNN_REPLAY_ENABLE_PERFCOUNTER)
@@ -135,13 +139,16 @@ if(MNN_CUDA)
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/transpose_half.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/plugins.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/int8.cu
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu)
-    # CudaOps.cpp / CudaOpsMisc.cpp (fp32 adapters) reference mnn_corpus_* shims
-    # compiled by nvcc. Only include them when CUDA is enabled so host builds
-    # without nvcc still link cleanly.
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/weight_only_quant.cu
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/convdw_bf16.cu)
+    # CudaOps.cpp / CudaOpsMisc.cpp / CudaOpsWoq.cpp (fp32 adapters) reference
+    # mnn_corpus_* shims compiled by nvcc. Only include them when CUDA is
+    # enabled so host builds without nvcc still link cleanly.
     target_sources(replay_benchmark.out PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOps.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsMisc.cpp)
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsMisc.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsWoq.cpp)
     # CudaOpsFp16.cu includes CudaOps.hpp -> CudaOpAdapter.hpp -> OpAdapter.hpp
     # which live under replay_benchmark/. Expose that path so nvcc can find them.
     target_include_directories(replay_cuda_corpus PRIVATE
@@ -191,6 +198,39 @@ if(MNN_CUDA)
     else()
       target_link_libraries(list_cuda_metrics -lcupti ${LCM_NVPERF_HOST} ${LCM_NVPERF_TARGET} ${LCM_CUDA_DRIVER} ${CUDA_LIBRARIES})
     endif()
+
+    # PMU multi-pass test: verifies that collecting N metrics in one session
+    # (which may need multiple passes) produces the same values as collecting
+    # each metric individually (single-pass). Run with sudo on NVIDIA GPUs.
+    # Build: cmake -DMNN_CUDA=ON .. && make replay_pmu_test
+    # Run:   sudo ./replay_pmu_test
+    # Filter: ./replay_pmu_test --filter PMU.MultiPass
+    add_executable(replay_pmu_test
+        ${CMAKE_CURRENT_LIST_DIR}/tests/test_pmu_multipass.cpp)
+    target_include_directories(replay_pmu_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/spdlog/include)
+
+    # PMU availability test: discovers all CUDA PMU metrics via list_cuda_metrics,
+    # collects each individually, verifies it returns a valid value. Reports
+    # per-domain summary. Run before multi-pass or accuracy tests.
+    # Build: cmake -DMNN_CUDA=ON .. && make replay_pmu_availability
+    # Run:   sudo ./replay_pmu_availability
+    # Filter: ./replay_pmu_availability --filter CudaMetric.SmDomain
+    add_executable(replay_pmu_availability
+        ${CMAKE_CURRENT_LIST_DIR}/tests/test_pmu_availability.cpp)
+    target_include_directories(replay_pmu_availability PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/spdlog/include)
+
+    # CUDA latency test: runs every CUDA corpus case with PMU explicitly
+    # disabled and writes one latency_us value per case.
+    add_executable(replay_kernel_latency
+        ${CMAKE_CURRENT_LIST_DIR}/tests/test_kernel_latency.cpp)
+    target_include_directories(replay_kernel_latency PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party
+        ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/spdlog/include)
   else()
     message(WARNING "MNN_CUDA enabled but CUDA toolkit not found; CUDA corpus backend disabled")
   endif()
