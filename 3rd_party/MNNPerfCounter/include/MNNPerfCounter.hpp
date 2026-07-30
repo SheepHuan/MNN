@@ -69,6 +69,11 @@ public:
 
     const char* error() const;
 
+    // Returns the number of CUPTI passes required for the configured metrics.
+    // 1 = single-pass (no replay). >1 means metrics share hardware counter
+    // slots and require N kernel replays. Returns 1 for non-NVIDIA backends.
+    size_t numPasses() const;
+
 private:
     Session();
     Session(const Session&) = delete;

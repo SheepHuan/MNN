@@ -117,11 +117,16 @@ struct PmuScope {
     std::vector<MNN::PerfCounter::CounterValue> values;
 #endif
     uint64_t workloadDelta = 0;
+    size_t numPasses = 1;
     std::string status = "unavailable";
 };
 
 static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
     PmuScope s;
+    if (eventsOverride == "none" || eventsOverride == "off" || eventsOverride == "disabled") {
+        s.status = "disabled";
+        return s;
+    }
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     MNN::PerfCounter::DeviceInfo device;
     std::string err;
@@ -156,6 +161,7 @@ static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
     if (s.session && s.session->start()) {
         s.started = true;
         s.status = "started";
+        s.numPasses = s.session->numPasses();
     } else {
         const char* e = s.session ? s.session->error() : (pmuErr ? pmuErr : "session create failed");
         s.status = std::string("start_failed: ") + (e ? e : "unknown");
@@ -177,7 +183,9 @@ static void endPmu(PmuScope& s) {
         s.status = std::string("stop_failed") + (e ? (": " + std::string(e)) : "");
     }
 #endif
-}static bool makeParentDirectories(const std::string& path) {
+}
+
+static bool makeParentDirectories(const std::string& path) {
     const std::string::size_type slash = path.find_last_of("/\\");
     if (slash == std::string::npos) return true;
     const std::string parent = path.substr(0, slash);
@@ -888,7 +896,8 @@ namespace {
 // allocates device buffers, collects scalar args, and dispatches through the
 // adapter's launch() entry point — so it stays agnostic to each kernel's C
 // signature.
-static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& perfCounterEvents) {
+static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& perfCounterEvents,
+                          bool measureLatency) {
     CaseReport report = buildReport(ac, "precompiled");
 
     // The adapter must be a CudaOpAdapter to expose launch().
@@ -952,11 +961,61 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
 
     // workload + NVIDIA range profiler (per-kernel counters via
     // MNNPerfCounter Session::beginRange/endRange). Each launch is wrapped in
-    // a range so per-kernel metrics are collected precisely. When the PMU
-    // backend is unavailable, fall back to cuda event wall-clock timing.
+    // a range so per-kernel counters are collected precisely. If CUPTI reports
+    // multiple passes, the same Session owns the replay and aggregation.
+    // Do not split or replay the workload in this layer: doing so changes the
+    // semantics of derived metrics and can produce different counter values.
+    if (measureLatency) {
+        // Measure latency in a separate non-PMU workload. A CUPTI session
+        // may replay a range internally, so timing the PMU workload would
+        // measure replay overhead rather than kernel latency.
+        auto restoreInitialData = [&]() -> bool {
+            for (size_t i = 0; i < ac.buffers.size(); ++i) {
+                if (ac.buffers[i].initialData.empty()) continue;
+                if (cudaMemcpy(devBufs[i], ac.buffers[i].initialData.data(), ac.buffers[i].sizeBytes,
+                               cudaMemcpyHostToDevice) != cudaSuccess) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        cudaEvent_t evStart = nullptr;
+        cudaEvent_t evStop = nullptr;
+        bool timingReady = cudaEventCreate(&evStart) == cudaSuccess &&
+                           cudaEventCreate(&evStop) == cudaSuccess;
+        if (timingReady && cudaEventRecord(evStart, stream) == cudaSuccess) {
+            for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
+            if (cudaEventRecord(evStop, stream) == cudaSuccess &&
+                cudaEventSynchronize(evStop) == cudaSuccess) {
+                float elapsedMs = 0.0f;
+                if (cudaEventElapsedTime(&elapsedMs, evStart, evStop) == cudaSuccess) {
+                    report.latencyUs = static_cast<double>(elapsedMs) * 1000.0;
+                } else {
+                    timingReady = false;
+                }
+            } else {
+                timingReady = false;
+            }
+        } else {
+            timingReady = false;
+        }
+        if (evStart != nullptr) cudaEventDestroy(evStart);
+        if (evStop != nullptr) cudaEventDestroy(evStop);
+        if (!timingReady || !restoreInitialData()) {
+            report.error = "CUDA event latency measurement failed";
+            cudaStreamDestroy(stream);
+            for (auto p : devBufs) cudaFree(p);
+            return report;
+        }
+    }
+
     PmuScope pmu = beginPmu(perfCounterEvents);
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     if (pmu.started) {
+        if (pmu.numPasses > 1) {
+            std::fprintf(stderr, "[PMU] metric configuration requires %zu passes; "
+                         "CUPTI will manage replay in the same session\n", pmu.numPasses);
+        }
         for (int r = 0; r < runs; ++r) {
             char rangeName[64];
             std::snprintf(rangeName, sizeof(rangeName), "%s_run%d", ac.entry.c_str(), r);
@@ -964,50 +1023,37 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
             cudaAdapter->launch(ac, ctx);
             pmu.session->endRange();
         }
-        // stop() is called by endPmu() below; do not call it here (would
-        // double-stop and set started=false prematurely).
+        // stop() is called by endPmu() below.
     } else {
-        // PMU unavailable; fall back to cuda event timing. Preserve the
-        // beginPmu failure reason in pmu.status for diagnostics.
-        cudaEvent_t evStart, evStop;
-        cudaEventCreate(&evStart);
-        cudaEventCreate(&evStop);
-        cudaEventRecord(evStart, stream);
+        // PMU unavailable; run the workload without counters so validation
+        // still observes the intended output. Preserve the PMU failure
+        // reason in pmu.status; when latency is enabled it already came from
+        // the independent event measurement above.
         for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
-        cudaEventRecord(evStop, stream);
-        cudaEventSynchronize(evStop);
-        float elapsedMs = 0.0f;
-        cudaEventElapsedTime(&elapsedMs, evStart, evStop);
-        cudaEventDestroy(evStart);
-        cudaEventDestroy(evStop);
-        pmu.workloadDelta = static_cast<uint64_t>(elapsedMs * 1000.0f);
-        // Keep pmu.status from beginPmu so the failure reason is visible.
-        if (pmu.status.empty() || pmu.status == "unavailable") {
+        if (pmu.status == "disabled") {
+            if (measureLatency) pmu.workloadDelta = static_cast<uint64_t>(report.latencyUs);
+        } else if (pmu.status.empty() || pmu.status == "unavailable") {
             pmu.status = "cuda_event_fallback";
+            if (measureLatency) pmu.workloadDelta = static_cast<uint64_t>(report.latencyUs);
         } else {
             pmu.status = "cuda_event_fallback(" + pmu.status + ")";
+            if (measureLatency) pmu.workloadDelta = static_cast<uint64_t>(report.latencyUs);
         }
     }
 #else
-    cudaEvent_t evStart, evStop;
-    cudaEventCreate(&evStart);
-    cudaEventCreate(&evStop);
-    cudaEventRecord(evStart, stream);
     for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
-    cudaEventRecord(evStop, stream);
-    cudaEventSynchronize(evStop);
-    float elapsedMs = 0.0f;
-    cudaEventElapsedTime(&elapsedMs, evStart, evStop);
-    cudaEventDestroy(evStart);
-    cudaEventDestroy(evStop);
-    pmu.workloadDelta = static_cast<uint64_t>(elapsedMs * 1000.0f);
-    pmu.status = "cuda_event";
+    if (measureLatency) pmu.workloadDelta = static_cast<uint64_t>(report.latencyUs);
+    pmu.status = perfCounterEvents == "none" || perfCounterEvents == "off" ||
+                         perfCounterEvents == "disabled" ? "disabled" : "cuda_event";
 #endif
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
-
-    // readback output buffers (as float; int kernels are compared bit-exact)
+    report.numPasses = pmu.numPasses;
+    // Save the values returned by this same profiler session. If CUPTI used
+    // multiple passes, stop() has already merged those passes.
+    for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
+        report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
     std::vector<float> output;
     for (size_t i = 0; i < ac.buffers.size(); ++i) {
         if (!ac.buffers[i].isOutput) continue;
@@ -1217,7 +1263,8 @@ bool runKernelCorpusBenchmark(const Options& options) {
 #endif
             } else if (spec.backend == "cuda") {
 #if defined(MNN_REPLAY_HAS_CUDA)
-                report = runCuda(ac, std::max(1, options.runs), options.perfCounterEvents);
+                report = runCuda(ac, std::max(1, options.runs), options.perfCounterEvents,
+                                 options.measureLatency);
 #else
                 report = buildReport(ac, "unsupported", "CUDA not compiled into replay_benchmark");
 #endif
@@ -1241,8 +1288,20 @@ bool runKernelCorpusBenchmark(const Options& options) {
             addString(caseValue, "pmu_status", report.pmuStatus, allocator);
             caseValue.AddMember("control_delta", report.controlDelta, allocator);
             caseValue.AddMember("workload_delta", report.workloadDelta, allocator);
+            if (report.latencyUs > 0.0) {
+                caseValue.AddMember("latency_us", report.latencyUs, allocator);
+            }
+            caseValue.AddMember("num_passes", static_cast<uint64_t>(report.numPasses), allocator);
             caseValue.AddMember("responsive", report.responsive, allocator);
             caseValue.AddMember("valid", report.valid, allocator);
+            if (!report.pmuMetrics.empty()) {
+                rapidjson::Value pmuMetrics(rapidjson::kObjectType);
+                for (const auto& m : report.pmuMetrics) {
+                    rapidjson::Value key(m.first.c_str(), allocator);
+                    pmuMetrics.AddMember(key, m.second, allocator);
+                }
+                caseValue.AddMember("pmu_metrics", pmuMetrics, allocator);
+            }
             if (!report.error.empty()) addString(caseValue, "error", report.error, allocator);
             casesArray.PushBack(caseValue, allocator);
         }

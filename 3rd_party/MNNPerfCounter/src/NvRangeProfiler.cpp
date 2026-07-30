@@ -85,6 +85,7 @@ void parseMetricName(const std::string& full, std::string* base, bool* isolated,
 bool nvBuildConfigImage(const std::string& chipName,
                        const std::vector<std::string>& metricNames,
                        std::vector<uint8_t>* configImage,
+                       size_t* numPassesOut,
                        std::string* error) {
     // Create metrics evaluator to resolve raw dependencies.
     NVPW_CUDA_MetricsEvaluator_CalculateScratchBufferSize_Params sizeParams = {
@@ -175,6 +176,19 @@ bool nvBuildConfigImage(const std::string& chipName,
         NVPW_RawMetricsConfig_GenerateConfigImage_Params_STRUCT_SIZE};
     gen.pRawMetricsConfig = cfg;
     NVPA_CHECK(NVPW_RawMetricsConfig_GenerateConfigImage(&gen), error);
+
+    // Query actual number of passes required by this metric configuration.
+    // This accounts for raw-counter dependency conflicts — metrics sharing
+    // the same hardware counter slot require multiple passes (kernel replays).
+    // numIsolatedPasses is the key value: it reflects actual replay passes.
+    if (numPassesOut) {
+        NVPW_RawMetricsConfig_GetNumPasses_Params passParams = {
+            NVPW_RawMetricsConfig_GetNumPasses_Params_STRUCT_SIZE};
+        passParams.pRawMetricsConfig = cfg;
+        if (NVPW_RawMetricsConfig_GetNumPasses(&passParams) == NVPA_STATUS_SUCCESS) {
+            *numPassesOut = passParams.numPipelinedPasses + passParams.numIsolatedPasses;
+        }
+    }
 
     NVPW_RawMetricsConfig_GetConfigImage_Params get = {
         NVPW_RawMetricsConfig_GetConfigImage_Params_STRUCT_SIZE};

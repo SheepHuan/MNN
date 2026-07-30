@@ -68,6 +68,7 @@ struct Options {
     std::string kernelCorpusRoot;
     std::string kernelCorpusCase;
     int kernelCorpusRuns = 1;
+    bool kernelCorpusMeasureLatency = true;
     bool kernelCorpusBench = false;
 };
 

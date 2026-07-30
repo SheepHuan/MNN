@@ -13,10 +13,13 @@ namespace MNN {
 namespace PerfCounter {
 
 // Build the NVPA config image from a list of metric names for the given chip.
-// Returns false and sets *error on failure.
+// Returns false and sets *error on failure. If numPassesOut is non-null, it
+// receives the actual number of passes required (accounts for raw-counter
+// dependency conflicts — metrics sharing hardware counter slots need replays).
 bool nvBuildConfigImage(const std::string& chipName,
                         const std::vector<std::string>& metricNames,
                         std::vector<uint8_t>* configImage,
+                        size_t* numPassesOut,
                         std::string* error);
 
 // Build the counterDataPrefix image for the given metrics/chip.
