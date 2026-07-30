@@ -729,6 +729,17 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_argmax_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/argmax/mnn/3.6.0/vulkan_argmax_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "argmax",
+      "tag": "3.6.0",
+      "variant": "vulkan_argmax_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "batchnorm",
       "execution_spec": "manual",
       "file": "operators/vulkan/batchnorm/ncnn/20190611/batchnorm.comp",
@@ -858,6 +869,17 @@
       "op_type": "binaryop_broadcast",
       "tag": "20260526",
       "variant": "binaryop_broadcast_pack4"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_cast_float_int_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/cast/mnn/3.6.0/vulkan_cast_float_int_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "cast",
+      "tag": "3.6.0",
+      "variant": "vulkan_cast_float_int_fp32"
     },
     {
       "backend": "vulkan",
@@ -2104,6 +2126,17 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_grid_sample_nearest_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/grid_sample/mnn/3.6.0/vulkan_grid_sample_nearest_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "grid_sample",
+      "tag": "3.6.0",
+      "variant": "vulkan_grid_sample_nearest_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "groupnorm_coeffs",
       "execution_spec": "manual",
       "file": "operators/vulkan/groupnorm_coeffs/ncnn/20260526/groupnorm_coeffs.comp",
@@ -2599,6 +2632,28 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_resize_bilinear_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/interp/mnn/3.6.0/vulkan_resize_bilinear_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "interp",
+      "tag": "3.6.0",
+      "variant": "vulkan_resize_bilinear_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_resize_nearest_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/interp/mnn/3.6.0/vulkan_resize_nearest_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "interp",
+      "tag": "3.6.0",
+      "variant": "vulkan_resize_nearest_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "interp",
       "execution_spec": "manual",
       "file": "operators/vulkan/interp/ncnn/20190611/interp.comp",
@@ -2706,6 +2761,17 @@
       "op_type": "interp_bicubic_coeffs",
       "tag": "20260526",
       "variant": "interp_bicubic_coeffs"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_norm_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/layernorm/mnn/3.6.0/vulkan_norm_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "vulkan_norm_fp32"
     },
     {
       "backend": "vulkan",
@@ -3688,6 +3754,17 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_prelu_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/prelu/mnn/3.6.0/vulkan_prelu_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "prelu",
+      "tag": "3.6.0",
+      "variant": "vulkan_prelu_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "prelu",
       "execution_spec": "manual",
       "file": "operators/vulkan/prelu/ncnn/20190611/prelu.comp",
@@ -3798,6 +3875,50 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_range_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/range/mnn/3.6.0/vulkan_range_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "range",
+      "tag": "3.6.0",
+      "variant": "vulkan_range_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_blit_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/1.2.0/vulkan_blit_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "vulkan_blit_120_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_nc4hw4_to_nchw_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/1.2.0/vulkan_nc4hw4_to_nchw_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "vulkan_nc4hw4_to_nchw_120_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_nchw_to_nc4hw4_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/1.2.0/vulkan_nchw_to_nc4hw4_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "1.2.0",
+      "variant": "vulkan_nchw_to_nc4hw4_120_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "vulkan_blit_c4_fp32",
       "execution_spec": "manual",
       "file": "operators/vulkan/raster/mnn/3.6.0/vulkan_blit_c4_fp32.comp",
@@ -3806,6 +3927,28 @@
       "op_type": "raster",
       "tag": "3.6.0",
       "variant": "vulkan_blit_c4_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_nc4hw4_to_nchw_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/raster/mnn/3.6.0/vulkan_nc4hw4_to_nchw_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "raster",
+      "tag": "3.6.0",
+      "variant": "vulkan_nc4hw4_to_nchw_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_reduce_sum_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/reduction/mnn/1.2.0/vulkan_reduce_sum_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "reduction",
+      "tag": "1.2.0",
+      "variant": "vulkan_reduce_sum_120_fp32"
     },
     {
       "backend": "vulkan",
@@ -4139,6 +4282,17 @@
     },
     {
       "backend": "vulkan",
+      "entry": "vulkan_scale_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/scale/mnn/3.6.0/vulkan_scale_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "scale",
+      "tag": "3.6.0",
+      "variant": "vulkan_scale_fp32"
+    },
+    {
+      "backend": "vulkan",
       "entry": "scale",
       "execution_spec": "manual",
       "file": "operators/vulkan/scale/ncnn/20190611/scale.comp",
@@ -4224,6 +4378,17 @@
       "op_type": "sdpa_fa_cm",
       "tag": "20260526",
       "variant": "sdpa_fa_cm"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_select_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/select/mnn/3.6.0/vulkan_select_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "select",
+      "tag": "3.6.0",
+      "variant": "vulkan_select_fp32"
     },
     {
       "backend": "vulkan",
@@ -4378,6 +4543,28 @@
       "op_type": "slice",
       "tag": "20260526",
       "variant": "slice_pack4"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_softmax_height_120_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/softmax/mnn/1.2.0/vulkan_softmax_height_120_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "softmax",
+      "tag": "1.2.0",
+      "variant": "vulkan_softmax_height_120_fp32"
+    },
+    {
+      "backend": "vulkan",
+      "entry": "vulkan_softmax_height_fp32",
+      "execution_spec": "manual",
+      "file": "operators/vulkan/softmax/mnn/3.6.0/vulkan_softmax_height_fp32.comp",
+      "framework": "mnn",
+      "language": "glsl",
+      "op_type": "softmax",
+      "tag": "3.6.0",
+      "variant": "vulkan_softmax_height_fp32"
     },
     {
       "backend": "vulkan",

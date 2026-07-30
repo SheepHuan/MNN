@@ -24,12 +24,30 @@ __global__ void MOD(const T* input0, const T* input1, T* output, size_t count, s
         output[i] = x - x / y;
     }
 }
+// Explicit fp16 specialization: nvcc + GCC 12 host sees ambiguous half -> built-in
+// conversions. Cast through float to keep semantics identical.
+template <>
+__global__ void MOD<half>(const half* input0, const half* input1, half* output, size_t count, size_t s0, size_t s1) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += blockDim.x * gridDim.x) {
+        float x = __half2float(input0[i * s0]);
+        float y = __half2float(input1[i * s1]);
+        output[i] = __float2half(x - x / y);
+    }
+}
 template <typename T>
 __global__ void LOGICALOR(const T* input0, const T* input1, T* output, size_t count, size_t s0, size_t s1) {
     for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += blockDim.x * gridDim.x) {
         T x = input0[i * s0];
         T y = input1[i * s1];
-        output[i] = (x || y) ? 1 : 0;
+        output[i] = (T)(x || y);
+    }
+}
+template <>
+__global__ void LOGICALOR<half>(const half* input0, const half* input1, half* output, size_t count, size_t s0, size_t s1) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += blockDim.x * gridDim.x) {
+        bool x = __half2float(input0[i * s0]) != 0.0f;
+        bool y = __half2float(input1[i * s1]) != 0.0f;
+        output[i] = __float2half((x || y) ? 1.0f : 0.0f);
     }
 }
 

@@ -8998,77 +8998,6 @@
       }
     },
     {
-      "name": "cuda_input_layernorm_320_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_320_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_512_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_512_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_1024_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_1024_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_2048_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_2048_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_adaptive_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_adaptive_fp32",
-      "int_params": {
-        "outside": 2,
-        "inside": 768
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
       "name": "cuda_float22half2_fp32_smoke",
       "backend": "cuda",
       "framework": "mnn",
@@ -9813,6 +9742,366 @@
         "channels": 4
       },
       "float_params": {}
+    },
+    {
+      "name": "vulkan_select_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "select",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_select_fp32",
+      "dtype": "float32",
+      "validator": "select_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_range_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "range",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_range_fp32",
+      "dtype": "float32",
+      "validator": "range_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_cast_float_int_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "cast",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_cast_float_int_fp32",
+      "dtype": "float32",
+      "validator": "cast_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_scale_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "scale",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_scale_fp32",
+      "dtype": "float32",
+      "validator": "scale_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "c4": 2,
+        "plane": 16
+      }
+    },
+    {
+      "name": "vulkan_prelu_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "prelu",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_prelu_fp32",
+      "dtype": "float32",
+      "validator": "prelu_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "c4": 2,
+        "plane": 16
+      }
+    },
+    {
+      "name": "vulkan_argmax_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "argmax",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_argmax_fp32",
+      "dtype": "float32",
+      "validator": "argmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inside": 4,
+        "axis": 16,
+        "outside": 2,
+        "reduceAxis": 4
+      }
+    },
+    {
+      "name": "vulkan_softmax_height_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "softmax",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_softmax_height_fp32",
+      "dtype": "float32",
+      "validator": "softmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 16,
+        "c": 2
+      }
+    },
+    {
+      "name": "vulkan_norm_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "layernorm",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_norm_fp32",
+      "dtype": "float32",
+      "validator": "layernorm_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inside": 32,
+        "outside": 4
+      }
+    },
+    {
+      "name": "vulkan_resize_nearest_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "interp",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_resize_nearest_fp32",
+      "dtype": "float32",
+      "validator": "resize_nearest_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inW": 4,
+        "inH": 4,
+        "outW": 8,
+        "outH": 8,
+        "c4": 1
+      }
+    },
+    {
+      "name": "vulkan_resize_bilinear_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "interp",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_resize_bilinear_fp32",
+      "dtype": "float32",
+      "validator": "resize_bilinear_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inW": 4,
+        "inH": 4,
+        "outW": 7,
+        "outH": 7,
+        "c4": 1
+      }
+    },
+    {
+      "name": "vulkan_grid_sample_nearest_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "grid_sample",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_grid_sample_nearest_fp32",
+      "dtype": "float32",
+      "validator": "grid_sample_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inW": 4,
+        "inH": 4,
+        "outW": 4,
+        "outH": 4,
+        "c4": 1,
+        "batch": 1
+      }
+    },
+    {
+      "name": "vulkan_nc4hw4_to_nchw_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_nc4hw4_to_nchw_fp32",
+      "dtype": "float32",
+      "validator": "nc4hw4_to_nchw_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_blit_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_blit_120_fp32",
+      "dtype": "float32",
+      "validator": "identity_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_nc4hw4_to_nchw_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_nc4hw4_to_nchw_120_fp32",
+      "dtype": "float32",
+      "validator": "nc4hw4_to_nchw_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_nchw_to_nc4hw4_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_nchw_to_nc4hw4_120_fp32",
+      "dtype": "float32",
+      "validator": "nchw_to_nc4hw4_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_reduce_sum_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_reduce_sum_120_fp32",
+      "dtype": "float32",
+      "validator": "reduction_sum_scalar_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 8,
+        "c": 2
+      }
+    },
+    {
+      "name": "vulkan_softmax_height_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "softmax",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_softmax_height_120_fp32",
+      "dtype": "float32",
+      "validator": "softmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 16,
+        "c": 2
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_320_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_320_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_512_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_512_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_1024_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_1024_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_2048_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_2048_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_adaptive_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_adaptive_fp32",
+      "int_params": {
+        "outside": 2,
+        "inside": 768
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
     },
     {
       "name": "cuda_flash_decode_fp16_smoke",
