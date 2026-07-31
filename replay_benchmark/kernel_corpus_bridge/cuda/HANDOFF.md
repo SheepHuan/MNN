@@ -3,8 +3,11 @@
 > **目标**: 将 MNN CUDA backend 的所有 `__global__` kernel（含历史版本 1.2.0-3.6.0）
 > 忠实复制到 `replay_benchmark`，按 kernel-adapt skill 的"变体 vs 版本"分层规则实现。
 >
-> **当前状态**: 30 个 kernels/*.cu 文件，297 个 shim，332 个 case，**332/332 全部通过**。
+> **当前状态**: 30 个 kernels/*.cu 文件，300+ 个 adapter 类，332 + 48 个 case（两条工作线合并）。
 > 编译 0 error。所有 MNN `__global__` kernel 已 100% 覆盖（含 1.2.0-3.6.0 全版本 + BF16）。
+> **两条工作线**：
+> - 主线（remote）：25 个 legacy kernel + 28 个 legacy adapter + 37 个 weight_only_quant + prefill adapter（326 → 332）
+> - 本地（HEAD）：raster 融合宏实例批量补齐 + BinaryMid4/Half2 向量化 + BINARY_INT8 完整覆盖 + SPLIT_FusedKV（261 → 309，+48）
 >
 > **核心原则**: 忠实复制 MNN kernel 源码。adapter 只负责参数转换 + buffer 打包 + 验证。
 
@@ -254,6 +257,64 @@ host 端重算 expected 值，与 kernel output 用 `fabs` 对比。涵盖：
   （host 重算 transpose + bf16 精确匹配）
 
 maxpool/avgpool_C8_BF16 已在 pool.cu 中。需 sm80+ 环境验证 convdw 的真实计算。
+
+`plugin/FmhaCommon/FmhaV2CommonExecution.cu:30`。与 SPLIT_FusedQKV 类似（2-way split）。
+
+✅ **本次已补齐** (P4)：fp32 + fp16 两个 adapter + case，忠实复制 MNN 索引公式。
+
+---
+
+## 9. 本次扩展记录（merge kernel-agent-3.6.1 后）
+
+> 基于 sm_89 RTX 4080 + CUDA 12.5 + g++-12 host compiler 环境。
+> 起始状态 261/261 → 最终 309/309 (+48 cases, +18.4%)。
+
+### 9.1 P1: Raster 融合宏实例批量补齐 (+34 cases)
+
+| 类别 | 新增 op | 文件 |
+|------|---------|------|
+| raster_binary | SUB/DIV/MINIMUM/MAXIMUM/FLOORDIV/FLOORMOD/SquaredDifference/POW (8) | raster_fuse.cu |
+| raster_binary_fuseadd | SUB/DIV/MINIMUM/MAXIMUM/FLOORDIV/FLOORMOD/SquaredDifference/POW (8) | raster_fuse.cu |
+| raster_binarymid | SUB/MUL_SILU/DIV/MINIMUM/MAXIMUM/FLOORDIV/FLOORMOD/SquaredDifference/POW (9) | raster_fuse.cu |
+| raster_binarymidlinear4 | SUB/MUL_SILU/DIV/MINIMUM/MAXIMUM/FLOORDIV/FLOORMOD/SquaredDifference/POW (9) | raster_fuse.cu |
+
+**重构**：`raster_fuse.cu` 的 extern "C" shim 区从手写改为宏驱动（`SHIM_BINARY` / `SHIM_BINARY_FUSEADD` / `SHIM_BINARYMID` / `SHIM_BINARYMIDLINEAR4`)，便于批量实例化。
+**注意**: `raster_binary_fuseadd` 是 `atomicAdd(output, OP(x,y))`，非幂等，case 必须 `warmup_runs=0` 且 `workload_runs=1`(CLI `--kernel-corpus-runs 1` 验证)。
+
+### 9.2 P2: PACK_NUMBER 向量化变体 (+6 cases)
+
+| 变体 | 数据类型 | PACK | 说明 |
+|------|---------|------|------|
+| BinaryMid4_<ADD/MUL> | fp32 | float4 | 3D stride,stride 不含 X 维（X 内嵌 `ix<<2`) |
+| BinaryMidHalf2_<ADD/MUL> | fp16 | half2 | 同上，PACK_NUMBER=2 |
+| BinaryMidLinearHalf4_<ADD/MUL> | fp16 | half2×2 | 1D linear，每个线程 4 half |
+
+**关键 fp16 validator 修复**:`output.data()` 是 raw bytes，需 `reinterpret_cast<const __half*>` + `__half2float` 才能与 fp32 expected 比较。
+
+### 9.3 P3: BINARY_INT8 完整覆盖 (+6 cases)
+
+| 类别 | 新增 |
+|------|------|
+| BINARY_INT8 (single-scale) | SUB/DIV/MINIMUM/MAXIMUM |
+| BINARY_INT8_CHANNELWISE (per-channel scale) | ADD/MUL |
+
+**关键修复**:
+1. `int8.cu` 的 `BINARY_INT8_ADD/MUL` 从手写重构为 `BINARY_INT8_FUNC` 宏驱动，便于批量实例化。
+2. `host_float2int_rn` 从 `(int)roundf` 改为 `(int)rintf`(banker's rounding),匹配 device `__float2int_rn` 的 round-to-nearest-even 语义。原先 DIV `0.25*10=2.5` 时 host 期望 3、device 给 2 导致 false negative。
+3. DIV 的输入数据 `in1[i] = 1 + (i % 5)` 避免 y=0 触发 inf/NaN 的 host-device 行为分歧。
+
+### 9.4 P4: SPLIT_FusedKV (+2 cases)
+
+`plugin/FmhaCommon/FmhaV2CommonExecution.cu:30`,fp32 + fp16 两 adapter,validator 检查 v 输出（k 不读回）。
+
+### 9.5 未覆盖项（已记录）
+
+| 类别 | 数量 | 状态 | 备注 |
+|------|------|------|------|
+| 权重量化 GEMV/GEMM int4/int8 | ~20 | ⏸️ 跳过 | cutlass 集成复杂，一次性投入大 |
+| Raster 融合剩余实例 | ~22 | ⏸️ 跳过 | GREATER/LESS/EQUAL/NOTEQUAL/LOGICALOR 返回 int 类型，需独立 validator;REALDIV/ATAN2/MOD 已存在或冗余 |
+| BF16 原生算子 | 8 | ⏸️ 跳过 | 需 `MNN_CUDA_BF16=ON` 重编 backend；当前 sm89 可跑但需配置切换 |
+| `BinaryMid4_` SUB/DIV/... 8 个 op | 8 | ⏸️ 可选 | 已覆盖 ADD/MUL 两个代表性，剩余宏实例遵循同一模式可批量加 |
 
 ---
 

@@ -205,7 +205,14 @@ def bake_kernel(source_path, output_path, tag, is_pack4=False):
     # Build full baked source
     # Note: OPERATOR/OPERATE are NOT defined here — they are operator-specific
     # and must be provided by the adapter via compileMacros (-DOPERATOR=...).
-    result = MNN_FP32_PREAMBLE + source
+    preamble = MNN_FP32_PREAMBLE
+    # 3.6.0 reduction_buf.cl uses OPERATE(out, in) as a two-argument function
+    # macro. OpenCL -D does not support function-like macros, so bake the SUM
+    # definition into the preamble. Other ops (MAX/MIN/PROD) are not baked
+    # because they would need separate variants (not in corpus yet).
+    if tag == "3.6.0" and source_path.name == "reduction_buf.cl":
+        preamble = preamble + "#ifndef OPERATE\n#define OPERATE(a, b) ((a) + (b))\n#endif\n"
+    result = preamble + source
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(result, encoding="utf-8")
     return True

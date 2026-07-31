@@ -1659,6 +1659,23 @@ public:
     cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
     bool validate(const AdaptedCase&, const std::vector<float>&) const override;
 };
+// P4 扩展：SPLIT_FusedKV (2-way split)
+class CudaSplitFusedKVFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "split_fusedkv"; }
+    const char* variant() const override { return "cuda_split_fusedkv_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaSplitFusedKVFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "split_fusedkv"; }
+    const char* variant() const override { return "cuda_split_fusedkv_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
 
 // ============================================================================
 // P4 int8 kernels — FloatToInt8/Int8ToFloat/DequantWeight/ConvDW/Im2Col/BinaryInt8
@@ -1760,6 +1777,26 @@ public:
     bool validate(const AdaptedCase&, const std::vector<float>&) const override;
 };
 
+// P3 扩展：BINARY_INT8 其余操作
+#define DECL_BINARY_INT8_ADAPTER(ClassName, OpTypeName, VariantName) \
+class ClassName : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return OpTypeName; } \
+    const char* variant() const override { return VariantName; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+};
+
+DECL_BINARY_INT8_ADAPTER(CudaBinaryInt8SubFp32Kernel, "binary_int8_sub", "cuda_binary_int8_sub_fp32")
+DECL_BINARY_INT8_ADAPTER(CudaBinaryInt8DivFp32Kernel, "binary_int8_div", "cuda_binary_int8_div_fp32")
+DECL_BINARY_INT8_ADAPTER(CudaBinaryInt8MinimumFp32Kernel, "binary_int8_minimum", "cuda_binary_int8_minimum_fp32")
+DECL_BINARY_INT8_ADAPTER(CudaBinaryInt8MaximumFp32Kernel, "binary_int8_maximum", "cuda_binary_int8_maximum_fp32")
+
+// P3 扩展：BINARY_INT8_CHANNELWISE (per-channel scale)
+DECL_BINARY_INT8_ADAPTER(CudaBinaryInt8ChannelwiseAddFp32Kernel, "binary_int8_channelwise_add", "cuda_binary_int8_channelwise_add_fp32")
+DECL_BINARY_INT8_ADAPTER(CudaBinaryInt8ChannelwiseMulFp32Kernel, "binary_int8_channelwise_mul", "cuda_binary_int8_channelwise_mul_fp32")
+
 // ============================================================================
 // P5 Raster fused binary — BinaryADD/MUL + FuseAddADD/MUL + MidADD/MUL + MidLinear4ADD/MUL
 // ============================================================================
@@ -1823,6 +1860,151 @@ class CudaBinaryMidLinear4MulFp32Kernel : public CudaOpAdapter {
 public:
     const char* opType() const override { return "raster_binarymidlinear4"; }
     const char* variant() const override { return "cuda_raster_binarymidlinear4_mul_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// ============================================================================
+// P5 扩展：Raster 融合宏实例批量声明（SUB/DIV/MIN/MAX/FLOORDIV/FLOORMOD/...）
+// 用宏一次性声明 adapter 类（每个 OP 一个类）
+// ============================================================================
+
+#define DECL_RASTER_BINARY_ADAPTER(ClassName, VariantName) \
+class ClassName : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return "raster_binary"; } \
+    const char* variant() const override { return VariantName; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+};
+
+#define DECL_RASTER_FUSEADD_ADAPTER(ClassName, VariantName) \
+class ClassName : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return "raster_binary_fuseadd"; } \
+    const char* variant() const override { return VariantName; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+};
+
+#define DECL_RASTER_BINARYMID_ADAPTER(ClassName, VariantName) \
+class ClassName : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return "raster_binarymid"; } \
+    const char* variant() const override { return VariantName; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+};
+
+#define DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(ClassName, VariantName) \
+class ClassName : public CudaOpAdapter { \
+public: \
+    const char* opType() const override { return "raster_binarymidlinear4"; } \
+    const char* variant() const override { return VariantName; } \
+    bool adapt(const CaseSpec&, AdaptedCase&) const override; \
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override; \
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override; \
+};
+
+// raster_binary 扩展 (SUB/DIV/MIN/MAX/FLOORDIV/FLOORMOD/SQUAREDDIFF/POW)
+DECL_RASTER_BINARY_ADAPTER(CudaBinarySubRasterFp32Kernel, "cuda_raster_binary_sub_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinaryDivRasterFp32Kernel, "cuda_raster_binary_div_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinaryMinimumRasterFp32Kernel, "cuda_raster_binary_minimum_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinaryMaximumRasterFp32Kernel, "cuda_raster_binary_maximum_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinaryFloordivRasterFp32Kernel, "cuda_raster_binary_floordiv_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinaryFloormodRasterFp32Kernel, "cuda_raster_binary_floormod_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinarySquaredDifferenceRasterFp32Kernel, "cuda_raster_binary_squared_difference_fp32")
+DECL_RASTER_BINARY_ADAPTER(CudaBinaryPowRasterFp32Kernel, "cuda_raster_binary_pow_fp32")
+
+// raster_binary_fuseadd 扩展
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddSubFp32Kernel, "cuda_raster_fuseadd_sub_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddDivFp32Kernel, "cuda_raster_fuseadd_div_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddMinimumFp32Kernel, "cuda_raster_fuseadd_minimum_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddMaximumFp32Kernel, "cuda_raster_fuseadd_maximum_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddFloordivFp32Kernel, "cuda_raster_fuseadd_floordiv_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddFloormodFp32Kernel, "cuda_raster_fuseadd_floormod_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddSquaredDifferenceFp32Kernel, "cuda_raster_fuseadd_squared_difference_fp32")
+DECL_RASTER_FUSEADD_ADAPTER(CudaBinaryFuseAddPowFp32Kernel, "cuda_raster_fuseadd_pow_fp32")
+
+// raster_binarymid 扩展
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidSubFp32Kernel, "cuda_raster_binarymid_sub_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidMulSiluFp32Kernel, "cuda_raster_binarymid_mul_silu_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidDivFp32Kernel, "cuda_raster_binarymid_div_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidMinimumFp32Kernel, "cuda_raster_binarymid_minimum_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidMaximumFp32Kernel, "cuda_raster_binarymid_maximum_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidFloordivFp32Kernel, "cuda_raster_binarymid_floordiv_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidFloormodFp32Kernel, "cuda_raster_binarymid_floormod_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidSquaredDifferenceFp32Kernel, "cuda_raster_binarymid_squared_difference_fp32")
+DECL_RASTER_BINARYMID_ADAPTER(CudaBinaryMidPowFp32Kernel, "cuda_raster_binarymid_pow_fp32")
+
+// raster_binarymidlinear4 扩展
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4SubFp32Kernel, "cuda_raster_binarymidlinear4_sub_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MulSiluFp32Kernel, "cuda_raster_binarymidlinear4_mul_silu_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4DivFp32Kernel, "cuda_raster_binarymidlinear4_div_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MinimumFp32Kernel, "cuda_raster_binarymidlinear4_minimum_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4MaximumFp32Kernel, "cuda_raster_binarymidlinear4_maximum_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4FloordivFp32Kernel, "cuda_raster_binarymidlinear4_floordiv_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4FloormodFp32Kernel, "cuda_raster_binarymidlinear4_floormod_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4SquaredDifferenceFp32Kernel, "cuda_raster_binarymidlinear4_squared_difference_fp32")
+DECL_RASTER_BINARYMIDLINEAR4_ADAPTER(CudaBinaryMidLinear4PowFp32Kernel, "cuda_raster_binarymidlinear4_pow_fp32")
+
+// ============================================================================
+// P2 扩展：BinaryMid4 / BinaryMidHalf2 / BinaryMidLinearHalf4 (PACK_NUMBER 向量化变体)
+// ============================================================================
+
+// BinaryMid4: float4 vectorized, stride 不含 X 维度（PACK_NUMBER=4）
+class CudaBinaryMid4AddFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymid4"; }
+    const char* variant() const override { return "cuda_raster_binarymid4_add_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMid4MulFp32Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymid4"; }
+    const char* variant() const override { return "cuda_raster_binarymid4_mul_fp32"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// BinaryMidHalf2: fp16 half2 vectorized (PACK_NUMBER=2)
+class CudaBinaryMidHalf2AddFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymidhalf2"; }
+    const char* variant() const override { return "cuda_raster_binarymidhalf2_add_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMidHalf2MulFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymidhalf2"; }
+    const char* variant() const override { return "cuda_raster_binarymidhalf2_mul_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+
+// BinaryMidLinearHalf4: fp16 half2 x2, 1D linear
+class CudaBinaryMidLinearHalf4AddFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymidlinearhalf4"; }
+    const char* variant() const override { return "cuda_raster_binarymidlinearhalf4_add_fp16"; }
+    bool adapt(const CaseSpec&, AdaptedCase&) const override;
+    cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
+    bool validate(const AdaptedCase&, const std::vector<float>&) const override;
+};
+class CudaBinaryMidLinearHalf4MulFp16Kernel : public CudaOpAdapter {
+public:
+    const char* opType() const override { return "raster_binarymidlinearhalf4"; }
+    const char* variant() const override { return "cuda_raster_binarymidlinearhalf4_mul_fp16"; }
     bool adapt(const CaseSpec&, AdaptedCase&) const override;
     cudaError_t launch(const AdaptedCase&, const CudaLaunchCtx&) const override;
     bool validate(const AdaptedCase&, const std::vector<float>&) const override;

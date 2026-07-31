@@ -244,20 +244,17 @@ __global__ void SPLIT_FusedQKV(const size_t count, const T* fused_qkv,
 }
 
 // ============================================================================
-// 2.x-era legacy plugin kernel (from legacy_kernels.cu)
+// SPLIT_FusedKV: [B,S,H,2,D] -> 2x [B,S,H,D]
+// 忠实复制 MNN plugin/FmhaCommon/FmhaV2CommonExecution.cu:30
 // ============================================================================
 template <typename T>
 __global__ void SPLIT_FusedKV(const size_t count, const T* fused_kv,
-        T* ptr_k, T* ptr_v,
-        int head_size
-    ) {
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (count); i += blockDim.x * gridDim.x) {
-        //[B, S, H, 2, D] -> [B, S, H, D]
+                               T* ptr_k, T* ptr_v, int head_size) {
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += blockDim.x * gridDim.x) {
         const int bsh = i / head_size;
         const int d = i % head_size;
-
-        ptr_k[i] =  fused_kv[(bsh * 2 + 0) * head_size + d];
-        ptr_v[i] =  fused_kv[(bsh * 2 + 1) * head_size + d];
+        ptr_k[i] = fused_kv[(bsh * 2 + 0) * head_size + d];
+        ptr_v[i] = fused_kv[(bsh * 2 + 1) * head_size + d];
     }
 }
 
@@ -370,6 +367,21 @@ void mnn_corpus_split_fusedqkv_fp16(size_t count, const void* fused_qkv,
                                      int grid, int block, cudaStream_t stream) {
     MNN::Corpus::SPLIT_FusedQKV<__half><<<grid, block, 0, stream>>>(
         count, (const __half*)fused_qkv, (__half*)ptr_q, (__half*)ptr_k, (__half*)ptr_v, head_size);
+}
+
+// ---- SPLIT_FusedKV fp32 ----
+void mnn_corpus_split_fusedkv_fp32(size_t count, const void* fused_kv,
+                                    void* ptr_k, void* ptr_v, int head_size,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SPLIT_FusedKV<float><<<grid, block, 0, stream>>>(
+        count, (const float*)fused_kv, (float*)ptr_k, (float*)ptr_v, head_size);
+}
+// ---- SPLIT_FusedKV fp16 ----
+void mnn_corpus_split_fusedkv_fp16(size_t count, const void* fused_kv,
+                                    void* ptr_k, void* ptr_v, int head_size,
+                                    int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::SPLIT_FusedKV<__half><<<grid, block, 0, stream>>>(
+        count, (const __half*)fused_kv, (__half*)ptr_k, (__half*)ptr_v, head_size);
 }
 
 } // extern "C"

@@ -42,6 +42,12 @@ struct CaseReport {
     bool responsive = false;
     bool valid = false;
     std::string error;
+
+    // Per-case wall-clock timing (nanoseconds). workloadNs is total time for
+    // `runs` dispatches; nsPerDispatch = workloadNs / runs.
+    uint64_t workloadNs = 0;
+    int runs = 0;
+
     // PMU metric values (name → value), populated when PMU is available
     std::vector<std::pair<std::string, uint64_t>> pmuMetrics;
     // Number of CUPTI passes required for the metric set (1=single-pass, N=replay)

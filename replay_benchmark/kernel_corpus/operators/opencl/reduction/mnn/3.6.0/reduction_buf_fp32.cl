@@ -54,6 +54,9 @@ typedef float16 OUTPUT_TYPE16;
 #define DEAL_NON_UNIFORM_DIM2(input1, input2) if (input1 >= global_size_dim0 || input2 >= global_size_dim1) { return; }
 #define DEAL_NON_UNIFORM_DIM3(input1, input2, input3) if (input1 >= global_size_dim0 || input2 >= global_size_dim1 || input3 >= global_size_dim2) { return; }
 #endif
+#ifndef OPERATE
+#define OPERATE(a, b) ((a) + (b))
+#endif
 #define GLOBAL_SIZE_2_DIMS \
 __private const int global_size_dim0, __private const int global_size_dim1,
 

@@ -8998,77 +8998,6 @@
       }
     },
     {
-      "name": "cuda_input_layernorm_320_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_320_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_512_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_512_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_1024_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_1024_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_2048_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_2048_fp32",
-      "int_params": {
-        "outside": 2
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
-      "name": "cuda_input_layernorm_adaptive_fp32_smoke",
-      "backend": "cuda",
-      "framework": "mnn",
-      "op_type": "layernorm",
-      "tag": "3.6.0",
-      "variant": "cuda_input_layernorm_adaptive_fp32",
-      "int_params": {
-        "outside": 2,
-        "inside": 768
-      },
-      "float_params": {
-        "epsilon": 1e-05
-      }
-    },
-    {
       "name": "cuda_float22half2_fp32_smoke",
       "backend": "cuda",
       "framework": "mnn",
@@ -9813,6 +9742,366 @@
         "channels": 4
       },
       "float_params": {}
+    },
+    {
+      "name": "vulkan_select_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "select",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_select_fp32",
+      "dtype": "float32",
+      "validator": "select_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_range_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "range",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_range_fp32",
+      "dtype": "float32",
+      "validator": "range_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_cast_float_int_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "cast",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_cast_float_int_fp32",
+      "dtype": "float32",
+      "validator": "cast_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_scale_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "scale",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_scale_fp32",
+      "dtype": "float32",
+      "validator": "scale_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "c4": 2,
+        "plane": 16
+      }
+    },
+    {
+      "name": "vulkan_prelu_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "prelu",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_prelu_fp32",
+      "dtype": "float32",
+      "validator": "prelu_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "c4": 2,
+        "plane": 16
+      }
+    },
+    {
+      "name": "vulkan_argmax_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "argmax",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_argmax_fp32",
+      "dtype": "float32",
+      "validator": "argmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inside": 4,
+        "axis": 16,
+        "outside": 2,
+        "reduceAxis": 4
+      }
+    },
+    {
+      "name": "vulkan_softmax_height_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "softmax",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_softmax_height_fp32",
+      "dtype": "float32",
+      "validator": "softmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 16,
+        "c": 2
+      }
+    },
+    {
+      "name": "vulkan_norm_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "layernorm",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_norm_fp32",
+      "dtype": "float32",
+      "validator": "layernorm_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inside": 32,
+        "outside": 4
+      }
+    },
+    {
+      "name": "vulkan_resize_nearest_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "interp",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_resize_nearest_fp32",
+      "dtype": "float32",
+      "validator": "resize_nearest_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inW": 4,
+        "inH": 4,
+        "outW": 8,
+        "outH": 8,
+        "c4": 1
+      }
+    },
+    {
+      "name": "vulkan_resize_bilinear_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "interp",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_resize_bilinear_fp32",
+      "dtype": "float32",
+      "validator": "resize_bilinear_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inW": 4,
+        "inH": 4,
+        "outW": 7,
+        "outH": 7,
+        "c4": 1
+      }
+    },
+    {
+      "name": "vulkan_grid_sample_nearest_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "grid_sample",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_grid_sample_nearest_fp32",
+      "dtype": "float32",
+      "validator": "grid_sample_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "inW": 4,
+        "inH": 4,
+        "outW": 4,
+        "outH": 4,
+        "c4": 1,
+        "batch": 1
+      }
+    },
+    {
+      "name": "vulkan_nc4hw4_to_nchw_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "3.6.0",
+      "variant": "vulkan_nc4hw4_to_nchw_fp32",
+      "dtype": "float32",
+      "validator": "nc4hw4_to_nchw_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_blit_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_blit_120_fp32",
+      "dtype": "float32",
+      "validator": "identity_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "size": 256
+      }
+    },
+    {
+      "name": "vulkan_nc4hw4_to_nchw_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_nc4hw4_to_nchw_120_fp32",
+      "dtype": "float32",
+      "validator": "nc4hw4_to_nchw_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_nchw_to_nc4hw4_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "raster",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_nchw_to_nc4hw4_120_fp32",
+      "dtype": "float32",
+      "validator": "nchw_to_nc4hw4_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "batch": 1,
+        "channel": 8,
+        "h": 4,
+        "w": 4
+      }
+    },
+    {
+      "name": "vulkan_reduce_sum_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "reduction",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_reduce_sum_120_fp32",
+      "dtype": "float32",
+      "validator": "reduction_sum_scalar_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 8,
+        "c": 2
+      }
+    },
+    {
+      "name": "vulkan_softmax_height_120_fp32_smoke",
+      "backend": "vulkan",
+      "op_type": "softmax",
+      "framework": "mnn",
+      "tag": "1.2.0",
+      "variant": "vulkan_softmax_height_120_fp32",
+      "dtype": "float32",
+      "validator": "softmax_fp32",
+      "warmup_runs": 2,
+      "workload_runs": 5,
+      "int_params": {
+        "w": 4,
+        "h": 16,
+        "c": 2
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_320_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_320_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_512_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_512_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_1024_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_1024_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_2048_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_2048_fp32",
+      "int_params": {
+        "outside": 2
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
+    },
+    {
+      "name": "cuda_input_layernorm_adaptive_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "layernorm",
+      "tag": "3.6.0",
+      "variant": "cuda_input_layernorm_adaptive_fp32",
+      "int_params": {
+        "outside": 2,
+        "inside": 768
+      },
+      "float_params": {
+        "epsilon": 1e-05
+      }
     },
     {
       "name": "cuda_flash_decode_fp16_smoke",
@@ -10666,7 +10955,8 @@
         "size_y": 4,
         "size_x": 4
       },
-      "warmup_runs": 0
+      "warmup_runs": 0,
+      "workload_runs": 1
     },
     {
       "name": "cuda_raster_fuseadd_mul_fp32_smoke",
@@ -10680,7 +10970,8 @@
         "size_y": 4,
         "size_x": 4
       },
-      "warmup_runs": 0
+      "warmup_runs": 0,
+      "workload_runs": 1
     },
     {
       "name": "cuda_raster_binarymid_add_fp32_smoke",
@@ -10728,6 +11019,612 @@
       "variant": "cuda_raster_binarymidlinear4_mul_fp32",
       "int_params": {
         "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binary_sub_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_sub_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_div_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_div_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_minimum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_minimum_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_maximum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_maximum_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_floordiv_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_floordiv_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_floormod_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_floormod_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_squared_difference_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_squared_difference_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binary_pow_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binary_pow_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_fuseadd_sub_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_sub_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_div_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_div_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_minimum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_minimum_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_maximum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_maximum_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_floordiv_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_floordiv_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_floormod_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_floormod_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_squared_difference_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_squared_difference_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_fuseadd_pow_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binary_fuseadd",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_fuseadd_pow_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      },
+      "warmup_runs": 0,
+      "workload_runs": 1
+    },
+    {
+      "name": "cuda_raster_binarymid_sub_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_sub_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_mul_silu_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_mul_silu_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_div_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_div_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_minimum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_minimum_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_maximum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_maximum_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_floordiv_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_floordiv_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_floormod_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_floormod_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_squared_difference_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_squared_difference_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid_pow_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid_pow_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_sub_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_sub_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_mul_silu_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_mul_silu_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_div_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_div_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_minimum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_minimum_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_maximum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_maximum_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_floordiv_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_floordiv_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_floormod_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_floormod_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_squared_difference_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_squared_difference_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinear4_pow_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinear4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinear4_pow_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid4_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid4_add_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymid4_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymid4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymid4_mul_fp32",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidhalf2_add_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidhalf2",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidhalf2_add_fp16",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidhalf2_mul_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidhalf2",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidhalf2_mul_fp16",
+      "int_params": {
+        "size_z": 2,
+        "size_y": 4,
+        "size_x": 4
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinearhalf4_add_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinearhalf4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinearhalf4_add_fp16",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_raster_binarymidlinearhalf4_mul_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "raster_binarymidlinearhalf4",
+      "tag": "3.6.0",
+      "variant": "cuda_raster_binarymidlinearhalf4_mul_fp16",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_binary_int8_sub_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_sub",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_sub_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_binary_int8_div_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_div",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_div_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_binary_int8_minimum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_minimum",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_minimum_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_binary_int8_maximum_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_maximum",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_maximum_fp32",
+      "int_params": {
+        "count": 64
+      }
+    },
+    {
+      "name": "cuda_binary_int8_channelwise_add_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_channelwise_add",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_channelwise_add_fp32",
+      "int_params": {
+        "channel_pack": 4,
+        "nhw_count": 16
+      }
+    },
+    {
+      "name": "cuda_binary_int8_channelwise_mul_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "binary_int8_channelwise_mul",
+      "tag": "3.6.0",
+      "variant": "cuda_binary_int8_channelwise_mul_fp32",
+      "int_params": {
+        "channel_pack": 4,
+        "nhw_count": 16
+      }
+    },
+    {
+      "name": "cuda_split_fusedkv_fp32_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "split_fusedkv",
+      "tag": "3.6.0",
+      "variant": "cuda_split_fusedkv_fp32",
+      "int_params": {
+        "bsh": 4,
+        "d": 64
+      }
+    },
+    {
+      "name": "cuda_split_fusedkv_fp16_smoke",
+      "backend": "cuda",
+      "framework": "mnn",
+      "op_type": "split_fusedkv",
+      "tag": "3.6.0",
+      "variant": "cuda_split_fusedkv_fp16",
+      "int_params": {
+        "bsh": 4,
+        "d": 64
       }
     },
     {

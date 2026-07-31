@@ -7,6 +7,7 @@
 #include "kernel_corpus_bridge/ncnn/NcnnBridge.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -119,6 +120,10 @@ struct PmuScope {
     uint64_t workloadDelta = 0;
     size_t numPasses = 1;
     std::string status = "unavailable";
+    // Wall-clock time of the workload section (ns), captured by the runner via
+    // chrono/cudaEvent/clGetEventProfilingInfo/vkCmdWriteTimestamp depending on
+    // backend. Always filled when the runner supports timing; not a PMC metric.
+    uint64_t workloadNs = 0;
 };
 
 static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
@@ -562,6 +567,7 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
 
     // workload + PMU
     PmuScope pmu = beginPmu();
+    const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) {
         cl::NDRange g = ac.dims == 2
             ? cl::NDRange(ac.globalSize[0], ac.globalSize[1])
@@ -574,9 +580,16 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
         }
     }
     queue.finish();
+    const auto wallEnd = std::chrono::steady_clock::now();
+    pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
+    report.workloadNs = pmu.workloadNs;
+    report.runs = runs;
+    report.numPasses = pmu.numPasses;
+    for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
+        report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
 
     // readback output buffers
     std::vector<float> output;
@@ -825,6 +838,7 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
 
     // workload + PMU
     PmuScope pmu = beginPmu();
+    const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) {
         // For in-place buffers, re-write initial data before each dispatch so
         // the output after N runs equals a single transformation of the input.
@@ -841,16 +855,23 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
         cmdbuf->bindDescriptorSets(pipelineLayout, 0, 1, &descSet);
         if (!ac.pushConstants.empty()) {
             cmdbuf->pushConstants(pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                                 ac.pushConstants.size(), ac.pushConstants.data());
+                                  ac.pushConstants.size(), ac.pushConstants.data());
         }
         cmdbuf->dispatch(ac.globalSize[0], ac.globalSize[1], ac.globalSize[2]);
         cmdbuf->end();
         cmdPool.submitAndWait(cmdbuf->get());
         delete cmdbuf;
     }
+    const auto wallEnd = std::chrono::steady_clock::now();
+    pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
+    report.workloadNs = pmu.workloadNs;
+    report.runs = runs;
+    report.numPasses = pmu.numPasses;
+    for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
+        report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
 
     // readback output buffers
     std::vector<float> output;
@@ -1016,6 +1037,7 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
             std::fprintf(stderr, "[PMU] metric configuration requires %zu passes; "
                          "CUPTI KernelReplay will manage replay in the same session\n", pmu.numPasses);
         }
+        const auto wallStart = std::chrono::steady_clock::now();
         for (int r = 0; r < runs; ++r) {
             char rangeName[64];
             std::snprintf(rangeName, sizeof(rangeName), "%s_run%d", ac.entry.c_str(), r);
@@ -1023,13 +1045,20 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
             cudaAdapter->launch(ac, ctx);
             pmu.session->endRange();
         }
+        cudaStreamSynchronize(stream);
+        const auto wallEnd = std::chrono::steady_clock::now();
+        pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
         // stop() is called by endPmu() below.
     } else {
         // PMU unavailable; run the workload without counters so validation
         // still observes the intended output. Preserve the PMU failure
         // reason in pmu.status; when latency is enabled it already came from
         // the independent event measurement above.
+        const auto wallStart = std::chrono::steady_clock::now();
         for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
+        cudaStreamSynchronize(stream);
+        const auto wallEnd = std::chrono::steady_clock::now();
+        pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
         if (pmu.status == "disabled") {
             if (measureLatency) pmu.workloadDelta = static_cast<uint64_t>(report.latencyUs);
         } else if (pmu.status.empty() || pmu.status == "unavailable") {
@@ -1041,7 +1070,11 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         }
     }
 #else
+    const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) cudaAdapter->launch(ac, ctx);
+    cudaStreamSynchronize(stream);
+    const auto wallEnd = std::chrono::steady_clock::now();
+    pmu.workloadNs = std::chrono::duration_cast<std::chrono::nanoseconds>(wallEnd - wallStart).count();
     if (measureLatency) pmu.workloadDelta = static_cast<uint64_t>(report.latencyUs);
     pmu.status = perfCounterEvents == "none" || perfCounterEvents == "off" ||
                          perfCounterEvents == "disabled" ? "disabled" : "cuda_event";
@@ -1049,11 +1082,15 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
+    report.workloadNs = pmu.workloadNs;
+    report.runs = runs;
     report.numPasses = pmu.numPasses;
     // Save the values returned by this same profiler session. If CUPTI used
     // multiple passes, stop() has already merged those passes.
     for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
         report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
+
+    // readback output buffers (as float; int kernels are compared bit-exact)
     std::vector<float> output;
     for (size_t i = 0; i < ac.buffers.size(); ++i) {
         if (!ac.buffers[i].isOutput) continue;
@@ -1288,6 +1325,12 @@ bool runKernelCorpusBenchmark(const Options& options) {
             addString(caseValue, "pmu_status", report.pmuStatus, allocator);
             caseValue.AddMember("control_delta", report.controlDelta, allocator);
             caseValue.AddMember("workload_delta", report.workloadDelta, allocator);
+            // Timing: workload wall-clock for the entire `runs` dispatches (ns),
+            // and per-dispatch derived value for easy cross-case comparison.
+            caseValue.AddMember("workload_ns", report.workloadNs, allocator);
+            caseValue.AddMember("runs", report.runs, allocator);
+            const uint64_t nsPerDispatch = report.runs > 0 ? report.workloadNs / (uint64_t)report.runs : 0;
+            caseValue.AddMember("ns_per_dispatch", nsPerDispatch, allocator);
             if (report.latencyUs > 0.0) {
                 caseValue.AddMember("latency_us", report.latencyUs, allocator);
             }

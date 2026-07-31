@@ -26,6 +26,17 @@ if(CUDA_FOUND)
     IF (MSVC)
      set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -allow-unsupported-compiler")
     ENDIF()
+    # CUDA 12.0 nvcc rejects GCC >= 13. Allow overriding the host-compiler check
+    # so CUDA can be built on newer toolchains (e.g. Ubuntu 24.04 + GCC 13).
+    IF (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
+     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -allow-unsupported-compiler")
+     # CUDA 12.0 + glibc 2.39 hits _Float32 not supported with GCC 13 headers.
+     # Force nvcc to use GCC 12 toolchain if it is installed.
+     find_program(MNN_NVCC_HOST_COMPILER NAMES g++-12 g++-11)
+     if(MNN_NVCC_HOST_COMPILER)
+       set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -ccbin ${MNN_NVCC_HOST_COMPILER}")
+     endif()
+    ENDIF()
     IF (${arch_count} EQUAL 1)
         set(support_archs 60 61 62 70 72 75 80 86 87 89 120)
         list(FIND support_archs ${CUDA_ARCH_FLAGS_readable_code} list_index)

@@ -20,9 +20,8 @@ add_executable(replay_benchmark.out
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ArgmaxOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ConvOps.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/ComplexOps.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOps.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsMisc.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsWoq.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/VulkanMiscOps.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/mnn/ops/VulkanTag120Ops.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/NcnnBridge.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/ops/ElementwiseOp.cpp
     ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/ncnn/ops/Pack4Op.cpp
@@ -97,8 +96,20 @@ if(MNN_CUDA)
     # (thrust's system_error.inl has a catch(...) clause). Without this flag
     # nvcc fails with "error: exception handling disabled, use -fexceptions".
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fexceptions")
+    # CUDA 12.0 nvcc rejects GCC >= 13. Force GCC 12 host compiler if available.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "13")
+      set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -allow-unsupported-compiler")
+      find_program(MNN_NVCC_HOST_COMPILER NAMES g++-12 g++-11)
+      if(MNN_NVCC_HOST_COMPILER)
+        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -ccbin ${MNN_NVCC_HOST_COMPILER}")
+      endif()
+    endif()
     include(${CMAKE_CURRENT_SOURCE_DIR}/source/backend/cuda/SelectCudaComputeArch.cmake)
     CUDA_SELECT_NVCC_ARCH_FLAGS(CUDA_ARCH_FLAGS ${CUDA_ARCHS})
+    # Propagate the auto-detected gencode flags so device-side intrinsics like
+    # __hfma2 (sm_53+) are enabled. Without this the default target is sm_30
+    # which lacks half2 arithmetic.
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} ${CUDA_ARCH_FLAGS}")
     cuda_add_library(replay_cuda_corpus STATIC
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsFp16.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/range.cu
@@ -131,6 +142,13 @@ if(MNN_CUDA)
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/raster_fuse.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/weight_only_quant.cu
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/kernels/convdw_bf16.cu)
+    # CudaOps.cpp / CudaOpsMisc.cpp / CudaOpsWoq.cpp (fp32 adapters) reference
+    # mnn_corpus_* shims compiled by nvcc. Only include them when CUDA is
+    # enabled so host builds without nvcc still link cleanly.
+    target_sources(replay_benchmark.out PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOps.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsMisc.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsWoq.cpp)
     # CudaOpsFp16.cu includes CudaOps.hpp -> CudaOpAdapter.hpp -> OpAdapter.hpp
     # which live under replay_benchmark/. Expose that path so nvcc can find them.
     target_include_directories(replay_cuda_corpus PRIVATE
