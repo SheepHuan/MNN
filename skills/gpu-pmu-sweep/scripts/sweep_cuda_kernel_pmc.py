@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep every CUDA corpus case against every globally valid CUDA PMC.
+"""Sweep selected CUDA corpus cases against every globally valid CUDA PMC.
 
 Each invocation contains exactly one case and a bounded group of metrics. CUPTI
 owns any replay passes inside that session. The detailed CSV is the resume
@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -21,16 +22,29 @@ VALID_STATUSES = {"VALID"}
 OVERFLOW_SENTINEL = 1 << 63
 
 
-def discover_cuda_cases(corpus_root):
+def discover_cuda_cases(corpus_root, selection="op-type"):
+    if selection not in {"op-type", "all"}:
+        raise ValueError("unknown CUDA case selection: {}".format(selection))
     data = json.loads((Path(corpus_root) / "operator_cases.json").read_text(encoding="utf-8"))
     cases = []
     seen = set()
+    representatives = {}
     for case in data.get("cases", []):
         name = case.get("name")
         if case.get("backend") == "cuda" and isinstance(name, str) and name and name not in seen:
-            cases.append(name)
             seen.add(name)
-    return cases
+            if selection == "all":
+                cases.append(name)
+                continue
+            op_type = case.get("op_type")
+            if not isinstance(op_type, str) or not op_type:
+                raise ValueError("CUDA case {} has no op_type".format(name))
+            # Keep the first corpus entry for each op type. Corpus generation
+            # orders the representative variants before shape-specific cases.
+            representatives.setdefault(op_type, name)
+    if selection == "all":
+        return cases
+    return [representatives[op_type] for op_type in sorted(representatives)]
 
 
 def read_valid_metrics(path):
@@ -116,10 +130,14 @@ def classify_report(report, case_name, metric, returncode=0, error=""):
 def run_batch(binary, corpus_root, case_name, metrics, workdir, lib_dir=None, use_sudo=False,
               runs=1, timeout=300, runner=subprocess.run):
     metrics = _normalize_metrics(metrics)
+    temp_dir = None
     output_path = None
     try:
-        fd, output_path = tempfile.mkstemp(prefix="replay_cuda_pmu_", suffix=".json")
-        os.close(fd)
+        # Keep the path absent because replay_benchmark creates the output file.
+        # A private user-owned directory also lets the caller remove files created
+        # by a root benchmark when --sudo is enabled.
+        temp_dir = tempfile.mkdtemp(prefix="replay_cuda_pmu_")
+        output_path = str(Path(temp_dir) / "report.json")
         argv = build_benchmark_argv(binary, corpus_root, case_name, metrics, output_path, runs)
         env = os.environ.copy()
         if lib_dir:
@@ -145,6 +163,8 @@ def run_batch(binary, corpus_root, case_name, metrics, workdir, lib_dir=None, us
                 Path(output_path).unlink()
             except FileNotFoundError:
                 pass
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def run_one(binary, corpus_root, case_name, metric, workdir, lib_dir=None, use_sudo=False,
@@ -172,15 +192,21 @@ def run_batch_with_fallback(binary, corpus_root, case_name, metrics, workdir, li
     return left
 
 
-def _read_rows(path):
+def _read_rows(path, cases=None, metrics=None):
     completed = set()
     if not Path(path).is_file():
         return completed
+    case_set = set(cases) if cases is not None else None
+    metric_set = set(metrics) if metrics is not None else None
     with Path(path).open(newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream)
         if reader.fieldnames != ROW_COLUMNS:
             raise ValueError("{} must have columns {}".format(path, ",".join(ROW_COLUMNS)))
         for row in reader:
+            if case_set is not None and row["case"] not in case_set:
+                continue
+            if metric_set is not None and row["metric"] not in metric_set:
+                continue
             completed.add((row["case"], row["metric"]))
     return completed
 
@@ -196,7 +222,7 @@ def build_result_json_from_csv(cases, path):
         for row in reader:
             case = row["case"]
             if case not in result:
-                result[case] = {"pmc": {}}
+                continue
             if row["status"] in VALID_STATUSES and row["value"]:
                 result[case]["pmc"][row["metric"]] = int(row["value"])
     return result
@@ -232,7 +258,7 @@ def metric_batches(metrics, batch_size):
 
 def run_sweep(args, executor=run_batch_with_fallback):
     corpus_root = Path(args.corpus_root).resolve()
-    cases = discover_cuda_cases(corpus_root)
+    cases = discover_cuda_cases(corpus_root, args.case_selection)
     if args.case_filter:
         cases = [case for case in cases if args.case_filter in case]
     if args.max_cases:
@@ -243,7 +269,7 @@ def run_sweep(args, executor=run_batch_with_fallback):
 
     output_csv = Path(args.output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    completed = _read_rows(output_csv) if args.resume else set()
+    completed = _read_rows(output_csv, cases, metrics) if args.resume else set()
     mode = "a" if args.resume and output_csv.is_file() else "w"
     with output_csv.open(mode, newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=ROW_COLUMNS, lineterminator="\n")
@@ -289,6 +315,8 @@ def parse_args(argv=None):
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--max-metrics", type=int)
     parser.add_argument("--case-filter")
+    parser.add_argument("--case-selection", choices=("op-type", "all"), default="op-type",
+                        help="select one corpus case per op_type (default) or scan all cases")
     return parser.parse_args(argv)
 
 

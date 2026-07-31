@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import csv
 import importlib.util
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,10 +41,21 @@ class CudaPmuSweepTest(unittest.TestCase):
                 self.assertEqual(len(list(csv.DictReader(stream))), 4)
 
     def test_discover_cuda_cases_uses_only_cuda_cases(self):
-        cases = SWEEP_MODULE.discover_cuda_cases(Path("replay_benchmark/kernel_corpus"))
-        self.assertEqual(len(cases), 425)
+        corpus_root = Path("replay_benchmark/kernel_corpus")
+        cases = SWEEP_MODULE.discover_cuda_cases(corpus_root)
+        self.assertEqual(len(cases), 60)
         self.assertEqual(len(cases), len(set(cases)))
         self.assertIn("cuda_conv_dw_fp32_smoke", cases)
+        corpus = json.loads((corpus_root / "operator_cases.json").read_text(encoding="utf-8"))
+        selected = [entry for entry in corpus["cases"] if entry.get("name") in cases]
+        self.assertEqual(len({entry["op_type"] for entry in selected}), 60)
+        self.assertEqual(len({(entry["op_type"], entry["variant"]) for entry in selected}), 60)
+
+        all_cases = SWEEP_MODULE.discover_cuda_cases(
+            corpus_root, "all"
+        )
+        self.assertEqual(len(all_cases), 425)
+        self.assertEqual(len(all_cases), len(set(all_cases)))
 
     def test_classify_fixed_report_preserves_zero_as_valid(self):
         report = {
@@ -104,6 +117,31 @@ class CudaPmuSweepTest(unittest.TestCase):
         )
         self.assertEqual(argv[argv.index("--perf-counter-events") + 1], "metric_a,metric_b")
 
+    def test_run_batch_uses_absent_output_path_and_cleans_private_directory(self):
+        observed = {}
+
+        def fake_runner(argv, **kwargs):
+            output_path = Path(argv[argv.index("--perf-counter-output") + 1])
+            observed["output_path"] = output_path
+            self.assertFalse(output_path.exists())
+            output_path.write_text(json.dumps({
+                "cases": [{
+                    "case": "cuda_relu_fp32_smoke",
+                    "pmu_status": "sampled",
+                    "num_passes": 1,
+                    "pmu_metrics": {"dram__bytes.avg": 123},
+                }],
+            }), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        result = SWEEP_MODULE.run_batch(
+            "bench", "corpus", "cuda_relu_fp32_smoke", ["dram__bytes.avg"],
+            ".", use_sudo=True, runner=fake_runner,
+        )
+        self.assertEqual(result["dram__bytes.avg"]["status"], "VALID")
+        self.assertFalse(observed["output_path"].exists())
+        self.assertFalse(observed["output_path"].parent.exists())
+
     def test_sweep_uses_valid_metrics_and_resume_ledger(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -120,6 +158,7 @@ class CudaPmuSweepTest(unittest.TestCase):
                 binary="bench", workdir=".", lib_dir=None, sudo=False, runs=1, timeout=5,
                 output_csv=str(root / "rows.csv"), output_json=str(root / "result.json"),
                 resume=False, max_cases=1, max_metrics=2, metrics_per_session=32, case_filter=None,
+                case_selection="op-type",
             )
             calls = []
 
@@ -130,13 +169,20 @@ class CudaPmuSweepTest(unittest.TestCase):
                         for metric in metrics}
 
             payload = SWEEP_MODULE.run_sweep(args, executor=fake_executor)
-            self.assertEqual(calls, [("cuda_relu_fp32_smoke", ("sm__cycles_elapsed.avg", "dram__bytes.sum"))])
+            self.assertEqual(calls, [("cuda_argmax_fp32_smoke", ("sm__cycles_elapsed.avg", "dram__bytes.sum"))])
             self.assertEqual(payload[calls[0][0]]["pmc"], {
                 "sm__cycles_elapsed.avg": 7, "dram__bytes.sum": 7,
             })
 
             args.resume = True
             SWEEP_MODULE.run_sweep(args, executor=lambda *unused: self.fail("resume reran a completed pair"))
+
+            with (root / "rows.csv").open("a", encoding="utf-8") as stream:
+                stream.write("old_case,old_metric,VALID,99,sampled,1,0,\n")
+            payload = SWEEP_MODULE.build_result_json_from_csv(
+                ["cuda_argmax_fp32_smoke"], root / "rows.csv"
+            )
+            self.assertNotIn("old_case", payload)
 
 
 if __name__ == "__main__":

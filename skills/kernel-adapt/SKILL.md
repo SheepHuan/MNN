@@ -740,7 +740,7 @@ bool CudaSoftmaxFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
 2. **权限**：需 `RmProfilingAdminOnly=0`（`/proc/driver/nvidia/params`），或 `sudo` 运行
 3. **metric 查询**：`./build/list_cuda_metrics` 列举本机 GPU 支持的全部 metric
 4. **手动指定**：`--perf-counter-events sm__cycles_elapsed.avg,sm__inst_executed.avg`
-5. **runCuda() 流程**：`beginPmu()` → 每个 launch 包 `beginRange()/endRange()` → `endPmu()` → `nvEvaluateMetrics()`
+5. **runCuda() 流程**：`beginPmu()` → CUPTI AutoRange + KernelReplay 自动捕获每个 launch → `endPmu()` → `nvEvaluateMetrics()`；AutoRange 下 `beginRange()/endRange()` 为兼容接口 no-op
 6. **fallback**：PMU 不可用时 fallback 到 `cudaEvent` 计时
 
 ### CUDA 构建规则

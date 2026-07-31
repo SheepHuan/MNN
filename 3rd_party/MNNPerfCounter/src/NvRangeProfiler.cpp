@@ -11,7 +11,7 @@
 //   3. Build counterDataPrefix via NVPA CounterDataBuilder
 //   4. Allocate counterDataImage + scratch via cuptiProfilerCounterDataImage*
 //   5. start()  -> cuptiRangeProfilerEnable + SetConfig + Start
-//   6. beginRange(name) / endRange() wrap each kernel launch
+//   6. AutoRange + KernelReplay lets CUPTI identify and replay the target kernel
 //   7. stop()   -> Stop + Disable + DecodeData
 //   8. Evaluate metrics via NVPW_MetricsEvaluator_EvaluateToGpuValues per range
 

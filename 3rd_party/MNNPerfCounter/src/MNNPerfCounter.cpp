@@ -282,6 +282,7 @@ struct Session::Impl {
     void* nvCtx = nullptr;       // CUcontext
     int nvRangeDepth = 0;
     size_t nvNumPasses = 1;      // actual passes needed (from GetNumPasses)
+    bool nvAutoRange = false;    // CUPTI owns range selection and kernel replay
     bool started = false;
 };
 
@@ -630,8 +631,11 @@ bool Session::start() {
         sc.configSize = mImpl->nvConfigImage.size();
         sc.counterDataImageSize = mImpl->nvCounterDataImage.size();
         sc.pCounterDataImage = mImpl->nvCounterDataImage.data();
-        sc.range = CUPTI_UserRange;
-        sc.replayMode = CUPTI_UserReplay;
+        // The corpus benchmark emits one target kernel while this session is
+        // active. AutoRange + KernelReplay lets CUPTI identify that kernel and
+        // replay all required passes without application-side replay.
+        sc.range = CUPTI_AutoRange;
+        sc.replayMode = CUPTI_KernelReplay;
         sc.maxRangesPerPass = 1;
         sc.numNestingLevels = 1;
         sc.minNestingLevel = 1;
@@ -640,6 +644,7 @@ bool Session::start() {
             mImpl->error = "cuptiRangeProfilerSetConfig failed";
             return false;
         }
+        mImpl->nvAutoRange = true;
         CUpti_RangeProfiler_Start_Params st = {CUpti_RangeProfiler_Start_Params_STRUCT_SIZE};
         st.pRangeProfilerObject = en.pRangeProfilerObject;
         CUptiResult sr = cuptiRangeProfilerStart(&st);
@@ -747,6 +752,10 @@ size_t Session::numPasses() const {
 bool Session::beginRange(const char* rangeName) {
     if (mImpl == nullptr || !mImpl->started || mImpl->vendor != GpuVendor::Nvidia) return false;
     if (mImpl->nvRangeObj == nullptr) return false;
+    if (mImpl->nvAutoRange) {
+        (void)rangeName;
+        return true;
+    }
 #if defined(MNN_PERFCOUNTER_HAS_CUDA)
     if (!nvBeginRange(mImpl->nvRangeObj, rangeName)) {
         mImpl->error = "cuptiRangeProfilerPushRange failed";
@@ -761,7 +770,9 @@ bool Session::beginRange(const char* rangeName) {
 }
 
 bool Session::endRange() {
-    if (mImpl == nullptr || mImpl->nvRangeDepth == 0) return false;
+    if (mImpl == nullptr || mImpl->vendor != GpuVendor::Nvidia) return false;
+    if (mImpl->nvAutoRange) return true;
+    if (mImpl->nvRangeDepth == 0) return false;
 #if defined(MNN_PERFCOUNTER_HAS_CUDA)
     if (!nvEndRange(mImpl->nvRangeObj)) {
         mImpl->error = "cuptiRangeProfilerPopRange failed";

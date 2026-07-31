@@ -1014,7 +1014,7 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     if (pmu.started) {
         if (pmu.numPasses > 1) {
             std::fprintf(stderr, "[PMU] metric configuration requires %zu passes; "
-                         "CUPTI will manage replay in the same session\n", pmu.numPasses);
+                         "CUPTI KernelReplay will manage replay in the same session\n", pmu.numPasses);
         }
         for (int r = 0; r < runs; ++r) {
             char rangeName[64];

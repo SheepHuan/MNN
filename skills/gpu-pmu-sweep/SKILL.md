@@ -244,11 +244,11 @@ python3 ../skills/gpu-pmu-sweep/scripts/parse_cuda_pmu_log.py \
   --valid-csv cuda_pmc_valid.csv
 ```
 
-使用全部 CUDA kernel corpus case（当前 `operator_cases.json` 中 425 个
-`backend=cuda` case）和有效 metric 自动扫描。每个 benchmark 进程只请求
-一个 case，默认将 32 个 metric 放入同一个 CUPTI Session；CUPTI 负责该
-Session 内部的 replay pass。扫描严格串行，`sweep_rows.csv` 是断点账本，
-使用 `--resume` 可从中断处继续：
+默认从 CUDA kernel corpus 中按 `op_type` 选择一个代表 case（当前 60 个
+`op_type`，每个保留 `operator_cases.json` 中的第一个 variant/case），再和
+有效 metric 自动扫描。每个 benchmark 进程只请求一个 case，默认将 32 个
+metric 放入同一个 CUPTI Session；CUPTI 负责该 Session 内部的 replay pass。
+扫描严格串行，`sweep_rows.csv` 是断点账本，使用 `--resume` 可从中断处继续：
 
 脚本会自动传入 `--kernel-corpus-no-latency`，PMC sweep 不执行额外的
 latency event workload。若 CUPTI 拒绝一个批量配置，脚本会自动二分重试，
@@ -262,6 +262,7 @@ python3 ../skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py \
   --binary ./replay_benchmark.out \
   --workdir . \
   --lib-dir .:source/backend/cuda:. \
+  --case-selection op-type \
   --metrics-per-session 32 \
   --sudo --resume \
   --output-csv cuda_kernel_pmc_rows.csv \
@@ -277,6 +278,12 @@ python3 ../skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py \
     "pmc": {"sm__cycles_elapsed.avg": 123}
   }
 }
+```
+
+如需恢复原来的 425 个 CUDA case 全量扫描，显式指定：
+
+```bash
+--case-selection all
 ```
 
 延迟不从 PMC sweep 获取。独立延迟测试会显式关闭 PMU，并输出单独的

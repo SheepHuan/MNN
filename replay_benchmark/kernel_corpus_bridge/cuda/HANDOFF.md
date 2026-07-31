@@ -360,7 +360,12 @@ fatal assertion 从 `check*()` 调用 `longjmp()` 回到 `RunAll()` 的 `setjmp(
 
 补充验证发现，CUPTI/NVPW 返回的 `numPasses > 1` 可能发生在单个 metric 上：derived metric 依赖多个 raw counter slot，并不表示请求了多个 metric。此前 replay 层把所有 `numPasses > 1` 配置手工拆成单 metric session，导致单 metric 也出现 `Split 1 metrics into 1`，并错误地把 pass 处理从 CUPTI Session 中移出。
 
-当前已修正为：一次 benchmark 只创建一个 PMU Session；所有 range 和 workload 都在该 Session 内执行；由 CUPTI 自己完成 multi-pass replay 与聚合；`report.num_passes` 保留 Session 报告的真实 pass 数。单 metric smoke 验证结果为 `pmu_status=sampled`、`num_passes=2`，不再打印手工 split 日志。
+当前已修正为：一次 benchmark 只创建一个 PMU Session；NVIDIA 使用
+`CUPTI_AutoRange + CUPTI_KernelReplay`，由 CUPTI 自动识别 corpus workload
+中的 kernel、完成 multi-pass replay 与聚合；`report.num_passes` 保留 Session
+报告的真实 pass 数。AutoRange 下 `beginRange()/endRange()` 为兼容接口 no-op。
+32 metric batch smoke 验证结果为 `pmu_status=sampled`、`num_passes=2`，32 个
+metric 全部返回有限值。
 
 验证中 `lts__t_sectors_srcnode_gpc_op_atom_dot_alu_lookup_hit.min` 返回 `9223372036854775808`。该值是无效/溢出哨兵，不是有效 PMU 计数；这属于 metric 评估或样本有效性问题，不能归因于 pass 拆分修复，也不能将其计入 `VALID`。
 
@@ -373,8 +378,8 @@ fatal assertion 从 `check*()` 调用 `longjmp()` 回到 `RunAll()` 的 `setjmp(
 - `cuda_pmc_valid.csv`：仅 5952 个 `VALID` metric，溢出哨兵值不进入此文件。
 
 `skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py` 读取 valid CSV，
-从 `operator_cases.json` 选择全部 425 个 `backend=cuda` case，执行
-`case × valid metric`。每个命令只提交一个 case，默认将 32 个 metric
+从 `operator_cases.json` 按 `op_type` 选择 60 个代表 case（每个 op type
+保留文件中的第一个 variant/case），执行 `case × valid metric`。每个命令只提交一个 case，默认将 32 个 metric
 放入同一个 CUPTI Session，由 CUPTI 在该 Session 内管理真实的 multi-pass；
 运行严格串行，避免 CUPTI profiler 资源竞争。
 脚本自动传入 `--kernel-corpus-no-latency`，PMC sweep 不执行延迟测量。
@@ -392,6 +397,7 @@ python3 ../skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py \
   --corpus-root ../replay_benchmark/kernel_corpus \
   --binary ./replay_benchmark.out --workdir . \
   --lib-dir .:source/backend/cuda:. --metrics-per-session 32 \
+  --case-selection op-type \
   --sudo --resume \
   --output-csv cuda_kernel_pmc_rows.csv \
   --output-json cuda_kernel_pmc.json
@@ -412,6 +418,8 @@ REPLAY_KERNEL_LATENCY_OUTPUT=cuda_kernel_latency.json \
 ```
 
 单 case 冒烟验证可设置 `REPLAY_KERNEL_LATENCY_CASE_FILTER`，正式全量测量时不要设置。
+
+如需扫描全部 425 个 CUDA case，在命令中加入 `--case-selection all`。
 
 该测试使用 `--perf-counter-events none`，确保 latency 测量不会创建 CUPTI
 Session，也不会受到 PMU multi-pass 影响。

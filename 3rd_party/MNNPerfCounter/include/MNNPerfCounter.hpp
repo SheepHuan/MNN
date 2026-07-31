@@ -62,7 +62,8 @@ public:
 
     // NVIDIA Range Profiler per-kernel range API (no-op on Mali/Adreno). For
     // NVIDIA sessions using CUPTI Range Profiler, start()/stop() demarcate the
-    // profiling session, and beginRange()/endRange() wrap individual kernels.
+    // profiling session. AutoRange sessions let CUPTI identify individual
+    // kernels; beginRange()/endRange() are no-ops in that mode.
     // Returns false (no-op) if the backend has no range support.
     bool beginRange(const char* rangeName);
     bool endRange();
