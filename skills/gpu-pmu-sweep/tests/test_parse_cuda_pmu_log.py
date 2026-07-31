@@ -43,18 +43,19 @@ class CudaPmuSweepTest(unittest.TestCase):
     def test_discover_cuda_cases_uses_only_cuda_cases(self):
         corpus_root = Path("replay_benchmark/kernel_corpus")
         cases = SWEEP_MODULE.discover_cuda_cases(corpus_root)
-        self.assertEqual(len(cases), 60)
         self.assertEqual(len(cases), len(set(cases)))
         self.assertIn("cuda_conv_dw_fp32_smoke", cases)
         corpus = json.loads((corpus_root / "operator_cases.json").read_text(encoding="utf-8"))
+        cuda_entries = [entry for entry in corpus["cases"] if entry.get("backend") == "cuda"]
+        self.assertEqual(len(cases), len({entry["op_type"] for entry in cuda_entries}))
         selected = [entry for entry in corpus["cases"] if entry.get("name") in cases]
-        self.assertEqual(len({entry["op_type"] for entry in selected}), 60)
-        self.assertEqual(len({(entry["op_type"], entry["variant"]) for entry in selected}), 60)
+        self.assertEqual(len({entry["op_type"] for entry in selected}), len(cases))
+        self.assertEqual(len({(entry["op_type"], entry["variant"]) for entry in selected}), len(cases))
 
         all_cases = SWEEP_MODULE.discover_cuda_cases(
             corpus_root, "all"
         )
-        self.assertEqual(len(all_cases), 425)
+        self.assertEqual(len(all_cases), len({entry["name"] for entry in cuda_entries}))
         self.assertEqual(len(all_cases), len(set(all_cases)))
 
     def test_classify_fixed_report_preserves_zero_as_valid(self):

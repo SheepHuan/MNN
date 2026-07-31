@@ -1,0 +1,98 @@
+{
+  "schema_version": "mnn-kernel-semantic-taxonomy/v1",
+  "semantic_families": {
+    "elementwise_quant": [
+      "binary", "binary_int8_add", "binary_int8_channelwise_add",
+      "binary_int8_channelwise_mul", "binary_int8_div", "binary_int8_maximum",
+      "binary_int8_minimum", "binary_int8_mul", "binary_int8_sub", "cast",
+      "castbool", "clamp", "float2int8", "float2int8_single", "int82float",
+      "int82float_single", "prelu", "relu", "scale", "select", "splitgelu"
+    ],
+    "reduction_norm_rank": [
+      "argmax", "argmin", "global_avgpool", "global_maxpool", "groupnorm",
+      "layernorm", "reduction", "softmax", "topkv2"
+    ],
+    "pooling_resample": [
+      "avgpool", "grid_sample", "grid_sample_3d", "grid_sample_bilinear",
+      "interp_bilinear", "interp_bilinear_opt", "interp_nearest",
+      "interp_nearest_round", "maxpool"
+    ],
+    "convolution": [
+      "conv_dw", "conv_dw3x3s1_int8", "conv_dw_int8", "convolution", "deconv",
+      "im2col", "im2col_packc16_int8", "weight_int8_pack_fill", "weight_pack_fill"
+    ],
+    "dense_quant": [
+      "conv_fpa_intb", "dequantize_int4_weight", "dequantize_int8_weight", "matmul"
+    ],
+    "layout_indexing": [
+      "gatherv2", "raster", "raster_binary", "raster_binary_fuseadd",
+      "raster_binarymid", "raster_binarymid4", "raster_binarymidhalf2",
+      "raster_binarymidlinear4", "raster_binarymidlinearhalf4", "scatternd", "transpose"
+    ],
+    "attention_sequence": [
+      "attention", "linear_attention", "rope", "seqlen2spatial",
+      "split_fusedkv", "split_fusedqkv"
+    ],
+    "generation": ["range"]
+  },
+  "expected_mechanisms": {
+    "dense_quant": ["compute_pipeline", "parallelism", "dram_memory", "cache_locality"],
+    "convolution": ["compute_pipeline", "parallelism", "dram_memory", "cache_locality"],
+    "attention_sequence": ["compute_pipeline", "dram_memory", "cache_locality", "scheduler_wait"],
+    "reduction_norm_rank": ["parallelism", "synchronization", "cache_locality", "scheduler_wait"],
+    "pooling_resample": ["dram_memory", "cache_locality", "compute_pipeline"],
+    "elementwise_quant": ["dram_memory", "cache_locality", "compute_pipeline", "parallelism"],
+    "layout_indexing": ["dram_memory", "cache_locality", "scheduler_wait"],
+    "generation": ["compute_pipeline", "dram_memory"]
+  },
+  "exact_variant_roles": {
+    "cuda_add_bias_fp32": "postprocess_pointwise",
+    "cuda_groupnorm_nhwc_sum_fp16": "reduction_stage",
+    "cuda_setzero_fp32": "initializer",
+    "cuda_splitgelu_fp16": "postprocess_pointwise",
+    "cuda_splitgelu_fp32": "postprocess_pointwise",
+    "cuda_wino_weight_reorder_fp32": "preprocess_pack"
+  },
+  "ordered_role_rules": [
+    {
+      "role": "preprocess_pack",
+      "tokens": [
+        "weight_reorder", "rearrange", "weight_prepare", "pack_fill", "pack_pad",
+        "precompute", "dequantize", "im2col"
+      ]
+    },
+    {
+      "role": "initializer",
+      "tokens": ["setzero", "bias_zero_prepare"]
+    },
+    {
+      "role": "postprocess_pointwise",
+      "tokens": [
+        "splitgelu", "add_bias", "biasandactivation", "relu", "clamp", "prelu",
+        "scale", "gelu", "silu", "select", "cast", "binary"
+      ]
+    },
+    {
+      "role": "reduction_stage",
+      "tokens": [
+        "reduction", "softmax", "argmax", "argmin", "topkv", "global_avgpool",
+        "global_maxpool", "groupnorm_nhwc_sum", "combine_results"
+      ]
+    },
+    {
+      "role": "layout_data_movement",
+      "tokens": [
+        "transpose", "packcommon", "unpackcommon", "blit", "raster", "gather",
+        "copy_kv", "compact_kv", "split_fusedqkv", "split_fusedkv", "col2im"
+      ]
+    },
+    {
+      "role": "core_compute",
+      "tokens": [
+        "gemm", "gemv", "matmul", "conv_dw", "flash_decode", "qk_kernel",
+        "qkv_kernel", "gated_delta", "short_conv", "conv1d", "pool", "interp",
+        "grid_sample", "layernorm", "groupnorm", "rope"
+      ]
+    }
+  ]
+}

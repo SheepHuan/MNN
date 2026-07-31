@@ -48,6 +48,7 @@ MNN supports end-to-end LLM export and inference:
 | `pymnn/` | Python bindings |
 | `test/` | Test cases |
 | `skills/` | AI Agent Skills |
+| `kernel_agent/` | Kernel 级分析代理与平台无关 PMC Interpreter |
 
 ## Coding Style
 
@@ -102,6 +103,27 @@ For the following tasks, **read the Skill entry file first** and execute step by
 
 Public skills are listed below. Environment-dependent skills may exist under `skills/*/SKILL.md`.
 
+### PMC Interpreter 数据源规范
+
+涉及 PMC Interpreter、CUDA PMC rows、kernel latency、`pmc_dataset.json` 或
+`operator_cases.json` 刷新时，必须先阅读：
+
+`docs/superpowers/specs/2026-07-31-pmc-interpreter-cuda-data-sources.md`
+
+分析或修改 `kernel_agent/pmc_interpreter/` 的 dataset 对象、数据源加载器、语义映射、
+分析模型、分析层或知识输出时，还必须阅读：
+
+`docs/superpowers/specs/2026-07-31-pmc-interpreter-module-physical-semantics.md`
+
+CUDA 分析固定使用以下三份原始数据源：
+
+- `build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv`
+- `build-x86-cuda/cuda_kernel_latency.json`
+- `replay_benchmark/kernel_corpus/operator_cases.json`
+
+三份文件必须来自同一份 case manifest。修改 `operator_cases.json` 后，必须重新生成
+PMC rows 与 latency；不得对来源已变化的旧 CSV 继续使用 `--resume`。
+
 | Skill | Entry File | Trigger |
 |-------|-----------|---------|
 | Support new LLM | `skills/support-new-llm/SKILL.md` | Add / adapt a new LLM model |
@@ -114,5 +136,5 @@ Public skills are listed below. Environment-dependent skills may exist under `sk
 | Run tests / CI | `skills/test-ci/SKILL.md` | Run the regression / CI suite (host or on-device), or add / select / retune a test stage |
 | Replay benchmark cross-compile | `skills/replay-benchmark-cross-compile/SKILL.md` | Cross-compile `replay_benchmark` with the ARM GNU Toolchain 11.3 archive |
 | Corpus audit | `skills/corpus-audit/SKILL.md` | Audit replay_benchmark kernel corpus for faithfulness (kernel body vs MNN source) and correctness (adapter params, launch geometry, validator effectiveness). Use after kernel-adapt to verify additions. |
-| GPU PMU sweep | `skills/gpu-pmu-sweep/SKILL.md` | Sweep PMU metrics (Adreno/Mali/NVIDIA) on replay_benchmark kernel corpus cases, collect per-kernel control/workload delta. Covers OpenCL, Vulkan, CUDA backends. |
+| GPU PMU sweep / PMC Interpreter | `skills/gpu-pmu-sweep/SKILL.md` | 采集或刷新 Adreno/Mali/NVIDIA PMC、生成 CUDA 数据源、构造数据集或解释 PMC 语义；同时遵循本节列出的两份中文规范。 |
 | Retrospective | `skills/retrospective/SKILL.md` | After non-trivial tasks with reusable lessons |
