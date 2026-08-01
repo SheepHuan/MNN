@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -119,8 +119,31 @@ class MeasurementRun(PmcModel):
     temperature_c: float | None
     cache_policy: str
     source_ref: str
+    launch_sampling_status: Literal[
+        "sampled",
+        "no_launch",
+        "unavailable",
+        "error",
+        "not_collected",
+    ] = "not_collected"
     launch_records: tuple[KernelLaunchRecord, ...] = ()
     environment_samples: tuple[EnvironmentSample, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_launch_sampling(self) -> Self:
+        if self.launch_sampling_status == "sampled" and not self.launch_records:
+            raise ValueError("sampled launch collection must contain launch records")
+        if (
+            self.launch_sampling_status
+            in {"no_launch", "unavailable", "not_collected"}
+            and self.launch_records
+        ):
+            raise ValueError(
+                "{} launch collection must not contain launch records".format(
+                    self.launch_sampling_status
+                )
+            )
+        return self
 
 
 class MetricDescriptor(PmcModel):
@@ -161,6 +184,12 @@ class MetricObservation(PmcModel):
     quality_flags: tuple[str, ...]
     raw_status: str
     error: str
+
+    @model_validator(mode="after")
+    def validate_status_value(self) -> Self:
+        if self.status == "VALID" and self.value is None:
+            raise ValueError("valid metric observation must contain a finite value")
+        return self
 
 
 class LatencyObservation(PmcModel):

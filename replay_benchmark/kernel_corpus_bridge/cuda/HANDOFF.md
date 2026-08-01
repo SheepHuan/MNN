@@ -148,7 +148,7 @@ for c in fails: print(f'  FAIL {c[\"case\"]}: {c[\"variant\"]}')"
 
 | 优先级 | 文件 | kernel | 状态 |
 |--------|------|--------|------|
-| 🔴 P0 | transpose.cu | NHWC8/C4NHW4 系列 (10 个) | ✅ 已修: C4 deinterleave + zero-fill |
+| 🔴 P0 | transpose.cu | NHWC↔NCHW + NHWC8/C4NHW4 系列 | ✅ 已修: 公开 kernel 恢复真实 DivMod 重排；packed 路径保留 C4 deinterleave + zero-fill |
 | 🔴 P1 | transpose.cu | PACKCOMMON/UNPACKCOMMON | ✅ 已修: MNN [kh][kw][c_p] 布局 + zero-fill |
 | 🔴 P2 | transpose.cu | PACKCOMMON_4/UNPACKCOMMON_4 | ✅ 已修: UP_DIV(axis,2)*2 + zero-fill |
 | 🟡 P3 | convdw.cu | CONV_DW | ✅ 已修: 权重[kh][kw][c_p] + UP_DIV + real validator |
@@ -170,6 +170,38 @@ for c in fails: print(f'  FAIL {c[\"case\"]}: {c[\"variant\"]}')"
 > 3. runner 不兼容 → 区分"编译限制"与"架构限制"
 > 4. 描述与源码不符 → 以 `git log`/源码为准
 
+### 7.3 P0 workload layout 与 transpose 方向审计（2026-08-01）
+
+PMC Interpreter 的 workload 控制量必须描述 adapter 实际索引的逻辑张量，不能仅根据
+op 名称猜测 layout。本轮对 P0 中容易混淆的三类进行了 adapter/source/case 三方核对：
+
+| 类别 | 结构化语义 | 证据边界 |
+|------|--------------|----------|
+| `conv_dw` | 1.2.0 input/output 为 NCHW，weight 为 `[C, KH, KW]`；2.0.4 input/output 为 channel-last，weight 仍为 `[C, KH, KW]`；2.2.3+ prepared weight 为 `[KH, KW, packed_C]` | 来自精确 `cuda_conv_dw_fp32` adapter 和版本分流，不外推到其他 conv variant |
+| `maxpool` / `avgpool` | 1.2.0 与独立 `_120` adapter 按 NCHW 索引；现代 C8 adapter 按 channel-last packed order 索引 | `CudaAvgPoolFp32Kernel` 保留真实 `ow = oh`；`cuda_avgpool_120_fp32` 独立用 `iw` 计算 `ow` |
+| generic/local transpose | `[M, N] → [N, M]` | 只匹配精确 variant 白名单 |
+| BDL→BLD | `[B, D, L] → [B, L, D]` | 来自 linear-attention adapter 契约 |
+| NHWC↔NCHW | NHWC `[B, area, C]` 与 NCHW `[B, C, area]` 按声明方向重排 | FP32/FP16 validator 逐元素比较真实目标位置，不再验证 identity |
+| packed format transpose | NCHW/C4NHW4 与 NHWC/NHWC8 按 variant 方向记录未 padding 的逻辑 extent | allocation padding 不计入 algorithmic shape/bytes |
+
+源码忠实性证据：
+
+- `NHWC_2_NCHW` 与 `NCHW_2_NHWC` 已恢复为公开
+  `source/backend/cuda/execution/Transpose.cu` 的 `DivModFast` 重排函数体；
+  `diff --ignore-all-space` 均为空。
+- 2.1.2 历史 kernel 实际是 NCHW→NHWC，已分流为
+  `mnn_corpus_nchw2nhwc_212_fp32` / `cuda_nchw2nhwc_fp32`；函数体与
+  `git show 2.1.2:source/backend/cuda/execution/Transpose.cu` 忽略空白后一致。
+- `replay_benchmark.out` 重新构建通过。FP32/FP16 NHWC→NCHW、FP32/FP16
+  NCHW→NHWC、2.1.2 NCHW→NHWC、generic、local 和 BDL→BLD 共 8 个 case 均为
+  `dispatched` + `validation_passed` + `valid=true`。
+
+`enrich_pmc_workload_metadata.py` 在当前 manifest 上处理 122 个 P0 case：
+`avgpool=6`、`conv_dw=14`、`matmul=11`、`maxpool=8`、`reduction=45`、
+`softmax=15`、`transpose=23`。连续两次 `--in-place` 后 SHA256 均为
+`55fe5369daa6ad3f4e011cd76372eb2f4772801e5f261ddb8f53c867978f2c5b`，证明本轮刷新幂等。
+该 SHA 是当前工作树审计身份，不是永久常量；manifest 再变更后必须重新计算。
+
 ---
 
 ## 8. Validator 质量分析
@@ -185,7 +217,7 @@ host 端重算 expected 值，与 kernel output 用 `fabs` 对比。涵盖：
 - INTERP (nearest/bilinear/round)
 - GRID_SAMPLE (nearest/bilinear/3D)
 - GATHERV2/ARGMAX/ARGMIN + 两阶段
-- TRANSPOSE (NHWC↔NCHW + 格式转换 + fuseblit)
+- TRANSPOSE（真实 NHWC↔NCHW 逐元素重排 + 格式转换 + fuseblit）
 - PACKCOMMON/UNPACKCOMMON/Col2Im/DeconvKernelReorder
 - MATMUL (GENERAL_BATCH_MATMUL + gemv)
 - CONV_DW (3.6.0, real host recompute)
@@ -224,6 +256,9 @@ host 端重算 expected 值，与 kernel output 用 `fabs` 对比。涵盖：
 ### 8.3 改进建议
 
 **已完成（本轮）**：
+- ✅ NHWC↔NCHW 公开 kernel 与 validator：原 corpus 的两个简化函数实际是
+  identity copy，现已恢复 MNN `DivModFast` 重排逻辑；FP32/FP16 validator 均按声明方向
+  计算 `src`/`dst`。2.1.2 case 从误标 NHWC→NCHW 修正为真实 NCHW→NHWC。
 - ✅ weight_only_quant GEMV/GEMM (9 个 adapter)：`woqRefInt8`/`woqRefInt4`/`woqRefInt4V14` 提升到共享头 `CudaOps.hpp`，adapter 在 `validate()` 调用。同时修复了 GEMV 适配器预先存在的 launch geometry bug（原 gridX=(oc+15)/16、block=16/64 与 MNN `onExecute` 不一致，被 smoke validator 隐藏）
 - ✅ convdw_extra (5 个 adapter)：新增 `convdwExtraRefFp32` host depthwise conv 重算，参考既有 `CudaConvDwFp32Kernel::validate` 公式（改进：支持 batch>1 + 从 validatorInputC 读 bias + clamp）
 - ✅ §9.2 BF16 原生算子 (6 个 kernel + adapter)：`CONV_DW_BF16`/`BF162_OPT`/`3x3_BF162_OPT`/`MULTI_WIDTH4` + `WeightTransToBf16`/`BiasTransToBf16`。4 个 convdw sm75 smoke（空 kernel），2 个 transpose real validator（host 重算 + bf16 精确匹配）
@@ -428,65 +463,45 @@ fatal assertion 从 `check*()` 调用 `longjmp()` 回到 `RunAll()` 的 `setjmp(
 32 metric batch smoke 验证结果为 `pmu_status=sampled`、`num_passes=2`，32 个
 metric 全部返回有限值。
 
-验证中 `lts__t_sectors_srcnode_gpc_op_atom_dot_alu_lookup_hit.min` 返回 `9223372036854775808`。该值是无效/溢出哨兵，不是有效 PMU 计数；这属于 metric 评估或样本有效性问题，不能归因于 pass 拆分修复，也不能将其计入 `VALID`。
+旧 collector 验证中 `lts__t_sectors_srcnode_gpc_op_atom_dot_alu_lookup_hit.min` 因
+double 强制转换为 uint64 而写出 `9223372036854775808` 哨兵。该值不是有效 PMU
+计数；新 collector 必须使用每 metric 状态显式报告 `overflow`，不得将其计入
+`VALID`。
 
-## 14. 有效 CUDA PMC 与 kernel corpus 全量 sweep
+## 14. P0 CUDA 三数据源当前状态与重采要求
 
-`skills/gpu-pmu-sweep/scripts/parse_cuda_pmu_log.py` 将
-`build-x86-cuda/sweep.log` 解析为：
+本轮修改了 `operator_cases.json` 的 case 身份、layout/workload 元数据和 transpose
+collector/validator。因此修改前产生的 availability、selection plan、PMC rows、latency 与
+normalized dataset 全部作废，只能作为历史探索数据。不得继续使用旧 rows 的
+`--resume`，也不得沿用旧的 case、metric 或 rows 数量作为验收常量。
 
-- `cuda_pmc_all.csv`：7200 个 metric 的 `VALID`、`NOT_FOUND`、`OVERFLOW`、`COMMAND_FAILED` 状态；
-- `cuda_pmc_valid.csv`：仅 5952 个 `VALID` metric，溢出哨兵值不进入此文件。
+当前正式 CUDA 原始输入固定为：
 
-`skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py` 读取 valid CSV，
-从 `operator_cases.json` 按 `op_type` 选择 60 个代表 case（每个 op type
-保留文件中的第一个 variant/case），执行 `case × valid metric`。每个命令只提交一个 case，默认将 32 个 metric
-放入同一个 CUPTI Session，由 CUPTI 在该 Session 内管理真实的 multi-pass；
-运行严格串行，避免 CUPTI profiler 资源竞争。
-脚本自动传入 `--kernel-corpus-no-latency`，PMC sweep 不执行延迟测量。
-如果 CUPTI 拒绝批量配置，脚本自动二分重试，最终降级到单 metric，避免
-将整批配置失败误判为 metric 无效。
+- `replay_benchmark/kernel_corpus/operator_cases.json`；
+- `build-x86-cuda/cuda_kernel_latency.json`；
+- `build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv`；
+- rows 必须携带
+  `build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv.selection.json`。
 
-从 `build-x86-cuda` 执行：
+重采顺序必须是：
 
-```bash
-python3 ../skills/gpu-pmu-sweep/scripts/parse_cuda_pmu_log.py \
-  --input sweep.log --all-csv cuda_pmc_all.csv --valid-csv cuda_pmc_valid.csv
-sudo -v
-python3 ../skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py \
-  --valid-csv cuda_pmc_valid.csv \
-  --corpus-root ../replay_benchmark/kernel_corpus \
-  --binary ./replay_benchmark.out --workdir . \
-  --lib-dir .:source/backend/cuda:. --metrics-per-session 32 \
-  --case-selection op-type \
-  --sudo --resume \
-  --output-csv cuda_kernel_pmc_rows.csv \
-  --output-json cuda_kernel_pmc.json
-```
+1. 对最终 manifest 再运行 workload enrichment，并验证连续两次 SHA 不变；
+2. 重新构建 `replay_benchmark.out`、`list_cuda_metrics`、
+   `replay_pmu_availability` 和 `replay_kernel_latency`；
+3. 从新的空日志运行 availability，动态生成本轮 `cuda_pmc_valid.csv`；
+4. 使用唯一正式策略 `--case-selection condition-balanced`、七个 P0 target 和每类
+   5 个 condition，从空 rows 账本生成新 `CaseSelectionPlan` 与 PMC rows；
+5. 显式关闭 PMU，独立采集全部 CUDA manifest case 的结构化 latency、真实
+   launch/resource 和环境信息；
+6. 使用 `skills/pmc-source-gate/scripts/validate_cuda_pmc_sources.py`，并启用
+   `--require-complete-targets` 与 `--require-measured-environment`，完成 schema、
+   manifest SHA、plan、有序笛卡尔积、session、环境和 latency join 严格验收；只有
+   `valid=true` 才能构造正式 `mnn-pmc-dataset/v1`。
 
-`cuda_kernel_pmc_rows.csv` 是断点账本，记录每个组合的 PMU 状态、值和
-错误；中断后再次使用 `--resume`。最终 JSON 的结构是：
+全部命令、字段和发布门禁以两份中文规范为准：
 
-```json
-{"kernel_case_name": {"pmc": {"metric.name": 123}}}
-```
+- `docs/superpowers/specs/2026-07-31-pmc-interpreter-cuda-data-sources.md`；
+- `docs/superpowers/specs/2026-07-31-pmc-interpreter-module-physical-semantics.md`。
 
-延迟由独立的 `replay_kernel_latency` 测试测量，不从 PMC sweep 获取：
-
-```bash
-REPLAY_KERNEL_LATENCY_OUTPUT=cuda_kernel_latency.json \
-  ./replay_kernel_latency --filter KernelLatency.AllCudaCases
-```
-
-单 case 冒烟验证可设置 `REPLAY_KERNEL_LATENCY_CASE_FILTER`，正式全量测量时不要设置。
-
-如需扫描全部 425 个 CUDA case，在命令中加入 `--case-selection all`。
-
-该测试使用 `--perf-counter-events none`，确保 latency 测量不会创建 CUPTI
-Session，也不会受到 PMU multi-pass 影响。
-固定样例单元测试位于
-`skills/gpu-pmu-sweep/tests/test_parse_cuda_pmu_log.py`，运行：
-
-```bash
-python3 -m unittest discover -s skills/gpu-pmu-sweep/tests -p 'test_*.py'
-```
+注意：历史文档中的 `--case-selection op-type` 别名已删除，不做兼容。
+`all` 只用于调用方明确要求的全 case 扫描，不是正式 P0 分析的默认策略。

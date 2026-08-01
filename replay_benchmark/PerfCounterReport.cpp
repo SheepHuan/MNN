@@ -7,6 +7,7 @@
 #include "rapidjson/writer.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -90,7 +91,27 @@ bool PerfCounterReport::write(const std::string& path) const {
     for (const auto& counter : counters) {
         rapidjson::Value value(rapidjson::kObjectType);
         addString(value, "name", counter.name, allocator);
-        value.AddMember("value", static_cast<uint64_t>(counter.value), allocator);
+        PerfCounterValueStatus status = counter.status;
+        if (status == PerfCounterValueStatus::Valid &&
+            counter.valueKind == PerfCounterValueKind::FloatingPoint &&
+            (!std::isfinite(counter.floatingPointValue) || counter.floatingPointValue < 0.0)) {
+            status = PerfCounterValueStatus::Overflow;
+        }
+        addString(value, "status",
+                  status == PerfCounterValueStatus::Valid
+                      ? "valid"
+                      : (status == PerfCounterValueStatus::Overflow ? "overflow" : "invalid"),
+                  allocator);
+        addString(value, "value_kind",
+                  counter.valueKind == PerfCounterValueKind::FloatingPoint ? "float64" : "uint64",
+                  allocator);
+        if (status == PerfCounterValueStatus::Valid) {
+            if (counter.valueKind == PerfCounterValueKind::FloatingPoint) {
+                value.AddMember("value", counter.floatingPointValue, allocator);
+            } else {
+                value.AddMember("value", counter.integerValue, allocator);
+            }
+        }
         values.PushBack(value, allocator);
     }
     document.AddMember("counters", values, allocator);

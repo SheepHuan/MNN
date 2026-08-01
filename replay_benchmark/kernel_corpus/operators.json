@@ -6152,14 +6152,14 @@
     },
     {
       "backend": "cuda",
-      "entry": "mnn_corpus_nhwc2nchw_212_fp32",
+      "entry": "mnn_corpus_nchw2nhwc_212_fp32",
       "execution_spec": "shim",
       "file": "source/backend/cuda/execution/Transpose.cu",
       "framework": "mnn",
       "language": "cuda",
       "op_type": "transpose",
       "tag": "2.1.2",
-      "variant": "cuda_nhwc2nchw_fp32"
+      "variant": "cuda_nchw2nhwc_fp32"
     },
     {
       "backend": "cuda",

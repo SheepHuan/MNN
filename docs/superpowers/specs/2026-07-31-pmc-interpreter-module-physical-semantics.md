@@ -5,6 +5,11 @@
 本文规定 `kernel_agent/pmc_interpreter/` 中每个组件在真实 GPU 性能实验中的物理意义、
 固定输入输出、串行依赖和证据边界。
 
+本规范由 `pmc-interpreter` Skill 执行。设备 metric discovery 与 PMC/latency 采集属于
+`gpu-pmu-sweep`，CUDA strict source gate 属于 `pmc-source-gate`；kernel/manifest 实现与
+独立正确性放行分别属于 `kernel-adapt` 和 `corpus-audit`。完整端到端任务按上述顺序组合
+Skill，但不得混淆权限。
+
 本文讨论“代码对象如何对应实验对象”，不替代 CUDA、Adreno 或 Mali 的原生 PMC 手册。
 原生 metric 的精确公式、单位、依赖关系和采集限制必须由设备专用目录提供。
 
@@ -133,9 +138,10 @@ kernel 分类、metric 推断或统计分析。
 
 | 对象 | 物理意义 | 不能误解为 |
 | --- | --- | --- |
-| `DatasetManifest` | 一批采集结果的数据集身份、平台、后端与 collector | 同一 CUPTI session 或同环境的证明 |
+| `DatasetManifest` | 一批采集结果的数据集身份、平台、后端、collector、源文件哈希和采样计划身份 | 同一 CUPTI session 或同环境的证明 |
 | `DeviceSpec` | 被测物理 GPU 或必须独立分析的逻辑设备 | 只写 `platform=cuda` 就足以标识设备 |
 | `KernelCondition` | 固定设备、语义、shape、参数、实现和 launch 的被测条件 | 一次采集 run 或一个 PMC 值 |
+| `SemanticFactProvenance` | shape、workload 或 launch 声明的来源、方法、公式、可信度和适用状态 | profiler 实测值或自动正确的物理真值 |
 
 `KernelCondition` 的实验单位是：
 
@@ -158,14 +164,20 @@ device
 - `performance_regime` 是 compute-bound、memory-bound 等瓶颈标签，未知时必须保留
   `unknown`，不能由名称猜成事实；
 - `semantic_equivalence_key` 用于筛选实现配对候选，不代替真实正确性验证。
+- `shape_provenance`、`workload_provenance` 和 `launch_provenance` 必须与对应事实一起保存；
+  `not_applicable` 与“缺失”是两个不同状态，不能都改写成 0；
+- `KernelCondition.launch` 是 manifest 声明或静态配置，不等于运行时真正发生的 device-kernel
+  launch；真实 launch 必须由 `MeasurementRun.launch_records` 保存。
 
 ### 4.2 测量过程与观测
 
 | 对象 | 物理意义 | 关键边界 |
 | --- | --- | --- |
 | `MeasurementRun` | 一次独立安排的 PMC 或 latency 采集过程 | 不等于一次 kernel launch |
+| `KernelLaunchRecord` | 某次 run 中真实 device-kernel 的名称、grid、block 与资源用量 | manifest 参数或 latency repeat |
+| `EnvironmentSample` | 采集区间前后读取的 clock/temperature 快照及来源、状态 | 每个 kernel 周期内的精确连续环境轨迹 |
 | `MetricObservation` | profiler 对一个硬件事件给出的读数 | 不等于瓶颈原因或优化建议 |
-| `LatencyObservation` | 一次 latency 读数 | 不保证与 PMC 同频率、同温度或同 cache 状态 |
+| `LatencyObservation` | 一次 latency 读数 | 不保证与 PMC 同 session、同频率、同温度或同 cache 状态 |
 
 必须区分：
 
@@ -178,6 +190,15 @@ device
 | `profiler_pass_count` | profiler 为收集 metric 执行的 replay pass 数 |
 
 `workload_runs`、重复账本行和 replay pass 都不能替代独立 `repeat_id`。
+
+CUDA 新 rows 中，一个真实 benchmark/CUPTI session 必须对应一个
+`MeasurementRun.collection_id`；同 session 的多条 metric observation 共享该 run。
+`order_index` 表示真实 session 的串行采集顺序，不是 repeat。旧版 rows 缺少
+`collection_session_id` 时，loader 只能构造带 issue 的合成容器，不能声称 metric 同时采集。
+
+结构化 latency JSON 中的 `launch_records` 和 `environment` 进入独立 latency run。
+PMC rows 与 latency JSON 的 run 永远分开，只能按 `KernelCondition` 对齐。launch metadata
+采样本身也不能冒充第二个 latency repeat。
 
 `MetricObservation.value_semantics` 至少区分：
 
@@ -252,7 +273,7 @@ counter 定义不能共享同一组相关系数、mRMR 排名或 delta slope。�
 | `AnalysisConfig` | coverage、样本数、FDR、Top-K 等工程阈值；不是 GPU 物理常数 |
 | `FeatureSpec` | raw PMC 如何形成分析 feature，包括来源、表达式、变换和可比范围 |
 | `FeatureStore` | feature 在各 condition 下的全部观测值 |
-| `DataReadiness` | 三个核心问题的数据资产与证据准备度 |
+| `DataReadiness` | 三个核心问题的数据资产与证据准备度，包括 workload、真实 launch/resource、环境与独立 repeat 覆盖 |
 | `AnalysisContext` | dataset、配置、特征和 condition 范围的只读上下文 |
 | `LayerRecord` | 每层输入/输出 feature 数和说明的审计记录 |
 
@@ -261,6 +282,13 @@ counter 定义不能共享同一组相关系数、mRMR 排名或 delta slope。�
 
 Delta readiness 同时报告原始合法 pair 行数和独立 pair group 数。最低样本门槛只使用不同
 `semantic_equivalence_key` 的独立组数；同一语义组中的多个 pair 行不能虚增可识别样本。
+
+Workload readiness 只把有限数值计为可用事实，并读取 provenance 区分“缺失”和
+`not_applicable`。例如比较或纯搬运类 kernel 的 `algorithmic_flops` 可以明确不适用；它不应
+降低该字段在适用样本中的覆盖率，也不能被补成 0。launch readiness 优先读取运行时
+`KernelLaunchRecord` 汇总出的 stage 数、block/thread 总量、真实 grid/block 和资源上限；
+manifest 静态声明只能作为补充。环境 readiness 分别统计有实测 clock 与 temperature 的
+condition 覆盖率，缺失值不以 0 代替。
 
 ### 5.2 各层报告
 
@@ -376,27 +404,88 @@ hardware domain + mechanism + quantity + concept_id
 
 它没有性能推断能力。manifest 字段不完整时，语义等价键也会不可靠。
 
-### 8.2 `dataset/sources/mnn_replay.py`
+### 8.2 `dataset/selection.py`
+
+该模块定义平台无关的 kernel condition 采样计划，不采集 PMC，也不判断瓶颈。
+
+固定 schema 为：
+
+```text
+mnn-pmc-case-selection/v1
+```
+
+`CaseSelectionPlan` 的物理意义是：
+
+> 在一个明确 manifest、backend、目标 op type 和选择策略下，本轮 PMC sweep 实际覆盖哪些
+> workload condition，以及为何选择它们。
+
+正式分析默认策略是 `condition-balanced`。它使用 dtype、`shapes`、`workload` 和 adapter
+params 构造 condition fingerprint，优先完整 `shapes + workload`，不足时才用
+`params_proxy`。`variant`、`tag` 和 `workload_runs` 不计入 workload 多样性。若某个 op type
+的 distinct condition 少于目标 K，计划必须全选该类别并标记
+`insufficient_unique_conditions`，不能挑一条伪装成“代表”。
+
+计划固定保存 manifest SHA、policy/version、K、target op types、每组 available/distinct/
+selected 状态、selected cases、元数据等级、fingerprint、选择原因、issues 和 plan ID。
+`plan_id` 是采样设计身份，不是测量 session 身份。
+
+加载计划时不能只验证 manifest SHA 和自签名的 `plan_id`。必须按计划保存的 backend、policy、
+K 和 target op types 使用当前算法重建，并要求完整 Pydantic 内容相等；否则错误归类的 case、
+被篡改的 shape/workload 或旧算法结果仍可能伪装成当前采样设计。
+
+`all` 只表示调用方显式要求全 case 扫描。旧 `op-type` 选择别名不属于当前契约。
+
+### 8.3 `dataset/sources/mnn_replay.py`
 
 该模块把 CUDA 三数据源连接为一个 `PmcDataset`：
 
 | 输入 | 标准化对象 | 物理角色 |
 | --- | --- | --- |
 | `operator_cases.json` | `KernelCondition` | 被测条件与输入语义 |
+| `CaseSelectionPlan` | PMC condition 范围与采样 provenance | 证明 rows 为什么覆盖这些 case |
 | PMC rows CSV | `MetricDescriptor`、PMC run、`MetricObservation` | 硬件事件读数 |
-| latency JSON | latency run、`LatencyObservation` | 独立目标测量 |
+| 结构化 latency JSON | latency run、`KernelLaunchRecord`、`EnvironmentSample`、`LatencyObservation` | 独立目标、真实 launch/resource 与环境测量 |
 | 可选 pairs CSV | `ComparisonPair` | 实现对照设计 |
 
-legacy CUDA rows 没有真实 `collection_session_id`。合成的 run 容器不能证明不同 metric
-同进程、同 CUPTI session 或同时采集，因此不能盲目构造跨 metric 比值。
+新 CUDA rows 按 `(case, collection_session_id)` 分组为真实 PMC run；同 session 的 metric
+共享 `order_index` 和环境快照。loader 必须检查 session 内字段一致性。不同 session 不能
+假设同时采集，因此仍不能盲目构造跨 session 比值。
 
-当前 CUDA rows 不提供独立 `repeat_id`；`num_passes` 不能代替 repeat。PMC 与 latency 也是
-独立采集，只按 condition 对齐。
+正式发布门禁还必须验证同一 session 的 rows 在账本中连续，并共享 case、order、PMU 状态、
+profiler pass、return code、错误和环境事实；一个已经结束的 session ID 不能在后续 rows 中
+再次出现。CUDA `absolute_workload` 的 `VALID` 值必须非负，环境标为 `sampled` 时来源不能为空。
+
+旧版 CUDA rows 没有真实 `collection_session_id` 时，合成 run 只保证对象引用完整，不能
+证明不同 metric 同进程、同 CUPTI session 或同时采集。此类 dataset 必须带 issue 并降级为
+历史探索数据。
+
+当前 CUDA rows 仍不提供独立 `repeat_id`；`num_passes` 不能代替 repeat。PMC 与 latency
+独立采集，只按 condition 对齐。结构化 latency 的多个 `launch_records` 是一个 condition
+可能触发的多个 device-kernel stage，也不是 repeat。
+
+正式 CUDA 构造必须传入 selection plan。loader 验证其 manifest SHA、backend、selected case
+集合以及 rows 中的 plan ID，并把 source SHA、plan/sweep identity、笛卡尔覆盖和状态计数写入
+`DatasetManifest.metadata`。不传 plan 时可以构造带 issue 的探索 dataset，但不能证明 PMC
+case coverage 符合采样策略。
+
+manifest 中的 shape/workload provenance 被物化到 `KernelCondition`。latency 中的真实
+launch/resource 进入 `MeasurementRun.launch_records`；PMC rows 与 latency 中的前后
+clock/temperature 分别进入 `EnvironmentSample`，缺失值保持 `None`，不能改成 0。
+
+`KernelLaunchRecord.local_memory_per_thread_bytes` 与 `local_memory_total_bytes` 对应 CUPTI
+Activity 报告的 local-memory reservation。它们是编译后 launch resource 事实，不等于运行
+期间真实发生的 spill byte 或 DRAM 流量；spill 仍需由对应 native PMC 观察。
+
+正式 latency 顶层必须是 `mnn-kernel-latency` version 1，并携带
+`source_manifest_sha256`。loader 在构造 dataset 前验证该 SHA 与当前 manifest 原始字节完全
+一致。顶层没有原生 run/collection ID；loader 生成的 `latency::<case>` 只是结构化引用身份，
+不是独立 repeat 的实验凭据。每个 raw launch record 也没有 `stage_index`，loader 只按数组顺序
+补出 stage 序号。
 
 没有显式 pairs CSV 时，loader 可按 `semantic_equivalence_key` 发现候选 pair。自动发现的
 pair 必须视为待审计的观察性配对，不是受控优化实验。
 
-### 8.3 `dataset/sources/control_delta.py`
+### 8.4 `dataset/sources/control_delta.py`
 
 该模块把 Adreno、Mali、OpenCL 或 Vulkan 风格的 control-delta CSV 追加到已有 dataset。
 每行表示：
@@ -407,7 +496,7 @@ workload PMU 变化 - empty-control PMU 变化
 
 负 delta 是合法观测，使用保留符号的数值变换。它不是实现优化的 `ΔPMC`。
 
-### 8.4 `dataset/bundle.py`
+### 8.5 `dataset/bundle.py`
 
 该模块只负责 `PmcDataset` 与 `mnn-pmc-dataset/v1` JSON 的读写和结构校验，不创造物理语义
 或统计证据。
@@ -423,11 +512,18 @@ workload PMU 变化 - empty-control PMU 变化
 - 非负计数通常用 `log1p`，有界比例用 `logit`，control delta 用固定尺度的
   `signed_asinh`；
 - 汇总 condition 的中位 latency 并使用 `log latency`；
-- 统计 workload、launch、环境、repeat 和合法 pair 的 readiness；
+- 只把有限 workload 数值视为控制量，并用 provenance 区分缺失与 `not_applicable`；
+- 把真实 `KernelLaunchRecord` 汇总成 condition 级 stage、block/thread、grid/block 和资源控制；
+- 分别统计 workload、launch/resource、clock、temperature、repeat 和合法 pair 的 readiness；
 - 发现同一 feature 混合不同 `value_semantics` 时写入 issue。
 
 本层没有瓶颈或相关性结论。当前只构造 raw 或 control-adjusted feature，尚未自动构造
 `PMC/output_elements`、`PMC/FLOPs` 或 `PMC/algorithmic_bytes` 等单位工作量特征。
+
+真实 launch 汇总只用于降低 launch 配置混杂，不表示寄存器、shared memory 或 occupancy
+已经被识别为瓶颈。一个 condition 触发多 stage 时，汇总量保留 stage 数、总 block/thread 和
+资源上限；不能把第一条 launch 当作整个 condition。环境样本是在采集区间前后读取的快照，
+只能用于覆盖与漂移控制，不能声称是逐 kernel 精确频率轨迹。
 
 ## 十、`layers/quality.py`：质量与 canonical rollup
 
@@ -488,11 +584,19 @@ workload PMU 变化 - empty-control PMU 变化
 log(median latency)
 ```
 
-控制变量包括覆盖充分的：
+控制变量包括覆盖充分且 provenance 允许使用的：
 
 - `workload`、`shapes`、`params` 和 `launch` 数值字段；
 - `semantic_family`、`execution_role`、`op_type` 和 `dtype`；
 - GPU clock 和 temperature。
+
+其中 launch 优先使用结构化 latency 的真实 launch records 汇总值，而不是从 case 名称或
+adapter 参数猜测 grid/block。若某个算法 workload 字段缺失，但每个缺失 condition 都通过
+provenance 明确标为 `not_applicable`，该字段不应被误报为未知混杂；缺失且无 provenance
+时仍必须降级。latency baseline 的 clock/temperature 只能来自实际贡献有效 latency
+observation、且 `collection_kind="latency"` 的 run；不能把同 condition 下独立采集的 PMC
+session 环境混入目标基线。clock/temperature 只有这些 latency run 的实测覆盖充分时才进入
+设计矩阵，空值不以 0 补齐。
 
 代码使用按 `condition_id` 分折的 cross-fitted ridge。若 out-of-fold `R² <= 0`，退化为
 全局均值并把证据降级为 `descriptive_cross_kernel`。
@@ -508,7 +612,12 @@ residual log latency
 
 ### 12.2 PMC feature residualization
 
-当 baseline 有效时，同一设计矩阵也用于 cross-fit 每个变换后 PMC feature：
+当 baseline 有效时，PMC feature residualization 与 latency baseline 共享 workload、shape、
+参数、launch 和 kernel 类别等结构控制，但环境事实必须按 feature 分域：每个 feature 的
+clock/temperature 只能来自实际贡献该 feature 有效 observation、且
+`collection_kind="pmc"` 的 measurement run。其他 metric 的 session、其他时段 PMC session
+和 latency run 环境都不能参与该 feature 的环境汇总。在此约束下，对每个变换后 PMC feature
+执行 cross-fit：
 
 ```text
 residual feature
@@ -743,6 +852,17 @@ Projection
 pipeline 不采集 PMC、不增加样本、不验证 CUDA 三数据源来自同一 manifest，也不会把
 观察性证据自动升级为因果。
 
+CUDA 正式发布必须在进入 pipeline 前运行
+`skills/pmc-source-gate/scripts/validate_cuda_pmc_sources.py`。P0 还必须启用
+`--require-complete-targets` 和 `--require-measured-environment`。前者固定要求 target 集合
+精确为 `avgpool`、`conv_dw`、`matmul`、`maxpool`、`reduction`、`softmax`、`transpose`，
+并要求当前 policy version 的 `condition-balanced`、固定 `K=5`、七个 group 全部
+`satisfied`；不能用缺类、额外类别、较小 K 或自签但未由当前算法重建的 plan 通过 P0。
+实测 clock 和 temperature 必须大于 0，temperature=0 仍表示无效占位，不是实测环境。
+该发布门禁的
+`mnn-cuda-pmc-source-validation/v1` 结果属于数据发布审计，不是分析 layer，也不改变任何 PMC
+相关系数或证据等级。
+
 ## 十七、`semantics/`：只编译和渲染
 
 `semantics/` 固定只包含两个职责模块，不保存输入 taxonomy，不执行统计。
@@ -796,19 +916,29 @@ metric 名称重新推断语义或生成新的统计量。完整 feature 明细�
 CLI 负责：
 
 1. 读取 `mnn-pmc-dataset/v1`，或从 CUDA 三数据源构造 dataset；
-2. 可选追加 control-delta CSV 和 explicit pairs；
-3. 可选保存 normalized dataset；
-4. 运行固定串行 interpreter；
-5. 将 `mnn-pmc-analysis-report/v1` 写入 `--output-json`；
-6. 在提供 `--output-md` 时写入中文 Markdown。
+2. CUDA 正式构造时读取 `--case-selection-plan`，验证 PMC case 范围和采样身份；
+3. 可选追加 control-delta CSV 和 explicit pairs；
+4. 可选保存 normalized dataset；
+5. 运行固定串行 interpreter；
+6. 将 `mnn-pmc-analysis-report/v1` 写入 `--output-json`；
+7. 在提供 `--output-md` 时写入中文 Markdown。
 
 示例：
 
 ```bash
 python3 -m kernel_agent.pmc_interpreter \
-  --input-bundle pmc_dataset.json \
+  --input-bundle <pmc-dataset-v1.json> \
   --output-json pmc_analysis_report.json \
   --output-md pmc_analysis_report.md
+```
+
+从 CUDA 原始数据构造正式 dataset 时必须额外提供：
+
+```text
+--pmc-csv <rows.csv>
+--latency-json <结构化-latency.json>
+--operator-cases <operator_cases.json>
+--case-selection-plan <rows.csv.selection.json>
 ```
 
 `--output-json` 必填；`--output-md` 可选。Markdown 不是 JSON 的替代品，也不能作为
@@ -816,7 +946,8 @@ python3 -m kernel_agent.pmc_interpreter \
 
 `--pmc-workload-runs` 和 `--latency-workload-runs` 是 measurement 内部运行次数，不是独立
 repeat。CLI 的默认设备信息可能为 `unknown`，也不会自动证明三数据源来自同一 manifest
-和同一设备环境。
+和同一设备环境。selection plan 能证明采样范围与 manifest 内容，但不能代替 device、driver、
+collector 或环境审计。
 
 `__main__.py` 只把 `python3 -m kernel_agent.pmc_interpreter` 转发到 CLI。
 
@@ -872,3 +1003,17 @@ repeat。CLI 的默认设备信息可能为 `unknown`，也不会自动证明三
 - 缺少 workload、shape、launch 或环境字段时，报告必须显式降级；
 - “PMC 变大”只有在确定 metric 类型、适用 kernel 类别、有效范围、目标耦合和配对证据后
   才能解释。
+
+当前 manifest、collector、selection policy、latency schema 和 rows schema 已变化。旧 CUDA
+rows、简单 latency JSON 或基于旧抽样策略生成的 normalized dataset，即使 loader 仍能兼容
+读取，也只能作为带 `issues` 的历史探索数据。只有从空账本重采并通过以下检查后，证据才能
+恢复到本规范描述的正常等级：
+
+- `CaseSelectionPlan` 与 manifest、选择算法和 rows plan ID 一致；
+- P0 workload metadata 及 provenance 已写入 condition；
+- 结构化 latency 提供真实 launch/resource 和环境信息；
+- PMC rows 提供真实 collection session、order 和环境字段；
+- selection case × ordered metric 笛卡尔积与 latency join 严格完整。
+
+在此之前，旧数据不能被称为正式有效输入，也不能据此发布新的全局 canonical set、kernel
+signature 或 `ΔPMC` rulebook。

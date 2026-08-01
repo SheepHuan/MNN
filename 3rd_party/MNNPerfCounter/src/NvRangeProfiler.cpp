@@ -27,8 +27,10 @@
 #include <nvperf_target.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -357,8 +359,25 @@ bool nvEvaluateMetrics(const std::string& chipName,
     nr.pCounterDataImage = counterDataImage.data();
     NVPA_CHECK(NVPW_CounterData_GetNumRanges(&nr), error);
 
-    bool anyOk = true;
+    // A successfully decoded image with no ranges still means that no kernel
+    // measurement was collected. Treat this as a session failure instead of
+    // returning a batch of per-metric Invalid values, which downstream would
+    // otherwise misclassify as metric-local NOT_FOUND results.
+    if (nr.numRanges == 0) {
+        NVPW_MetricsEvaluator_Destroy_Params d = {
+            NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE};
+        d.pMetricsEvaluator = evaluator;
+        NVPW_MetricsEvaluator_Destroy(&d);
+        if (error) *error = "counter data contains zero ranges";
+        return false;
+    }
+
     for (size_t i = 0; i < metricNames.size() && i < count; ++i) {
+        values[i].name = metricNames[i].c_str();
+        values[i].value = 0;
+        values[i].floatingPointValue = 0.0;
+        values[i].valueKind = CounterValueKind::FloatingPoint;
+        values[i].status = CounterValueStatus::Invalid;
         std::string base;
         bool isolated = true, keepInstances = true;
         parseMetricName(metricNames[i], &base, &isolated, &keepInstances);
@@ -370,10 +389,10 @@ bool nvEvaluateMetrics(const std::string& chipName,
         conv.pMetricEvalRequest = &mer;
         conv.metricEvalRequestStructSize = NVPW_MetricEvalRequest_STRUCT_SIZE;
         if (NVPW_MetricsEvaluator_ConvertMetricNameToMetricEvalRequest(&conv) != NVPA_STATUS_SUCCESS) {
-            anyOk = false;
             continue;
         }
         double summed = 0.0;
+        bool metricValid = true;
         for (size_t r = 0; r < nr.numRanges; ++r) {
             NVPW_MetricsEvaluator_SetDeviceAttributes_Params sda = {
                 NVPW_MetricsEvaluator_SetDeviceAttributes_Params_STRUCT_SIZE};
@@ -381,7 +400,8 @@ bool nvEvaluateMetrics(const std::string& chipName,
             sda.pCounterDataImage = counterDataImage.data();
             sda.counterDataImageSize = counterDataImage.size();
             if (NVPW_MetricsEvaluator_SetDeviceAttributes(&sda) != NVPA_STATUS_SUCCESS) {
-                anyOk = false; continue;
+                metricValid = false;
+                break;
             }
             double v = 0.0;
             NVPW_MetricsEvaluator_EvaluateToGpuValues_Params ev = {
@@ -394,20 +414,44 @@ bool nvEvaluateMetrics(const std::string& chipName,
             ev.pCounterDataImage = counterDataImage.data();
             ev.counterDataImageSize = counterDataImage.size();
             ev.rangeIndex = r;
-            ev.isolated = true;
+            ev.isolated = isolated;
             ev.pMetricValues = &v;
             if (NVPW_MetricsEvaluator_EvaluateToGpuValues(&ev) != NVPA_STATUS_SUCCESS) {
-                anyOk = false; continue;
+                metricValid = false;
+                break;
+            }
+            // CUDA kernel PMC rows have absolute-workload semantics. A
+            // non-finite evaluator result, a sum that cannot be represented
+            // as finite double, or a negative value is not serializable as a
+            // valid observation. Preserve it as an explicit per-metric status
+            // rather than relying on an implementation-defined uint64 cast.
+            if (!std::isfinite(v) ||
+                v > std::numeric_limits<double>::max() - summed) {
+                values[i].status = CounterValueStatus::Overflow;
+                metricValid = false;
+                break;
+            }
+            if (v < 0.0) {
+                values[i].status = CounterValueStatus::Overflow;
+                metricValid = false;
+                break;
             }
             summed += v;
         }
-        values[i].name = metricNames[i].c_str();
-        values[i].value = static_cast<uint64_t>(summed);
+        if (metricValid && std::isfinite(summed) && summed >= 0.0) {
+            values[i].floatingPointValue = summed;
+            values[i].status = CounterValueStatus::Valid;
+        } else if (!std::isfinite(summed)) {
+            values[i].status = CounterValueStatus::Overflow;
+        }
     }
     NVPW_MetricsEvaluator_Destroy_Params d = {NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE};
     d.pMetricsEvaluator = evaluator;
     NVPW_MetricsEvaluator_Destroy(&d);
-    return anyOk;
+    // Evaluator setup and counter-data decoding succeeded. Individual metric
+    // failures are carried by CounterValue::status so batch consumers can keep
+    // valid siblings and report the failing metric precisely.
+    return true;
 }
 
 // Range push/pop wrappers operating on opaque state (called by Session::Impl

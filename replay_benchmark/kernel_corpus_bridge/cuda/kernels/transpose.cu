@@ -11,38 +11,64 @@ namespace Corpus {
 
 // ============================================================================
 // Transpose format conversion: source/backend/cuda/execution/Transpose.cu
-// NHWC_2_NCHW and NCHW_2_NHWC are the simplest (no DivModFast dependency).
+// These bodies mirror source/backend/cuda/execution/Transpose.cu. The shim
+// resolves DivModFast values from the adapter's outside/axis/inside contract.
 // ============================================================================
-template <typename T0, typename T1>
-__global__ void NHWC_2_NCHW(const T0* input, T1* output,
-                            int total, int inside, int axis, int outside) {
-    CUDA_KERNEL_LOOP(index, total) {
-        int x = index % inside;
-        int y = (index / inside) % axis;
-        int z = index / (inside * axis);
-        output[z * axis * inside + y * inside + x] = input[index];
+template<typename T0, typename T1>
+__global__ void NHWC_2_NCHW(const T0* input,
+                            T1* output,
+                            const int maxCount,
+                            const int channel, // redundant parameter
+                            const int area,
+                            const int inChannelPack,
+                            DivModFast divOutChannelPack,
+                            DivModFast divArea
+) {
+    for(size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divArea.divmod(index, temp, area_idx);
+        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
+
+        int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
+        output[index] = (T1)input[src_offset];
     }
 }
-template <typename T0, typename T1>
-__global__ void NCHW_2_NHWC(const T0* input, T1* output,
-                            int total, int inside, int axis, int outside) {
-    CUDA_KERNEL_LOOP(index, total) {
-        int x = index % inside;
-        int y = (index / inside) % axis;
-        int z = index / (inside * axis);
-        output[index] = input[z * axis * inside + y * inside + x];
+template<typename T0, typename T1>
+__global__ void NCHW_2_NHWC(const T0* input,
+                            T1* output,
+                            const int maxCount,
+                            const int channel, // redundant parameter
+                            const int area,
+                            const int inChannelPack,
+                            DivModFast divOutChannelPack,
+                            DivModFast divArea
+) {
+    for(size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
+        int area_idx, temp, chnl_idx, batch_idx;
+        divOutChannelPack.divmod(index, temp, chnl_idx);
+        divArea.divmod(temp, batch_idx, area_idx);
+
+        int src_offset = (batch_idx * inChannelPack + chnl_idx) * area + area_idx;
+        output[index] = (T1)input[src_offset];
     }
 }
 
 // ---- NCHW_2_NHWC 2.1.2: src_offset uses channel (not inChannelPack) ----
-template <typename T0, typename T1>
-__global__ void NCHW_2_NHWC_212(const T0* input, T1* output, const int maxCount, const int channel,
-                                 const int area, const int channel_pack,
-                                 MNN::Corpus::DivModFast d_oc, MNN::Corpus::DivModFast d_area) {
-    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
+template<typename T0, typename T1>
+__global__ void NCHW_2_NHWC_212(const T0* input,
+    T1* output,
+    const int maxCount,
+    const int channel,
+    const int area,
+    const int channel_pack,
+    DivModFast d_oc,
+    DivModFast d_area
+) {
+    for(size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < maxCount; index += blockDim.x * gridDim.x) {
         int area_idx, temp, chnl_idx, batch_idx;
         d_oc.divmod(index, temp, chnl_idx);
         d_area.divmod(temp, batch_idx, area_idx);
+
         int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
         output[index] = (T1)input[src_offset];
     }
@@ -363,18 +389,33 @@ __global__ void blit_2_half(const T* input, T* output, int count,
 }
 
 // ---- transpose_BDL_to_BLD (LinearAttention, 3.6.0) ----
-// Transposes [B][D][L] → [B][L][D]. Simple grid-stride version (no shared
-// memory tiling). Same result as the tiled original.
-__global__ void transpose_BDL_to_BLD(const float* input, float* output,
-                                     int B, int D, int L) {
-    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (size_t)(B * D * L); i += blockDim.x * gridDim.x) {
-        int b = i / (D * L);
-        int dl = i % (D * L);
-        int d = dl / L;
-        int l = dl % L;
-        int srcOffset = b * D * L + d * L + l;  // [B][D][L]
-        int dstOffset = b * L * D + l * D + d;  // [B][L][D]
-        output[dstOffset] = input[srcOffset];
+// Faithful copy of MNN's shared-memory tiled [B][D][L] -> [B][L][D]
+// transpose. The extra tile column avoids shared-memory bank conflicts.
+#define TILE_DIM 32
+#define BLOCK_ROWS 8
+__global__ void transpose_BDL_to_BLD(
+    const float* __restrict__ input, float* __restrict__ output,
+    int B, int D, int L
+) {
+    __shared__ float tile[TILE_DIM][TILE_DIM + 1];
+    int batchIdx = blockIdx.z;
+    const float* in = input + batchIdx * D * L;
+    float* out = output + batchIdx * L * D;
+    int xBase = blockIdx.x * TILE_DIM;
+    int yBase = blockIdx.y * TILE_DIM;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        int d = xBase + threadIdx.y + j;
+        int l = yBase + threadIdx.x;
+        if (d < D && l < L)
+            tile[threadIdx.y + j][threadIdx.x] = in[d * L + l];
+    }
+    __syncthreads();
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        int l = yBase + threadIdx.y + j;
+        int d = xBase + threadIdx.x;
+        if (l < L && d < D)
+            out[l * D + d] = tile[threadIdx.x][threadIdx.y + j];
     }
 }
 
@@ -386,25 +427,33 @@ extern "C" {
 // ---- Transpose format conversion ----
 void mnn_corpus_nhwc2nchw_fp32(const float* input, float* output, int total, int inside, int axis, int outside,
                                 int grid, int block, cudaStream_t stream) {
-    MNN::Corpus::NHWC_2_NCHW<float, float><<<grid, block, 0, stream>>>(input, output, total, inside, axis, outside);
+    MNN::Corpus::DivModFast d_oc(axis), d_area(inside);
+    MNN::Corpus::NHWC_2_NCHW<float, float><<<grid, block, 0, stream>>>(
+        input, output, total, axis, inside, axis, d_oc, d_area);
 }
 void mnn_corpus_nchw2nhwc_fp32(const float* input, float* output, int total, int inside, int axis, int outside,
                                 int grid, int block, cudaStream_t stream) {
-    MNN::Corpus::NCHW_2_NHWC<float, float><<<grid, block, 0, stream>>>(input, output, total, inside, axis, outside);
+    MNN::Corpus::DivModFast d_oc(axis), d_area(inside);
+    MNN::Corpus::NCHW_2_NHWC<float, float><<<grid, block, 0, stream>>>(
+        input, output, total, axis, inside, axis, d_oc, d_area);
 }
 
 // ---- Transpose fp16 ----
 void mnn_corpus_nhwc2nchw_fp16(const void* input, void* output, int total, int inside, int axis, int outside,
                                 int grid, int block, cudaStream_t stream) {
-    MNN::Corpus::NHWC_2_NCHW<half, half><<<grid, block, 0, stream>>>((const half*)input, (half*)output, total, inside, axis, outside);
+    MNN::Corpus::DivModFast d_oc(axis), d_area(inside);
+    MNN::Corpus::NHWC_2_NCHW<half, half><<<grid, block, 0, stream>>>(
+        (const half*)input, (half*)output, total, axis, inside, axis, d_oc, d_area);
 }
 void mnn_corpus_nchw2nhwc_fp16(const void* input, void* output, int total, int inside, int axis, int outside,
                                 int grid, int block, cudaStream_t stream) {
-    MNN::Corpus::NCHW_2_NHWC<half, half><<<grid, block, 0, stream>>>((const half*)input, (half*)output, total, inside, axis, outside);
+    MNN::Corpus::DivModFast d_oc(axis), d_area(inside);
+    MNN::Corpus::NCHW_2_NHWC<half, half><<<grid, block, 0, stream>>>(
+        (const half*)input, (half*)output, total, axis, inside, axis, d_oc, d_area);
 }
 
 // ---- NCHW_2_NHWC 2.1.2: src_offset uses channel ----
-void mnn_corpus_nhwc2nchw_212_fp32(const float* input, float* output, int total, int channel, int area, int channel_pack,
+void mnn_corpus_nchw2nhwc_212_fp32(const float* input, float* output, int total, int channel, int area, int channel_pack,
                                     int grid, int block, cudaStream_t stream) {
     MNN::Corpus::DivModFast d_oc(channel_pack);
     MNN::Corpus::DivModFast d_area(area);
@@ -539,7 +588,10 @@ void mnn_corpus_blit_2_half_fp32(const float* input, float* output, int count,
 // ---- transpose_BDL_to_BLD (LinearAttention, 3.6.0) ----
 void mnn_corpus_transpose_bdl_to_bld_fp32(const float* input, float* output,
                                            int B, int D, int L,
-                                           int grid, int block, cudaStream_t stream) {
+                                           int gridX, int gridY, int gridZ,
+                                           cudaStream_t stream) {
+    dim3 grid(gridX, gridY, gridZ);
+    dim3 block(TILE_DIM, BLOCK_ROWS);
     MNN::Corpus::transpose_BDL_to_BLD<<<grid, block, 0, stream>>>(input, output, B, D, L);
 }
 

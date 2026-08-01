@@ -105,15 +105,22 @@ Public skills are listed below. Environment-dependent skills may exist under `sk
 
 ### PMC Interpreter 数据源规范
 
-涉及 PMC Interpreter、CUDA PMC rows、kernel latency、`pmc_dataset.json` 或
+涉及 CUDA PMC rows、kernel latency、CUDA selection plan、source validation 或
 `operator_cases.json` 刷新时，必须先阅读：
 
 `docs/superpowers/specs/2026-07-31-pmc-interpreter-cuda-data-sources.md`
 
-分析或修改 `kernel_agent/pmc_interpreter/` 的 dataset 对象、数据源加载器、语义映射、
-分析模型、分析层或知识输出时，还必须阅读：
+分析 `mnn-pmc-dataset/v1` bundle，或修改 `kernel_agent/pmc_interpreter/` 的 dataset 对象、
+数据源加载器、语义映射、分析模型、分析层或知识输出时，必须阅读：
 
 `docs/superpowers/specs/2026-07-31-pmc-interpreter-module-physical-semantics.md`
+
+CUDA 原始数据进入 Interpreter 时必须同时遵循两份规范；只分析 Adreno/Mali 或其他已标准化
+bundle 时，不强制进入 CUDA 数据源流程。
+
+固定职责链为：
+`kernel-adapt -> corpus-audit -> gpu-pmu-sweep -> pmc-source-gate -> pmc-interpreter`。
+采集完成不等于可发布，source gate 通过也不等于得到统计或因果结论。
 
 CUDA 分析固定使用以下三份原始数据源：
 
@@ -135,6 +142,9 @@ PMC rows 与 latency；不得对来源已变化的旧 CSV 继续使用 `--resume
 | Bugfix / debugging | `skills/general-debug/SKILL.md` | Diagnose correctness bugs / regressions in MNN — organized by bug category. |
 | Run tests / CI | `skills/test-ci/SKILL.md` | Run the regression / CI suite (host or on-device), or add / select / retune a test stage |
 | Replay benchmark cross-compile | `skills/replay-benchmark-cross-compile/SKILL.md` | Cross-compile `replay_benchmark` with the ARM GNU Toolchain 11.3 archive |
-| Corpus audit | `skills/corpus-audit/SKILL.md` | Audit replay_benchmark kernel corpus for faithfulness (kernel body vs MNN source) and correctness (adapter params, launch geometry, validator effectiveness). Use after kernel-adapt to verify additions. |
-| GPU PMU sweep / PMC Interpreter | `skills/gpu-pmu-sweep/SKILL.md` | 采集或刷新 Adreno/Mali/NVIDIA PMC、生成 CUDA 数据源、构造数据集或解释 PMC 语义；同时遵循本节列出的两份中文规范。 |
+| Kernel adapt | `skills/kernel-adapt/SKILL.md` | 新增或修复 replay_benchmark kernel、shim、adapter、validator、manifest 与 workload metadata。 |
+| Corpus audit | `skills/corpus-audit/SKILL.md` | 独立审计 kernel 忠实性、adapter/launch、validator 和 workload metadata，冻结采集前 manifest。 |
+| GPU PMU sweep | `skills/gpu-pmu-sweep/SKILL.md` | 采集或刷新 Adreno/Mali/NVIDIA PMC，生成 availability、selection plan、rows 与独立 latency。 |
+| PMC source gate | `skills/pmc-source-gate/SKILL.md` | 严格验收 manifest、plan、rows、latency、session/environment 和发布身份。 |
+| PMC Interpreter | `skills/pmc-interpreter/SKILL.md` | 将已验收 PMC 数据转换为相关性分类、Canonical PMC、Kernel Signature、Delta Rulebook 和中文报告。 |
 | Retrospective | `skills/retrospective/SKILL.md` | After non-trivial tasks with reusable lessons |

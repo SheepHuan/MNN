@@ -1,15 +1,17 @@
 // Measure CUDA kernel latency independently from PMU collection.
 //
 // This test intentionally passes --perf-counter-events none. It validates
-// that latency collection does not open a CUPTI session and writes one JSON
-// value per CUDA kernel-corpus case.
+// that latency collection does not open a CUPTI session and writes one
+// structured JSON record per CUDA kernel-corpus case.
 
+#include "KernelCorpusBenchmark.hpp"
 #include "tests/ReplayTest.hpp"
 #include "rapidjson/document.h"
 #include "rapidjson/filewritestream.h"
 #include "rapidjson/writer.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -46,9 +48,106 @@ static bool readFile(const std::string& path, std::string* contents) {
     return read == contents->size();
 }
 
-static std::vector<std::string> discoverCudaCases(const std::string& corpusRoot) {
+static uint32_t rotateRight(uint32_t value, uint32_t bits) {
+    return (value >> bits) | (value << (32 - bits));
+}
+
+static std::string sha256Hex(const std::string& contents) {
+    static const uint32_t constants[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    };
+    uint32_t state[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+    std::vector<uint8_t> message(contents.begin(), contents.end());
+    const uint64_t bitLength = static_cast<uint64_t>(message.size()) * 8;
+    message.push_back(0x80);
+    while (message.size() % 64 != 56) message.push_back(0);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        message.push_back(static_cast<uint8_t>((bitLength >> shift) & 0xff));
+    }
+
+    for (size_t offset = 0; offset < message.size(); offset += 64) {
+        uint32_t words[64] = {};
+        for (size_t i = 0; i < 16; ++i) {
+            const size_t position = offset + i * 4;
+            words[i] = (static_cast<uint32_t>(message[position]) << 24) |
+                       (static_cast<uint32_t>(message[position + 1]) << 16) |
+                       (static_cast<uint32_t>(message[position + 2]) << 8) |
+                       static_cast<uint32_t>(message[position + 3]);
+        }
+        for (size_t i = 16; i < 64; ++i) {
+            const uint32_t sigma0 = rotateRight(words[i - 15], 7) ^
+                                    rotateRight(words[i - 15], 18) ^
+                                    (words[i - 15] >> 3);
+            const uint32_t sigma1 = rotateRight(words[i - 2], 17) ^
+                                    rotateRight(words[i - 2], 19) ^
+                                    (words[i - 2] >> 10);
+            words[i] = words[i - 16] + sigma0 + words[i - 7] + sigma1;
+        }
+
+        uint32_t a = state[0];
+        uint32_t b = state[1];
+        uint32_t c = state[2];
+        uint32_t d = state[3];
+        uint32_t e = state[4];
+        uint32_t f = state[5];
+        uint32_t g = state[6];
+        uint32_t h = state[7];
+        for (size_t i = 0; i < 64; ++i) {
+            const uint32_t sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+            const uint32_t choose = (e & f) ^ ((~e) & g);
+            const uint32_t temp1 = h + sum1 + choose + constants[i] + words[i];
+            const uint32_t sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+            const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+            const uint32_t temp2 = sum0 + majority;
+            h = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+        state[0] += a;
+        state[1] += b;
+        state[2] += c;
+        state[3] += d;
+        state[4] += e;
+        state[5] += f;
+        state[6] += g;
+        state[7] += h;
+    }
+
+    char digest[65];
+    for (size_t i = 0; i < 8; ++i) {
+        std::snprintf(digest + i * 8, 9, "%08x", state[i]);
+    }
+    return std::string(digest, 64);
+}
+
+static std::vector<std::string> discoverCudaCases(const std::string& corpusRoot,
+                                                   std::string* sourceManifestSha256) {
     std::string contents;
     if (!readFile(corpusRoot + "/operator_cases.json", &contents)) return {};
+    *sourceManifestSha256 = sha256Hex(contents);
     rapidjson::Document document;
     document.Parse(contents.c_str(), contents.size());
     if (document.HasParseError() || !document.IsObject() || !document.HasMember("cases") ||
@@ -93,6 +192,7 @@ struct LatencyResult {
     bool commandOk = false;
     bool hasLatency = false;
     bool pmuDisabled = false;
+    bool validationPassed = false;
     bool hasStructuredMetadata = false;
     double latencyUs = 0.0;
     std::string launchSamplingStatus;
@@ -141,6 +241,10 @@ static bool parseLaunchRecords(const rapidjson::Value& report, LatencyResult* re
         return false;
     }
     result->launchSamplingStatus = report["launch_sampling_status"].GetString();
+    if (result->launchSamplingStatus != "sampled") {
+        result->error = "launch sampling did not complete successfully";
+        return false;
+    }
     for (const auto& item : report["launch_records"].GetArray()) {
         LaunchRecord record;
         if (!item.IsObject() || !item.HasMember("kernel_name") || !item["kernel_name"].IsString() ||
@@ -161,7 +265,7 @@ static bool parseLaunchRecords(const rapidjson::Value& report, LatencyResult* re
         }
         result->launchRecords.emplace_back(std::move(record));
     }
-    if (result->launchSamplingStatus == "sampled" && result->launchRecords.empty()) {
+    if (result->launchRecords.empty()) {
         result->error = "launch sampling succeeded but returned no kernel records";
         return false;
     }
@@ -185,6 +289,22 @@ static bool parseEnvironment(const rapidjson::Value& report, LatencyResult* resu
     result->environment.gpuClockHzAfter = readOptionalNumber(environment, "gpu_clock_hz_after");
     result->environment.temperatureCBefore = readOptionalNumber(environment, "temperature_c_before");
     result->environment.temperatureCAfter = readOptionalNumber(environment, "temperature_c_after");
+    if (result->environment.samplingSource.empty() || result->environment.samplingStatus != "sampled") {
+        result->error = "environment sampling did not complete successfully";
+        return false;
+    }
+    const OptionalNumber values[] = {
+        result->environment.gpuClockHzBefore,
+        result->environment.gpuClockHzAfter,
+        result->environment.temperatureCBefore,
+        result->environment.temperatureCAfter,
+    };
+    for (const auto& value : values) {
+        if (!value.present || !std::isfinite(value.value) || value.value <= 0.0) {
+            result->error = "environment sampling returned a missing or non-positive value";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -226,6 +346,14 @@ static LatencyResult runLatency(const std::string& caseName, const std::string& 
         return result;
     }
     result.pmuDisabled = true;
+    if (!report.HasMember("valid") || !report["valid"].IsBool() ||
+        !report["valid"].GetBool() ||
+        !report.HasMember("validation_status") || !report["validation_status"].IsString() ||
+        std::strcmp(report["validation_status"].GetString(), "validation_passed") != 0) {
+        result.error = "kernel output validation failed";
+        return result;
+    }
+    result.validationPassed = true;
     if (!report.HasMember("latency_us") || !report["latency_us"].IsNumber()) {
         result.error = "latency_us is missing or malformed";
         return result;
@@ -246,12 +374,19 @@ static std::string latencyOutputPath() {
 
 static bool writeLatencyJson(const std::string& path,
                              const std::vector<std::string>& cases,
-                             const std::vector<LatencyResult>& results) {
+                             const std::vector<LatencyResult>& results,
+                             const std::string& sourceManifestSha256) {
     FILE* file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return false;
     rapidjson::Document document;
     document.SetObject();
     auto& allocator = document.GetAllocator();
+    rapidjson::Value format("mnn-kernel-latency", allocator);
+    rapidjson::Value manifestSha256(sourceManifestSha256.c_str(), allocator);
+    document.AddMember("format", format, allocator);
+    document.AddMember("version", 1, allocator);
+    document.AddMember("source_manifest_sha256", manifestSha256, allocator);
+    rapidjson::Value caseValues(rapidjson::kObjectType);
     for (size_t i = 0; i < cases.size(); ++i) {
         rapidjson::Value key(cases[i].c_str(), allocator);
         rapidjson::Value value(rapidjson::kObjectType);
@@ -298,7 +433,8 @@ static bool writeLatencyJson(const std::string& path,
                 environment.AddMember("gpu_clock_hz_after", results[i].environment.gpuClockHzAfter.value, allocator);
             }
             if (results[i].environment.temperatureCBefore.present) {
-                environment.AddMember("temperature_c_before", results[i].environment.temperatureCBefore.value, allocator);
+                environment.AddMember(
+                    "temperature_c_before", results[i].environment.temperatureCBefore.value, allocator);
             }
             if (results[i].environment.temperatureCAfter.present) {
                 environment.AddMember("temperature_c_after", results[i].environment.temperatureCAfter.value, allocator);
@@ -309,8 +445,9 @@ static bool writeLatencyJson(const std::string& path,
                 value.AddMember("error", error, allocator);
             }
         }
-        document.AddMember(key, value, allocator);
+        caseValues.AddMember(key, value, allocator);
     }
+    document.AddMember("cases", caseValues, allocator);
     char buffer[4096];
     rapidjson::FileWriteStream stream(file, buffer, sizeof(buffer));
     rapidjson::Writer<rapidjson::FileWriteStream> writer(stream);
@@ -321,11 +458,46 @@ static bool writeLatencyJson(const std::string& path,
 
 } // namespace
 
+TEST(KernelLatency, CudaAdapterValidationIsTerminal) {
+    using MNN::Replay::KernelCorpus::detail::AdapterValidationDecision;
+    using MNN::Replay::KernelCorpus::detail::adapterValidationDecision;
+
+    // These selected cases carry a legacy identity validator even though their
+    // CUDA adapters validate a real layout transform. A failed adapter result
+    // must be terminal; otherwise an identity output can be incorrectly rescued.
+    const char* selectedCases[] = {
+        "transpose_local_fp32_smoke",
+        "c4nhw4_2_nchw_fp32_smoke",
+    };
+    for (const char* caseName : selectedCases) {
+        (void)caseName;
+        EXPECT_EQ(
+            adapterValidationDecision(true, true, false),
+            AdapterValidationDecision::Reject);
+        EXPECT_EQ(
+            adapterValidationDecision(true, true, true),
+            AdapterValidationDecision::Accept);
+    }
+
+    // OpenCL/Vulkan compatibility remains unchanged while their validators
+    // continue migrating from string dispatch to co-located adapter logic.
+    EXPECT_EQ(
+        adapterValidationDecision(true, false, false),
+        AdapterValidationDecision::TryLegacy);
+    EXPECT_EQ(
+        adapterValidationDecision(false, false, false),
+        AdapterValidationDecision::TryLegacy);
+}
+
 TEST(KernelLatency, AllCudaCases) {
+    ASSERT_EQ(
+        sha256Hex("abc"),
+        std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
     const char* root = std::getenv("REPLAY_KERNEL_CORPUS_ROOT");
     const std::string corpusRoot = root == nullptr || *root == '\0'
         ? "../replay_benchmark/kernel_corpus" : root;
-    auto cases = discoverCudaCases(corpusRoot);
+    std::string sourceManifestSha256;
+    auto cases = discoverCudaCases(corpusRoot, &sourceManifestSha256);
     const char* caseFilter = std::getenv("REPLAY_KERNEL_LATENCY_CASE_FILTER");
     if (caseFilter != nullptr && *caseFilter != '\0') {
         std::vector<std::string> filtered;
@@ -335,6 +507,7 @@ TEST(KernelLatency, AllCudaCases) {
         cases.swap(filtered);
     }
     ASSERT_TRUE(!cases.empty());
+    ASSERT_EQ(sourceManifestSha256.size(), static_cast<size_t>(64));
 
     std::vector<LatencyResult> results;
     results.reserve(cases.size());
@@ -356,7 +529,8 @@ TEST(KernelLatency, AllCudaCases) {
         results.emplace_back(result);
     }
 
-    EXPECT_TRUE(writeLatencyJson(latencyOutputPath(), cases, results));
+    EXPECT_TRUE(writeLatencyJson(
+        latencyOutputPath(), cases, results, sourceManifestSha256));
     EXPECT_EQ(valid, cases.size());
     EXPECT_EQ(structured, cases.size());
 }

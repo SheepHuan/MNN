@@ -24,6 +24,25 @@ struct Options {
     std::string perfCounterEvents;
 };
 
+enum class PmuMetricValueKind {
+    UnsignedInteger,
+    FloatingPoint,
+};
+
+enum class PmuMetricValueStatus {
+    Invalid,
+    Valid,
+    Overflow,
+};
+
+struct PmuMetricValue {
+    std::string name;
+    uint64_t integerValue = 0;
+    double floatingPointValue = 0.0;
+    PmuMetricValueKind valueKind = PmuMetricValueKind::UnsignedInteger;
+    PmuMetricValueStatus status = PmuMetricValueStatus::Invalid;
+};
+
 struct CaseReport {
     std::string framework;
     std::string tag;
@@ -50,8 +69,10 @@ struct CaseReport {
     uint64_t workloadNs = 0;
     int runs = 0;
 
-    // PMU metric values (name → value), populated when PMU is available
-    std::vector<std::pair<std::string, uint64_t>> pmuMetrics;
+    // PMU metric values retain their native representation: Adreno/Mali raw
+    // counters remain uint64 while CUDA/NVPW values remain double. Invalid or
+    // overflowing metrics keep an explicit per-metric status and no JSON value.
+    std::vector<PmuMetricValue> pmuMetrics;
     // Number of CUPTI passes required for the metric set (1=single-pass, N=replay)
     size_t numPasses = 1;
 
@@ -66,6 +87,28 @@ struct CaseReport {
     // by samplingStatus.
     CudaEnvironmentObservation environment;
 };
+
+namespace detail {
+
+enum class AdapterValidationDecision {
+    Accept,
+    Reject,
+    TryLegacy,
+};
+
+// CUDA adapters own the complete output semantics for their kernels. A failed
+// CUDA adapter validation is terminal so a weaker legacy validator cannot
+// rescue an output with the wrong layout. Non-CUDA adapters retain the legacy
+// fallback while those paths are migrated.
+inline AdapterValidationDecision adapterValidationDecision(
+    bool hasAdapter, bool isCudaAdapter, bool adapterValidationPassed) {
+    if (!hasAdapter) return AdapterValidationDecision::TryLegacy;
+    if (adapterValidationPassed) return AdapterValidationDecision::Accept;
+    return isCudaAdapter ? AdapterValidationDecision::Reject
+                         : AdapterValidationDecision::TryLegacy;
+}
+
+} // namespace detail
 
 // Run the kernel corpus benchmark and return false only on unrecoverable
 // initialization failure. Per-case failures are reported in the returned

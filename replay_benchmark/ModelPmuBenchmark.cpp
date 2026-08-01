@@ -121,6 +121,18 @@ struct PmuSample {
     std::string error;
 };
 
+static bool assignUnsignedCounter(const MNN::PerfCounter::CounterValue& counter,
+                                  PmuSample* sample) {
+    if (sample == nullptr || counter.status != MNN::PerfCounter::CounterValueStatus::Valid ||
+        counter.valueKind != MNN::PerfCounter::CounterValueKind::UnsignedInteger) {
+        if (sample != nullptr) sample->error = "PMU counter did not return a valid uint64 value";
+        return false;
+    }
+    sample->value = counter.value;
+    sample->available = true;
+    return true;
+}
+
 static std::unique_ptr<MNN::PerfCounter::Session> createPmuSession(const Options& options,
                                                                      MNN::PerfCounter::DeviceInfo* device,
                                                                      std::string* error) {
@@ -158,8 +170,7 @@ static PmuSample sampleControl(const Options& options) {
         result.error = session->error();
         return result;
     }
-    result.value = value.value;
-    result.available = true;
+    assignUnsignedCounter(value, &result);
     return result;
 }
 
@@ -202,8 +213,7 @@ static PmuSample sampleWorkload(const Options& options, MNN::Interpreter* net, M
         return result;
     }
     if (!ok) return result;
-    result.value = value.value;
-    result.available = true;
+    assignUnsignedCounter(value, &result);
     return result;
 }
 
@@ -244,8 +254,7 @@ static PmuSample sampleLlmWorkload(const Options& options, MNN::Transformer::Llm
         return result;
     }
     if (!ok) return result;
-    result.value = value.value;
-    result.available = true;
+    assignUnsignedCounter(value, &result);
     return result;
 }
 

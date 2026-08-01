@@ -160,15 +160,39 @@ def build_data_readiness(dataset, config):
     )
 
     workload_presence = Counter()
+    workload_applicable = Counter()
     launch_presence = Counter()
+    semantic_workload_fields = (
+        "algorithmic_flops",
+        "algorithmic_bytes",
+        "output_elements",
+    )
     for condition in dataset.conditions.values():
-        workload_presence.update(condition.workload.keys())
+        workload_presence.update(
+            key
+            for key, value in condition.workload.items()
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        )
+        for key in semantic_workload_fields:
+            provenance = condition.workload_provenance.get(key)
+            if provenance is None or provenance.status != "not_applicable":
+                workload_applicable[key] += 1
         launch_presence.update(condition.launch.keys())
     observed_launch = observed_launch_controls(dataset)
     for fields in observed_launch.values():
         launch_presence.update(fields.keys())
+
+    def workload_denominator(key):
+        if key in semantic_workload_fields:
+            return workload_applicable[key]
+        return condition_count
+
     workload_coverage = {
-        key: count / condition_count if condition_count else 0.0
+        key: count / workload_denominator(key)
+        if workload_denominator(key)
+        else 0.0
         for key, count in sorted(workload_presence.items())
     }
     launch_coverage = {
@@ -214,8 +238,11 @@ def build_data_readiness(dataset, config):
     )
 
     missing_controls = []
-    for key in ("algorithmic_flops", "algorithmic_bytes", "output_elements"):
-        if workload_coverage.get(key, 0.0) < config.min_coverage:
+    for key in semantic_workload_fields:
+        if (
+            workload_applicable[key] > 0
+            and workload_coverage.get(key, 0.0) < config.min_coverage
+        ):
             missing_controls.append(key)
     if not launch_coverage or max(launch_coverage.values(), default=0.0) < config.min_coverage:
         missing_controls.append("launch_geometry")

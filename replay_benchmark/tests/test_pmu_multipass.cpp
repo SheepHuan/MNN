@@ -1,8 +1,16 @@
 // test_pmu_multipass.cpp — PMU multi-pass accuracy test suite.
 //
 // 64 test combinations: 8 kernel variants × 8 metric groups.
-// Each combination verifies that multi-pass auto-split produces the same
-// values as single-metric collection.
+// Each combination verifies the multi-pass report contract and compares only
+// replay-invariant work counters with single-metric collection.
+//
+// This collector uses CUPTI AutoRange + KernelReplay without explicit cache
+// purging. CUPTI restores device memory between passes, but hardware cache
+// contents are not a reproducible part of that state. DRAM/L2 traffic, active
+// warp integrals, and cycle counters can therefore legitimately change when
+// the metric configuration changes. Those metrics are validated as finite,
+// non-negative observations, but are not treated as cross-configuration
+// numeric truth.
 //
 // Kernel variants (covering compute/memory/cache-bound workloads):
 //   1. ConvDw    (depthwise conv, compute+memory)
@@ -36,8 +44,10 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include <cerrno>
+#include <cstdint>
 #include <unistd.h>
+
+#include "rapidjson/document.h"
 
 // ============================================================
 // Infrastructure: subprocess + JSON parsing
@@ -58,6 +68,7 @@ struct MetricResult {
 struct BenchResult {
     std::vector<MetricResult> metrics;
     std::string pmuStatus;
+    uint64_t numPasses = 0;
     int commandStatus = -1;
     std::string error;
 };
@@ -99,35 +110,32 @@ static bool readFile(const std::string& path, std::string* contents) {
     return read == contents->size();
 }
 
-static std::string parseJsonString(const std::string& json, const std::string& key) {
-    const std::string pattern = "\"" + key + "\":";
-    size_t pos = json.find(pattern);
-    if (pos == std::string::npos) return "";
-    pos += pattern.size();
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' ||
-                                 json[pos] == '\r' || json[pos] == '\t')) pos++;
-    if (pos >= json.size() || json[pos] != '\"') return "";
-    size_t end = json.find('\"', pos + 1);
-    if (end == std::string::npos) return "";
-    return json.substr(pos + 1, end - pos - 1);
-}
-
-static MetricResult parseMetric(const std::string& json, const std::string& metric) {
-    const std::string pattern = "\"" + metric + "\":";
-    size_t pos = json.find(pattern);
-    if (pos == std::string::npos) {
-        return {metric, -1.0, MetricResult::Status::Unsupported};
+static MetricResult parseMetric(const rapidjson::Value& caseResult, const std::string& metric) {
+    if (!caseResult.IsObject() || !caseResult.HasMember("pmu_metric_statuses") ||
+        !caseResult["pmu_metric_statuses"].IsObject()) {
+        return {metric, -1.0, MetricResult::Status::MalformedOutput};
     }
-    pos += pattern.size();
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' ||
-                                 json[pos] == '\r' || json[pos] == '\t')) pos++;
-    if (json.compare(pos, 19, "9223372036854775808") == 0) {
+    const auto& statuses = caseResult["pmu_metric_statuses"];
+    if (!statuses.HasMember(metric.c_str()) || !statuses[metric.c_str()].IsString()) {
+        return {metric, -1.0, MetricResult::Status::MalformedOutput};
+    }
+    const std::string status = statuses[metric.c_str()].GetString();
+    if (status == "overflow") {
         return {metric, -1.0, MetricResult::Status::Overflow};
     }
-    errno = 0;
-    char* end = nullptr;
-    double value = std::strtod(json.c_str() + pos, &end);
-    if (end == json.c_str() + pos || errno == ERANGE || !std::isfinite(value)) {
+    if (status == "invalid") {
+        return {metric, -1.0, MetricResult::Status::Unsupported};
+    }
+    if (status != "valid") {
+        return {metric, -1.0, MetricResult::Status::MalformedOutput};
+    }
+    if (!caseResult.HasMember("pmu_metrics") || !caseResult["pmu_metrics"].IsObject() ||
+        !caseResult["pmu_metrics"].HasMember(metric.c_str()) ||
+        !caseResult["pmu_metrics"][metric.c_str()].IsNumber()) {
+        return {metric, -1.0, MetricResult::Status::MalformedOutput};
+    }
+    const double value = caseResult["pmu_metrics"][metric.c_str()].GetDouble();
+    if (!std::isfinite(value) || value < 0.0) {
         return {metric, -1.0, MetricResult::Status::MalformedOutput};
     }
     return {metric, value, MetricResult::Status::Valid};
@@ -176,7 +184,30 @@ static BenchResult runBench(const std::string& caseName,
     }
     std::remove(outputPath.c_str());
 
-    result.pmuStatus = parseJsonString(json, "pmu_status");
+    rapidjson::Document document;
+    document.Parse(json.c_str(), json.size());
+    if (document.HasParseError() || !document.IsObject() || !document.HasMember("cases") ||
+        !document["cases"].IsArray() || document["cases"].Empty() ||
+        !document["cases"][0].IsObject()) {
+        result.error = "benchmark output JSON is malformed";
+        for (const auto& metric : metrics) {
+            result.metrics.push_back({metric, -1.0, MetricResult::Status::MalformedOutput});
+        }
+        return result;
+    }
+    const auto& caseResult = document["cases"][0];
+    if (!caseResult.HasMember("num_passes") || !caseResult["num_passes"].IsUint64() ||
+        caseResult["num_passes"].GetUint64() == 0) {
+        result.error = "num_passes is missing, malformed, or zero";
+        for (const auto& metric : metrics) {
+            result.metrics.push_back({metric, -1.0, MetricResult::Status::MalformedOutput});
+        }
+        return result;
+    }
+    result.numPasses = caseResult["num_passes"].GetUint64();
+    if (caseResult.HasMember("pmu_status") && caseResult["pmu_status"].IsString()) {
+        result.pmuStatus = caseResult["pmu_status"].GetString();
+    }
     if (result.pmuStatus.empty()) {
         result.error = "pmu_status is missing or malformed";
         for (const auto& metric : metrics) {
@@ -186,7 +217,7 @@ static BenchResult runBench(const std::string& caseName,
     }
 
     for (const auto& metric : metrics) {
-        result.metrics.push_back(parseMetric(json, metric));
+        result.metrics.push_back(parseMetric(caseResult, metric));
     }
     const bool pmuFailed = result.pmuStatus.find("failed") != std::string::npos ||
                            result.pmuStatus.find("error") != std::string::npos;
@@ -201,6 +232,35 @@ static BenchResult runBench(const std::string& caseName,
     return result;
 }
 
+static bool validateMetricResult(const MetricResult& metric, const char* collectionKind) {
+    const bool recognizedStatus =
+        metric.status == MetricResult::Status::Valid ||
+        metric.status == MetricResult::Status::Unsupported ||
+        metric.status == MetricResult::Status::Overflow;
+    if (!recognizedStatus) {
+        printf("    %s %s (%s)\n", statusName(metric.status), metric.name.c_str(), collectionKind);
+        EXPECT_TRUE(recognizedStatus);
+        return false;
+    }
+    if (metric.status != MetricResult::Status::Valid) {
+        return false;
+    }
+    const bool finiteNonNegative = std::isfinite(metric.value) && metric.value >= 0.0;
+    if (!finiteNonNegative) {
+        printf("    invalid numeric value for %s (%s): %.17g\n",
+               metric.name.c_str(), collectionKind, metric.value);
+    }
+    EXPECT_TRUE(finiteNonNegative);
+    return finiteNonNegative;
+}
+
+static bool isReplayInvariantMetric(const std::string& metric) {
+    const bool isSum = metric.size() >= 4 &&
+                       metric.compare(metric.size() - 4, 4, ".sum") == 0;
+    return isSum && (metric.find("inst_executed") != std::string::npos ||
+                     metric.find("l1tex__t_sectors") != std::string::npos);
+}
+
 static MetricResult runSingleMedian(const std::string& caseName, const std::string& metric) {
     std::vector<double> vals;
     MetricResult::Status lastStatus = MetricResult::Status::Unsupported;
@@ -211,7 +271,10 @@ static MetricResult runSingleMedian(const std::string& caseName, const std::stri
         BenchResult result = runBench(caseName, {metric});
         if (result.metrics.empty()) continue;
         lastStatus = result.metrics[0].status;
-        if (lastStatus == MetricResult::Status::Valid) vals.push_back(result.metrics[0].value);
+        if (validateMetricResult(result.metrics[0], "single") &&
+            lastStatus == MetricResult::Status::Valid) {
+            vals.push_back(result.metrics[0].value);
+        }
         if (lastStatus == MetricResult::Status::Overflow) sawOverflow = true;
         if (lastStatus == MetricResult::Status::CommandFailed) sawCommandFailure = true;
         if (lastStatus == MetricResult::Status::MalformedOutput) sawMalformed = true;
@@ -306,55 +369,31 @@ static void checkMultiVsSingle(const std::string& caseName,
         return;
     }
 
-    int validComparisons = 0;
+    int validMetrics = 0;
     for (size_t i = 0; i < metrics.size(); ++i) {
         const MetricResult& multiMetric = multi.metrics[i];
-        if (multiMetric.status != MetricResult::Status::Valid) {
+        if (!validateMetricResult(multiMetric, "multi")) {
             printf("    %s %s (multi)\n", statusName(multiMetric.status), metrics[i].c_str());
-            if (multiMetric.status != MetricResult::Status::Unsupported) EXPECT_TRUE(false);
             continue;
         }
+        validMetrics++;
+        if (!isReplayInvariantMetric(metrics[i])) {
+            printf("    %-55s multi=%14.6g  observed only (cache-uncontrolled replay)\n",
+                   metrics[i].c_str(), multiMetric.value);
+            continue;
+        }
+
         MetricResult singleMetric = runSingleMedian(caseName, metrics[i]);
-        if (singleMetric.status != MetricResult::Status::Valid) {
+        if (!validateMetricResult(singleMetric, "single median")) {
             printf("    %s %s (single)\n", statusName(singleMetric.status), metrics[i].c_str());
-            if (singleMetric.status != MetricResult::Status::Unsupported) EXPECT_TRUE(false);
+            EXPECT_TRUE(singleMetric.status == MetricResult::Status::Valid);
             continue;
         }
-        validComparisons++;
-        double mv = multiMetric.value;
-        double sv = singleMetric.value;
-        bool isExactMetric = (
-            metrics[i].find("inst_executed") != std::string::npos ||
-            metrics[i].find("inst_executed_op_f") != std::string::npos ||
-            metrics[i].find("l1tex__t_sectors") != std::string::npos
-        );
-        bool isWarpMetric = (
-            metrics[i].find("warps_active") != std::string::npos ||
-            metrics[i].find("lts__t_sectors") != std::string::npos
-        );
-        bool isDramMetric = (
-            metrics[i].find("dram__") != std::string::npos
-        );
-        if (isExactMetric) {
-            // Instruction/cache-sector metrics: exact match (deterministic)
-            EXPECT_EQ(mv, sv);
-        } else if (isWarpMetric) {
-            // Warp/L2 metrics: 20% tolerance (jitter from scheduling, eviction)
-            double tol = std::abs(sv) * 0.20 + 1.0;
-            EXPECT_NEAR(mv, sv, tol);
-        } else if (isDramMetric) {
-            // DRAM metrics: 50% tolerance (large jitter — refresh, eviction)
-            double tol = std::abs(sv) * 0.5 + 100.0;
-            EXPECT_NEAR(mv, sv, tol);
-        } else {
-            // Other timing metrics: 35% tolerance
-            double tol = std::abs(sv) * 0.35 + 1.0;
-            EXPECT_NEAR(mv, sv, tol);
-        }
-        printf("    %-55s multi=%14.0f single=%14.0f\n",
-               metrics[i].c_str(), mv, sv);
+        EXPECT_EQ(multiMetric.value, singleMetric.value);
+        printf("    %-55s multi=%14.6g single=%14.6g  replay-invariant\n",
+               metrics[i].c_str(), multiMetric.value, singleMetric.value);
     }
-    EXPECT_TRUE(validComparisons > 0);
+    EXPECT_TRUE(validMetrics > 0);
 }
 
 static void runCombination(int ki, int gi) {
@@ -366,9 +405,12 @@ static void runCombination(int ki, int gi) {
     checkMultiVsSingle(kc.benchCase, mg.metrics, &multi);
     if (!multi.error.empty()) printf("  Error: %s\n", multi.error.c_str());
     const std::string& status = multi.pmuStatus;
-    printf("  Status: %s\n", status.c_str());
+    printf("  Status: %s, passes=%llu\n", status.c_str(),
+           static_cast<unsigned long long>(multi.numPasses));
+    EXPECT_TRUE(multi.numPasses >= 1);
+    EXPECT_TRUE(status.find("sampled") != std::string::npos);
     if (mg.expectMultiPass) {
-        EXPECT_TRUE(status.find("sampled") != std::string::npos);
+        EXPECT_TRUE(multi.numPasses > 1);
     }
 }
 
@@ -463,6 +505,7 @@ TEST(PMU, InstructionReproducibility_AllKernels) {
             if (status != MetricResult::Status::Unsupported) EXPECT_TRUE(false);
             continue;
         }
+        validateMetricResult(r1.metrics[0], "reproducibility first run");
         BenchResult r2 = runBench(kernels[k].benchCase, {"sm__inst_executed.sum"});
         if (r2.metrics.empty() || r2.metrics[0].status != MetricResult::Status::Valid) {
             MetricResult::Status status = r2.metrics.empty()
@@ -471,6 +514,7 @@ TEST(PMU, InstructionReproducibility_AllKernels) {
             if (status != MetricResult::Status::Unsupported) EXPECT_TRUE(false);
             continue;
         }
+        validateMetricResult(r2.metrics[0], "reproducibility second run");
         valid++;
         EXPECT_EQ(r1.metrics[0].value, r2.metrics[0].value);
         printf("  %-12s inst_executed.sum = %.0f\n", kernels[k].shortName, r1.metrics[0].value);
@@ -483,6 +527,8 @@ TEST(PMU, AutoSplitStatus) {
     std::string s1 = single.pmuStatus;
     EXPECT_TRUE(single.metrics.size() == 1 &&
                 single.metrics[0].status == MetricResult::Status::Valid);
+    if (!single.metrics.empty()) validateMetricResult(single.metrics[0], "auto-split single");
+    EXPECT_TRUE(single.numPasses >= 1);
     EXPECT_TRUE(s1.find("sampled") != std::string::npos);
 
     BenchResult multi = runBench("cuda_conv_dw_fp32_smoke", {
@@ -494,16 +540,16 @@ TEST(PMU, AutoSplitStatus) {
     EXPECT_TRUE(!multi.metrics.empty());
     int validMetrics = 0;
     for (const auto& metric : multi.metrics) {
-        if (metric.status == MetricResult::Status::Valid) {
+        if (validateMetricResult(metric, "auto-split multi")) {
             validMetrics++;
-        } else if (metric.status != MetricResult::Status::Unsupported) {
-            printf("  %s %s\n", statusName(metric.status), metric.name.c_str());
-            EXPECT_TRUE(false);
         }
     }
     EXPECT_TRUE(validMetrics > 0);
+    EXPECT_TRUE(multi.numPasses > 1);
     EXPECT_TRUE(s2.find("sampled") != std::string::npos);
-    printf("  single: %s\n  multi:  %s\n", s1.c_str(), s2.c_str());
+    printf("  single: %s, passes=%llu\n  multi:  %s, passes=%llu\n",
+           s1.c_str(), static_cast<unsigned long long>(single.numPasses),
+           s2.c_str(), static_cast<unsigned long long>(multi.numPasses));
 }
 
 int main(int argc, char** argv) {

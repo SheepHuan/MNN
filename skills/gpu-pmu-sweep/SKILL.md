@@ -1,555 +1,375 @@
 ---
 name: gpu-pmu-sweep
-description: 在 Adreno/Mali/NVIDIA GPU 上运行 replay_benchmark 的 kernel corpus case，采集每个 kernel 执行前后的 PMU（Performance Monitoring Unit）metric 值，计算 delta 增量并输出 CSV。覆盖 OpenCL（Adreno/Mali）、Vulkan（Mali/Adreno）、CUDA（NVIDIA CUPTI）三种后端，支持单 metric 单进程扫描、多次重复测量、raw JSON 保存。
+description: 在 NVIDIA、Adreno 或 Mali GPU 上发现可用 metric，并采集 replay_benchmark kernel 的 PMC、CaseSelectionPlan、完整状态账本、独立 latency、launch/resource 和 environment 原始事实。用于刷新设备数据、验证 collector 数值链路或安全断点续跑；不负责 kernel 正确性、原始数据发布门禁或 PMC 统计解释。
 ---
 
-# GPU PMU Sweep — Adreno / Mali / NVIDIA
+# GPU PMU Sweep：设备发现与原始数据采集
 
-> **触发条件**：需要对 GPU kernel 做 PMU 性能计数器采集时触发。包括：kernel corpus 的 per-kernel metric 采集、特定 case 的多 metric 扫描、不同形状参数下的性能对比。
+本 Skill 只负责产生测量事实，并把不可变采集产物交给独立发布门禁：
 
-## 概述
+~~~text
+kernel-adapt
+  -> corpus-audit
+  -> gpu-pmu-sweep
+  -> pmc-source-gate
+  -> pmc-interpreter
+~~~
 
-本 skill 通过 `replay_benchmark.out` 的 PMU 采集能力，对 kernel corpus 中每个 case 执行**前（control）**和**后（workload）**的 PMU 采样，输出 delta 增量：
+采集完成不等于数据可发布。不要在本 Skill 中运行统计解释，也不要因为 rows 数量看似完整就
+自行宣称数据有效。
 
-```
-delta_metric = workload_delta - control_delta
-```
+开始前必须完整阅读：
 
-每个 GPU 后端有自己的 PMU 机制和 metric 列表：
+- `docs/superpowers/specs/2026-07-31-pmc-interpreter-cuda-data-sources.md`
 
-| 后端 | GPU 厂商 | PMU 机制 | metric 发现方式 |
-|------|---------|---------|----------------|
-| OpenCL | Adreno (Rhinopi) | KGSL ioctl | `replay_benchmark.out --opencl-pmu-list-events` |
-| OpenCL | Mali (OrangePi) | Mali Performance Counter | 同上 |
-| Vulkan | Adreno/Mali | Vulkan extension query | 同上 |
-| CUDA | NVIDIA | CUPTI Range Profiler | `list_cuda_metrics` 或 `--perf-counter-events` |
+## 1. Ownership 与禁止跨界
 
-### 语义分析前置约束
+本 Skill 拥有：
 
-PMC Interpreter 规范文档位于：
+- 当前设备 metric discovery/availability；
+- PMC collector 数值状态链路验证；
+- case selection plan 与 PMC long rows 采集；
+- 关闭 PMU 后的独立 latency/launch/resource/environment 采集；
+- Adreno/Mali control-delta sweep 的原始数据保存；
+- 采集脚本的 session、顺序、resume ledger 和 raw 日志维护。
 
-- 数据产生与同步：`docs/superpowers/specs/2026-07-31-pmc-interpreter-cuda-data-sources.md`
-- 模块物理语义：`docs/superpowers/specs/2026-07-31-pmc-interpreter-module-physical-semantics.md`
+本 Skill 不拥有：
 
-涉及以下文件的产生、刷新、字段解释或完整性校验时，必须以数据产生与同步规范为准：
+- kernel、shim、adapter、validator 或 `operator_cases.json` 的实现与修改；
+- kernel 正确性放行；
+- 为满足 target/K 而增加、复制或重命名 case；
+- CUDA 三数据源严格发布门禁；
+- 把 CUDA NVPW double 转成整数；
+- 用历史固定 metric 数、case 数或 rows 数作为验收目标；
+- 构造 `mnn-pmc-dataset/v1`、统计相关性、signature 或 delta rulebook。
 
-- `build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv`
-- `build-x86-cuda/cuda_kernel_latency.json`
-- `replay_benchmark/kernel_corpus/operator_cases.json`
+实现或 manifest 有问题时回到 `kernel-adapt`，正确性未放行时回到 `corpus-audit`。采集完成后
+交给 `pmc-source-gate`，门禁通过后再交给 `pmc-interpreter`。
 
-- `operator_cases.json` 是受版本控制的权威 case manifest，不是 test 运行产物；
-- manifest 变化后，PMC rows 与 latency 必须重新生成；
-- 前置 case 或 metric 集合发生变化时，不得对旧 rows CSV 继续 `--resume`。
+## 2. 固定输入与输出
 
-- `repeat_id`、一次测量内的 workload runs、profiler replay passes、
-  workload-control delta、implementation baseline/candidate delta 是五个不同概念；
-  不得互相代替。
-- legacy CUDA rows 没有 `collection_session_id`。不同 metric 可能来自不同进程或
-  CUPTI session，不能据此假设 numerator/denominator 同时采集，也不能盲目构造比值。
-- `--case-selection op-type` 只取 `operator_cases.json` 中该 op_type 的第一条记录，
-  不是语义代表选择；分析时还必须区分 semantic family、execution role 和 variant。
-- 当前 CUDA collector/ledger 主要验证了整数 raw rollup。采集 ratio、throughput、
-  per-cycle 等浮点 metric 前，必须确认 C++ report 和 Python ledger 全链路保留
-  `double`，不能把小数强制转换为整数。
-- 当前数据中两个 metric 向量完全相等，不等于公式或机制相同。只有同 dependency
-  group/canonical concept 才能强制去重；跨机制相等仅作为冗余注释和选择惩罚。
-- 通用名称推断只能生成低置信度 mechanism proxy。atomic byte/sector/request/wavefront 是原子
-  操作工作量，不是竞争症状；只有 conflict/serialization/retry/stall 等事件才能标为 contention。
-- 语义报告必须把类别直接 `resolved_features` 与样本不足时的 family 继承分开。继承项不能写成
-  op-type 实证，也不能把未归一化 `.sum` 工作量 counter 写成效率指标或优化方向。
-- availability 必须以本轮重新构建的 collector 实测结果为准，不能把旧的有效 metric 数量
-  写死为验收目标。即使 GPU、driver 和 manifest 未换，旧 `OVERFLOW` 也可能在 collector
-  重建后变成 `VALID`；正式 rows 行数必须按新的 `cuda_pmc_valid.csv` 动态计算。
-- 如果 availability 出现 `OVERFLOW → VALID` 等状态迁移，先在一个代表 case 上直接采集至少
-  一个迁移 metric，确认 report、CSV ledger 和 JSON 全链路能保存其数值，再启动全量 sweep。
-- `cuda_pmc_all.csv` 是按发现请求位置保存的完整状态账本，非 `VALID` 的无后缀 metric 名称
-  可能重复，不能据此删除请求行或要求 metric name 全局唯一；必须要求
-  `cuda_pmc_valid.csv` 和正式 rows 中的有效 metric 唯一。
-- `load_mnn_kernelreplay_dataset()` 可以把不完整旧数据加载为带 `issues` 的探索数据，不是正式
-  数据发布 gate。替换正式三数据源前仍需用独立严格验收检查精确集合、笛卡尔积、状态、数值、
-  行顺序和 latency join，并在任何 mismatch 时非零退出。
+### CUDA 采集输入与输出
 
-## PMU Metric 分类
+| 数据 | 固定路径 | 本 Skill 中的角色 |
+| --- | --- | --- |
+| Manifest | `replay_benchmark/kernel_corpus/operator_cases.json` | 冻结的采集输入 |
+| PMC rows | `build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv` | plan-selected case × metric 完整状态账本 |
+| Latency | `build-x86-cuda/cuda_kernel_latency.json` | 全部 CUDA case 的独立 latency 与 launch/environment 输出 |
 
-### NVIDIA CUDA（CUPTI）
+PMC rows 必须同时产生并保留：
 
-NVIDIA GPU（本机 TU102 / RTX 2080 Ti，sm75）共 **7200 个 metric**（1802 个去后缀 basename），按硬件域分类：
+- `cuda_kernel_pmc_kernelreplay_rows.csv.selection.json`；
+- 本轮 `cuda_pmc_valid.csv`；
+- availability 原始日志与 `cuda_pmc_all.csv`；
+- metric smoke、设备/driver/profiler、collector binary 和 sweep 配置证据。
 
-| 域前缀 | 数量 | 类别 | 说明 |
-|--------|------|------|------|
-| `lts__` | 814 | 缓存 | L2 Cache Slice（L2 缓存切片，命中率/sector/throughput） |
-| `smsp__` | 335 | 计算 | SM Sub-Partition（SM 子分区，warp stall/指令/寄存器） |
-| `l1tex__` | 307 | 缓存 | L1/Texture Cache（L1 纹理缓存，sector/hit_rate） |
-| `sm__` | 183 | 计算 | Streaming Multiprocessor（SM 核心，指令/周期/占用率） |
-| `gcc__` | 30 | 缓存 | Graphics Command Cache（图形命令缓存） |
-| `tpc__` | 21 | 计算 | Texture Processing Cluster（纹理处理簇） |
-| `gpu__` | 17 | 全局 | GPU 全局（时间/功耗/温度） |
-| `fbpa__` | 13 | 显存 | Frame Buffer Partition（帧缓冲分区，DRAM 子单元） |
-| `dram__` | 13 | 显存 | DRAM 控制器（读写字节/sector/throughput） |
-| `idc__` | 12 | 显存 | Inter-DRAM Channel（DRAM 通道间） |
-| `gr__` | 10 | 计算 | Graphics Engine（图形引擎） |
-| `pcie__` | 7 | 总线 | PCIe 总线 |
-| `fe__` | 5 | 前端 | Front End（前端命令处理器） |
-| `sys__` | 4 | 系统 | 系统级 |
-| `gpc__` | 4 | 计算 | Graphics Processing Cluster |
-| `nvltx__/nvlrx__` | 各13 | 总线 | NVLink TX/RX |
+本 Skill 不产生 `cuda_pmc_source_validation.json`、normalized dataset 或语义报告。
 
-**后缀**：每个 basename 有 4 种聚合方式 — `.avg`（平均）、`.sum`（总和）、`.max`（最大）、`.min`（最小）。少量 ratio 类 metric 无后缀。
+## 3. Collection 入口条件
 
-#### 常用 CUDA metric 推荐
+开始正式采集前必须获得 `corpus-audit` 放行记录：
 
-**计算性能**（compute bound 分析）：
-- `sm__cycles_elapsed.avg` — SM 周期数（执行时间）
-- `sm__inst_executed.avg` — 执行指令数
-- `sm__warps_active.avg.per_cycle_active` — 活跃 warp 数（占用率）
-- `sm__sass_thread_inst_executed_op_fadd_pred_on.sum` — FP32 加法指令数
-- `sm__sass_thread_inst_executed_op_fmul_pred_on.sum` — FP32 乘法指令数
-- `sm__sass_thread_inst_executed_op_ffma_pred_on.sum` — FP32 FMA 指令数
+~~~text
+audit_status=passed
+manifest_sha256
+audited_case_names
+unsupported cases and reasons
+test evidence
+~~~
 
-**显存带宽**（memory bound 分析）：
-- `dram__bytes.sum` — DRAM 读写总字节
-- `dram__bytes_read.sum` — DRAM 读字节
-- `dram__bytes_write.sum` — DRAM 写字节
-- `dram__throughput.avg.pct_of_peak_sustained_elapsed` — DRAM 带宽利用率
-- `lts__t_bytes.sum` — L2 缓存总字节
+同时满足：
 
-**缓存命中**（cache 分析）：
-- `l1tex__t_sector_hit_rate.pct` — L1 缓存命中率
-- `lts__t_sector_hit_rate.pct` — L2 缓存命中率
-- `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` — L1 全局加载 sector 数
+1. manifest 已冻结；
+2. collector 源码和 binary 版本已确定；
+3. GPU、driver、CUDA/CUPTI 或移动 GPU 驱动身份已记录；
+4. 没有 availability、latency 或 PMC sweep 进程运行；
+5. 使用新的 staging 路径，不覆盖或 resume 已作废数据；
+6. 整轮采集期间不重建 binary、不修改 manifest、不切换设备或 metric 顺序。
 
-**Warp 停顿**（stall 分析）：
-- `smsp__warp_issue_stalled_long_scoreboard.avg.per_warp_active` — 长延迟等待（显存）
-- `smsp__warp_issue_stalled_short_scoreboard.avg.per_warp_active` — 短延迟等待
-- `smsp__warp_issue_stalled_mio_throttle.avg.per_warp_active` — MIO 管线拥塞
+availability、latency 和 PMC rows 必须严格串行，不能并发竞争 profiler 或环境。
 
-### Adreno（OpenCL/KGSL）
+## 4. 实验身份与 resume
 
-Adreno GPU 通过 KGSL ioctl 暴露 PMU 计数器，典型事件：
+一次 CUDA sweep 身份至少包含：
 
-| 类别 | 事件名 | 说明 |
-|------|--------|------|
-| **计算** | `cp_busy_cycles` | CP 繁忙周期 |
-| | `sp_busy_cycles` | SP 繁忙周期 |
-| | `sp_cs_invocations` | Compute shader 调用次数 |
-| **显存** | `rbbm_vbif_busy` | VBIF 总线繁忙 |
-| | `uche_busy_cycles` | UCHE 繁忙周期 |
-| **缓存** | `tp_l1_cacheline_requests` | L1 缓存请求 |
-| | `tp_l1_cacheline_misses` | L1 缓存 miss |
-| | `uche_busy_cycles` | UCHE（统一 L2）繁忙 |
-| **指令** | `sp_gm_load_instructions` | 全局内存加载指令 |
-| | `sp_gm_store_instructions` | 全局内存存储指令 |
-| | `sp_lm_load_instructions` | 本地内存加载指令 |
-| **线程** | `sp_working_eu_cs_stage` | 活跃执行单元 |
+~~~text
+manifest bytes
+selection policy/version、target op types、K
+ordered valid metrics
+collector binary/code
+runs、metrics-per-session、timeout
+device fingerprint、driver、CUDA、CUPTI
+~~~
 
-使用 `replay_benchmark.out --opencl-pmu-list-events` 发现设备支持的全部事件。
+任一项变化后：
 
-### Mali（OpenCL/Vulkan）
+- 创建新的 selection plan；
+- 从不存在的 rows CSV 开始；
+- 首次运行禁止 `--resume`；
+- 旧 normalized dataset/report 只能作为历史探索数据。
 
-Mali GPU 通过 `MaliDebugInterface` 或 Vulkan 扩展暴露 PMU 计数器，典型事件：
+另外：
 
-| 类别 | 事件名 | 说明 |
-|------|--------|------|
-| **计算** | `gpu_active_cycles` | GPU 活跃周期 |
-| | `compute_active_cycles` | Compute 活跃周期 |
-| | `compute_tasks` | Compute 任务数 |
-| **缓存** | `l2_any_lookup` | L2 查找总数 |
-| | `l2_ext_read` | L2 外部读 |
-| | `l2_ext_write` | L2 外部写 |
+- manifest、kernel/runner binary 或被测设备变化时，重新采 latency；
+- collector、metric discovery 条件、driver/CUDA/CUPTI 或设备变化时，重新跑 availability；
+- 只改变 target/K、runs、session 大小或 timeout 时，也必须重采 rows，但不把无关旧文件自动
+  宣称为同一轮实验；最终仍由 strict gate 校验所有身份。
 
-使用 `replay_benchmark.out --opencl-pmu-list-events` 发现设备支持的全部事件。
+只有旧 rows 恰好是当前确定性笛卡尔积的合法前缀，且 plan ID、sweep config ID、表头、metric
+顺序、binary 和设备身份全部一致时，才允许显式 `--resume`。resume 通过不等于正式发布通过。
 
-## 快速开始
+禁止恢复旧 `op-type` 选择别名；正式默认策略是 `condition-balanced`，`all` 只用于调用方
+明确要求的全 case sweep。
 
-### NVIDIA CUDA（本机）
+## 5. CUDA Collection
 
-```bash
-# 单次采集（所有 case × 指定 metric）
-sudo LD_LIBRARY_PATH=build/:build/source/backend/cuda:. build/replay_benchmark.out \
+### 5.1 构建
+
+~~~bash
+cmake -S . -B build-x86-cuda \
+  -DMNN_BUILD_BENCHMARK=ON \
+  -DMNN_CUDA=ON \
+  -DMNN_REPLAY_ENABLE_PERFCOUNTER=ON \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build-x86-cuda \
+  --target replay_benchmark.out list_cuda_metrics \
+           replay_pmu_availability replay_kernel_latency \
+  -j2
+~~~
+
+构建完成后冻结 binary；扫描期间不得再次构建。
+
+### 5.2 数值链路冒烟
+
+CUDA NVPW metric 的权威数值类型是 `double`。链路必须保持：
+
+~~~text
+NVPW double
+  -> collector report double
+  -> benchmark JSON number
+  -> Python float
+  -> CSV decimal
+  -> Pydantic finite float
+~~~
+
+禁止经过 `uint64_t`、`static_cast<uint64_t>` 或 `int(raw)`。Adreno/Mali 原生 uint64 counter
+则保持 JSON integer，二者不能用同一强制转换策略。
+
+collector 或 ledger 变更后，在 full availability 前完成两类单 metric 冒烟：
+
+1. 选择当前设备上确实产生小数的 avg/ratio/throughput metric，确认 report、JSON 和 CSV
+   保留小数，而不是只验证状态为 VALID；
+2. 选择历史 overflow/non-finite 或本轮发生状态迁移的 metric，确认非有限值不会进入 VALID，
+   `OVERFLOW -> VALID` 时确认新有限值可端到端保存。
+
+示例命令模板：
+
+~~~bash
+cd build-x86-cuda
+
+sudo env LD_LIBRARY_PATH=.:source/backend/cuda:. \
+  ./replay_benchmark.out \
   --kernel-corpus-bench \
-  --kernel-corpus-root replay_benchmark/kernel_corpus \
+  --kernel-corpus-root ../replay_benchmark/kernel_corpus \
+  --kernel-corpus-case <audited-representative-case> \
   --kernel-corpus-runs 1 \
-  --perf-counter-events sm__cycles_elapsed.avg,dram__bytes.sum,sm__inst_executed.avg \
-  --perf-counter-output /tmp/kc_pmu.json
+  --kernel-corpus-no-latency \
+  --perf-counter-events <fractional-or-migration-metric> \
+  --perf-counter-output <new-staging-dir>/metric-smoke.json
+~~~
 
-# 查看
-python3 -c "
-import json
-d=json.load(open('/tmp/kc_pmu.json'))
-for c in d['cases'][:3]:
-    print(c['case'], c.get('pmu_metrics',{}))
-"
-```
+不要把某个历史 metric 名或历史 status 当作所有设备的固定断言；以本轮 discovery 与原始报告
+为准。
 
-**权限**：CUDA CUPTI Range Profiler 需要 `sudo` 运行（或设置 `RmProfilingAdminOnly=0`）。
+### 5.3 Availability
 
-### PMU 进程清理
+每轮使用新日志和新 CSV：
 
-PMU 扫描被 `Ctrl-Z` 挂起后，进程仍可能持有 CUPTI/NVIDIA profiler 资源；再次启动扫描可能得到 `CUPTI_ERROR_HARDWARE_BUSY`。`replay_pmu_availability` 不要并发启动多个实例，它们还可能竞争固定的临时 JSON 文件。
-
-通过进程名查找 PID 并清理测试进程：
-
-```bash
-pattern='(^|/| )replay_pmu_(test|availability)( |$)|(^|/| )replay_benchmark\.out.*--kernel-corpus-bench'
-pids=$(pgrep -f "$pattern" || true)
-if [ -n "$pids" ]; then
-    # 先恢复被 Ctrl-Z 挂起的进程，否则 TERM 可能只会排队而不会退出。
-    sudo kill -CONT $pids 2>/dev/null || true
-    sudo kill -TERM $pids 2>/dev/null || true
-    sleep 2
-    pids=$(pgrep -f "$pattern" || true)
-    [ -z "$pids" ] || sudo kill -KILL $pids
-fi
-
-pgrep -af 'replay_pmu_(test|availability)|replay_benchmark\.out.*--kernel-corpus-bench' || true
-```
-
-优先使用 `Ctrl-C` 结束前台扫描，不要使用 `Ctrl-Z`。如果只需清理当前 shell 的挂起任务，可先执行 `jobs -l`，再用 `fg %<job>` 恢复到前台并按 `Ctrl-C`。清理后确认没有残留 `replay_pmu_*` 或 `replay_benchmark.out --kernel-corpus-bench`，再启动下一轮采集。
-
-### CUDA PMU metric availability 测试
-
-`replay_benchmark/tests/test_pmu_availability.cpp` 会发现 CUDA metric，并按硬件域逐个执行单 metric 采集。一次只运行一个 availability 实例：
-
-```bash
-# 构建发现器和测试目标
-cmake --build build-x86-cuda --target list_cuda_metrics replay_pmu_availability -j2
-
-# 运行完整测试
+~~~bash
 cd build-x86-cuda
-sudo LD_LIBRARY_PATH=.:source/backend/cuda:. ./replay_pmu_availability
+set -o pipefail
 
-# 运行单个测试过滤器
-sudo LD_LIBRARY_PATH=.:source/backend/cuda:. ./replay_pmu_availability \
-  --filter CudaMetric.SmDomain
+sudo env LD_LIBRARY_PATH=.:source/backend/cuda:. \
+  ./replay_pmu_availability --filter CudaMetric.AllMetrics \
+  2>&1 | tee <new-staging-dir>/sweep.log
 
-# 逐个检查发现的全部 metric（7200 个 metric，预计耗时很长）
-sudo LD_LIBRARY_PATH=.:source/backend/cuda:. ./replay_pmu_availability \
-  --filter CudaMetric.AllMetrics
-```
-
-常用过滤器包括 `CudaMetric.Discovery`、`CudaMetric.AllMetrics`、`CudaMetric.SmDomain`、`CudaMetric.DramDomain`、`CudaMetric.L1texDomain`、`CudaMetric.LtsDomain`、`CudaMetric.SmspDomain`、`CudaMetric.KeyMetrics` 和 `CudaMetric.Reproducibility`。`AllMetrics` 每个 metric 启动一个单 metric benchmark，预计比域测试耗时很多；如果输出出现大量 `invalid` 或 `CUPTI_ERROR_HARDWARE_BUSY`，先按上面的进程清理流程停止残留扫描，再重试；不要把 metric 枚举成功当作 metric 采集成功。
-
-### Adreno / Mali（远程设备）
-
-```bash
-# 单 metric 单进程扫描（脚本自动遍历所有 event × case × measurement）
-python3 skills/gpu-pmu-sweep/scripts/sweep_opencl_pmu.py \
-  --device rhinopi \
-  --events all \
-  --measurements 3 \
-  --workload-runs 5 \
-  --output-csv records/rhinopi-all.csv \
-  --keep-json-dir records/rhinopi-all-raw
-```
-
-### CUDA kernel corpus sweep
-
-```bash
-# 扫描所有 CUDA case × 指定 metric 集合
-sudo LD_LIBRARY_PATH=build/:build/source/backend/cuda:. build/replay_benchmark.out \
-  --kernel-corpus-bench \
-  --kernel-corpus-root replay_benchmark/kernel_corpus \
-  --kernel-corpus-runs 3 \
-  --perf-counter-events sm__cycles_elapsed.avg,sm__inst_executed.avg,dram__bytes.sum,dram__bytes_read.sum,dram__bytes_write.sum,l1tex__t_sector_hit_rate.pct,lts__t_sector_hit_rate.pct \
-  --perf-counter-output /tmp/kc_sweep.json
-
-# 输出 CSV
-python3 -c "
-import json, csv
-d=json.load(open('/tmp/kc_sweep.json'))
-with open('/tmp/kc_sweep.csv','w') as f:
-    w=csv.writer(f)
-    w.writerow(['case','variant','tag'] + [k for k in d['cases'][0].get('pmu_metrics',{})])
-    for c in d['cases']:
-        m=c.get('pmu_metrics',{})
-        w.writerow([c['case'],c['variant'],c['tag']] + [m.get(k,'') for k in d['cases'][0].get('pmu_metrics',{})])
-"
-```
-
-## 测量规则
-
-- **CUDA**：`--kernel-corpus-runs N` 控制 workload 重复次数。PMU 在所有 N 次 launch 外包一个 range，输出的是 N 次聚合值。
-- **OpenCL/Vulkan**：`--measurements M` 控制独立进程数，`--workload-runs N` 控制每进程 dispatch 数。一次只测一个 event（单 metric 单进程）。
-- **delta 计算**：`delta = workload_delta - control_delta`。control 是空跑（无 kernel launch），workload 是实际执行。
-- **raw JSON 保存**：始终保留原始 JSON 输出用于审计。
-
-## CSV 契约
-
-### CUDA 全量有效 PMC sweep
-
-先把 `CudaMetric.AllMetrics` 的日志拆成两个 CSV。完整 CSV 保留所有状态，
-`cuda_pmc_valid.csv` 只包含状态为 `VALID` 的 metric；`OVERFLOW` 的
-`9223372036854775808` 哨兵值不会进入有效清单：
-
-```bash
-cd build-x86-cuda
 python3 ../skills/gpu-pmu-sweep/scripts/parse_cuda_pmu_log.py \
-  --input sweep.log \
-  --all-csv cuda_pmc_all.csv \
-  --valid-csv cuda_pmc_valid.csv
-```
+  --input <new-staging-dir>/sweep.log \
+  --all-csv <new-staging-dir>/cuda_pmc_all.csv \
+  --valid-csv <new-staging-dir>/cuda_pmc_valid.csv
+~~~
 
-默认从 CUDA kernel corpus 中按 `op_type` 选择一个代表 case（数量随当前
-`operator_cases.json` 动态变化，每个保留文件中的第一个 variant/case），再和
-有效 metric 自动扫描。每个 benchmark 进程只请求一个 case，默认将 32 个
-metric 放入同一个 CUPTI Session；CUPTI 负责该 Session 内部的 replay pass。
-扫描严格串行，`sweep_rows.csv` 是断点账本，使用 `--resume` 可从中断处继续：
+解析器必须拒绝中断、缺号、重复、汇总不一致、没有 OK/PASSED 结束标记的日志。有效 metric 数
+由本轮 `cuda_pmc_valid.csv` 动态决定，不得写死。`cuda_pmc_all.csv` 可保留重复的非 VALID
+请求名；`cuda_pmc_valid.csv` 中 VALID metric 必须唯一、有序且数值状态合法。
 
-脚本会自动传入 `--kernel-corpus-no-latency`，PMC sweep 不执行额外的
-latency event workload。若 CUPTI 拒绝一个批量配置，脚本会自动二分重试，
-最终降级到单 metric，不会把整批误记为无效。
+### 5.4 CaseSelectionPlan 与 PMC rows
 
-```bash
+P0 固定 target 为 `matmul`、`conv_dw`、`reduction`、`softmax`、`transpose`、
+`maxpool`、`avgpool`，每类请求 K=5 个 distinct condition。最终 selected case 数只能由
+当前 manifest 和 plan 产生。
+
+首次正式采集：
+
+~~~bash
+cd build-x86-cuda
 sudo -v
+
 python3 ../skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py \
-  --valid-csv cuda_pmc_valid.csv \
+  --valid-csv <new-staging-dir>/cuda_pmc_valid.csv \
   --corpus-root ../replay_benchmark/kernel_corpus \
   --binary ./replay_benchmark.out \
   --workdir . \
   --lib-dir .:source/backend/cuda:. \
-  --case-selection op-type \
+  --case-selection condition-balanced \
+  --conditions-per-op-type 5 \
+  --target-op-type matmul \
+  --target-op-type conv_dw \
+  --target-op-type reduction \
+  --target-op-type softmax \
+  --target-op-type transpose \
+  --target-op-type maxpool \
+  --target-op-type avgpool \
+  --selection-plan-output <new-staging-dir>/cuda_kernel_pmc_kernelreplay_rows.csv.selection.json \
+  --device-fingerprint '<GPU|driver|CUDA|CUPTI>' \
   --metrics-per-session 32 \
+  --runs 1 \
+  --sudo \
+  --output-csv <new-staging-dir>/cuda_kernel_pmc_kernelreplay_rows.csv \
+  --output-json <new-staging-dir>/cuda_kernel_pmc_kernelreplay.json
+~~~
+
+语义约束：
+
+- 每行是一个 `(case, metric)`；
+- 一个 benchmark/CUPTI session 有唯一 `collection_session_id`；
+- 同 session metric 共享 `order_index` 和环境事实；
+- `num_passes` 是 replay pass，不是 repeat；
+- `--runs` 是 measurement 内 launch 数，不是 repeat；
+- compact JSON 不能替代完整 rows ledger；
+- 完整 rows 数动态等于 plan-selected case 数 × 本轮 ordered valid metric 数。
+
+合法续跑必须复用保存的 plan：
+
+~~~bash
+python3 ../skills/gpu-pmu-sweep/scripts/sweep_cuda_kernel_pmc.py \
+  --valid-csv <same-staging-dir>/cuda_pmc_valid.csv \
+  --corpus-root ../replay_benchmark/kernel_corpus \
+  --binary ./replay_benchmark.out \
+  --workdir . \
+  --lib-dir .:source/backend/cuda:. \
+  --selection-plan-input <same-staging-dir>/cuda_kernel_pmc_kernelreplay_rows.csv.selection.json \
+  --selection-plan-output <same-staging-dir>/cuda_kernel_pmc_kernelreplay_rows.csv.selection.json \
+  --device-fingerprint '<与首次完全相同>' \
+  --metrics-per-session 32 \
+  --runs 1 \
   --sudo --resume \
-  --output-csv cuda_kernel_pmc_kernelreplay_rows.csv \
-  --output-json cuda_kernel_pmc_kernelreplay.json
-```
+  --output-csv <same-staging-dir>/cuda_kernel_pmc_kernelreplay_rows.csv \
+  --output-json <same-staging-dir>/cuda_kernel_pmc_kernelreplay.json
+~~~
 
-输出 CSV 每行记录一个 `(case, metric)` 的 PMU 状态、值和错误；输出 JSON
-只写入有效 PMC，结构为：
+### 5.5 独立 latency
 
-```json
-{
-  "cuda_relu_fp32_smoke": {
-    "pmc": {"sm__cycles_elapsed.avg": 123}
-  }
-}
-```
+latency 必须关闭 PMU，并覆盖当前 manifest 的全部 CUDA case。正式运行不得设置
+`REPLAY_KERNEL_LATENCY_CASE_FILTER`：
 
-如需扫描当前 corpus 中的全部 CUDA case，显式指定：
+~~~bash
+cd build-x86-cuda
 
-```bash
---case-selection all
-```
-
-延迟不从 PMC sweep 获取。独立延迟测试会显式关闭 PMU，并输出单独的
-`case -> latency_us` JSON：
-
-```bash
-cmake --build build-x86-cuda --target replay_kernel_latency replay_benchmark.out -j2
-
-REPLAY_KERNEL_LATENCY_OUTPUT=cuda_kernel_latency.json \
+env -u REPLAY_KERNEL_LATENCY_CASE_FILTER \
+  REPLAY_KERNEL_CORPUS_ROOT=../replay_benchmark/kernel_corpus \
+  REPLAY_KERNEL_LATENCY_OUTPUT=<new-staging-dir>/cuda_kernel_latency.json \
+  LD_LIBRARY_PATH=.:source/backend/cuda:. \
   ./replay_kernel_latency --filter KernelLatency.AllCudaCases
-```
+~~~
 
-单 case 冒烟验证可设置 `REPLAY_KERNEL_LATENCY_CASE_FILTER`；正式测量时不要设置：
+latency producer 只能接受中间 benchmark report 中 `valid=true` 且
+`validation_status=validation_passed` 的 case；正式 latency 记录必须有正数有限 latency、
+真实 launch records 和 environment。最终 schema 不需要重复保存这两个中间状态字段。
+launch stage、workload runs 或 profiler passes 都不是独立 repeat。latency run 与 PMC
+session 永远分开。
 
-```bash
-REPLAY_KERNEL_LATENCY_CASE_FILTER=cuda_relu_fp32_smoke \
-  ./replay_kernel_latency --filter KernelLatency.AllCudaCases
-```
+## 6. 交给 PMC Source Gate
 
-没有权限或 CUPTI 启动失败会记录为 `COMMAND_FAILED`，不会伪造 PMC 值。
+availability、latency 和 PMC rows 全部结束后，先确认没有进程继续写 staging，再把以下原始
+产物交给 `pmc-source-gate`：
 
-### CUDA kernel corpus sweep CSV
+~~~text
+corpus-audit 放行记录
+operator_cases.json + manifest_sha256
+availability 原始日志
+cuda_pmc_all.csv
+cuda_pmc_valid.csv
+cuda_kernel_pmc_kernelreplay_rows.csv.selection.json + plan_id
+cuda_kernel_pmc_kernelreplay_rows.csv
+cuda_kernel_latency.json
+device/driver/CUDA/CUPTI fingerprint
+collector binary/code identity
+runs、metrics-per-session、timeout 和 sweep_config_id
+fractional/overflow smoke evidence
+~~~
 
-```text
-case,variant,tag,sm__cycles_elapsed.avg,sm__inst_executed.avg,dram__bytes.sum,...
-```
+本 Skill 不生成 `cuda_pmc_source_validation.json`，也不把采集目录复制到正式固定路径。只有
+`pmc-source-gate` 输出 `valid=true` 后，数据才能交给 `pmc-interpreter`。
 
-每行一个 case，每列一个 metric 值（workload 采样值）。
+## 7. Adreno / Mali Collection
 
-### OpenCL/Vulkan sweep CSV
+OpenCL/Vulkan 使用单 event、独立 measurement、保留 raw JSON 的扫描：
 
-```text
-case_name,case_args,case_runs,pmu_metric_name,delta_metric
-```
+~~~bash
+python3 skills/gpu-pmu-sweep/scripts/sweep_opencl_pmu.py \
+  --device <device-name> \
+  --events all \
+  --measurements 3 \
+  --workload-runs 5 \
+  --output-csv <new-output>.csv \
+  --keep-json-dir <new-raw-json-dir>
+~~~
 
-每行一个 (case, event, measurement) 组合，`delta_metric` 是 workload-control 增量。
+必须区分：
 
-### Summary CSV
+- `measurements`：独立进程测量；
+- `workload-runs`：一次测量内 dispatch 数；
+- `workload_minus_control`：workload 与 empty control 的差；
+- implementation candidate-baseline delta：另一个实验设计。
 
-```text
-pmu_metric_name,valid,valid_cases
-```
+control delta 可以为负，使用 signed-asinh 等保留符号变换；不能套用 CUDA absolute counter
+的非负过滤。不同设备的结果不直接合并。
 
-`valid=true` 表示至少一个 case 有非零 delta；`valid_cases` 列出这些 case（分号分隔）。
+## 8. 退出条件与交接
 
-## 平台无关 PMC Interpreter
+Collection 阶段退出产物：
 
-语义解释核心位于 `kernel_agent/pmc_interpreter/`。CUDA、Adreno、Mali
-的差异只允许出现在 `dataset/sources/` 和 `dataset/catalog/`；投影、质量、去冗余、
-相关性、kernel signature 与 implementation delta layer 不按平台分支。
+~~~text
+manifest_sha256
+device/driver/profiler fingerprint
+collector binary identity
+availability all/valid ledger
+selection plan
+complete PMC rows
+independent latency JSON
+raw logs and smoke evidence
+~~~
 
-统一输入 schema 为 `mnn-pmc-dataset/v1`，核心实体必须区分：
+采集退出只表示原始账本已冻结。若 manifest、collector、metric 清单、设备或采样策略发生变化，
+旧 staging 立即失效，不能跨身份 resume，也不能交给 Source Gate 冒充同一轮实验。
 
-- `KernelCondition`：device + kernel 语义 + shape/workload + implementation；
-- `MeasurementRun`：独立的 PMC 或 latency run，含 repeat/session/environment；
-- `MetricObservation`：原生 metric、状态、值语义和 profiler pass；
-- `ComparisonPair`：implementation baseline/candidate 配对；
-- `FeatureSpec`：由 raw PMC 构造出的分析特征，和原生 metric 分开保存。
+## 9. 静态与单元验证
 
-特别注意以下概念不能合并：
+修改采集脚本后运行：
 
-- workload-control PMC delta；
-- candidate-baseline implementation delta；
-- 独立 measurement repeat；
-- 单次测量内部的 workload runs；
-- profiler replay passes。
+~~~bash
+git diff --check
 
-结构化类的固定位置为：
+.venv/bin/python -m unittest discover \
+  -s skills/gpu-pmu-sweep/tests \
+  -p 'test_*.py'
 
-- `dataset/model.py`：设备、condition、run、PMC/latency 观测、配对和 `PmcDataset`；
-- `dataset/reports.py`：特征、分析配置、逐层输入输出和 `PmcAnalysisReport`；
-- `dataset/document.py`：`MarkdownSection` 与 `MarkdownDocument`；
-- `dataset/catalog/`：kernel taxonomy 与 native metric 语义目录。
+.venv/bin/python -m unittest discover \
+  -s replay_benchmark/kernel_corpus/tests \
+  -p 'test_pmc_workload_metadata.py'
+~~~
 
-所有这些模型都继承严格 Pydantic 基类，禁止未知字段和非有限数值；模型字段禁止重新赋值，
-内含容器由 layer 按只读约定消费。`frozen=True` 只是浅冻结，不是深不可变或完整审计保证。
-输入语义必须在 dataset 构造阶段写入 `KernelCondition` 和 `MetricDescriptor`，不能在分析时
-再传入松散的语义映射。`KernelCondition.expected_mechanisms` 是 Signature 层的显式输入；
-未知时使用空 tuple，layer 不得按平台或 kernel 类别硬编码另一份机制表。
-
-一次 Interpreter 分析必须 device-scoped：所有参与分析的 `KernelCondition.device_id` 必须
-相同。多设备 bundle 要先拆分并分别运行；“平台无关”不代表可以在一次统计中合并多设备
-native counter。
-
-分析层必须严格串行，不允许跳层或重排：
-
-```text
-ProjectionOutput
-  → QualityOutput
-  → RedundancyOutput
-  → CorrelationOutput
-  → KernelSignatureOutput
-  → DeltaRelationOutput
-```
-
-每个 layer 只接受上一层的具体 Pydantic 输出类型，并在输出中累积此前所有固定报告；不得以
-无类型的 annotations/artifacts 传递隐式状态。
-
-Correlation 层必须把控制后的 condition → residual feature 坐标写入固定报告，Signature
-层据此计算类别 relevance 和冗余；不能只 residualize latency 后又用原始 PMC 做类别选择。
-
-统一结构化输出 schema 为 `mnn-pmc-analysis-report/v1`，包含：
-
-- `metric_knowledge`：语义目录、质量、用途分类、相关证据和冗余簇；
-- `canonical_metric_sets.descriptive_canonical`：不使用 latency 的稳定描述候选；
-- `canonical_metric_sets.latency_association`：单独的监督式探索集合；
-- `kernel_signatures`：platform-neutral concept slot 到当前设备 native metric 的解析；
-- `delta_rulebook`：只由合法 implementation pairs 生成的条件关系规则；
-- `evidence_index` 和 `warnings`：显式标注能回答与不能回答的问题。
-
-Delta 的最低样本门槛按不同 `semantic_equivalence_key` 的独立语义组计算，不按 pair CSV
-行数计算；同一组内的多个 pair 先汇总。因果升级还要求 baseline/candidate 共享至少两个
-非空 `paired_run_group_id`，且每个共享组在双方都同时连接有效 PMC 与 latency 重复。独立
-`repeat_id` 只在这些共享组内统计，未配对重复不能补足门槛；所有 pair 还必须填写一致、非空
-且与 feature 语义匹配的 `controlled_mechanism`。clock/temperature 的实测匹配也必须在每个
-共享组内成立，不能用未配对 run 的环境值补足。
-
-Delta 同时生成全局和 family-scoped rule：报告可用状态必须按两者并集判断。每个统计 scope
-内，不同 delta 共线 fingerprint 必须分配不同 group ID；不能给整个 family 共用一个
-`collinear` ID，否则选择器会把多个独立共线簇误删到只剩一条规则。
-
-rulebook 只能在其设备、kernel 类别、贡献配对观测区间和 intervention 设计内解释；禁止
-外推到其他设备、类别、未观测数值范围或不同干预机制。
-
-`semantics/` 只允许包含结果编译和文档渲染职责：
-
-- `semantics/compiler.py`：完整 `DeltaRelationOutput` → `PmcAnalysisReport`，不做新统计；
-- `semantics/markdown.py`：`PmcAnalysisReport` → 固定章节中文 `MarkdownDocument`。
-
-当前 CUDA long rows 可通过 `dataset/sources/mnn_replay.py` 直接构造统一数据集并分析：
-
-```bash
-python3 -m kernel_agent.pmc_interpreter \
-  --pmc-csv build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv \
-  --latency-json build-x86-cuda/cuda_kernel_latency.json \
-  --operator-cases replay_benchmark/kernel_corpus/operator_cases.json \
-  --platform cuda --backend cuda --namespace cupti \
-  --normalized-output-json build-x86-cuda/cuda_pmc_dataset_v1.json \
-  --output-json build-x86-cuda/cuda_pmc_analysis_report_v1.json \
-  --output-md build-x86-cuda/cuda_pmc_analysis_report_v1.md
-```
-
-`--output-json` 必填并保存完整 `mnn-pmc-analysis-report/v1`；`--output-md` 可选并保存面向人的
-中文解释。Markdown 不能替代结构化 JSON。
-
-CUDA 辅助入口 `skills/gpu-pmu-sweep/scripts/analyze_cuda_pmc_semantics.py` 调用上述
-统一 CLI，本身不包含分析逻辑。
-
-Adreno/Mali 的 control-delta CSV 使用 `dataset/sources/control_delta.py` 中的
-`append_control_delta_csv()`
-追加到同一 normalized dataset；负 delta 是合法观测，会使用 signed-asinh
-变换，不能按 CUDA raw counter 的非负约束过滤：
-
-```python
-from kernel_agent.pmc_interpreter import analyze
-from kernel_agent.pmc_interpreter.dataset import load_normalized_bundle
-from kernel_agent.pmc_interpreter.dataset.sources import append_control_delta_csv
-
-dataset = load_normalized_bundle("device_conditions.json")
-dataset = append_control_delta_csv(
-    dataset, "records/device-pmu.csv", namespace="kgsl"  # 或 mali
-)
-report = analyze(dataset)
-```
-
-跨平台只能通过 `MetricDescriptor.concept_id`、`mapping_level` 和
-`mapping_confidence` 对齐。不同 GPU 的 native counter 数值和效应系数默认仍是
-device-scoped，不能因名称或机制相似就直接合并。
-
-## metric 选择策略
-
-### 按 op 类型选择
-
-| Op 类型 | 推荐 metric | 分析目标 |
-|---------|-------------|---------|
-| conv_dw / matmul / gemm | `sm__cycles_elapsed.avg`, `dram__bytes.sum`, `sm__sass_thread_inst_executed_op_fadd_pred_on.sum` | 计算 vs 带宽比 |
-| reduction / softmax | `sm__warps_active.avg.per_cycle_active`, `smsp__warp_issue_stalled_long_scoreboard.avg.per_warp_active` | 占用率 + 显存停顿 |
-| pooling / interp | `dram__bytes.sum`, `l1tex__t_sector_hit_rate.pct` | 带宽 + L1 命中 |
-| cast / raster | `dram__bytes_read.sum`, `dram__bytes_write.sum` | 纯带宽 |
-
-### 按 memory-bound / compute-bound 选择
-
-- **memory-bound case**（大 spatial、小 kernel）：看 `dram__throughput.avg.pct_of_peak_sustained_elapsed`（带宽利用率是否接近峰值）
-- **compute-bound case**（大 kernel、高 MAC）：看 `sm__inst_executed.avg` / `sm__cycles_elapsed.avg`（IPC = inst/cycles）
-- **latency-bound case**：看 `smsp__warp_issue_stalled_long_scoreboard.avg.per_warp_active`（长延迟等待占比）
-
-## 设备信息
-
-- **本机**：NVIDIA GeForce RTX 2080 Ti (TU102, sm75)，CUDA 13.2
-- **Rhinopi**：`${RHINO_PI_USER}@${RHINO_PI_HOST}`，`$RHINO_PI_WORKSPACE/replay-benchmark`，Adreno 740
-- **OrangePi**：`${ORANGE_PI_USER}@${ORANGE_PI_HOST}`，`$ORANGE_PI_WORKSPACE`，Mali-G610
-- 凭据（IP/用户/密码/workspace）统一记录在仓库根 `.env`，使用前 `source ./.env`；不写入本 skill
-
-## 验证
-
-修改脚本后运行单元测试：
-
-```bash
-python3 -m unittest discover -s kernel_agent/tests -p 'test_*.py'
-python3 -m unittest discover -s skills/gpu-pmu-sweep/tests -p 'test_*.py'
-```
-
-## 合并报告
-
-跨后端合并 valid metric（同一设备）：
-
-```bash
-python3 skills/gpu-pmu-sweep/scripts/merge_backend_valid_metrics.py \
-  --opencl-metrics records/orangepi-all-metrics.csv \
-  --vulkan-metrics records/orangepi-vulkan-model-all-metrics.csv \
-  --output-csv records/orangepi-opencl-vulkan-valid-metrics.csv
-```
-
-合并多轮 sweep 的详细 CSV：
-
-```bash
-python3 skills/gpu-pmu-sweep/scripts/merge_opencl_pmu_csv.py \
-  --input-csv records/rhinopi-all.csv \
-  --input-csv records/rhinopi-model-smoke.csv \
-  --output-csv records/rhinopi-all.csv \
-  --summary-csv records/rhinopi-all-metrics.csv
-```
-
-不同设备的结果**不合并**——设备身份是实验边界。
+这些测试不替代真实设备的 fractional/overflow smoke、availability、latency 和 rows。发布门禁
+及其测试属于 `pmc-source-gate`。

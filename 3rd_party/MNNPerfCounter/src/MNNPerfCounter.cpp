@@ -667,7 +667,17 @@ bool Session::start() {
 }
 
 bool Session::stop(CounterValue* values, size_t count) {
-    if (mImpl == nullptr || !mImpl->started || values == nullptr || count < mImpl->adrenoCounters.size() + mImpl->maliCounters.size()) {
+    size_t requiredCount = 0;
+    if (mImpl != nullptr) {
+        if (mImpl->vendor == GpuVendor::Adreno) {
+            requiredCount = mImpl->adrenoCounters.size();
+        } else if (mImpl->maliSampler) {
+            requiredCount = mImpl->maliCounters.size();
+        } else if (mImpl->vendor == GpuVendor::Nvidia) {
+            requiredCount = mImpl->nvMetricNames.size();
+        }
+    }
+    if (mImpl == nullptr || !mImpl->started || values == nullptr || count < requiredCount) {
         return false;
     }
     bool ok = true;
@@ -682,6 +692,9 @@ bool Session::stop(CounterValue* values, size_t count) {
             for (size_t i = 0; i < raw.size(); ++i) {
                 values[i].name = mImpl->adrenoCounters[i].spec.name;
                 values[i].value = current[i] >= mImpl->adrenoCounters[i].previous ? current[i] - mImpl->adrenoCounters[i].previous : 0;
+                values[i].floatingPointValue = 0.0;
+                values[i].valueKind = CounterValueKind::UnsignedInteger;
+                values[i].status = CounterValueStatus::Valid;
             }
         }
         for (const auto& counter : mImpl->adrenoCounters) {
@@ -700,6 +713,9 @@ bool Session::stop(CounterValue* values, size_t count) {
                 }
                 values[i].name = mImpl->maliSpecs[i].name;
                 values[i].value = sample.value.uint64;
+                values[i].floatingPointValue = 0.0;
+                values[i].valueKind = CounterValueKind::UnsignedInteger;
+                values[i].status = CounterValueStatus::Valid;
             }
         }
         if (mImpl->maliSampler->stop_sampling()) ok = false;

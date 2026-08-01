@@ -25,9 +25,27 @@ struct CounterSpec {
     const char* name = nullptr;
 };
 
+enum class CounterValueKind {
+    UnsignedInteger,
+    FloatingPoint,
+};
+
+enum class CounterValueStatus {
+    Invalid,
+    Valid,
+    Overflow,
+};
+
 struct CounterValue {
     const char* name = nullptr;
+    // Adreno and Mali expose native uint64 counters. Keep that channel exact
+    // instead of routing it through double, which would lose values above
+    // 2^53. NVIDIA's metrics evaluator natively returns double and uses the
+    // floatingPointValue channel without an integer cast.
     uint64_t value = 0;
+    double floatingPointValue = 0.0;
+    CounterValueKind valueKind = CounterValueKind::UnsignedInteger;
+    CounterValueStatus status = CounterValueStatus::Invalid;
 };
 
 struct CounterBinding {

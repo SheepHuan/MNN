@@ -1164,13 +1164,13 @@ bool CudaNhwc2NchwFp16Kernel::validate(const AdaptedCase& ac, const std::vector<
     const int total = outside * axis * inside;
     if (static_cast<int>(output.size() * sizeof(float)) < total * (int)sizeof(__half)) return false;
     const __half* out = reinterpret_cast<const __half*>(output.data());
-    for (int idx = 0; idx < total; ++idx) {
-        int x = idx % inside;
-        int y = (idx / inside) % axis;
-        int z = idx / (inside * axis);
-        int nchwOff = z * axis * inside + y * inside + x;
-        if (std::fabs(__half2float(out[nchwOff]) - ac.validatorInputA[idx]) > 1.0f) return false;
-    }
+    for (int b = 0; b < outside; ++b)
+        for (int c = 0; c < axis; ++c)
+            for (int a = 0; a < inside; ++a) {
+                int src = (b * inside + a) * axis + c;
+                int dst = (b * axis + c) * inside + a;
+                if (std::fabs(__half2float(out[dst]) - ac.validatorInputA[src]) > 1e-3f) return false;
+            }
     return true;
 }
 
@@ -1208,13 +1208,13 @@ bool CudaNchw2NhwcFp16Kernel::validate(const AdaptedCase& ac, const std::vector<
     const int total = outside * axis * inside;
     if (static_cast<int>(output.size() * sizeof(float)) < total * (int)sizeof(__half)) return false;
     const __half* out = reinterpret_cast<const __half*>(output.data());
-    for (int idx = 0; idx < total; ++idx) {
-        int x = idx % inside;
-        int y = (idx / inside) % axis;
-        int z = idx / (inside * axis);
-        int nchwOff = z * axis * inside + y * inside + x;
-        if (std::fabs(__half2float(out[idx]) - ac.validatorInputA[nchwOff]) > 1.0f) return false;
-    }
+    for (int b = 0; b < outside; ++b)
+        for (int a = 0; a < inside; ++a)
+            for (int c = 0; c < axis; ++c) {
+                int src = (b * axis + c) * inside + a;
+                int dst = (b * inside + a) * axis + c;
+                if (std::fabs(__half2float(out[dst]) - ac.validatorInputA[src]) > 1e-3f) return false;
+            }
     return true;
 }
 

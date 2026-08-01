@@ -788,6 +788,13 @@ static PmuInterval samplePmuInterval(const PmuBatch& batch, OpenCLPmuRuntime* ru
         interval.error = ok ? session->error() : workloadError;
         return interval;
     }
+    for (const auto& value : interval.values) {
+        if (value.status != MNN::PerfCounter::CounterValueStatus::Valid ||
+            value.valueKind != MNN::PerfCounter::CounterValueKind::UnsignedInteger) {
+            interval.error = "OpenCL PMU counter did not return a valid uint64 value";
+            return interval;
+        }
+    }
     interval.available = true;
     return interval;
 }

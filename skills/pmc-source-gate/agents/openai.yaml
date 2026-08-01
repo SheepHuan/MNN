@@ -1,0 +1,4 @@
+interface:
+  display_name: "PMC 数据源发布门禁"
+  short_description: "严格验收 PMC 原始数据身份、一致性、完整性与可发布性"
+  default_prompt: "使用 $pmc-source-gate 验收本轮 PMC 原始数据，并输出可审计的发布门禁结果。"

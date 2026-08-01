@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kernel Corpus Audit"
+  short_description: "独立审计 kernel 忠实性、launch、validator 与元数据"
+  default_prompt: "使用 $corpus-audit 独立审计新增 kernel 的忠实性、launch、validator 和 manifest，并给出采集放行结论。"

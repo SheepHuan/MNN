@@ -130,6 +130,38 @@ struct PmuScope {
     uint64_t workloadNs = 0;
 };
 
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+static PmuMetricValueStatus pmuMetricStatus(MNN::PerfCounter::CounterValueStatus status) {
+    switch (status) {
+        case MNN::PerfCounter::CounterValueStatus::Valid:
+            return PmuMetricValueStatus::Valid;
+        case MNN::PerfCounter::CounterValueStatus::Overflow:
+            return PmuMetricValueStatus::Overflow;
+        case MNN::PerfCounter::CounterValueStatus::Invalid:
+            return PmuMetricValueStatus::Invalid;
+    }
+    return PmuMetricValueStatus::Invalid;
+}
+
+static void appendPmuMetrics(const PmuScope& pmu, CaseReport* report) {
+    if (report == nullptr) return;
+    const size_t count = std::min(pmu.names.size(), pmu.values.size());
+    report->pmuMetrics.reserve(report->pmuMetrics.size() + count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& source = pmu.values[i];
+        PmuMetricValue metric;
+        metric.name = pmu.names[i];
+        metric.integerValue = source.value;
+        metric.floatingPointValue = source.floatingPointValue;
+        metric.valueKind = source.valueKind == MNN::PerfCounter::CounterValueKind::FloatingPoint
+                               ? PmuMetricValueKind::FloatingPoint
+                               : PmuMetricValueKind::UnsignedInteger;
+        metric.status = pmuMetricStatus(source.status);
+        report->pmuMetrics.emplace_back(std::move(metric));
+    }
+}
+#endif
+
 static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
     PmuScope s;
     if (pmuExplicitlyDisabled(eventsOverride)) {
@@ -186,7 +218,11 @@ static void endPmu(PmuScope& s) {
     s.values.resize(s.names.size());
     if (s.session && s.session->stop(s.values.data(), s.values.size())) {
         s.status = "sampled";
-        if (!s.values.empty()) s.workloadDelta = s.values[0].value;
+        if (!s.values.empty() &&
+            s.values[0].status == MNN::PerfCounter::CounterValueStatus::Valid &&
+            s.values[0].valueKind == MNN::PerfCounter::CounterValueKind::UnsignedInteger) {
+            s.workloadDelta = s.values[0].value;
+        }
     } else {
         const char* e = s.session ? s.session->error() : nullptr;
         s.status = std::string("stop_failed") + (e ? (": " + std::string(e)) : "");
@@ -259,9 +295,15 @@ static bool runValidator(const AdaptedCase& ac, const std::vector<float>& output
     // for adapters that haven't been migrated yet.
     if (ac.adapter != nullptr) {
         const bool ok = ac.adapter->validate(ac, output);
-        if (ok) return true;
-        if (ac.validator.empty()) return false;
-        // adapter validate failed, try legacy
+        switch (detail::adapterValidationDecision(true, ac.adapter->isCuda(), ok)) {
+            case detail::AdapterValidationDecision::Accept:
+                return true;
+            case detail::AdapterValidationDecision::Reject:
+                return false;
+            case detail::AdapterValidationDecision::TryLegacy:
+                if (ac.validator.empty()) return false;
+                break;
+        }
     } else {
         // no adapter, use legacy
     }
@@ -592,8 +634,9 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     report.workloadNs = pmu.workloadNs;
     report.runs = runs;
     report.numPasses = pmu.numPasses;
-    for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
-        report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    appendPmuMetrics(pmu, &report);
+#endif
 
     // readback output buffers
     std::vector<float> output;
@@ -874,8 +917,9 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
     report.workloadNs = pmu.workloadNs;
     report.runs = runs;
     report.numPasses = pmu.numPasses;
-    for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
-        report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    appendPmuMetrics(pmu, &report);
+#endif
 
     // readback output buffers
     std::vector<float> output;
@@ -1010,7 +1054,6 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         cudaEvent_t evStop = nullptr;
         CudaLaunchMetadataCollector launchCollector;
         const bool collectLaunchMetadata = pmuExplicitlyDisabled(perfCounterEvents);
-        if (collectLaunchMetadata) launchCollector.start();
         environmentSampler.sampleBefore();
         bool timingReady = cudaEventCreate(&evStart) == cudaSuccess &&
                            cudaEventCreate(&evStop) == cudaSuccess;
@@ -1033,13 +1076,26 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         if (evStart != nullptr) cudaEventDestroy(evStart);
         if (evStop != nullptr) cudaEventDestroy(evStop);
         environmentSampler.sampleAfter();
+        bool buffersRestored = restoreInitialData();
         if (collectLaunchMetadata) {
-            launchCollector.stop();
+            const bool collectorStarted = launchCollector.start();
+            cudaError_t metadataLaunchStatus = cudaSuccess;
+            if (collectorStarted) {
+                metadataLaunchStatus = cudaAdapter->launch(ac, ctx);
+                if (metadataLaunchStatus == cudaSuccess) metadataLaunchStatus = cudaStreamSynchronize(stream);
+                launchCollector.stop();
+                buffersRestored = restoreInitialData() && buffersRestored;
+            }
             report.launchSamplingStatus = launchCollector.status();
             report.launchRecords = launchCollector.records();
+            if (metadataLaunchStatus != cudaSuccess) {
+                report.launchSamplingStatus = "unavailable:metadata launch failed: " +
+                    std::string(cudaGetErrorString(metadataLaunchStatus));
+                report.launchRecords.clear();
+            }
         }
         report.environment = environmentSampler.observation();
-        if (!timingReady || !restoreInitialData()) {
+        if (!timingReady || !buffersRestored) {
             report.error = "CUDA event latency measurement failed";
             cudaStreamDestroy(stream);
             for (auto p : devBufs) cudaFree(p);
@@ -1107,8 +1163,9 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     report.environment = environmentSampler.observation();
     // Save the values returned by this same profiler session. If CUPTI used
     // multiple passes, stop() has already merged those passes.
-    for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
-        report.pmuMetrics.push_back({pmu.names[i], pmu.values[i].value});
+#if defined(MNN_REPLAY_HAS_PERFCOUNTER)
+    appendPmuMetrics(pmu, &report);
+#endif
 
     // readback output buffers (as float; int kernels are compared bit-exact)
     std::vector<float> output;
@@ -1359,11 +1416,42 @@ bool runKernelCorpusBenchmark(const Options& options) {
             caseValue.AddMember("valid", report.valid, allocator);
             if (!report.pmuMetrics.empty()) {
                 rapidjson::Value pmuMetrics(rapidjson::kObjectType);
+                rapidjson::Value pmuMetricStatuses(rapidjson::kObjectType);
+                rapidjson::Value pmuMetricValueKinds(rapidjson::kObjectType);
                 for (const auto& m : report.pmuMetrics) {
-                    rapidjson::Value key(m.first.c_str(), allocator);
-                    pmuMetrics.AddMember(key, m.second, allocator);
+                    PmuMetricValueStatus status = m.status;
+                    if (status == PmuMetricValueStatus::Valid &&
+                        m.valueKind == PmuMetricValueKind::FloatingPoint &&
+                        (!std::isfinite(m.floatingPointValue) || m.floatingPointValue < 0.0)) {
+                        status = PmuMetricValueStatus::Overflow;
+                    }
+                    const char* statusName = status == PmuMetricValueStatus::Valid
+                                                 ? "valid"
+                                                 : (status == PmuMetricValueStatus::Overflow
+                                                        ? "overflow"
+                                                        : "invalid");
+                    rapidjson::Value statusKey(m.name.c_str(), allocator);
+                    pmuMetricStatuses.AddMember(
+                        statusKey, rapidjson::Value(statusName, allocator), allocator);
+                    rapidjson::Value kindKey(m.name.c_str(), allocator);
+                    pmuMetricValueKinds.AddMember(
+                        kindKey,
+                        rapidjson::Value(m.valueKind == PmuMetricValueKind::FloatingPoint
+                                             ? "float64"
+                                             : "uint64",
+                                         allocator),
+                        allocator);
+                    if (status != PmuMetricValueStatus::Valid) continue;
+                    rapidjson::Value valueKey(m.name.c_str(), allocator);
+                    if (m.valueKind == PmuMetricValueKind::FloatingPoint) {
+                        pmuMetrics.AddMember(valueKey, m.floatingPointValue, allocator);
+                    } else {
+                        pmuMetrics.AddMember(valueKey, m.integerValue, allocator);
+                    }
                 }
                 caseValue.AddMember("pmu_metrics", pmuMetrics, allocator);
+                caseValue.AddMember("pmu_metric_statuses", pmuMetricStatuses, allocator);
+                caseValue.AddMember("pmu_metric_value_kinds", pmuMetricValueKinds, allocator);
             }
             addString(caseValue, "launch_sampling_status", report.launchSamplingStatus, allocator);
             rapidjson::Value launchRecords(rapidjson::kArrayType);

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kernel Adapt"
+  short_description: "忠实接入 kernel、adapter、validator 与可审计 manifest"
+  default_prompt: "使用 $kernel-adapt 将目标 GPU kernel 忠实接入 replay_benchmark，并生成可审计 manifest 与 workload metadata。"

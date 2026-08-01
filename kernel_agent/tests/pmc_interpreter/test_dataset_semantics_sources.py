@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import csv
+import hashlib
 import importlib
 import json
 import tempfile
@@ -126,6 +127,24 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
                     "dtype": "float32",
                     "validator": "identity_fp32",
                     "int_params": {"size": 16},
+                    "shapes": {"input0": [16], "output0": [16]},
+                    "workload": {
+                        "output_elements": 16,
+                        "algorithmic_bytes": 128,
+                    },
+                    "launch": {
+                        "grid": [16, 1, 1],
+                        "block": [64, 1, 1],
+                    },
+                    "workload_provenance": {
+                        "algorithmic_bytes": {
+                            "status": "estimated",
+                            "source": "operator_case",
+                            "method": "semantic_formula",
+                            "formula": "(input_elements + output_elements) * 4",
+                            "confidence": 1.0,
+                        }
+                    },
                 },
                 {
                     "name": "case_b",
@@ -136,23 +155,85 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
                     "dtype": "float32",
                     "validator": "identity_fp32",
                     "int_params": {"size": 16},
+                    "shapes": {"input0": [16], "output0": [16]},
+                    "workload": {
+                        "output_elements": 16,
+                        "algorithmic_bytes": 128,
+                    },
+                    "workload_provenance": {
+                        "algorithmic_bytes": {
+                            "status": "estimated",
+                            "source": "operator_case",
+                            "method": "semantic_formula",
+                            "formula": "(input_elements + output_elements) * 4",
+                            "confidence": 1.0,
+                        }
+                    },
                 },
             ]
         }), encoding="utf-8")
         latency = root / "latency.json"
-        latency.write_text(
-            json.dumps({"case_a": 10.0, "case_b": 8.0}),
-            encoding="utf-8",
-        )
+        manifest_sha256 = hashlib.sha256(operator_cases.read_bytes()).hexdigest()
+        latency.write_text(json.dumps({
+            "format": "mnn-kernel-latency",
+            "version": 1,
+            "source_manifest_sha256": manifest_sha256,
+            "cases": {
+                "case_a": {
+                    "latency_us": 10.0,
+                    "launch_sampling_status": "sampled",
+                    "launch_records": [{
+                        "stage_index": 0,
+                        "kernel_name": "relu_kernel",
+                        "grid": [2, 1, 1],
+                        "block": [128, 1, 1],
+                        "registers_per_thread": 12,
+                        "static_shared_memory_bytes": 0,
+                        "dynamic_shared_memory_bytes": 0,
+                        "local_memory_per_thread_bytes": 0,
+                        "local_memory_total_bytes": 0,
+                    }],
+                    "environment": {
+                        "gpu_clock_hz_before": 1_500_000_000,
+                        "gpu_clock_hz_after": 1_490_000_000,
+                        "temperature_c_before": 50,
+                        "temperature_c_after": 51,
+                        "sampling_source": "nvml",
+                        "sampling_status": "sampled",
+                    },
+                },
+                "case_b": {
+                    "latency_us": 8.0,
+                    "launch_sampling_status": (
+                        "unavailable:no kernel activity records"
+                    ),
+                    "launch_records": [],
+                    "environment": {
+                        "gpu_clock_hz_before": 1_500_000_000,
+                        "gpu_clock_hz_after": 1_500_000_000,
+                        "temperature_c_before": 51,
+                        "temperature_c_after": 51,
+                        "sampling_source": "nvml",
+                        "sampling_status": "sampled",
+                    },
+                },
+            },
+        }), encoding="utf-8")
         rows = root / "rows.csv"
         with rows.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=[
-                "case", "metric", "status", "value", "pmu_status",
-                "num_passes", "returncode", "error",
+                "sweep_plan_id", "sweep_config_id", "case", "metric",
+                "status", "value", "pmu_status", "num_passes",
+                "returncode", "error", "collection_session_id",
+                "order_index", "gpu_clock_hz_before", "gpu_clock_hz_after",
+                "temperature_c_before", "temperature_c_after",
+                "environment_status", "environment_source",
             ])
             writer.writeheader()
             for case, value in (("case_a", 1.5), ("case_b", 2.5)):
                 writer.writerow({
+                    "sweep_plan_id": "fixture-plan",
+                    "sweep_config_id": "fixture-config",
                     "case": case,
                     "metric": "dram__bytes.sum",
                     "status": "VALID",
@@ -161,8 +242,161 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
                     "num_passes": 2,
                     "returncode": 0,
                     "error": "",
+                    "collection_session_id": "session-{}".format(case),
+                    "order_index": 0 if case == "case_a" else 1,
+                    "gpu_clock_hz_before": 1_500_000_000,
+                    "gpu_clock_hz_after": 1_490_000_000,
+                    "temperature_c_before": 50,
+                    "temperature_c_after": 51,
+                    "environment_status": "sampled",
+                    "environment_source": "nvml",
                 })
         return rows, latency, operator_cases
+
+    def test_launch_sampling_status_normalization_and_consistency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows, latency, operator_cases = self._write_mnn_fixture(root)
+            payload = json.loads(latency.read_text(encoding="utf-8"))
+            sampled_record = payload["cases"]["case_a"]["launch_records"][0]
+            payload["cases"]["case_a"].update({
+                "launch_sampling_status": (
+                    "unavailable:CUPTI Activity was not built"
+                ),
+                "launch_records": [],
+            })
+            payload["cases"]["case_b"].update({
+                "launch_sampling_status": "partial:dropped_records=1",
+                "launch_records": [sampled_record],
+            })
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+
+            dataset = load_mnn_kernelreplay_dataset(
+                rows, latency, operator_cases
+            )
+            self.assertEqual(
+                dataset.runs["latency::case_a"].launch_sampling_status,
+                "unavailable",
+            )
+            self.assertEqual(
+                dataset.runs["latency::case_b"].launch_sampling_status,
+                "error",
+            )
+            self.assertEqual(
+                len(dataset.runs["latency::case_b"].launch_records),
+                1,
+            )
+
+            payload["cases"]["case_a"].update({
+                "launch_sampling_status": "no_launch",
+                "launch_records": [],
+            })
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+            dataset = load_mnn_kernelreplay_dataset(
+                rows, latency, operator_cases
+            )
+            self.assertEqual(
+                dataset.runs["latency::case_a"].launch_sampling_status,
+                "no_launch",
+            )
+
+            payload["cases"]["case_a"].update({
+                "launch_sampling_status": "sampled",
+                "launch_records": [],
+            })
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValidationError,
+                "sampled launch collection must contain launch records",
+            ):
+                load_mnn_kernelreplay_dataset(rows, latency, operator_cases)
+
+    def test_latency_environment_does_not_accept_status_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows, latency, operator_cases = self._write_mnn_fixture(root)
+            payload = json.loads(latency.read_text(encoding="utf-8"))
+            environment = payload["cases"]["case_a"]["environment"]
+            environment["status"] = environment.pop("sampling_status")
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+
+            dataset = load_mnn_kernelreplay_dataset(
+                rows, latency, operator_cases
+            )
+            samples = dataset.runs["latency::case_a"].environment_samples
+            self.assertTrue(samples)
+            self.assertEqual({sample.status for sample in samples}, {"unknown"})
+
+    def test_latency_source_envelope_is_strict_but_legacy_is_exploratory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows, latency, operator_cases = self._write_mnn_fixture(root)
+            payload = json.loads(latency.read_text(encoding="utf-8"))
+            payload["collector"] = "unexpected"
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "fields must be exactly",
+            ):
+                load_mnn_kernelreplay_dataset(rows, latency, operator_cases)
+
+            payload.pop("collector")
+            case_b = payload["cases"].pop("case_b")
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "latency/manifest mismatch: 1 missing",
+            ):
+                load_mnn_kernelreplay_dataset(rows, latency, operator_cases)
+
+            payload["cases"]["case_b"] = case_b
+            payload["source_manifest_sha256"] = "0" * 64
+            latency.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "source manifest SHA256 does not match",
+            ):
+                load_mnn_kernelreplay_dataset(rows, latency, operator_cases)
+
+            latency.write_text(
+                json.dumps({"case_a": 10.0, "case_b": 8.0}),
+                encoding="utf-8",
+            )
+            dataset = load_mnn_kernelreplay_dataset(
+                rows, latency, operator_cases
+            )
+            self.assertTrue(
+                any("legacy flat latency JSON" in issue for issue in dataset.issues)
+            )
+            self.assertEqual(
+                dataset.runs["latency::case_a"].launch_sampling_status,
+                "not_collected",
+            )
+
+    def test_valid_metric_observation_rejects_nonfinite_source_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows, latency, operator_cases = self._write_mnn_fixture(root)
+            with rows.open(newline="", encoding="utf-8") as stream:
+                records = list(csv.DictReader(stream))
+            records[0]["value"] = "nan"
+            with rows.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=[
+                    "sweep_plan_id", "sweep_config_id", "case", "metric",
+                    "status", "value", "pmu_status", "num_passes",
+                    "returncode", "error", "collection_session_id",
+                    "order_index", "gpu_clock_hz_before", "gpu_clock_hz_after",
+                    "temperature_c_before", "temperature_c_after",
+                    "environment_status", "environment_source",
+                ])
+                writer.writeheader()
+                writer.writerows(records)
+
+            with self.assertRaisesRegex(
+                ValidationError,
+                "valid metric observation must contain a finite value",
+            ):
+                load_mnn_kernelreplay_dataset(rows, latency, operator_cases)
 
     def test_dataset_source_round_trip_control_delta_and_analysis_report(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -174,9 +408,46 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
             self.assertEqual(len(dataset.conditions), 2)
             self.assertEqual(len(dataset.comparisons), 1)
             self.assertEqual(dataset.metric_observations[0].value, 1.5)
+            pmc_run = dataset.runs[dataset.metric_observations[0].run_id]
+            self.assertEqual(pmc_run.collection_id, "session-case_a")
+            self.assertEqual(pmc_run.gpu_clock_hz, 1_495_000_000)
+            self.assertEqual(pmc_run.environment_samples[0].source, "nvml")
             self.assertNotEqual(
                 dataset.metric_observations[0].run_id,
                 dataset.latency_observations[0].run_id,
+            )
+            self.assertEqual(
+                dataset.conditions["case_a"].workload["algorithmic_bytes"],
+                128,
+            )
+            self.assertEqual(
+                dataset.conditions["case_a"].workload_provenance[
+                    "algorithmic_bytes"
+                ].method,
+                "semantic_formula",
+            )
+            latency_run = dataset.runs["latency::case_a"]
+            self.assertEqual(latency_run.launch_sampling_status, "sampled")
+            self.assertEqual(latency_run.launch_records[0].grid, (2, 1, 1))
+            self.assertEqual(
+                latency_run.launch_records[0].registers_per_thread,
+                12,
+            )
+            self.assertEqual(latency_run.gpu_clock_hz, 1_495_000_000)
+            self.assertEqual(latency_run.temperature_c, 50.5)
+            self.assertEqual(len(latency_run.environment_samples), 2)
+            self.assertEqual(
+                dataset.runs["latency::case_b"].launch_sampling_status,
+                "unavailable",
+            )
+            self.assertEqual(
+                dataset.conditions["case_a"].launch["grid"],
+                [16, 1, 1],
+            )
+            self.assertEqual(
+                dataset.manifest.metadata["source_consistency"]
+                ["latency_source_manifest_matches"],
+                True,
             )
 
             normalized = root / "normalized.json"
@@ -185,6 +456,10 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
             self.assertEqual(
                 restored.model_dump(mode="json"),
                 dataset.model_dump(mode="json"),
+            )
+            self.assertEqual(
+                restored.runs["latency::case_a"].launch_sampling_status,
+                "sampled",
             )
 
             delta = root / "delta.csv"
@@ -269,6 +544,18 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
             )
             self.assertIn(
                 "metric_to_kernel_classes", payload["kernel_signatures"]
+            )
+            self.assertIn(
+                "observed_total_blocks",
+                payload["data_readiness"]["available_launch_fields"],
+            )
+            self.assertIn(
+                "observed_max_registers_per_thread",
+                payload["data_readiness"]["available_launch_fields"],
+            )
+            self.assertNotIn(
+                "resource_usage",
+                payload["data_readiness"]["missing_high_value_fields"],
             )
             self.assertEqual(payload["scope"]["platform"], "adreno")
             self.assertEqual(

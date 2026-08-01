@@ -1,0 +1,4 @@
+interface:
+  display_name: "PMC Interpreter"
+  short_description: "将已验收的跨平台 PMC 数据转换为结构化语义知识和中文分析报告"
+  default_prompt: "使用 $pmc-interpreter 分析已验收的 PMC 数据，生成相关性分类、Kernel Signature 和 Delta Rulebook。"

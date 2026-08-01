@@ -56,7 +56,38 @@ def _record_numeric_controls(target, prefix, values):
             target[name + "_product"] = product
 
 
-def _numeric_controls(output, condition_ids):
+def _environment_run_ids_for_latency(dataset, condition_ids):
+    condition_ids = set(condition_ids)
+    return {
+        observation.run_id
+        for observation in dataset.latency_observations
+        if observation.status == "VALID"
+        and observation.latency_us is not None
+        and observation.latency_us > 0
+        and dataset.runs[observation.run_id].collection_kind == "latency"
+        and dataset.runs[observation.run_id].condition_id in condition_ids
+    }
+
+
+def _environment_run_ids_for_feature(output, feature_id, condition_ids):
+    condition_ids = set(condition_ids)
+    source_metric_ids = set(
+        output.context.features.specs[feature_id].source_metric_ids
+    )
+    return {
+        observation.run_id
+        for observation in output.context.dataset.metric_observations
+        if observation.metric_id in source_metric_ids
+        and observation.status == "VALID"
+        and observation.value is not None
+        and output.context.dataset.runs[observation.run_id].collection_kind
+        == "pmc"
+        and output.context.dataset.runs[observation.run_id].condition_id
+        in condition_ids
+    }
+
+
+def _numeric_controls(output, condition_ids, environment_run_ids):
     per_condition = {condition_id: {} for condition_id in condition_ids}
     observed_launch = observed_launch_controls(output.context.dataset)
     for condition_id in condition_ids:
@@ -74,7 +105,8 @@ def _numeric_controls(output, condition_ids):
             observed_launch.get(condition_id, {}),
         )
     environment = defaultdict(lambda: defaultdict(list))
-    for run in output.context.dataset.runs.values():
+    for run_id in sorted(environment_run_ids):
+        run = output.context.dataset.runs[run_id]
         if run.condition_id not in per_condition:
             continue
         if run.gpu_clock_hz is not None:
@@ -91,8 +123,8 @@ def _numeric_controls(output, condition_ids):
     return per_condition
 
 
-def _build_design(output, condition_ids):
-    numeric = _numeric_controls(output, condition_ids)
+def _build_design(output, condition_ids, environment_run_ids):
+    numeric = _numeric_controls(output, condition_ids, environment_run_ids)
     minimum_presence = max(3, int(math.ceil(len(condition_ids) * 0.5)))
     all_keys = sorted({key for values in numeric.values() for key in values})
     numeric_keys = []
@@ -194,6 +226,24 @@ def _build_design(output, condition_ids):
     return design, feature_names, numeric_keys
 
 
+def _workload_control_semantically_complete(output, condition_ids, key):
+    """Return true when every missing value is explicitly not applicable."""
+
+    for condition_id in condition_ids:
+        condition = output.context.dataset.conditions[condition_id]
+        raw = condition.workload.get(key)
+        if (
+            isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and math.isfinite(float(raw))
+        ):
+            continue
+        provenance = condition.workload_provenance.get(key)
+        if provenance is None or provenance.status != "not_applicable":
+            return False
+    return True
+
+
 def build_latency_baseline(output):
     latency = log_latency_map(output.context.dataset)
     condition_ids = [
@@ -214,13 +264,18 @@ def build_latency_baseline(output):
                 "workload.algorithmic_flops",
                 "workload.algorithmic_bytes",
                 "workload.output_elements",
-                "launch.grid",
-                "launch.block",
+                "launch.observed_geometry",
                 "environment.gpu_clock_hz",
                 "environment.temperature_c",
             ),
         )
-    design, feature_names, numeric_keys = _build_design(output, condition_ids)
+    design, feature_names, numeric_keys = _build_design(
+        output,
+        condition_ids,
+        _environment_run_ids_for_latency(
+            output.context.dataset, condition_ids
+        ),
+    )
     predictions = cross_fitted_ridge(
         design, target, condition_ids, folds=5, penalty=1.0
     )
@@ -252,6 +307,22 @@ def build_latency_baseline(output):
         condition_id: latency[condition_id] - prediction_map[condition_id]
         for condition_id in condition_ids
     }
+    missing_controls = []
+    for key in (
+        "algorithmic_flops",
+        "algorithmic_bytes",
+        "output_elements",
+    ):
+        control = "workload.{}".format(key)
+        if control not in feature_names and not _workload_control_semantically_complete(
+            output, condition_ids, key
+        ):
+            missing_controls.append(control)
+    for key in ("environment.gpu_clock_hz", "environment.temperature_c"):
+        if key not in feature_names:
+            missing_controls.append(key)
+    if not any(name.startswith("launch.") for name in feature_names):
+        missing_controls.append("launch.observed_geometry")
     return LatencyBaselineReport(
         condition_ids=tuple(condition_ids),
         predictions=prediction_map,
@@ -259,26 +330,26 @@ def build_latency_baseline(output):
         evidence_level=evidence,
         cross_validated_r_squared=score,
         controls=controls,
-        missing_high_value_controls=tuple(
-            key
-            for key in (
-                "workload.algorithmic_flops",
-                "workload.algorithmic_bytes",
-                "workload.output_elements",
-                "launch.grid",
-                "launch.block",
-                "environment.gpu_clock_hz",
-                "environment.temperature_c",
-            )
-            if key not in feature_names
-        ),
+        missing_high_value_controls=tuple(missing_controls),
     )
 
 
-def _residualize_feature(output, condition_ids, feature_values, baseline_evidence):
+def _residualize_feature(
+    output,
+    feature_id,
+    condition_ids,
+    feature_values,
+    baseline_evidence,
+):
     if baseline_evidence in {"not_estimable", "descriptive_cross_kernel"}:
         return feature_values, False, 0.0
-    design, _, _ = _build_design(output, condition_ids)
+    design, _, _ = _build_design(
+        output,
+        condition_ids,
+        _environment_run_ids_for_feature(
+            output, feature_id, condition_ids
+        ),
+    )
     predictions = cross_fitted_ridge(
         design, feature_values, condition_ids, folds=5, penalty=1.0
     )
@@ -422,6 +493,7 @@ class CorrelationLayer(AnalysisLayer):
                 residual_feature, feature_residualized, feature_baseline_r2 = (
                     _residualize_feature(
                         layer_input,
+                        feature_id,
                         condition_ids,
                         feature_values,
                         baseline.evidence_level,
@@ -513,6 +585,8 @@ class CorrelationLayer(AnalysisLayer):
             ),
             method=(
                 "cross-fitted ridge residualization of log latency and each PMC feature; "
+                "latency controls use latency-run environment samples and each PMC feature uses only its contributing "
+                "PMC-session environment samples; "
                 "Spearman association with Fisher-z p approximation and Benjamini-Hochberg FDR; "
                 "distance correlation is an exploratory nonlinear-dependence screen"
             ),

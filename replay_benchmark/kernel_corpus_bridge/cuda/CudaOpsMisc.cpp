@@ -49,7 +49,7 @@ void mnn_corpus_reduction_prod_127_fp32(const float*, float*, const void*, int, 
 void mnn_corpus_interp_nearest_127_fp32(const int, int, int, int, int, float, float, float, float, const float*, float*, int, int, cudaStream_t);
 void mnn_corpus_interp_bilinear_127_fp32(const int, int, int, int, int, float, float, float, float, const float*, float*, int, int, cudaStream_t);
 void mnn_corpus_blitregion_241_fp32(const float*, float*, int, const int32_t*, const int32_t*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
-void mnn_corpus_nhwc2nchw_212_fp32(const float*, float*, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_nchw2nhwc_212_fp32(const float*, float*, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_grid_sample_nearest_272_fp32(const int, const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_grid_sample_bilinear_272_fp32(const int, const float*, const float*, float*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 // weight_only_quant shims (defined in weight_only_quant.cu)
@@ -490,87 +490,12 @@ bool CudaInterpNearestFp32Kernel::validate(const AdaptedCase& ac, const std::vec
 
 // ---- Transpose NHWC->NCHW ----
 bool CudaNhwc2NchwFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    if (spec.tag == "2.1.2") ac.entry = "mnn_corpus_nhwc2nchw_212_fp32";
-    else ac.entry = "mnn_corpus_nhwc2nchw_fp32";
+    if (spec.tag == "2.1.2") return false;
+    ac.entry = "mnn_corpus_nhwc2nchw_fp32";
     const int outside = spec.intParam("outside", 2);
     const int axis = spec.intParam("axis", 4);
     const int inside = spec.intParam("inside", 3);
     const int total = outside * axis * inside;
-    std::vector<float> input(total);
-    for (int i = 0; i < total; ++i) input[i] = (float)i;
-    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
-    AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
-    ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
-    ac.args.push_back(AdaptedArg::buffer(0));
-    ac.args.push_back(AdaptedArg::buffer(1));
-    if (spec.tag == "2.1.2") {
-        // 2.1.2 shim: (input, output, total, channel, area, channel_pack, ...)
-        // channel = axis, area = inside, channel_pack = axis
-        ac.args.push_back(AdaptedArg::scalarInt(total));
-        ac.args.push_back(AdaptedArg::scalarInt(axis));
-        ac.args.push_back(AdaptedArg::scalarInt(inside));
-        ac.args.push_back(AdaptedArg::scalarInt(axis));
-    } else {
-        ac.args.push_back(AdaptedArg::scalarInt(total));
-        ac.args.push_back(AdaptedArg::scalarInt(inside));
-        ac.args.push_back(AdaptedArg::scalarInt(axis));
-        ac.args.push_back(AdaptedArg::scalarInt(outside));
-    }
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
-    ac.validatorInputA = input; ac.elementCount = total;
-    ac.m = outside; ac.n = axis; ac.k = inside;
-    return true;
-}
-cudaError_t CudaNhwc2NchwFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
-    if (ac.tag == "2.1.2") {
-        mnn_corpus_nhwc2nchw_212_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
-                                       ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-                                       ctx.grid, ctx.block, ctx.stream);
-    } else {
-        mnn_corpus_nhwc2nchw_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
-                                   ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-                                   ctx.grid, ctx.block, ctx.stream);
-    }
-    return cudaGetLastError();
-}
-bool CudaNhwc2NchwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
-    const int outside = ac.m, axis = ac.n, inside = ac.k;
-    const int total = outside * axis * inside;
-    if ((int)output.size() < total) return false;
-    if (ac.tag == "2.1.2") {
-        // NCHW_2_NHWC_212: index = (batch_idx*area + area_idx)*channel_pack + chnl_idx
-        //   where channel_pack = axis, area = inside
-        // src_offset = (batch_idx*channel + chnl_idx)*area + area_idx
-        //   where channel = axis, area = inside
-        const int channel = axis, area = inside, channel_pack = axis;
-        for (int index = 0; index < total; ++index) {
-            int temp = index / channel_pack;
-            int chnl_idx = index % channel_pack;
-            int area_idx = temp % area;
-            int batch_idx = temp / area;
-            int src_offset = (batch_idx * channel + chnl_idx) * area + area_idx;
-            if (std::fabs(output[index] - ac.validatorInputA[src_offset]) > 1e-3f) return false;
-        }
-        return true;
-    }
-    for (int idx = 0; idx < total; ++idx) {
-        int x = idx % inside;
-        int y = (idx / inside) % axis;
-        int z = idx / (inside * axis);
-        int nchwOff = z * axis * inside + y * inside + x;
-        if (std::fabs(output[nchwOff] - ac.validatorInputA[idx]) > 1e-3f) return false;
-    }
-    return true;
-}
-
-// ---- Transpose NCHW->NHWC ----
-bool CudaNchw2NhwcFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
-    ac.entry = "mnn_corpus_nchw2nhwc_fp32";
-    const int outside = spec.intParam("outside", 2);
-    const int axis = spec.intParam("axis", 4);
-    const int inside = spec.intParam("inside", 3);
-    const int total = outside * axis * inside;
-    // Input is NCHW layout: [outside, axis, inside]
     std::vector<float> input(total);
     for (int i = 0; i < total; ++i) input[i] = (float)i;
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
@@ -587,23 +512,82 @@ bool CudaNchw2NhwcFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const
     ac.m = outside; ac.n = axis; ac.k = inside;
     return true;
 }
-cudaError_t CudaNchw2NhwcFp32Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
-    mnn_corpus_nchw2nhwc_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
+cudaError_t CudaNhwc2NchwFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    mnn_corpus_nhwc2nchw_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
                                ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
                                ctx.grid, ctx.block, ctx.stream);
+    return cudaGetLastError();
+}
+bool CudaNhwc2NchwFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
+    const int outside = ac.m, axis = ac.n, inside = ac.k;
+    const int total = outside * axis * inside;
+    if ((int)output.size() < total) return false;
+    for (int b = 0; b < outside; ++b)
+        for (int c = 0; c < axis; ++c)
+            for (int a = 0; a < inside; ++a) {
+                int src = (b * inside + a) * axis + c;
+                int dst = (b * axis + c) * inside + a;
+                if (std::fabs(output[dst] - ac.validatorInputA[src]) > 1e-3f) return false;
+            }
+    return true;
+}
+
+// ---- Transpose NCHW->NHWC ----
+bool CudaNchw2NhwcFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
+    if (spec.tag == "2.1.2") ac.entry = "mnn_corpus_nchw2nhwc_212_fp32";
+    else ac.entry = "mnn_corpus_nchw2nhwc_fp32";
+    const int outside = spec.intParam("outside", 2);
+    const int axis = spec.intParam("axis", 4);
+    const int inside = spec.intParam("inside", 3);
+    const int total = outside * axis * inside;
+    // Input is NCHW layout: [outside, axis, inside]
+    std::vector<float> input(total);
+    for (int i = 0; i < total; ++i) input[i] = (float)i;
+    AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = total * sizeof(float); outBuf.isOutput = true;
+    ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
+    ac.args.push_back(AdaptedArg::buffer(0));
+    ac.args.push_back(AdaptedArg::buffer(1));
+    if (spec.tag == "2.1.2") {
+        // 2.1.2 shim: (input, output, total, channel, area, channel_pack, ...)
+        ac.args.push_back(AdaptedArg::scalarInt(total));
+        ac.args.push_back(AdaptedArg::scalarInt(axis));
+        ac.args.push_back(AdaptedArg::scalarInt(inside));
+        ac.args.push_back(AdaptedArg::scalarInt(axis));
+    } else {
+        ac.args.push_back(AdaptedArg::scalarInt(total));
+        ac.args.push_back(AdaptedArg::scalarInt(inside));
+        ac.args.push_back(AdaptedArg::scalarInt(axis));
+        ac.args.push_back(AdaptedArg::scalarInt(outside));
+    }
+    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    ac.validatorInputA = input; ac.elementCount = total;
+    ac.m = outside; ac.n = axis; ac.k = inside;
+    return true;
+}
+cudaError_t CudaNchw2NhwcFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    if (ac.tag == "2.1.2") {
+        mnn_corpus_nchw2nhwc_212_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
+                                       ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
+                                       ctx.grid, ctx.block, ctx.stream);
+    } else {
+        mnn_corpus_nchw2nhwc_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
+                                   ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
+                                   ctx.grid, ctx.block, ctx.stream);
+    }
     return cudaGetLastError();
 }
 bool CudaNchw2NhwcFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
     const int outside = ac.m, axis = ac.n, inside = ac.k;
     const int total = outside * axis * inside;
     if ((int)output.size() < total) return false;
-    for (int idx = 0; idx < total; ++idx) {
-        int x = idx % inside;
-        int y = (idx / inside) % axis;
-        int z = idx / (inside * axis);
-        int nchwOff = z * axis * inside + y * inside + x;
-        if (std::fabs(output[idx] - ac.validatorInputA[nchwOff]) > 1e-3f) return false;
-    }
+    for (int b = 0; b < outside; ++b)
+        for (int a = 0; a < inside; ++a)
+            for (int c = 0; c < axis; ++c) {
+                int src = (b * axis + c) * inside + a;
+                int dst = (b * inside + a) * axis + c;
+                if (std::fabs(output[dst] - ac.validatorInputA[src]) > 1e-3f) return false;
+            }
     return true;
 }
 
@@ -761,7 +745,7 @@ void mnn_corpus_col2im_fp32(const int, const float*, int, int, int, int, int, in
 void mnn_corpus_col2im_vec4_fp32(const int, const float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, const float*, float*, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_pack_pad_fill_fp32(const float*, const float*, bool, bool, float*, float*, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_weight_pack_fill_implicit_fp32(const float*, float*, int, size_t, int, int, int, int, int, int, cudaStream_t);
-void mnn_corpus_transpose_bdl_to_bld_fp32(const float*, float*, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_transpose_bdl_to_bld_fp32(const float*, float*, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_packcommon_4_fp32(const float*, float*, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_unpackcommon_4_fp32(const float*, float*, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_blit_2_half_fp32(const float*, float*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
@@ -3448,14 +3432,18 @@ bool CudaTransposeBdlToBldFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& a
     ac.args.push_back(AdaptedArg::buffer(0)); ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::scalarInt(B)); ac.args.push_back(AdaptedArg::scalarInt(D)); ac.args.push_back(AdaptedArg::scalarInt(L));
     ac.entry = "mnn_corpus_transpose_bdl_to_bld_fp32";
-    ac.globalSize[0] = gridFor(total); ac.localSize[0] = kBlock; ac.dims = 1;
+    const int gridX = (D + 31) / 32;
+    const int gridY = (L + 31) / 32;
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.globalSize[2] = B;
+    ac.localSize[0] = 32; ac.localSize[1] = 8; ac.localSize[2] = 1; ac.dims = 3;
     ac.validatorInputA = input; ac.elementCount = total;
     ac.m = B; ac.n = D; ac.k = L;
+    ac.p = gridX; ac.q = gridY;
     return true;
 }
 cudaError_t CudaTransposeBdlToBldFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
     mnn_corpus_transpose_bdl_to_bld_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
-        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.grid, ctx.block, ctx.stream);
+        ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ac.p, ac.q, ac.m, ctx.stream);
     return cudaGetLastError();
 }
 bool CudaTransposeBdlToBldFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -5201,8 +5189,9 @@ bool CudaTransposeLocalFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) 
     ac.args.push_back(AdaptedArg::buffer(1));
     ac.args.push_back(AdaptedArg::buffer(2));
     // TRANSPOSE_LOCAL uses dim3 grid(gridX,gridY,gridZ), dim3 block(8,8)
-    const int gridX = (n + 7) / 8, gridY = (m + 7) / 8, gridZ = 1;
-    ac.globalSize[0] = gridX; ac.localSize[0] = 8; ac.dims = 1;
+    const int gridX = (m + 7) / 8, gridY = (n + 7) / 8, gridZ = 1;
+    ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.globalSize[2] = gridZ;
+    ac.localSize[0] = 8; ac.localSize[1] = 8; ac.localSize[2] = 1; ac.dims = 3;
     // store grid dims in p/q for launch
     ac.p = gridX; ac.q = gridY;
     ac.validatorInputA = input; ac.elementCount = total;

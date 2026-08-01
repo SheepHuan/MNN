@@ -8,9 +8,23 @@
 namespace MNN {
 namespace Replay {
 
+enum class PerfCounterValueKind {
+    UnsignedInteger,
+    FloatingPoint,
+};
+
+enum class PerfCounterValueStatus {
+    Invalid,
+    Valid,
+    Overflow,
+};
+
 struct PerfCounterValueRecord {
     std::string name;
-    uint64_t value = 0;
+    uint64_t integerValue = 0;
+    double floatingPointValue = 0.0;
+    PerfCounterValueKind valueKind = PerfCounterValueKind::UnsignedInteger;
+    PerfCounterValueStatus status = PerfCounterValueStatus::Invalid;
 };
 
 struct PerfCounterReport {

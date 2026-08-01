@@ -43,11 +43,47 @@ def _load_metadata(path, backend):
 
 def _load_latency(path):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if (
-        isinstance(payload, dict)
-        and isinstance(payload.get("cases"), dict)
-        and str(payload.get("format") or "").startswith("mnn-kernel-latency")
-    ):
+    source = {
+        "structured": False,
+        "format": "legacy-flat",
+        "version": 0,
+        "source_manifest_sha256": "",
+    }
+    if isinstance(payload, dict) and "cases" in payload:
+        expected_fields = {
+            "format",
+            "version",
+            "source_manifest_sha256",
+            "cases",
+        }
+        if set(payload) != expected_fields:
+            raise ValueError(
+                "structured latency JSON fields must be exactly {}".format(
+                    ",".join(sorted(expected_fields))
+                )
+            )
+        if payload.get("format") != "mnn-kernel-latency":
+            raise ValueError("structured latency JSON has unsupported format")
+        if type(payload.get("version")) is not int or payload["version"] != 1:
+            raise ValueError("structured latency JSON has unsupported version")
+        source_manifest_sha256 = payload.get("source_manifest_sha256")
+        if (
+            not isinstance(source_manifest_sha256, str)
+            or len(source_manifest_sha256) != 64
+            or source_manifest_sha256 != source_manifest_sha256.lower()
+            or any(character not in "0123456789abcdef" for character in source_manifest_sha256)
+        ):
+            raise ValueError(
+                "structured latency JSON requires a lowercase SHA256 source_manifest_sha256"
+            )
+        if not isinstance(payload["cases"], dict):
+            raise ValueError("structured latency JSON cases must be an object")
+        source = {
+            "structured": True,
+            "format": payload["format"],
+            "version": payload["version"],
+            "source_manifest_sha256": source_manifest_sha256,
+        }
         payload = payload["cases"]
     if not isinstance(payload, dict):
         raise ValueError("latency JSON must be an object keyed by case name")
@@ -59,7 +95,28 @@ def _load_latency(path):
         value = parse_number(raw, allow_negative=False)
         if value is not None and value > 0:
             result[case] = {**record, "latency_us": value}
-    return result, set(payload)
+    return result, set(payload), source
+
+
+def _canonical_launch_sampling_status(raw_status):
+    status = str(raw_status or "").strip()
+    if status == "sampled":
+        return "sampled"
+    if status in {"", "not_requested", "not_collected"}:
+        return "not_collected"
+    if status == "no_launch":
+        return "no_launch"
+    if (
+        status in {"partial", "error"}
+        or status.startswith("partial:")
+        or status.startswith("error:")
+        or status.startswith("metadata launch failed:")
+        or status.startswith("unavailable:metadata launch failed:")
+    ):
+        return "error"
+    if status == "unavailable" or status.startswith("unavailable:"):
+        return "unavailable"
+    return "error"
 
 
 def _load_fact_provenance(entry, field):
@@ -123,7 +180,7 @@ def _parse_environment(record):
     if not isinstance(raw, dict):
         return (), None, None
     source = str(raw.get("sampling_source") or raw.get("source") or "unknown")
-    status = str(raw.get("status") or "unknown")
+    status = str(raw.get("sampling_status") or "unknown")
     samples = []
     for phase in ("before", "after"):
         clock = parse_number(raw.get("gpu_clock_hz_{}".format(phase)), allow_negative=False)
@@ -290,7 +347,15 @@ def load_mnn_kernelreplay_dataset(
     registry = registry or MetricRegistry()
     device = device or DeviceSpec(device_id="{}:default".format(platform), vendor=platform)
     metadata = _load_metadata(operator_cases_json, backend)
-    latencies, latency_keys = _load_latency(latency_json)
+    latencies, latency_keys, latency_source = _load_latency(latency_json)
+    operator_cases_sha256 = _sha256(operator_cases_json)
+    if (
+        latency_source["structured"]
+        and latency_source["source_manifest_sha256"] != operator_cases_sha256
+    ):
+        raise ValueError(
+            "latency source manifest SHA256 does not match operator_cases.json"
+        )
     selection_plan = None
     if case_selection_plan:
         selection_plan = load_case_selection_plan(case_selection_plan)
@@ -306,7 +371,6 @@ def load_mnn_kernelreplay_dataset(
     seen_cases = set()
     metric_names = set()
     metrics_by_case = defaultdict(set)
-    rows_by_session = defaultdict(list)
     sweep_plan_ids = set()
     sweep_config_ids = set()
     duplicate_pair_count = 0
@@ -329,9 +393,6 @@ def load_mnn_kernelreplay_dataset(
             metrics_by_case[case].add(metric)
             metric_names.add(metric)
             status_counts[row["status"].strip()] += 1
-            session_id = row.get("collection_session_id", "").strip()
-            if session_id:
-                rows_by_session[session_id].append(row)
             if row.get("sweep_plan_id", "").strip():
                 sweep_plan_ids.add(row["sweep_plan_id"].strip())
             if row.get("sweep_config_id", "").strip():
@@ -344,12 +405,18 @@ def load_mnn_kernelreplay_dataset(
     extra_latency_cases = sorted(latency_keys - manifest_cases)
     invalid_latency_cases = sorted(latency_keys - set(latencies))
     if missing_latency_cases or extra_latency_cases or invalid_latency_cases:
+        message = "latency/manifest mismatch: {} missing, {} extra, {} invalid".format(
+            len(missing_latency_cases),
+            len(extra_latency_cases),
+            len(invalid_latency_cases),
+        )
+        if latency_source["structured"]:
+            raise ValueError(message)
+        issues.append(message)
+    if not latency_source["structured"]:
         issues.append(
-            "latency/manifest mismatch: {} missing, {} extra, {} invalid".format(
-                len(missing_latency_cases),
-                len(extra_latency_cases),
-                len(invalid_latency_cases),
-            )
+            "legacy flat latency JSON has no canonical format/version/source_manifest_sha256; "
+            "it is exploratory input, not a formal source-consistency gate"
         )
     observed_row_cases = set(case_order)
     expected_selected_cases = (
@@ -479,6 +546,9 @@ def load_mnn_kernelreplay_dataset(
         entry = metadata[case]
         latency_record = latencies[case]
         launch_records = _parse_launch_records(case, latency_record)
+        launch_sampling_status = _canonical_launch_sampling_status(
+            latency_record.get("launch_sampling_status")
+        )
         environment_samples, gpu_clock_hz, temperature_c = _parse_environment(
             latency_record
         )
@@ -497,6 +567,7 @@ def load_mnn_kernelreplay_dataset(
             temperature_c=temperature_c,
             cache_policy="unknown",
             source_ref=str(latency_json),
+            launch_sampling_status=launch_sampling_status,
             launch_records=launch_records,
             environment_samples=environment_samples,
         )
@@ -553,6 +624,16 @@ def load_mnn_kernelreplay_dataset(
                 "incomplete_case_count": len(incomplete_cases),
                 "sweep_plan_ids": sorted(sweep_plan_ids),
                 "sweep_config_ids": sorted(sweep_config_ids),
+                "latency_format": latency_source["format"],
+                "latency_version": latency_source["version"],
+                "latency_source_manifest_sha256": latency_source[
+                    "source_manifest_sha256"
+                ],
+                "latency_source_manifest_matches": (
+                    latency_source["structured"]
+                    and latency_source["source_manifest_sha256"]
+                    == operator_cases_sha256
+                ),
             },
             "status_counts": dict(status_counts),
             "profiler_pass_note": "pass count belongs to the collection session, not an independent repeat",

@@ -434,10 +434,23 @@ def build_case_selection_plan(
             reason = "selected by deterministic mixed-condition farthest-first coverage"
             if uses_proxy:
                 issues.append(
-                    "op_type {} needed proxy conditions because fewer than {} complete shapes+workload conditions exist".format(
+                    (
+                        "op_type {} needed proxy conditions because fewer than {} "
+                        "complete shapes+workload conditions exist"
+                    ).format(
                         op_type, minimum_conditions_per_op_type
                     )
                 )
+
+        non_explicit_count = sum(
+            record["metadata_level"] != "explicit" for record in chosen
+        )
+        if non_explicit_count and status != "satisfied_with_proxy":
+            issues.append(
+                "op_type {} selected {} cases without complete shapes+workload metadata under status {}".format(
+                    op_type, non_explicit_count, status
+                )
+            )
 
         selected = [
             _selected_case(
@@ -515,10 +528,22 @@ def write_case_selection_plan(plan: CaseSelectionPlan, path: str | Path) -> None
 def validate_case_selection_plan_source(
     plan: CaseSelectionPlan, operator_cases_json: str | Path
 ) -> None:
-    actual = _sha256_file(Path(operator_cases_json))
+    manifest_path = Path(operator_cases_json)
+    actual = _sha256_file(manifest_path)
     if actual != plan.source_manifest_sha256:
         raise ValueError(
             "case selection plan manifest mismatch: expected {}, found {}".format(
                 plan.source_manifest_sha256, actual
             )
+        )
+    rebuilt = build_case_selection_plan(
+        manifest_path,
+        backend=plan.backend,
+        policy=plan.policy,
+        minimum_conditions_per_op_type=plan.minimum_conditions_per_op_type,
+        target_op_types=plan.target_op_types,
+    )
+    if rebuilt.model_dump(mode="json") != plan.model_dump(mode="json"):
+        raise ValueError(
+            "case selection plan no longer matches the current selection algorithm"
         )

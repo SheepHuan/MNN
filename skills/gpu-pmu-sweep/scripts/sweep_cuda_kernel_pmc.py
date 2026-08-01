@@ -11,6 +11,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -57,7 +58,31 @@ ROW_COLUMNS = [
     "error",
 ] + ENVIRONMENT_COLUMNS
 VALID_STATUSES = {"VALID"}
-OVERFLOW_SENTINEL = 1 << 63
+
+
+def _is_nonnegative_finite_number(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and value >= 0
+    )
+
+
+def _ledger_number_text(value):
+    if not _is_nonnegative_finite_number(value):
+        raise ValueError("PMC value must be a nonnegative finite JSON number")
+    return json.dumps(value, allow_nan=False, separators=(",", ":"))
+
+
+def _parse_ledger_number(value):
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid PMC ledger value: {}".format(value)) from exc
+    if not _is_nonnegative_finite_number(parsed):
+        raise ValueError("PMC ledger value must be a nonnegative finite number")
+    return parsed
 
 
 def read_valid_metrics(path):
@@ -207,6 +232,24 @@ def _empty_environment(collection_session_id=""):
     }
 
 
+def _report_environment(case, collection_session_id=""):
+    result = _empty_environment(collection_session_id)
+    raw = case.get("environment") if isinstance(case, dict) else None
+    if not isinstance(raw, dict):
+        return result
+    result["environment_status"] = str(raw.get("sampling_status") or "not_collected")
+    result["environment_source"] = str(raw.get("sampling_source") or "")
+    for key in (
+        "gpu_clock_hz_before",
+        "gpu_clock_hz_after",
+        "temperature_c_before",
+        "temperature_c_after",
+    ):
+        value = raw.get(key)
+        result[key] = "" if value is None else str(value)
+    return result
+
+
 def classify_report(
     report,
     case_name,
@@ -216,7 +259,7 @@ def classify_report(
     collection_session_id="",
 ):
     case = _find_case(report, case_name)
-    environment = _empty_environment(collection_session_id)
+    environment = _report_environment(case, collection_session_id)
     if returncode != 0:
         return {"status": "COMMAND_FAILED", "value": "", "pmu_status": "", "num_passes": "",
                 "returncode": returncode, "error": error, **environment}
@@ -224,26 +267,53 @@ def classify_report(
         return {"status": "MALFORMED_OUTPUT", "value": "", "pmu_status": "", "num_passes": "",
                 "returncode": returncode, "error": "case report missing", **environment}
     status = str(case.get("pmu_status", ""))
-    raw = case.get("pmu_metrics", {}).get(metric) if isinstance(case.get("pmu_metrics"), dict) else None
     num_passes = case.get("num_passes", "")
     common = {"pmu_status": status, "num_passes": num_passes, "returncode": returncode}
+    if (
+        case.get("valid") is not True
+        or case.get("dispatch_status") != "dispatched"
+        or case.get("validation_status") != "validation_passed"
+    ):
+        diagnostic = (
+            "kernel case is not a validated dispatch: valid={!r}, dispatch_status={!r}, "
+            "validation_status={!r}"
+        ).format(
+            case.get("valid"),
+            case.get("dispatch_status"),
+            case.get("validation_status"),
+        )
+        return {
+            "status": "COMMAND_FAILED",
+            "value": "",
+            **common,
+            "error": case.get("error", "") or diagnostic,
+            **environment,
+        }
+    raw = case.get("pmu_metrics", {}).get(metric) if isinstance(case.get("pmu_metrics"), dict) else None
+    metric_statuses = case.get("pmu_metric_statuses")
+    metric_status = (
+        metric_statuses.get(metric)
+        if isinstance(metric_statuses, dict)
+        else None
+    )
     if "start_failed" in status or "stop_failed" in status or "cuda_event_fallback(" in status:
         return {"status": "COMMAND_FAILED", "value": "" if raw is None else str(raw), **common,
                 "error": case.get("error", "") or status, **environment}
-    if raw is not None:
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            value = None
-        if value == OVERFLOW_SENTINEL:
-            return {"status": "OVERFLOW", "value": str(raw), **common,
-                    "error": case.get("error", ""), **environment}
-        if status == "sampled" and value is not None and value >= 0:
-            return {"status": "VALID", "value": str(value), **common,
-                    "error": case.get("error", ""), **environment}
-        if value is not None:
-            return {"status": "NOT_FOUND", "value": str(value), **common,
-                    "error": case.get("error", ""), **environment}
+    if metric_status == "overflow":
+        return {"status": "OVERFLOW", "value": "", **common,
+                "error": case.get("error", "") or "metric evaluation overflow", **environment}
+    if metric_status == "invalid":
+        return {"status": "NOT_FOUND", "value": "", **common,
+                "error": case.get("error", "") or "metric evaluation invalid", **environment}
+    if metric_status == "valid":
+        if status != "sampled" or not _is_nonnegative_finite_number(raw):
+            return {"status": "MALFORMED_OUTPUT", "value": "", **common,
+                    "error": "valid metric is missing a nonnegative finite value", **environment}
+        return {"status": "VALID", "value": _ledger_number_text(raw), **common,
+                "error": case.get("error", ""), **environment}
+    if metric_status is not None:
+        return {"status": "MALFORMED_OUTPUT", "value": "", **common,
+                "error": "unknown per-metric status: {}".format(metric_status), **environment}
     if status in {"unavailable", "unsupported", ""}:
         result_status = "NOT_FOUND"
     else:
@@ -368,6 +438,20 @@ def _read_rows(path, cases, metrics, sweep_plan_id, sweep_config_id, require_fil
     return completed
 
 
+def _last_session_order_index(path):
+    if not Path(path).is_file():
+        return 0
+    maximum = 0
+    with Path(path).open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        for row in reader:
+            try:
+                maximum = max(maximum, int(row.get("order_index", "")))
+            except (TypeError, ValueError):
+                continue
+    return maximum
+
+
 def build_result_json_from_csv(cases, metrics, path, sweep_plan_id, sweep_config_id):
     result = {case: {"pmc": {}} for case in cases}
     if not Path(path).is_file():
@@ -380,7 +464,7 @@ def build_result_json_from_csv(cases, metrics, path, sweep_plan_id, sweep_config
         for row in reader:
             case = row["case"]
             if row["status"] in VALID_STATUSES and row["value"]:
-                result[case]["pmc"][row["metric"]] = int(row["value"])
+                result[case]["pmc"][row["metric"]] = _parse_ledger_number(row["value"])
     return result
 
 
@@ -401,7 +485,7 @@ def build_result_json(cases, rows):
         if case not in result:
             result[case] = {"pmc": {}}
         if row["status"] in VALID_STATUSES and row["value"]:
-            result[case]["pmc"][row["metric"]] = int(row["value"])
+            result[case]["pmc"][row["metric"]] = _parse_ledger_number(row["value"])
     return result
 
 
@@ -444,6 +528,7 @@ def run_sweep(args, executor=run_batch_with_fallback):
             writer.writeheader()
         total = len(cases) * len(metrics)
         done = len(completed)
+        session_order_index = _last_session_order_index(output_csv) if args.resume else 0
         for case in cases:
             for batch in metric_batches(metrics, args.metrics_per_session):
                 pending = [metric for metric in batch if (case, metric) not in completed]
@@ -451,13 +536,19 @@ def run_sweep(args, executor=run_batch_with_fallback):
                     continue
                 batch_rows = executor(args.binary, corpus_root, case, pending, args.workdir,
                                       args.lib_dir, args.sudo, args.runs, args.timeout)
+                batch_session_orders = {}
                 for metric in pending:
                     measurement = dict(batch_rows[metric])
                     for column in ENVIRONMENT_COLUMNS:
                         measurement.setdefault(
                             column, "not_collected" if column == "environment_status" else ""
                         )
-                    measurement["order_index"] = str(done + 1)
+                    session_id = measurement["collection_session_id"]
+                    session_key = session_id or "{}::{}".format(case, metric)
+                    if session_key not in batch_session_orders:
+                        session_order_index += 1
+                        batch_session_orders[session_key] = session_order_index
+                    measurement["order_index"] = str(batch_session_orders[session_key])
                     row = {
                         "sweep_plan_id": selection_plan.plan_id,
                         "sweep_config_id": sweep_config_id,

@@ -5,6 +5,10 @@
 `dataset/catalog/`；投影、质量过滤、去冗余、相关性、kernel signature 和实现差分分析
 不按平台分支。
 
+工作流由三个独立 Skill 分工：`gpu-pmu-sweep` 负责设备采集，`pmc-source-gate` 负责 CUDA
+原始数据发布门禁，`pmc-interpreter` 负责标准化数据集、固定分析层和语义输出。CUDA
+raw-source 模式只有在 `cuda_pmc_source_validation.json` 为 `valid=true` 后才能用于正式分析。
+
 ## 数据源规范
 
 CUDA 数据的产生、刷新和一致性验收见：
@@ -258,7 +262,7 @@ JSON 是完整、可机读的分析结果；Markdown 是面向人的语义化视
 from kernel_agent.pmc_interpreter import AnalysisConfig, PmcInterpreter
 from kernel_agent.pmc_interpreter.dataset import load_normalized_bundle
 
-dataset = load_normalized_bundle("pmc_dataset.json")
+dataset = load_normalized_bundle("pmc-dataset-v1.json")
 interpreter = PmcInterpreter(config=AnalysisConfig(global_top_k=15))
 
 report = interpreter.analyze(dataset)
@@ -274,7 +278,7 @@ markdown = document.markdown
 
 ```bash
 python3 -m kernel_agent.pmc_interpreter \
-  --input-bundle pmc_dataset.json \
+  --input-bundle <pmc-dataset-v1.json> \
   --output-json pmc_analysis_report.json \
   --output-md pmc_analysis_report.md
 ```
@@ -286,6 +290,7 @@ python3 -m kernel_agent.pmc_interpreter \
   --pmc-csv build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv \
   --latency-json build-x86-cuda/cuda_kernel_latency.json \
   --operator-cases replay_benchmark/kernel_corpus/operator_cases.json \
+  --case-selection-plan build-x86-cuda/cuda_kernel_pmc_kernelreplay_rows.csv.selection.json \
   --platform cuda \
   --backend cuda \
   --namespace cupti \
@@ -300,6 +305,11 @@ python3 -m kernel_agent.pmc_interpreter \
 ## 验证
 
 ```bash
-.venv/bin/python -m unittest discover -s kernel_agent/tests -p 'test_*.py'
-.venv/bin/python -m unittest discover -s skills/gpu-pmu-sweep/tests -p 'test_*.py'
+.venv/bin/python -m unittest discover -s kernel_agent/tests/pmc_interpreter -p 'test_*.py'
+```
+
+若同时修改 CUDA 原始数据交接或共享 selection 契约，还要运行：
+
+```bash
+.venv/bin/python -m unittest discover -s skills/pmc-source-gate/tests -p 'test_*.py'
 ```

@@ -1,4 +1,4 @@
 interface:
-  display_name: "OpenCL PMU Sweep"
-  short_description: "Sweep one GPU PMU event and write CSV results"
-  default_prompt: "Run a single-event OpenCL PMU sweep for the requested cases and device, preserving raw JSON and writing the fixed CSV schema."
+  display_name: "GPU PMC Sweep"
+  short_description: "采集 NVIDIA、Adreno 与 Mali GPU 的 PMC 和独立 latency"
+  default_prompt: "使用 $gpu-pmu-sweep 按冻结 manifest 采集 GPU PMC、availability、selection plan 和独立 latency。"

@@ -54,6 +54,7 @@ static const char* perfVendorName(MNN::PerfCounter::GpuVendor vendor) {
     switch (vendor) {
         case MNN::PerfCounter::GpuVendor::Mali: return "Mali";
         case MNN::PerfCounter::GpuVendor::Adreno: return "Adreno";
+        case MNN::PerfCounter::GpuVendor::Nvidia: return "NVIDIA";
         default: return "Unknown";
     }
 }
@@ -344,7 +345,16 @@ bool replayOp(const Options& options) {
             for (size_t i = 0; i < counterValues.size(); ++i) {
                 PerfCounterValueRecord value;
                 value.name = counterNames[i];
-                value.value = counterValues[i].value;
+                value.integerValue = counterValues[i].value;
+                value.floatingPointValue = counterValues[i].floatingPointValue;
+                value.valueKind = counterValues[i].valueKind == MNN::PerfCounter::CounterValueKind::FloatingPoint
+                                      ? PerfCounterValueKind::FloatingPoint
+                                      : PerfCounterValueKind::UnsignedInteger;
+                value.status = counterValues[i].status == MNN::PerfCounter::CounterValueStatus::Valid
+                                   ? PerfCounterValueStatus::Valid
+                                   : (counterValues[i].status == MNN::PerfCounter::CounterValueStatus::Overflow
+                                          ? PerfCounterValueStatus::Overflow
+                                          : PerfCounterValueStatus::Invalid);
                 perfReport.counters.emplace_back(std::move(value));
             }
         }

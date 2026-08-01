@@ -26,9 +26,23 @@ SWEEP_MODULE = load("sweep_cuda_kernel_pmc", ROOT / "scripts" / "sweep_cuda_kern
 
 
 class CudaPmuSweepTest(unittest.TestCase):
+    @staticmethod
+    def _complete_availability_log():
+        return "\n".join([
+            "=== CUDA PMU Metric Availability Test Suite ===",
+            "[ RUN      ] CudaMetric.AllMetrics",
+            "  [    1/    4] sm__inst_executed.sum VALID         value= 826",
+            "  [    2/    4] sm__unsupported.sum NOT_FOUND      value=-1",
+            "  [    3/    4] lts__broken.sum OVERFLOW           value=-2",
+            "  [    4/    4] dram__failed.sum COMMAND_FAILED    value=-1",
+            "  all metrics: 1 valid, 1 not_found, 1 overflow, 1 command_failed (of 4)",
+            "\x1b[32m[       OK ]\x1b[0m CudaMetric.AllMetrics",
+            "\x1b[32m[  PASSED  ]\x1b[0m 1 tests.",
+            "",
+        ])
+
     def test_parse_fixed_log_and_write_valid_only_csv(self):
-        fixture = Path(__file__).parent / "fixtures" / "sample_cuda_pmu_sweep.log"
-        records = LOG_MODULE.parse_sweep_log(fixture.read_text(encoding="utf-8"))
+        records = LOG_MODULE.parse_sweep_log(self._complete_availability_log())
         self.assertEqual([record["status"] for record in records], [
             "VALID", "NOT_FOUND", "OVERFLOW", "COMMAND_FAILED",
         ])
@@ -41,6 +55,99 @@ class CudaPmuSweepTest(unittest.TestCase):
             self.assertEqual(rows, [{"metric": "sm__inst_executed.sum", "value": "826"}])
             with all_csv.open(newline="", encoding="utf-8") as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 4)
+
+    def test_parse_rejects_truncated_log_without_publishing_csv(self):
+        text = self._complete_availability_log()
+        truncated = text.split("  [    4/    4]", 1)[0] + "  [    4/    4] dram__failed"
+        with tempfile.TemporaryDirectory() as directory:
+            all_csv = Path(directory) / "all.csv"
+            valid_csv = Path(directory) / "valid.csv"
+            with self.assertRaisesRegex(ValueError, "incomplete or out of order"):
+                LOG_MODULE.main([
+                    "--input", str(self._write_text(Path(directory) / "truncated.log", truncated)),
+                    "--all-csv", str(all_csv),
+                    "--valid-csv", str(valid_csv),
+                ])
+            self.assertFalse(all_csv.exists())
+            self.assertFalse(valid_csv.exists())
+
+    def test_parse_rejects_missing_index_and_inconsistent_total(self):
+        text = self._complete_availability_log()
+        missing_index = text.replace(
+            "  [    2/    4] sm__unsupported.sum NOT_FOUND      value=-1\n", ""
+        )
+        with self.assertRaisesRegex(ValueError, "incomplete or out of order"):
+            LOG_MODULE.parse_sweep_log(missing_index)
+
+        inconsistent_total = text.replace("[    3/    4]", "[    3/    5]")
+        with self.assertRaisesRegex(ValueError, "inconsistent total"):
+            LOG_MODULE.parse_sweep_log(inconsistent_total)
+
+    def test_parse_rejects_missing_test_completion(self):
+        text = self._complete_availability_log()
+        without_ok = "\n".join(
+            line for line in text.splitlines() if "CudaMetric.AllMetrics" not in line
+        )
+        with self.assertRaisesRegex(ValueError, "did not complete with OK"):
+            LOG_MODULE.parse_sweep_log(without_ok)
+
+        without_passed = "\n".join(
+            line for line in text.splitlines() if "PASSED" not in line
+        )
+        with self.assertRaisesRegex(ValueError, "did not complete with PASSED"):
+            LOG_MODULE.parse_sweep_log(without_passed)
+
+    def test_parse_rejects_summary_count_mismatch(self):
+        text = self._complete_availability_log().replace(
+            "1 valid, 1 not_found", "2 valid, 0 not_found"
+        )
+        with self.assertRaisesRegex(ValueError, "VALID count does not match"):
+            LOG_MODULE.parse_sweep_log(text)
+
+    def test_parse_accepts_unique_nonnegative_finite_valid_values(self):
+        text = "\n".join([
+            "[ RUN      ] CudaMetric.AllMetrics",
+            "[ 1/2] metric.zero VALID value=0",
+            "[ 2/2] metric.fraction VALID value=1.25",
+            "all metrics: 2 valid, 0 not_found, 0 overflow, 0 command_failed (of 2)",
+            "[       OK ] CudaMetric.AllMetrics",
+            "[  PASSED  ] 1 test.",
+        ])
+        records = LOG_MODULE.parse_sweep_log(text)
+        self.assertEqual(
+            [(record["metric"], record["value"]) for record in records],
+            [("metric.zero", "0"), ("metric.fraction", "1.25")],
+        )
+
+    def test_parse_rejects_duplicate_valid_metric_name(self):
+        text = "\n".join([
+            "[ RUN      ] CudaMetric.AllMetrics",
+            "[ 1/2] metric.same VALID value=1",
+            "[ 2/2] metric.same VALID value=2",
+            "all metrics: 2 valid, 0 not_found, 0 overflow, 0 command_failed (of 2)",
+            "[       OK ] CudaMetric.AllMetrics",
+            "[  PASSED  ] 1 test.",
+        ])
+        with self.assertRaisesRegex(ValueError, "duplicate VALID metric: metric.same"):
+            LOG_MODULE.parse_sweep_log(text)
+
+    def test_parse_rejects_nonfinite_unparseable_or_negative_valid_value(self):
+        for value in ("nan", "inf", "not-a-number", "-1"):
+            with self.subTest(value=value):
+                text = "\n".join([
+                    "[ RUN      ] CudaMetric.AllMetrics",
+                    "[ 1/1] metric.invalid VALID value={}".format(value),
+                    "all metrics: 1 valid, 0 not_found, 0 overflow, 0 command_failed (of 1)",
+                    "[       OK ] CudaMetric.AllMetrics",
+                    "[  PASSED  ] 1 test.",
+                ])
+                with self.assertRaisesRegex(ValueError, "expected a nonnegative finite number"):
+                    LOG_MODULE.parse_sweep_log(text)
+
+    @staticmethod
+    def _write_text(path, text):
+        path.write_text(text, encoding="utf-8")
+        return path
 
     @staticmethod
     def _case(name, op_type, *, dtype="float32", shapes=None, workload=None, params=None,
@@ -121,6 +228,8 @@ class CudaPmuSweepTest(unittest.TestCase):
             )
             for index in range(6)
         ]
+        for index, case in enumerate(insufficient, 1):
+            case["workload_runs"] = index
         with tempfile.TemporaryDirectory() as directory:
             manifest = self._write_manifest(Path(directory), mixed + insufficient)
             plan = SWEEP_MODULE.build_case_selection_plan(manifest, backend="cuda")
@@ -140,8 +249,14 @@ class CudaPmuSweepTest(unittest.TestCase):
         report = {
             "cases": [{
                 "case": "cuda_relu_fp32_smoke",
+                "dispatch_status": "dispatched",
+                "validation_status": "validation_passed",
+                "valid": True,
                 "pmu_status": "sampled",
                 "pmu_metrics": {"sm__sass_thread_inst_executed_op_fadd_pred_on.sum": 0},
+                "pmu_metric_statuses": {
+                    "sm__sass_thread_inst_executed_op_fadd_pred_on.sum": "valid",
+                },
                 "latency_us": 1.5,
             }],
         }
@@ -151,17 +266,115 @@ class CudaPmuSweepTest(unittest.TestCase):
         self.assertEqual(row["status"], "VALID")
         self.assertEqual(row["value"], "0")
         self.assertEqual(row["pmu_status"], "sampled")
+        self.assertEqual(row["environment_status"], "not_collected")
+        self.assertEqual(row["gpu_clock_hz_before"], "")
+        self.assertNotEqual(row["gpu_clock_hz_before"], "0")
+
+    def test_classify_report_preserves_fractional_metric(self):
+        report = {
+            "cases": [{
+                "case": "cuda_relu_fp32_smoke",
+                "dispatch_status": "dispatched",
+                "validation_status": "validation_passed",
+                "valid": True,
+                "pmu_status": "sampled",
+                "pmu_metrics": {"dram__throughput.avg.pct_of_peak_sustained_elapsed": 12.375},
+                "pmu_metric_statuses": {
+                    "dram__throughput.avg.pct_of_peak_sustained_elapsed": "valid",
+                },
+            }],
+        }
+        row = SWEEP_MODULE.classify_report(
+            report,
+            "cuda_relu_fp32_smoke",
+            "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+        )
+        self.assertEqual(row["status"], "VALID")
+        self.assertEqual(row["value"], "12.375")
+
+    def test_classify_report_uses_explicit_metric_overflow_status(self):
+        report = {
+            "cases": [{
+                "case": "cuda_relu_fp32_smoke",
+                "dispatch_status": "dispatched",
+                "validation_status": "validation_passed",
+                "valid": True,
+                "pmu_status": "sampled",
+                "pmu_metrics": {},
+                "pmu_metric_statuses": {"metric.bad": "overflow"},
+            }],
+        }
+        row = SWEEP_MODULE.classify_report(
+            report, "cuda_relu_fp32_smoke", "metric.bad"
+        )
+        self.assertEqual(row["status"], "OVERFLOW")
+        self.assertEqual(row["value"], "")
+
+    def test_classify_report_rejects_nonfinite_or_negative_valid_metric(self):
+        for raw in (float("nan"), float("inf"), -0.5, True):
+            with self.subTest(raw=raw):
+                report = {
+                    "cases": [{
+                        "case": "cuda_relu_fp32_smoke",
+                        "dispatch_status": "dispatched",
+                        "validation_status": "validation_passed",
+                        "valid": True,
+                        "pmu_status": "sampled",
+                        "pmu_metrics": {"metric.bad": raw},
+                        "pmu_metric_statuses": {"metric.bad": "valid"},
+                    }],
+                }
+                row = SWEEP_MODULE.classify_report(
+                    report, "cuda_relu_fp32_smoke", "metric.bad"
+                )
+                self.assertEqual(row["status"], "MALFORMED_OUTPUT")
 
     def test_classify_pmu_start_failure_as_command_failed(self):
         report = {
             "cases": [{
                 "case": "cuda_relu_fp32_smoke",
+                "dispatch_status": "dispatched",
+                "validation_status": "validation_passed",
+                "valid": True,
                 "pmu_status": "cuda_event_fallback(start_failed: CUPTI_ERROR_INSUFFICIENT_PRIVILEGES)",
                 "latency_us": 2.0,
             }],
         }
         row = SWEEP_MODULE.classify_report(report, "cuda_relu_fp32_smoke", "dram__bytes.avg")
         self.assertEqual(row["status"], "COMMAND_FAILED")
+
+    def test_classify_report_rejects_unvalidated_or_malformed_case(self):
+        cases = (
+            {
+                "case": "cuda_relu_fp32_smoke",
+                "dispatch_status": "dispatched",
+                "validation_status": "validation_failed",
+                "valid": False,
+                "pmu_status": "sampled",
+                "error": "kernel output validation failed",
+            },
+            {
+                "case": "cuda_relu_fp32_smoke",
+                "dispatch_status": "dispatched",
+                "validation_status": "readback_failed",
+                "valid": False,
+                "pmu_status": "sampled",
+                "error": "CUDA readback failed",
+            },
+            {
+                "case": "cuda_relu_fp32_smoke",
+                "pmu_status": "sampled",
+            },
+        )
+        for case in cases:
+            with self.subTest(validation_status=case.get("validation_status")):
+                row = SWEEP_MODULE.classify_report(
+                    {"cases": [case]},
+                    "cuda_relu_fp32_smoke",
+                    "dram__bytes.avg",
+                )
+                self.assertEqual(row["status"], "COMMAND_FAILED")
+                self.assertTrue(row["error"])
 
     def test_build_json_matches_requested_shape(self):
         payload = SWEEP_MODULE.build_result_json(
@@ -179,6 +392,19 @@ class CudaPmuSweepTest(unittest.TestCase):
             "case_a": {"pmc": {"sm__cycles_elapsed.avg": 123}},
             "case_b": {"pmc": {}},
         })
+
+    def test_build_json_preserves_fraction_and_large_integer_lexemes(self):
+        payload = SWEEP_MODULE.build_result_json(
+            ["case_a"],
+            [
+                {"case": "case_a", "metric": "metric.fraction", "status": "VALID",
+                 "value": "0.125"},
+                {"case": "case_a", "metric": "metric.uint64", "status": "VALID",
+                 "value": "9007199254740993"},
+            ],
+        )
+        self.assertEqual(payload["case_a"]["pmc"]["metric.fraction"], 0.125)
+        self.assertEqual(payload["case_a"]["pmc"]["metric.uint64"], 9007199254740993)
 
     def test_build_command_contains_one_case_and_one_metric(self):
         argv = SWEEP_MODULE.build_benchmark_argv(
@@ -206,9 +432,21 @@ class CudaPmuSweepTest(unittest.TestCase):
             output_path.write_text(json.dumps({
                 "cases": [{
                     "case": "cuda_relu_fp32_smoke",
+                    "dispatch_status": "dispatched",
+                    "validation_status": "validation_passed",
+                    "valid": True,
                     "pmu_status": "sampled",
                     "num_passes": 1,
                     "pmu_metrics": {"dram__bytes.avg": 123},
+                    "pmu_metric_statuses": {"dram__bytes.avg": "valid"},
+                    "environment": {
+                        "sampling_source": "nvml",
+                        "sampling_status": "sampled",
+                        "gpu_clock_hz_before": 1350000000,
+                        "gpu_clock_hz_after": 1365000000,
+                        "temperature_c_before": 51,
+                        "temperature_c_after": 52,
+                    },
                 }],
             }), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, "", "")
@@ -219,9 +457,10 @@ class CudaPmuSweepTest(unittest.TestCase):
         )
         self.assertEqual(result["dram__bytes.avg"]["status"], "VALID")
         self.assertTrue(result["dram__bytes.avg"]["collection_session_id"].startswith("cuda-pmc-"))
-        self.assertEqual(result["dram__bytes.avg"]["environment_status"], "not_collected")
-        self.assertEqual(result["dram__bytes.avg"]["gpu_clock_hz_before"], "")
-        self.assertEqual(result["dram__bytes.avg"]["temperature_c_after"], "")
+        self.assertEqual(result["dram__bytes.avg"]["environment_status"], "sampled")
+        self.assertEqual(result["dram__bytes.avg"]["environment_source"], "nvml")
+        self.assertEqual(result["dram__bytes.avg"]["gpu_clock_hz_before"], "1350000000")
+        self.assertEqual(result["dram__bytes.avg"]["temperature_c_after"], "52")
         self.assertFalse(observed["output_path"].exists())
         self.assertFalse(observed["output_path"].parent.exists())
 
@@ -256,10 +495,10 @@ class CudaPmuSweepTest(unittest.TestCase):
                 return {metric: {"status": "VALID", "value": "7", "pmu_status": "sampled",
                                  "num_passes": 2, "returncode": 0, "error": "",
                                  "collection_session_id": "session-1",
-                                 "order_index": "", "gpu_clock_hz_before": "",
-                                 "gpu_clock_hz_after": "", "temperature_c_before": "",
-                                 "temperature_c_after": "", "environment_status": "not_collected",
-                                 "environment_source": ""}
+                                 "order_index": "", "gpu_clock_hz_before": "1200000000",
+                                 "gpu_clock_hz_after": "1215000000", "temperature_c_before": "48",
+                                 "temperature_c_after": "49", "environment_status": "sampled",
+                                 "environment_source": "nvml"}
                         for metric in metrics}
 
             payload = SWEEP_MODULE.run_sweep(args, executor=fake_executor)
@@ -274,10 +513,11 @@ class CudaPmuSweepTest(unittest.TestCase):
             with Path(args.output_csv).open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream))
             self.assertEqual(rows[0]["sweep_plan_id"], plan.plan_id)
-            self.assertEqual([row["order_index"] for row in rows], ["1", "2"])
+            self.assertEqual([row["order_index"] for row in rows], ["1", "1"])
             self.assertEqual({row["collection_session_id"] for row in rows}, {"session-1"})
-            self.assertTrue(all(row["gpu_clock_hz_before"] == "" for row in rows))
-            self.assertTrue(all(row["temperature_c_after"] == "" for row in rows))
+            self.assertTrue(all(row["gpu_clock_hz_before"] == "1200000000" for row in rows))
+            self.assertTrue(all(row["temperature_c_after"] == "49" for row in rows))
+            self.assertTrue(all(row["environment_source"] == "nvml" for row in rows))
 
             args.resume = True
             SWEEP_MODULE.run_sweep(args, executor=lambda *unused: self.fail("resume reran a completed pair"))

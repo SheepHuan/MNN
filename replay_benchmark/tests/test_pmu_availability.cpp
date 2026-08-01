@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "rapidjson/document.h"
+
 // ============================================================
 // Infrastructure (shared with test_pmu_multipass.cpp)
 // ============================================================
@@ -61,18 +63,44 @@ static std::vector<MetricResult> runBench(const std::string& caseName,
     fread(&json[0], 1, sz, f);
     fclose(f);
 
+    rapidjson::Document document;
+    document.Parse(json.c_str(), json.size());
+    if (document.HasParseError() || !document.IsObject() || !document.HasMember("cases") ||
+        !document["cases"].IsArray()) {
+        return {};
+    }
+    const rapidjson::Value* caseResult = nullptr;
+    for (const auto& item : document["cases"].GetArray()) {
+        if (item.IsObject() && item.HasMember("case") && item["case"].IsString() &&
+            caseName == item["case"].GetString()) {
+            caseResult = &item;
+            break;
+        }
+    }
+    if (caseResult == nullptr || !caseResult->HasMember("pmu_status") ||
+        !(*caseResult)["pmu_status"].IsString() ||
+        std::string((*caseResult)["pmu_status"].GetString()) != "sampled" ||
+        !caseResult->HasMember("pmu_metric_statuses") ||
+        !(*caseResult)["pmu_metric_statuses"].IsObject()) {
+        return {};
+    }
+    const auto& statuses = (*caseResult)["pmu_metric_statuses"];
+    const rapidjson::Value* values = caseResult->HasMember("pmu_metrics") &&
+                                             (*caseResult)["pmu_metrics"].IsObject()
+                                         ? &(*caseResult)["pmu_metrics"]
+                                         : nullptr;
     std::vector<MetricResult> results;
     for (const auto& metric : metrics) {
-        std::string pattern = "\"" + metric + "\":";
-        size_t pos = json.find(pattern);
         double val = -1.0;
-        if (pos != std::string::npos) {
-            pos += pattern.size();
-            while (pos < json.size() && json[pos] == ' ') pos++;
-            if (json.substr(pos, 19) == "9223372036854775808")
-                val = -2.0;  // overflow — metric collected but value invalid
-            else
-                val = atof(json.c_str() + pos);
+        if (statuses.HasMember(metric.c_str()) && statuses[metric.c_str()].IsString()) {
+            const std::string status = statuses[metric.c_str()].GetString();
+            if (status == "overflow") {
+                val = -2.0;
+            } else if (status == "valid" && values != nullptr && values->HasMember(metric.c_str()) &&
+                       (*values)[metric.c_str()].IsNumber()) {
+                const double parsed = (*values)[metric.c_str()].GetDouble();
+                if (std::isfinite(parsed) && parsed >= 0.0) val = parsed;
+            }
         }
         results.push_back({metric, val});
     }
@@ -187,7 +215,7 @@ TEST(CudaMetric, AllMetrics) {
         } else {
             commandFailed++;
         }
-        printf("  [%5zu/%5zu] %-80s %-13s value=% .0f\n",
+        printf("  [%5zu/%5zu] %-80s %-13s value=%.17g\n",
                i + 1, metrics.size(), metric.c_str(), state, value);
     }
 

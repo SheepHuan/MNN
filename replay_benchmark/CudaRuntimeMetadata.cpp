@@ -234,11 +234,22 @@ struct CudaEnvironmentSampler::Impl {
         } else {
             lastError = nvmlErrorString(clockResult);
         }
-        unsigned int temperatureC = 0;
-        nvmlReturn_t temperatureResult = nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &temperatureC);
+        nvmlReturn_t temperatureResult = NVML_ERROR_NOT_SUPPORTED;
+        double temperatureC = 0.0;
+#if defined(nvmlTemperature_v1)
+        nvmlTemperature_t temperatureInfo = {};
+        temperatureInfo.version = nvmlTemperature_v1;
+        temperatureInfo.sensorType = NVML_TEMPERATURE_GPU;
+        temperatureResult = nvmlDeviceGetTemperatureV(device, &temperatureInfo);
+        temperatureC = static_cast<double>(temperatureInfo.temperature);
+#else
+        unsigned int legacyTemperatureC = 0;
+        temperatureResult = nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &legacyTemperatureC);
+        temperatureC = static_cast<double>(legacyTemperatureC);
+#endif
         if (temperatureResult == NVML_SUCCESS) {
             temperature->present = true;
-            temperature->value = static_cast<double>(temperatureC);
+            temperature->value = temperatureC;
         } else {
             lastError = nvmlErrorString(temperatureResult);
         }
