@@ -20,6 +20,7 @@ from .base import (
     descriptor_for_feature,
     feature_condition_medians,
     log_latency_map,
+    observed_launch_controls,
     transformed_feature_map,
 )
 from .statistics import (
@@ -57,6 +58,7 @@ def _record_numeric_controls(target, prefix, values):
 
 def _numeric_controls(output, condition_ids):
     per_condition = {condition_id: {} for condition_id in condition_ids}
+    observed_launch = observed_launch_controls(output.context.dataset)
     for condition_id in condition_ids:
         condition = output.context.dataset.conditions[condition_id]
         for prefix, values in (
@@ -66,6 +68,11 @@ def _numeric_controls(output, condition_ids):
             ("launch", condition.launch),
         ):
             _record_numeric_controls(per_condition[condition_id], prefix, values)
+        _record_numeric_controls(
+            per_condition[condition_id],
+            "launch",
+            observed_launch.get(condition_id, {}),
+        )
     environment = defaultdict(lambda: defaultdict(list))
     for run in output.context.dataset.runs.values():
         if run.condition_id not in per_condition:

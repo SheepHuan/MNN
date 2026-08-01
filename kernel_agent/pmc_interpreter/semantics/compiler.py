@@ -34,12 +34,16 @@ def compile_analysis_report(layer_output):
     selected_features = {
         item.feature_id for item in layer_output.signature_report.latency_association_set
     }
+    selected_descriptors = []
     metric_knowledge = {}
     for feature_id, spec in sorted(context.features.specs.items()):
         metric_id = spec.source_metric_ids[0]
+        descriptor = context.dataset.metric_catalog[metric_id]
+        if feature_id in selected_features:
+            selected_descriptors.append(descriptor)
         metric_knowledge[feature_id] = MetricKnowledge(
             feature_spec=spec,
-            descriptor=context.dataset.metric_catalog[metric_id],
+            descriptor=descriptor,
             quality=layer_output.quality_report.metrics.get(feature_id),
             redundancy=layer_output.redundancy_report.metrics.get(feature_id),
             association=layer_output.correlation_report.associations.get(feature_id),
@@ -77,6 +81,22 @@ def compile_analysis_report(layer_output):
         warnings.append(
             "diagnostic-only metrics are isolated from latency explanation and optimization effect sets"
         )
+    if selected_descriptors and all(
+        descriptor.phenomenon_role == "work"
+        and descriptor.normalizer == "none"
+        for descriptor in selected_descriptors
+    ):
+        warnings.append(
+            "the latency association set contains only unnormalized work counters; it does not measure execution efficiency"
+        )
+    if selected_descriptors and any(
+        descriptor.mapping_level != "exact_quantity"
+        or descriptor.mapping_confidence < 0.8
+        for descriptor in selected_descriptors
+    ):
+        warnings.append(
+            "some selected metric semantics are generic mechanism proxies rather than vendor-verified exact mappings"
+        )
 
     layer_reports = LayerReportBundle(
         projection=layer_output.projection_report,
@@ -93,6 +113,17 @@ def compile_analysis_report(layer_output):
         for groups in layer_output.signature_report.signature_index.values()
         for signature in groups.values()
     )
+    correlation_evidence = layer_output.correlation_report.evidence_level
+    if correlation_evidence == "descriptive_cross_kernel":
+        association_selection_basis = (
+            "constrained mRMR over uncontrolled cross-kernel descriptive associations; "
+            "workload and shape residualization was not effective"
+        )
+    else:
+        association_selection_basis = (
+            "constrained mRMR over correlation evidence residualized with the controls "
+            "listed in the latency baseline report"
+        )
     return PmcAnalysisReport(
         scope=AnalysisScope(
             dataset_id=context.dataset.manifest.dataset_id,
@@ -124,9 +155,7 @@ def compile_analysis_report(layer_output):
                     item.feature_id
                     for item in layer_output.signature_report.latency_association_set
                 ),
-                selection_basis=(
-                    "constrained mRMR over workload/shape-controlled correlation evidence"
-                ),
+                selection_basis=association_selection_basis,
                 uses_latency=True,
                 evidence_level=(
                     layer_output.signature_report.latency_association_set_evidence

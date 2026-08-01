@@ -66,10 +66,10 @@
       "tokens": ["setzero", "bias_zero_prepare"]
     },
     {
-      "role": "postprocess_pointwise",
+      "role": "layout_data_movement",
       "tokens": [
-        "splitgelu", "add_bias", "biasandactivation", "relu", "clamp", "prelu",
-        "scale", "gelu", "silu", "select", "cast", "binary"
+        "transpose", "packcommon", "unpackcommon", "blit", "raster", "gather",
+        "copy_kv", "compact_kv", "split_fusedqkv", "split_fusedkv", "col2im"
       ]
     },
     {
@@ -80,18 +80,18 @@
       ]
     },
     {
-      "role": "layout_data_movement",
-      "tokens": [
-        "transpose", "packcommon", "unpackcommon", "blit", "raster", "gather",
-        "copy_kv", "compact_kv", "split_fusedqkv", "split_fusedkv", "col2im"
-      ]
-    },
-    {
       "role": "core_compute",
       "tokens": [
         "gemm", "gemv", "matmul", "conv_dw", "flash_decode", "qk_kernel",
         "qkv_kernel", "gated_delta", "short_conv", "conv1d", "pool", "interp",
         "grid_sample", "layernorm", "groupnorm", "rope"
+      ]
+    },
+    {
+      "role": "postprocess_pointwise",
+      "tokens": [
+        "splitgelu", "add_bias", "biasandactivation", "relu", "clamp", "prelu",
+        "scale", "gelu", "silu", "select", "cast", "binary"
       ]
     }
   ]

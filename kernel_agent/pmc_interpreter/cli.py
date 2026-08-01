@@ -28,6 +28,7 @@ def parse_args(argv=None):
     source.add_argument("--pmc-csv", help="MNN kernel-replay long rows CSV")
     parser.add_argument("--latency-json")
     parser.add_argument("--operator-cases")
+    parser.add_argument("--case-selection-plan")
     parser.add_argument("--pairs-csv")
     parser.add_argument("--platform", default="cuda")
     parser.add_argument("--backend", default="cuda")
@@ -102,6 +103,7 @@ def _load_dataset(args):
             taxonomy=taxonomy,
             registry=registry,
             pairs_csv=args.pairs_csv,
+            case_selection_plan=args.case_selection_plan,
             pmc_workload_runs=args.pmc_workload_runs,
             latency_workload_runs=args.latency_workload_runs,
         )

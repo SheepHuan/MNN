@@ -409,17 +409,37 @@ ProjectionOutput
 生成的 rulebook 仍是 device、kernel 类别、贡献配对观测区间和 intervention-scoped；不能
 外推到其他设备、类别、未观测 `ΔPMC` 区间或不同干预机制。
 
-## 八、当前工作区状态（2026-07-31）
+## 八、当前工作区状态（2026-08-01）
 
-当前文件尚未满足“同一 manifest 快照”的完整性要求：
+当前 CUDA 三数据源已经按第六节顺序从同一份 manifest 快照重新生成，并通过严格集合、
+笛卡尔积、协议字段和数值验收：
 
 | 检查项 | 当前结果 |
 | --- | --- |
-| `operator_cases.json` | 919 个总 case；473 个 CUDA case；70 个 CUDA op_type |
-| PMC rows | 60 个代表 case；5,952 个 metric；357,120 行；无重复 |
-| Latency JSON | 425 个正数 latency；比当前 CUDA manifest 少 48 个 case |
-| Rows 与 latency | 现有 60 个 rows case 都能找到 latency |
+| `operator_cases.json` | 919 个总 case；473 个 CUDA case；70 个 CUDA op_type；CUDA 子集 name 唯一 |
+| Availability | 7,200 条请求；6,316 `VALID`；712 `NOT_FOUND`；172 `OVERFLOW`；0 `COMMAND_FAILED` |
+| PMC rows | 70 个代表 case；6,316 个唯一有效 metric；442,120 行；442,120 个唯一 `(case, metric)`；全部 `VALID` |
+| Latency JSON | 473 个有限正数 latency；key 与 CUDA manifest 完全一致 |
+| Rows 与 latency | 70 个代表 case 全部可以连接 latency |
+| 标准化数据集 | 70 个 condition；6,316 个 metric；442,120 个 PMC observation；70 个 latency observation |
 
-因此现有文件可以复现旧的 60-case 探索分析，但不能声明为当前
-`operator_cases.json` 对应的完整数据集。正式分析前应按第六节顺序重新生成 PMC rows
-和 latency。
+本次采集使用的 manifest SHA256 为：
+
+```text
+f1987cc8f9644b608c3b6316b8d89662f686e399ffd3b1599db8e142182dc09d
+```
+
+旧的 60-case PMC、425-case latency 和旧 availability 文件已归档到：
+
+```text
+build-x86-cuda/pmc-archive/20260801-070449-pre-refresh/
+```
+
+当前还有两个不阻塞本轮 CUDA 数据的独立警告：
+
+- manifest 全局存在 98 个非 CUDA 重名 case；CUDA 473 个 case 内没有重名；
+- availability 完整清单中的 151 个非 `VALID` basename 各出现四次，但
+  `cuda_pmc_valid.csv` 的 6,316 个 metric 全部唯一。
+
+这两项不能解释为 CUDA 三数据源缺失，也不得在已有采集过程中修改 manifest 后继续
+`--resume`；后续清理 manifest 时仍需重新执行完整刷新流程。

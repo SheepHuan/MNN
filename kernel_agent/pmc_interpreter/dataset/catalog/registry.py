@@ -173,14 +173,27 @@ class MetricRegistry:
     def _mechanism(lower, domain, target_equivalent):
         if target_equivalent:
             return "target_timing", "global"
-        if "atom" in lower or "atomic" in lower:
-            return "atomic_contention", "memory_system"
+        is_atomic = "atom" in lower or "atomic" in lower
         if any(token in lower for token in ("bank_conflict", "barrier", "membar")):
             return "synchronization", "execution_core"
+        if is_atomic and any(
+            token in lower
+            for token in (
+                "conflict",
+                "collision",
+                "retry",
+                "serial",
+                "stall",
+                "throttle",
+            )
+        ):
+            return "atomic_contention", "memory_system"
         if any(token in lower for token in ("diverg", "branch", "pred_off")):
             return "control_divergence", "execution_core"
         if any(token in lower for token in ("stalled", "pending", "scoreboard", "throttle")):
             return "scheduler_wait", "scheduler"
+        if is_atomic:
+            return "atomic_operation", "memory_system"
         if domain in {"lts", "l2", "uche", "gcc"} or "l2_" in lower:
             return "cache_locality", "l2"
         if domain in {"l1tex", "tp"} or "l1_" in lower:
@@ -269,6 +282,8 @@ class MetricRegistry:
             return "synchronization.wait_or_conflict"
         if mechanism == "atomic_contention":
             return "synchronization.atomic"
+        if mechanism == "atomic_operation":
+            return "memory.atomic.work"
         if mechanism == "control_divergence":
             return "control.divergence"
         return "{}.{}".format(mechanism, unit)

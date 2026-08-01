@@ -36,6 +36,17 @@ class DeviceSpec(PmcModel):
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class SemanticFactProvenance(PmcModel):
+    """shape/workload 声明的来源，避免把估算值解释成设备实测值。"""
+
+    status: str
+    source: str
+    method: str
+    formula: str = ""
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    notes: str = ""
+
+
 class KernelCondition(PmcModel):
     condition_id: str
     device_id: str
@@ -53,7 +64,44 @@ class KernelCondition(PmcModel):
     params: dict[str, JsonValue] = Field(default_factory=dict)
     workload: dict[str, JsonValue] = Field(default_factory=dict)
     launch: dict[str, JsonValue] = Field(default_factory=dict)
+    shape_provenance: dict[str, SemanticFactProvenance] = Field(default_factory=dict)
+    workload_provenance: dict[str, SemanticFactProvenance] = Field(default_factory=dict)
+    launch_provenance: dict[str, SemanticFactProvenance] = Field(default_factory=dict)
     tags: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class KernelLaunchRecord(PmcModel):
+    """一次真实 device-kernel launch 的平台无关资源记录。"""
+
+    stage_index: int = Field(ge=0)
+    repeat_index: int | None = Field(default=None, ge=0)
+    kernel_name: str
+    grid: tuple[int, int, int]
+    block: tuple[int, int, int]
+    registers_per_thread: int | None = Field(default=None, ge=0)
+    static_shared_memory_bytes: int | None = Field(default=None, ge=0)
+    dynamic_shared_memory_bytes: int | None = Field(default=None, ge=0)
+    local_memory_per_thread_bytes: int | None = Field(default=None, ge=0)
+    local_memory_total_bytes: int | None = Field(default=None, ge=0)
+    native: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_geometry(self) -> Self:
+        if any(value <= 0 for value in self.grid):
+            raise ValueError("kernel launch grid dimensions must be positive")
+        if any(value <= 0 for value in self.block):
+            raise ValueError("kernel launch block dimensions must be positive")
+        return self
+
+
+class EnvironmentSample(PmcModel):
+    """采集区间外读取的设备环境快照，不宣称是逐 kernel 精确状态。"""
+
+    phase: str
+    gpu_clock_hz: float | None = Field(default=None, gt=0.0)
+    temperature_c: float | None
+    source: str
+    status: str
 
 
 class MeasurementRun(PmcModel):
@@ -71,6 +119,8 @@ class MeasurementRun(PmcModel):
     temperature_c: float | None
     cache_policy: str
     source_ref: str
+    launch_records: tuple[KernelLaunchRecord, ...] = ()
+    environment_samples: tuple[EnvironmentSample, ...] = ()
 
 
 class MetricDescriptor(PmcModel):

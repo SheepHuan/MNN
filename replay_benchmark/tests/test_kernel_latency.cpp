@@ -10,6 +10,7 @@
 #include "rapidjson/writer.h"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,13 +64,129 @@ static std::vector<std::string> discoverCudaCases(const std::string& corpusRoot)
     return cases;
 }
 
+struct LaunchRecord {
+    std::string kernelName;
+    int64_t grid[3] = {0, 0, 0};
+    int64_t block[3] = {0, 0, 0};
+    uint64_t registersPerThread = 0;
+    uint64_t staticSharedMemoryBytes = 0;
+    uint64_t dynamicSharedMemoryBytes = 0;
+    uint64_t localMemoryPerThreadBytes = 0;
+    uint64_t localMemoryTotalBytes = 0;
+};
+
+struct OptionalNumber {
+    bool present = false;
+    double value = 0.0;
+};
+
+struct EnvironmentResult {
+    std::string samplingSource;
+    std::string samplingStatus;
+    OptionalNumber gpuClockHzBefore;
+    OptionalNumber gpuClockHzAfter;
+    OptionalNumber temperatureCBefore;
+    OptionalNumber temperatureCAfter;
+};
+
 struct LatencyResult {
     bool commandOk = false;
     bool hasLatency = false;
     bool pmuDisabled = false;
+    bool hasStructuredMetadata = false;
     double latencyUs = 0.0;
+    std::string launchSamplingStatus;
+    std::vector<LaunchRecord> launchRecords;
+    EnvironmentResult environment;
     std::string error;
 };
+
+static bool readDimension3(const rapidjson::Value& object, const char* key, int64_t result[3]) {
+    if (!object.HasMember(key) || !object[key].IsArray() || object[key].Size() != 3) return false;
+    for (rapidjson::SizeType i = 0; i < 3; ++i) {
+        if (!object[key][i].IsInt64() && !object[key][i].IsUint64()) return false;
+        result[i] = object[key][i].IsInt64()
+            ? object[key][i].GetInt64() : static_cast<int64_t>(object[key][i].GetUint64());
+        if (result[i] <= 0) return false;
+    }
+    return true;
+}
+
+static bool readNonnegativeUint64(const rapidjson::Value& object, const char* key, uint64_t* result) {
+    if (!object.HasMember(key)) return false;
+    if (object[key].IsUint64()) {
+        *result = object[key].GetUint64();
+        return true;
+    }
+    if (object[key].IsInt64() && object[key].GetInt64() >= 0) {
+        *result = static_cast<uint64_t>(object[key].GetInt64());
+        return true;
+    }
+    return false;
+}
+
+static OptionalNumber readOptionalNumber(const rapidjson::Value& object, const char* key) {
+    OptionalNumber result;
+    if (object.HasMember(key) && object[key].IsNumber()) {
+        result.present = true;
+        result.value = object[key].GetDouble();
+    }
+    return result;
+}
+
+static bool parseLaunchRecords(const rapidjson::Value& report, LatencyResult* result) {
+    if (!report.HasMember("launch_sampling_status") || !report["launch_sampling_status"].IsString() ||
+        !report.HasMember("launch_records") || !report["launch_records"].IsArray()) {
+        result->error = "launch metadata is missing or malformed";
+        return false;
+    }
+    result->launchSamplingStatus = report["launch_sampling_status"].GetString();
+    for (const auto& item : report["launch_records"].GetArray()) {
+        LaunchRecord record;
+        if (!item.IsObject() || !item.HasMember("kernel_name") || !item["kernel_name"].IsString() ||
+            !readDimension3(item, "grid", record.grid) ||
+            !readDimension3(item, "block", record.block) ||
+            !readNonnegativeUint64(item, "registers_per_thread", &record.registersPerThread) ||
+            !readNonnegativeUint64(item, "static_shared_memory_bytes", &record.staticSharedMemoryBytes) ||
+            !readNonnegativeUint64(item, "dynamic_shared_memory_bytes", &record.dynamicSharedMemoryBytes) ||
+            !readNonnegativeUint64(item, "local_memory_per_thread_bytes", &record.localMemoryPerThreadBytes) ||
+            !readNonnegativeUint64(item, "local_memory_total_bytes", &record.localMemoryTotalBytes)) {
+            result->error = "launch record is malformed";
+            return false;
+        }
+        record.kernelName = item["kernel_name"].GetString();
+        if (record.kernelName.empty()) {
+            result->error = "launch record kernel_name is empty";
+            return false;
+        }
+        result->launchRecords.emplace_back(std::move(record));
+    }
+    if (result->launchSamplingStatus == "sampled" && result->launchRecords.empty()) {
+        result->error = "launch sampling succeeded but returned no kernel records";
+        return false;
+    }
+    return true;
+}
+
+static bool parseEnvironment(const rapidjson::Value& report, LatencyResult* result) {
+    if (!report.HasMember("environment") || !report["environment"].IsObject()) {
+        result->error = "environment metadata is missing or malformed";
+        return false;
+    }
+    const auto& environment = report["environment"];
+    if (!environment.HasMember("sampling_source") || !environment["sampling_source"].IsString() ||
+        !environment.HasMember("sampling_status") || !environment["sampling_status"].IsString()) {
+        result->error = "environment sampling status is missing or malformed";
+        return false;
+    }
+    result->environment.samplingSource = environment["sampling_source"].GetString();
+    result->environment.samplingStatus = environment["sampling_status"].GetString();
+    result->environment.gpuClockHzBefore = readOptionalNumber(environment, "gpu_clock_hz_before");
+    result->environment.gpuClockHzAfter = readOptionalNumber(environment, "gpu_clock_hz_after");
+    result->environment.temperatureCBefore = readOptionalNumber(environment, "temperature_c_before");
+    result->environment.temperatureCAfter = readOptionalNumber(environment, "temperature_c_after");
+    return true;
+}
 
 static LatencyResult runLatency(const std::string& caseName, const std::string& corpusRoot) {
     LatencyResult result;
@@ -116,6 +233,9 @@ static LatencyResult runLatency(const std::string& caseName, const std::string& 
     result.latencyUs = report["latency_us"].GetDouble();
     result.hasLatency = result.latencyUs > 0.0;
     if (!result.hasLatency) result.error = "latency_us is not positive";
+    if (result.hasLatency && parseLaunchRecords(report, &result) && parseEnvironment(report, &result)) {
+        result.hasStructuredMetadata = true;
+    }
     return result;
 }
 
@@ -134,12 +254,62 @@ static bool writeLatencyJson(const std::string& path,
     auto& allocator = document.GetAllocator();
     for (size_t i = 0; i < cases.size(); ++i) {
         rapidjson::Value key(cases[i].c_str(), allocator);
+        rapidjson::Value value(rapidjson::kObjectType);
         if (i < results.size() && results[i].hasLatency) {
-            document.AddMember(key, results[i].latencyUs, allocator);
+            value.AddMember("latency_us", results[i].latencyUs, allocator);
         } else {
             rapidjson::Value nullValue(rapidjson::kNullType);
-            document.AddMember(key, nullValue, allocator);
+            value.AddMember("latency_us", nullValue, allocator);
         }
+        if (i < results.size()) {
+            rapidjson::Value launchStatus(results[i].launchSamplingStatus.c_str(), allocator);
+            value.AddMember("launch_sampling_status", launchStatus, allocator);
+            rapidjson::Value launches(rapidjson::kArrayType);
+            for (const auto& record : results[i].launchRecords) {
+                rapidjson::Value item(rapidjson::kObjectType);
+                rapidjson::Value kernelName(record.kernelName.c_str(), allocator);
+                item.AddMember("kernel_name", kernelName, allocator);
+                rapidjson::Value grid(rapidjson::kArrayType);
+                rapidjson::Value block(rapidjson::kArrayType);
+                for (int d = 0; d < 3; ++d) {
+                    grid.PushBack(record.grid[d], allocator);
+                    block.PushBack(record.block[d], allocator);
+                }
+                item.AddMember("grid", grid, allocator);
+                item.AddMember("block", block, allocator);
+                item.AddMember("registers_per_thread", record.registersPerThread, allocator);
+                item.AddMember("static_shared_memory_bytes", record.staticSharedMemoryBytes, allocator);
+                item.AddMember("dynamic_shared_memory_bytes", record.dynamicSharedMemoryBytes, allocator);
+                item.AddMember("local_memory_per_thread_bytes", record.localMemoryPerThreadBytes, allocator);
+                item.AddMember("local_memory_total_bytes", record.localMemoryTotalBytes, allocator);
+                launches.PushBack(item, allocator);
+            }
+            value.AddMember("launch_records", launches, allocator);
+
+            rapidjson::Value environment(rapidjson::kObjectType);
+            rapidjson::Value source(results[i].environment.samplingSource.c_str(), allocator);
+            rapidjson::Value status(results[i].environment.samplingStatus.c_str(), allocator);
+            environment.AddMember("sampling_source", source, allocator);
+            environment.AddMember("sampling_status", status, allocator);
+            if (results[i].environment.gpuClockHzBefore.present) {
+                environment.AddMember("gpu_clock_hz_before", results[i].environment.gpuClockHzBefore.value, allocator);
+            }
+            if (results[i].environment.gpuClockHzAfter.present) {
+                environment.AddMember("gpu_clock_hz_after", results[i].environment.gpuClockHzAfter.value, allocator);
+            }
+            if (results[i].environment.temperatureCBefore.present) {
+                environment.AddMember("temperature_c_before", results[i].environment.temperatureCBefore.value, allocator);
+            }
+            if (results[i].environment.temperatureCAfter.present) {
+                environment.AddMember("temperature_c_after", results[i].environment.temperatureCAfter.value, allocator);
+            }
+            value.AddMember("environment", environment, allocator);
+            if (!results[i].error.empty()) {
+                rapidjson::Value error(results[i].error.c_str(), allocator);
+                value.AddMember("error", error, allocator);
+            }
+        }
+        document.AddMember(key, value, allocator);
     }
     char buffer[4096];
     rapidjson::FileWriteStream stream(file, buffer, sizeof(buffer));
@@ -169,6 +339,7 @@ TEST(KernelLatency, AllCudaCases) {
     std::vector<LatencyResult> results;
     results.reserve(cases.size());
     size_t valid = 0;
+    size_t structured = 0;
     for (size_t i = 0; i < cases.size(); ++i) {
         LatencyResult result = runLatency(cases[i], corpusRoot);
         if (!result.hasLatency) {
@@ -176,14 +347,18 @@ TEST(KernelLatency, AllCudaCases) {
                         cases[i].c_str(), result.error.c_str());
         } else {
             ++valid;
-            std::printf("  [%zu/%zu] %s %.3f us\n", i + 1, cases.size(),
-                        cases[i].c_str(), result.latencyUs);
+            if (result.hasStructuredMetadata) ++structured;
+            std::printf("  [%zu/%zu] %s %.3f us, launch=%s (%zu records), environment=%s\n",
+                        i + 1, cases.size(), cases[i].c_str(), result.latencyUs,
+                        result.launchSamplingStatus.c_str(), result.launchRecords.size(),
+                        result.environment.samplingStatus.c_str());
         }
         results.emplace_back(result);
     }
 
     EXPECT_TRUE(writeLatencyJson(latencyOutputPath(), cases, results));
     EXPECT_EQ(valid, cases.size());
+    EXPECT_EQ(structured, cases.size());
 }
 
 int main(int argc, char** argv) {

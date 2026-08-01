@@ -11,14 +11,18 @@ from ..model import (
     ComparisonPair,
     DatasetManifest,
     DeviceSpec,
+    EnvironmentSample,
     KernelCondition,
+    KernelLaunchRecord,
     LatencyObservation,
     MeasurementRun,
     MetricObservation,
     PmcDataset,
+    SemanticFactProvenance,
 )
 from ..catalog import KernelTaxonomy, MetricRegistry
 from ..parsing import parse_number, parse_optional_int, semantic_equivalence_key
+from ..selection import load_case_selection_plan, validate_case_selection_plan_source
 from .comparison_pairs import read_comparison_pairs_csv
 
 
@@ -39,14 +43,147 @@ def _load_metadata(path, backend):
 
 def _load_latency(path):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("cases"), dict)
+        and str(payload.get("format") or "").startswith("mnn-kernel-latency")
+    ):
+        payload = payload["cases"]
+    if not isinstance(payload, dict):
+        raise ValueError("latency JSON must be an object keyed by case name")
     result = {}
     for case, raw in payload.items():
+        record = raw if isinstance(raw, dict) else {"latency_us": raw}
         if isinstance(raw, dict):
             raw = raw.get("latency_us")
         value = parse_number(raw, allow_negative=False)
         if value is not None and value > 0:
-            result[case] = value
+            result[case] = {**record, "latency_us": value}
     return result, set(payload)
+
+
+def _load_fact_provenance(entry, field):
+    raw = entry.get(field, {})
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("case {} field {} must be an object".format(entry.get("name", ""), field))
+    result = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            raise ValueError(
+                "case {} provenance {}.{} must be an object".format(
+                    entry.get("name", ""), field, key
+                )
+            )
+        result[str(key)] = SemanticFactProvenance.model_validate(value)
+    return result
+
+
+def _vector3(raw, field, case):
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        raise ValueError("latency case {} {} must contain three integers".format(case, field))
+    values = tuple(int(value) for value in raw)
+    if any(value <= 0 for value in values):
+        raise ValueError("latency case {} {} dimensions must be positive".format(case, field))
+    return values
+
+
+def _parse_launch_records(case, record):
+    raw_records = record.get("launch_records", [])
+    if raw_records is None:
+        return ()
+    if not isinstance(raw_records, list):
+        raise ValueError("latency case {} launch_records must be an array".format(case))
+    records = []
+    for index, raw in enumerate(raw_records):
+        if not isinstance(raw, dict):
+            raise ValueError("latency case {} launch record {} must be an object".format(case, index))
+        native = raw.get("native", {})
+        if not isinstance(native, dict):
+            raise ValueError("latency case {} launch record native must be an object".format(case))
+        records.append(KernelLaunchRecord(
+            stage_index=parse_optional_int(raw.get("stage_index")) if raw.get("stage_index") is not None else index,
+            repeat_index=parse_optional_int(raw.get("repeat_index")),
+            kernel_name=str(raw.get("kernel_name") or ""),
+            grid=_vector3(raw.get("grid"), "grid", case),
+            block=_vector3(raw.get("block"), "block", case),
+            registers_per_thread=parse_optional_int(raw.get("registers_per_thread")),
+            static_shared_memory_bytes=parse_optional_int(raw.get("static_shared_memory_bytes")),
+            dynamic_shared_memory_bytes=parse_optional_int(raw.get("dynamic_shared_memory_bytes")),
+            local_memory_per_thread_bytes=parse_optional_int(raw.get("local_memory_per_thread_bytes")),
+            local_memory_total_bytes=parse_optional_int(raw.get("local_memory_total_bytes")),
+            native=native,
+        ))
+    return tuple(records)
+
+
+def _parse_environment(record):
+    raw = record.get("environment", {})
+    if not isinstance(raw, dict):
+        return (), None, None
+    source = str(raw.get("sampling_source") or raw.get("source") or "unknown")
+    status = str(raw.get("status") or "unknown")
+    samples = []
+    for phase in ("before", "after"):
+        clock = parse_number(raw.get("gpu_clock_hz_{}".format(phase)), allow_negative=False)
+        temperature = parse_number(raw.get("temperature_c_{}".format(phase)), allow_negative=True)
+        if clock is None and temperature is None:
+            continue
+        samples.append(EnvironmentSample(
+            phase=phase,
+            gpu_clock_hz=clock if clock and clock > 0 else None,
+            temperature_c=temperature,
+            source=source,
+            status=status,
+        ))
+    clocks = [sample.gpu_clock_hz for sample in samples if sample.gpu_clock_hz is not None]
+    temperatures = [sample.temperature_c for sample in samples if sample.temperature_c is not None]
+    clock = sum(clocks) / len(clocks) if clocks else None
+    temperature = sum(temperatures) / len(temperatures) if temperatures else None
+    return tuple(samples), clock, temperature
+
+
+def _single_row_value(rows, key):
+    values = {row.get(key, "").strip() for row in rows if row.get(key, "").strip()}
+    if len(values) > 1:
+        raise ValueError(
+            "PMC collection session has inconsistent {} values: {}".format(
+                key, ",".join(sorted(values))
+            )
+        )
+    return next(iter(values), "")
+
+
+def _row_environment(rows):
+    source = _single_row_value(rows, "environment_source") or "unknown"
+    status = _single_row_value(rows, "environment_status") or "unknown"
+    samples = []
+    for phase in ("before", "after"):
+        clock = parse_number(
+            _single_row_value(rows, "gpu_clock_hz_{}".format(phase)),
+            allow_negative=False,
+        )
+        temperature = parse_number(
+            _single_row_value(rows, "temperature_c_{}".format(phase)),
+            allow_negative=True,
+        )
+        if clock is None and temperature is None:
+            continue
+        samples.append(EnvironmentSample(
+            phase=phase,
+            gpu_clock_hz=clock if clock and clock > 0 else None,
+            temperature_c=temperature,
+            source=source,
+            status=status,
+        ))
+    clocks = [sample.gpu_clock_hz for sample in samples if sample.gpu_clock_hz is not None]
+    temperatures = [sample.temperature_c for sample in samples if sample.temperature_c is not None]
+    return (
+        tuple(samples),
+        sum(clocks) / len(clocks) if clocks else None,
+        sum(temperatures) / len(temperatures) if temperatures else None,
+    )
 
 
 def _sha256(path):
@@ -98,6 +235,9 @@ def _build_condition(case, entry, device_id, taxonomy):
         params=params,
         workload=workload,
         launch=launch,
+        shape_provenance=_load_fact_provenance(entry, "shape_provenance"),
+        workload_provenance=_load_fact_provenance(entry, "workload_provenance"),
+        launch_provenance=_load_fact_provenance(entry, "launch_provenance"),
         tags=tags,
     )
 
@@ -142,6 +282,7 @@ def load_mnn_kernelreplay_dataset(
     taxonomy=None,
     registry=None,
     pairs_csv=None,
+    case_selection_plan=None,
     pmc_workload_runs=1,
     latency_workload_runs=1,
 ):
@@ -150,11 +291,24 @@ def load_mnn_kernelreplay_dataset(
     device = device or DeviceSpec(device_id="{}:default".format(platform), vendor=platform)
     metadata = _load_metadata(operator_cases_json, backend)
     latencies, latency_keys = _load_latency(latency_json)
+    selection_plan = None
+    if case_selection_plan:
+        selection_plan = load_case_selection_plan(case_selection_plan)
+        validate_case_selection_plan_source(selection_plan, operator_cases_json)
+        if selection_plan.backend != backend:
+            raise ValueError(
+                "case selection plan backend {} does not match dataset backend {}".format(
+                    selection_plan.backend, backend
+                )
+            )
     rows = []
     case_order = []
     seen_cases = set()
     metric_names = set()
     metrics_by_case = defaultdict(set)
+    rows_by_session = defaultdict(list)
+    sweep_plan_ids = set()
+    sweep_config_ids = set()
     duplicate_pair_count = 0
     status_counts = Counter()
     with Path(pmc_csv).open(newline="", encoding="utf-8") as stream:
@@ -175,6 +329,13 @@ def load_mnn_kernelreplay_dataset(
             metrics_by_case[case].add(metric)
             metric_names.add(metric)
             status_counts[row["status"].strip()] += 1
+            session_id = row.get("collection_session_id", "").strip()
+            if session_id:
+                rows_by_session[session_id].append(row)
+            if row.get("sweep_plan_id", "").strip():
+                sweep_plan_ids.add(row["sweep_plan_id"].strip())
+            if row.get("sweep_config_id", "").strip():
+                sweep_config_ids.add(row["sweep_config_id"].strip())
             rows.append(row)
 
     issues = []
@@ -190,17 +351,27 @@ def load_mnn_kernelreplay_dataset(
                 len(invalid_latency_cases),
             )
         )
-    representative_by_op_type = {}
-    for case, entry in metadata.items():
-        op_type = str(entry.get("op_type") or "unknown")
-        representative_by_op_type.setdefault(op_type, case)
-    expected_representatives = set(representative_by_op_type.values())
     observed_row_cases = set(case_order)
-    if observed_row_cases != expected_representatives:
+    expected_selected_cases = (
+        {case.case_id for case in selection_plan.selected_cases}
+        if selection_plan is not None
+        else set()
+    )
+    if selection_plan is not None and observed_row_cases != expected_selected_cases:
         issues.append(
-            "PMC rows/manifest representative mismatch: {} expected op-type representatives, {} observed"
-            .format(len(expected_representatives), len(observed_row_cases))
+            "PMC rows/case selection plan mismatch: {} expected selected cases, {} observed"
+            .format(len(expected_selected_cases), len(observed_row_cases))
         )
+    elif selection_plan is None:
+        issues.append(
+            "no case selection plan; PMC case coverage cannot be verified against the collection policy"
+        )
+    if len(sweep_plan_ids) > 1:
+        issues.append("PMC rows contain multiple sweep_plan_id values")
+    if len(sweep_config_ids) > 1:
+        issues.append("PMC rows contain multiple sweep_config_id values")
+    if selection_plan is not None and sweep_plan_ids and selection_plan.plan_id not in sweep_plan_ids:
+        issues.append("PMC rows sweep_plan_id does not match the supplied case selection plan")
     if duplicate_pair_count:
         issues.append(
             "PMC rows contain {} duplicate (case, metric) records".format(
@@ -232,29 +403,51 @@ def load_mnn_kernelreplay_dataset(
     runs = {}
     metric_observations = []
     observation_index = 0
-    for case in case_order:
-        run_id = "pmc::{}".format(case)
+    pmc_groups = defaultdict(list)
+    for row in rows:
+        case = row["case"].strip()
+        if case not in conditions:
+            continue
+        session_id = row.get("collection_session_id", "").strip()
+        group_key = (case, session_id or "legacy")
+        pmc_groups[group_key].append(row)
+    pmc_run_ids = {}
+    for (case, session_id), session_rows in sorted(pmc_groups.items()):
+        run_id = (
+            "pmc-session::{}".format(session_id)
+            if session_id != "legacy"
+            else "pmc::{}".format(case)
+        )
+        if run_id in runs:
+            raise ValueError("duplicate PMC collection session {}".format(run_id))
         entry = metadata[case]
+        environment_samples, gpu_clock_hz, temperature_c = _row_environment(session_rows)
+        repeat_id = _single_row_value(session_rows, "repeat_id")
+        paired_run_group_id = _single_row_value(session_rows, "paired_run_group_id")
+        order_index = parse_optional_int(_single_row_value(session_rows, "order_index"))
         runs[run_id] = MeasurementRun(
             run_id=run_id,
             condition_id=case,
             collection_kind="pmc",
             collector=collector,
-            repeat_id="",
-            collection_id="",
-            paired_run_group_id="",
+            repeat_id=repeat_id,
+            collection_id="" if session_id == "legacy" else session_id,
+            paired_run_group_id=paired_run_group_id,
             warmup_runs=parse_optional_int(entry.get("warmup_runs")),
             workload_runs=pmc_workload_runs,
-            order_index=None,
-            gpu_clock_hz=None,
-            temperature_c=None,
+            order_index=order_index,
+            gpu_clock_hz=gpu_clock_hz,
+            temperature_c=temperature_c,
             cache_policy="unknown",
             source_ref=str(pmc_csv),
+            environment_samples=environment_samples,
         )
+        pmc_run_ids[(case, session_id)] = run_id
     for row in rows:
         case = row["case"].strip()
         if case not in conditions:
             continue
+        session_id = row.get("collection_session_id", "").strip() or "legacy"
         native_name = row["metric"].strip()
         metric_id = "{}::{}".format(namespace, native_name)
         if metric_id not in metric_catalog:
@@ -265,7 +458,7 @@ def load_mnn_kernelreplay_dataset(
         observation_index += 1
         metric_observations.append(MetricObservation(
             observation_id="pmc-observation-{:09d}".format(observation_index),
-            run_id="pmc::{}".format(case),
+            run_id=pmc_run_ids[(case, session_id)],
             metric_id=metric_id,
             value=value,
             value_semantics="absolute_workload",
@@ -284,6 +477,11 @@ def load_mnn_kernelreplay_dataset(
             continue
         run_id = "latency::{}".format(case)
         entry = metadata[case]
+        latency_record = latencies[case]
+        launch_records = _parse_launch_records(case, latency_record)
+        environment_samples, gpu_clock_hz, temperature_c = _parse_environment(
+            latency_record
+        )
         runs[run_id] = MeasurementRun(
             run_id=run_id,
             condition_id=case,
@@ -295,15 +493,17 @@ def load_mnn_kernelreplay_dataset(
             warmup_runs=parse_optional_int(entry.get("warmup_runs")),
             workload_runs=latency_workload_runs,
             order_index=None,
-            gpu_clock_hz=None,
-            temperature_c=None,
+            gpu_clock_hz=gpu_clock_hz,
+            temperature_c=temperature_c,
             cache_policy="unknown",
             source_ref=str(latency_json),
+            launch_records=launch_records,
+            environment_samples=environment_samples,
         )
         latency_observations.append(LatencyObservation(
             observation_id="latency::{}".format(case),
             run_id=run_id,
-            latency_us=latencies[case],
+            latency_us=latency_record["latency_us"],
             status="VALID",
             quality_flags=(),
         ))
@@ -317,10 +517,11 @@ def load_mnn_kernelreplay_dataset(
         comparisons = _discover_pairs(conditions, case_order)
     if not any(run.repeat_id for run in runs.values()):
         issues.append("no independent repeat_id; repeatability cannot be estimated")
-    issues.append(
-        "legacy rows have no collection_session_id; per-case PMC run grouping is synthetic and must not be used "
-        "to assume metrics were co-collected"
-    )
+    if any(not row.get("collection_session_id", "").strip() for row in rows):
+        issues.append(
+            "legacy rows have no collection_session_id; per-case PMC run grouping is synthetic and must not be used "
+            "to assume metrics were co-collected"
+        )
     manifest = DatasetManifest(
         dataset_id=dataset_id,
         platform=platform,
@@ -330,20 +531,28 @@ def load_mnn_kernelreplay_dataset(
             "pmc_csv": str(pmc_csv),
             "latency_json": str(latency_json),
             "operator_cases_json": str(operator_cases_json),
+            "case_selection_plan": str(case_selection_plan or ""),
             "source_sha256": {
                 "pmc_csv": _sha256(pmc_csv),
                 "latency_json": _sha256(latency_json),
                 "operator_cases_json": _sha256(operator_cases_json),
+                **(
+                    {"case_selection_plan": _sha256(case_selection_plan)}
+                    if case_selection_plan
+                    else {}
+                ),
             },
             "source_consistency": {
                 "manifest_case_count": len(manifest_cases),
                 "latency_key_count": len(latency_keys),
                 "valid_latency_count": len(latencies),
-                "expected_representative_count": len(expected_representatives),
+                "expected_selected_case_count": len(expected_selected_cases),
                 "observed_pmc_case_count": len(observed_row_cases),
                 "metric_count": len(metric_names),
                 "duplicate_pair_count": duplicate_pair_count,
                 "incomplete_case_count": len(incomplete_cases),
+                "sweep_plan_ids": sorted(sweep_plan_ids),
+                "sweep_config_ids": sorted(sweep_config_ids),
             },
             "status_counts": dict(status_counts),
             "profiler_pass_note": "pass count belongs to the collection session, not an independent repeat",

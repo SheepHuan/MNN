@@ -238,14 +238,18 @@ Markdown 固定包含以下章节：
 # PMC 语义分析报告
 
 ## 数据集与证据完整性
+## 三个核心问题结论
 ## PMC 质量和过滤结果
 ## PMC 相关性分类
 ## 重复指标与 Canonical Set
 ## Kernel Type × PMC Signature
 ## ΔPMC 与 ΔLatency 规则
+## 下一步完成路径
 ## 证据限制和不可回答问题
 ```
 
+Markdown 会展示 association PMC 的 mechanism、phenomenon role、单位、normalizer、语义映射
+置信度和解释边界，并严格区分 semantic-family 直接结果、op-type 直接实证和 family 先验继承。
 JSON 是完整、可机读的分析结果；Markdown 是面向人的语义化视图，不能替代 JSON。
 
 ## Python 调用

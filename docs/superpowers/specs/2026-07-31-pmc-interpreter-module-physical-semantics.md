@@ -319,7 +319,9 @@ Markdown 文档 schema 为 `mnn-pmc-markdown-document/v1`。它是
 - `ordered_role_rules`：按 variant 名称 token 推断执行角色。
 
 它不读取 kernel 源码或 PMC，也不判断 compute-bound、memory-bound、同步瓶颈等
-微架构状态。规则顺序会影响分类结果。
+微架构状态。规则顺序会影响分类结果；数据移动和 core-compute token 必须先于 pointwise
+后处理 token 匹配，避免 `raster_binary` 被 `binary` 抢先分类、`conv1d_silu` 被 `silu`
+抢先分类。
 
 ### 7.2 `registry.py::KernelTaxonomy`
 
@@ -354,6 +356,11 @@ hardware domain + mechanism + quantity + concept_id
 - `target_equivalent`：`cycles_elapsed`、`time_duration` 等目标等价量；
 - `phenomenon_role`：work、utilization、symptom 等现象角色；
 - `dependency_metric_ids`：已知公式依赖；空值表示尚未录入，不证明没有依赖。
+
+通用 fallback 必须区分 atomic operation work 与 atomic contention：atomic byte、sector、request
+或 wavefront 只表示原子操作工作量；只有明确的 conflict、serialization、retry、stall 等事件
+才能映射为竞争症状。含 bank-conflict 的 atomic metric 仍属于同步/冲突症状，不能因名称中有
+`atom` 就改写为原子竞争。
 
 分析 layer 不再接收额外“语义映射”参数，只读取 `PmcDataset.metric_catalog`。
 
@@ -762,16 +769,27 @@ intervention 范围，不能只读取方向字段后外推。
 # PMC 语义分析报告
 
 ## 数据集与证据完整性
+## 三个核心问题结论
 ## PMC 质量和过滤结果
 ## PMC 相关性分类
 ## 重复指标与 Canonical Set
 ## Kernel Type × PMC Signature
 ## ΔPMC 与 ΔLatency 规则
+## 下一步完成路径
 ## 证据限制和不可回答问题
 ```
 
-Markdown 只展示结构化报告的重要部分。完整 feature 明细、全部 layer report 和 provenance
-必须从 JSON 获取。
+Markdown 只展示结构化报告的重要部分。它必须明确区分：
+
+- latency association set 中的 FDR 支持项与仅由 mRMR 多样性保留的候选；
+- 未归一化工作量 counter 与效率、利用率、症状和容量指标；
+- semantic-family 直接 signature、op-type 直接实证和 family 先验继承；
+- 跨 kernel 相关性、配对观察规则和允许局部因果表述的受控规则。
+
+Markdown 必须展示 metric 的 mechanism、phenomenon role、单位、normalizer、mapping level 和
+mapping confidence，并给出条件解释边界。它只能使用结构化报告已有字段，不得根据 native
+metric 名称重新推断语义或生成新的统计量。完整 feature 明细、全部 layer report 和 provenance
+仍必须从 JSON 获取。
 
 ## 十八、`cli.py` 与 `__main__.py`
 

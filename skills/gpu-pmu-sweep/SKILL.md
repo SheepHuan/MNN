@@ -53,6 +53,21 @@ PMC Interpreter 规范文档位于：
   `double`，不能把小数强制转换为整数。
 - 当前数据中两个 metric 向量完全相等，不等于公式或机制相同。只有同 dependency
   group/canonical concept 才能强制去重；跨机制相等仅作为冗余注释和选择惩罚。
+- 通用名称推断只能生成低置信度 mechanism proxy。atomic byte/sector/request/wavefront 是原子
+  操作工作量，不是竞争症状；只有 conflict/serialization/retry/stall 等事件才能标为 contention。
+- 语义报告必须把类别直接 `resolved_features` 与样本不足时的 family 继承分开。继承项不能写成
+  op-type 实证，也不能把未归一化 `.sum` 工作量 counter 写成效率指标或优化方向。
+- availability 必须以本轮重新构建的 collector 实测结果为准，不能把旧的有效 metric 数量
+  写死为验收目标。即使 GPU、driver 和 manifest 未换，旧 `OVERFLOW` 也可能在 collector
+  重建后变成 `VALID`；正式 rows 行数必须按新的 `cuda_pmc_valid.csv` 动态计算。
+- 如果 availability 出现 `OVERFLOW → VALID` 等状态迁移，先在一个代表 case 上直接采集至少
+  一个迁移 metric，确认 report、CSV ledger 和 JSON 全链路能保存其数值，再启动全量 sweep。
+- `cuda_pmc_all.csv` 是按发现请求位置保存的完整状态账本，非 `VALID` 的无后缀 metric 名称
+  可能重复，不能据此删除请求行或要求 metric name 全局唯一；必须要求
+  `cuda_pmc_valid.csv` 和正式 rows 中的有效 metric 唯一。
+- `load_mnn_kernelreplay_dataset()` 可以把不完整旧数据加载为带 `issues` 的探索数据，不是正式
+  数据发布 gate。替换正式三数据源前仍需用独立严格验收检查精确集合、笛卡尔积、状态、数值、
+  行顺序和 latency join，并在任何 mismatch 时非零退出。
 
 ## PMU Metric 分类
 

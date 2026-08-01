@@ -76,6 +76,19 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
         self.assertEqual(mali.mechanism, "cache_locality")
         self.assertEqual(mali.hardware_scope, "l2")
 
+        atomic_traffic = registry.describe(
+            "l1tex__t_bytes_pipe_lsu_mem_global_op_atom.sum", "cupti"
+        )
+        self.assertEqual(atomic_traffic.mechanism, "atomic_operation")
+        self.assertEqual(atomic_traffic.phenomenon_role, "work")
+
+        atomic_conflict = registry.describe(
+            "l1tex__data_bank_conflicts_pipe_lsu_mem_global_op_atom.sum",
+            "cupti",
+        )
+        self.assertEqual(atomic_conflict.mechanism, "synchronization")
+        self.assertEqual(atomic_conflict.phenomenon_role, "symptom")
+
     def test_kernel_taxonomy_separates_owner_and_execution_role(self):
         taxonomy = KernelTaxonomy.load()
         add_bias = taxonomy.classify("matmul", "cuda_add_bias_fp32")
@@ -87,6 +100,18 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
             "convolution", "cuda_wino_weight_reorder_fp32"
         )
         self.assertEqual(reorder["execution_role"], "preprocess_pack")
+
+        raster_binary = taxonomy.classify(
+            "raster_binary", "cuda_raster_binarymid_fp32"
+        )
+        self.assertEqual(
+            raster_binary["execution_role"], "layout_data_movement"
+        )
+
+        conv1d_silu = taxonomy.classify(
+            "attention", "cuda_conv1d_silu_fp32"
+        )
+        self.assertEqual(conv1d_silu["execution_role"], "core_compute")
 
     def _write_mnn_fixture(self, root):
         operator_cases = root / "operator_cases.json"
@@ -255,6 +280,24 @@ class DatasetSemanticsSourcesTest(unittest.TestCase):
                 payload["scope"]["cross_platform_policy"].split(";")[0],
                 "native metrics remain device-scoped",
             )
+            self.assertIn(
+                "uncontrolled cross-kernel descriptive associations",
+                payload["canonical_metric_sets"]["latency_association"]
+                ["selection_basis"],
+            )
+
+            _, document = pmc_interpreter.PmcInterpreter(
+                config=AnalysisConfig(
+                    min_unique_values=2,
+                    min_group_samples=2,
+                    min_delta_pairs=2,
+                )
+            ).analyze_with_document(restored)
+            self.assertIn("## 三个核心问题结论", document.markdown)
+            self.assertIn("### Semantic family 直接面板", document.markdown)
+            self.assertIn("### Op type 直接证据与继承关系", document.markdown)
+            self.assertIn("要生成第一版 rulebook", document.markdown)
+            self.assertIn("## 下一步完成路径", document.markdown)
 
 
 if __name__ == "__main__":

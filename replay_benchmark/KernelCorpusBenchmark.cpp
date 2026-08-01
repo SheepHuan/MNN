@@ -91,6 +91,10 @@ static const char* kNvidiaCounters[] = {
     "dram__bytes_write.sum",
 };
 
+static bool pmuExplicitlyDisabled(const std::string& events) {
+    return events == "none" || events == "off" || events == "disabled";
+}
+
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
 static std::vector<std::string> selectPmuCounters(const MNN::PerfCounter::DeviceInfo& device) {
     if (device.vendor == MNN::PerfCounter::GpuVendor::Adreno) {
@@ -128,7 +132,7 @@ struct PmuScope {
 
 static PmuScope beginPmu(const std::string& eventsOverride = std::string()) {
     PmuScope s;
-    if (eventsOverride == "none" || eventsOverride == "off" || eventsOverride == "disabled") {
+    if (pmuExplicitlyDisabled(eventsOverride)) {
         s.status = "disabled";
         return s;
     }
@@ -980,6 +984,8 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     }
     report.dispatchStatus = "dispatched";
 
+    CudaEnvironmentSampler environmentSampler;
+
     // workload + NVIDIA range profiler (per-kernel counters via
     // MNNPerfCounter Session::beginRange/endRange). Each launch is wrapped in
     // a range so per-kernel counters are collected precisely. If CUPTI reports
@@ -1002,6 +1008,10 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         };
         cudaEvent_t evStart = nullptr;
         cudaEvent_t evStop = nullptr;
+        CudaLaunchMetadataCollector launchCollector;
+        const bool collectLaunchMetadata = pmuExplicitlyDisabled(perfCounterEvents);
+        if (collectLaunchMetadata) launchCollector.start();
+        environmentSampler.sampleBefore();
         bool timingReady = cudaEventCreate(&evStart) == cudaSuccess &&
                            cudaEventCreate(&evStop) == cudaSuccess;
         if (timingReady && cudaEventRecord(evStart, stream) == cudaSuccess) {
@@ -1022,6 +1032,13 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
         }
         if (evStart != nullptr) cudaEventDestroy(evStart);
         if (evStop != nullptr) cudaEventDestroy(evStop);
+        environmentSampler.sampleAfter();
+        if (collectLaunchMetadata) {
+            launchCollector.stop();
+            report.launchSamplingStatus = launchCollector.status();
+            report.launchRecords = launchCollector.records();
+        }
+        report.environment = environmentSampler.observation();
         if (!timingReady || !restoreInitialData()) {
             report.error = "CUDA event latency measurement failed";
             cudaStreamDestroy(stream);
@@ -1031,6 +1048,7 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     }
 
     PmuScope pmu = beginPmu(perfCounterEvents);
+    if (!measureLatency) environmentSampler.sampleBefore();
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     if (pmu.started) {
         if (pmu.numPasses > 1) {
@@ -1079,12 +1097,14 @@ static CaseReport runCuda(const AdaptedCase& ac, int runs, const std::string& pe
     pmu.status = perfCounterEvents == "none" || perfCounterEvents == "off" ||
                          perfCounterEvents == "disabled" ? "disabled" : "cuda_event";
 #endif
+    if (!measureLatency) environmentSampler.sampleAfter();
     endPmu(pmu);
     report.pmuStatus = pmu.status;
     report.workloadDelta = pmu.workloadDelta;
     report.workloadNs = pmu.workloadNs;
     report.runs = runs;
     report.numPasses = pmu.numPasses;
+    report.environment = environmentSampler.observation();
     // Save the values returned by this same profiler session. If CUPTI used
     // multiple passes, stop() has already merged those passes.
     for (size_t i = 0; i < pmu.names.size() && i < pmu.values.size(); ++i)
@@ -1345,6 +1365,44 @@ bool runKernelCorpusBenchmark(const Options& options) {
                 }
                 caseValue.AddMember("pmu_metrics", pmuMetrics, allocator);
             }
+            addString(caseValue, "launch_sampling_status", report.launchSamplingStatus, allocator);
+            rapidjson::Value launchRecords(rapidjson::kArrayType);
+            for (const auto& record : report.launchRecords) {
+                rapidjson::Value launch(rapidjson::kObjectType);
+                addString(launch, "kernel_name", record.kernelName, allocator);
+                rapidjson::Value grid(rapidjson::kArrayType);
+                rapidjson::Value block(rapidjson::kArrayType);
+                for (int dimension = 0; dimension < 3; ++dimension) {
+                    grid.PushBack(record.grid[dimension], allocator);
+                    block.PushBack(record.block[dimension], allocator);
+                }
+                launch.AddMember("grid", grid, allocator);
+                launch.AddMember("block", block, allocator);
+                launch.AddMember("registers_per_thread", record.registersPerThread, allocator);
+                launch.AddMember("static_shared_memory_bytes", record.staticSharedMemoryBytes, allocator);
+                launch.AddMember("dynamic_shared_memory_bytes", record.dynamicSharedMemoryBytes, allocator);
+                launch.AddMember("local_memory_per_thread_bytes", record.localMemoryPerThreadBytes, allocator);
+                launch.AddMember("local_memory_total_bytes", record.localMemoryTotalBytes, allocator);
+                launchRecords.PushBack(launch, allocator);
+            }
+            caseValue.AddMember("launch_records", launchRecords, allocator);
+
+            rapidjson::Value environment(rapidjson::kObjectType);
+            addString(environment, "sampling_source", report.environment.samplingSource, allocator);
+            addString(environment, "sampling_status", report.environment.samplingStatus, allocator);
+            if (report.environment.gpuClockHzBefore.present) {
+                environment.AddMember("gpu_clock_hz_before", report.environment.gpuClockHzBefore.value, allocator);
+            }
+            if (report.environment.gpuClockHzAfter.present) {
+                environment.AddMember("gpu_clock_hz_after", report.environment.gpuClockHzAfter.value, allocator);
+            }
+            if (report.environment.temperatureCBefore.present) {
+                environment.AddMember("temperature_c_before", report.environment.temperatureCBefore.value, allocator);
+            }
+            if (report.environment.temperatureCAfter.present) {
+                environment.AddMember("temperature_c_after", report.environment.temperatureCAfter.value, allocator);
+            }
+            caseValue.AddMember("environment", environment, allocator);
             if (!report.error.empty()) addString(caseValue, "error", report.error, allocator);
             casesArray.PushBack(caseValue, allocator);
         }

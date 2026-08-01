@@ -1,6 +1,8 @@
 #ifndef MNN_REPLAY_KERNEL_CORPUS_BENCHMARK_HPP
 #define MNN_REPLAY_KERNEL_CORPUS_BENCHMARK_HPP
 
+#include "CudaRuntimeMetadata.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -52,6 +54,17 @@ struct CaseReport {
     std::vector<std::pair<std::string, uint64_t>> pmuMetrics;
     // Number of CUPTI passes required for the metric set (1=single-pass, N=replay)
     size_t numPasses = 1;
+
+    // Actual CUDA kernel executions observed during the independent,
+    // PMU-disabled latency workload. One adapter dispatch may emit multiple
+    // launch records (for example a two-stage reduction).
+    std::string launchSamplingStatus = "not_requested";
+    std::vector<CudaLaunchRecord> launchRecords;
+
+    // Current SM clock and GPU temperature sampled outside the timed workload
+    // or profiler range. Missing values remain absent in JSON and are explained
+    // by samplingStatus.
+    CudaEnvironmentObservation environment;
 };
 
 // Run the kernel corpus benchmark and return false only on unrecoverable

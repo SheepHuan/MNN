@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections import Counter, defaultdict
 
 from ..dataset.reports import (
@@ -73,6 +74,58 @@ def log_latency_map(dataset):
     }
 
 
+def observed_launch_controls(dataset):
+    """把每个 run 的真实 stage records 汇总为 condition 级数值控制量。"""
+
+    values = defaultdict(lambda: defaultdict(list))
+    for run in dataset.runs.values():
+        records = run.launch_records
+        if not records:
+            continue
+        summary = {
+            "observed_stage_count": float(len(records)),
+            "observed_total_blocks": float(
+                sum(math.prod(record.grid) for record in records)
+            ),
+            "observed_total_launched_threads": float(
+                sum(math.prod(record.grid) * math.prod(record.block) for record in records)
+            ),
+            "observed_max_block_threads": float(
+                max(math.prod(record.block) for record in records)
+            ),
+        }
+        if len(records) == 1:
+            record = records[0]
+            for axis, value in zip(("x", "y", "z"), record.grid):
+                summary["observed_grid_{}".format(axis)] = float(value)
+            for axis, value in zip(("x", "y", "z"), record.block):
+                summary["observed_block_{}".format(axis)] = float(value)
+        resource_fields = (
+            "registers_per_thread",
+            "static_shared_memory_bytes",
+            "dynamic_shared_memory_bytes",
+            "local_memory_per_thread_bytes",
+            "local_memory_total_bytes",
+        )
+        for field in resource_fields:
+            observed = [
+                getattr(record, field)
+                for record in records
+                if getattr(record, field) is not None
+            ]
+            if observed:
+                summary["observed_max_{}".format(field)] = float(max(observed))
+        for key, value in summary.items():
+            values[run.condition_id][key].append(value)
+    return {
+        condition_id: {
+            key: statistics.median(items)
+            for key, items in fields.items()
+        }
+        for condition_id, fields in values.items()
+    }
+
+
 def _valid_pair_ids(dataset, latency):
     valid = []
     groups = set()
@@ -111,6 +164,9 @@ def build_data_readiness(dataset, config):
     for condition in dataset.conditions.values():
         workload_presence.update(condition.workload.keys())
         launch_presence.update(condition.launch.keys())
+    observed_launch = observed_launch_controls(dataset)
+    for fields in observed_launch.values():
+        launch_presence.update(fields.keys())
     workload_coverage = {
         key: count / condition_count if condition_count else 0.0
         for key, count in sorted(workload_presence.items())

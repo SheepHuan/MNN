@@ -146,6 +146,7 @@ if(MNN_CUDA)
     # mnn_corpus_* shims compiled by nvcc. Only include them when CUDA is
     # enabled so host builds without nvcc still link cleanly.
     target_sources(replay_benchmark.out PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/CudaRuntimeMetadata.cpp
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOps.cpp
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsMisc.cpp
         ${CMAKE_CURRENT_LIST_DIR}/kernel_corpus_bridge/cuda/CudaOpsWoq.cpp)
@@ -182,6 +183,28 @@ if(MNN_CUDA)
     endif()
     target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_CUDA)
     target_include_directories(replay_benchmark.out PRIVATE ${CUDA_INCLUDE_DIRS})
+
+    # CUPTI Activity records the actual launch geometry and per-kernel resource
+    # usage for the independent PMU-disabled latency workload. This is separate
+    # from the Range Profiler metric session and does not require metric replay.
+    find_library(RB_CUPTI_ACTIVITY_LIBRARY cupti
+        HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    if(RB_CUPTI_ACTIVITY_LIBRARY)
+      target_link_libraries(replay_benchmark.out ${RB_CUPTI_ACTIVITY_LIBRARY})
+      target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_CUPTI_ACTIVITY)
+    endif()
+
+    # NVML supplies current SM clock and GPU temperature. Keep it optional so
+    # CUDA corpus replay still builds on systems without the NVML SDK/library;
+    # the JSON then reports an explicit unavailable sampling status.
+    find_path(RB_NVML_INCLUDE_DIR nvml.h
+        HINTS ${CUDA_INCLUDE_DIRS} ${CUDA_INCLUDE_DIRS}/../include)
+    find_library(RB_NVML_LIBRARY nvidia-ml)
+    if(RB_NVML_INCLUDE_DIR AND RB_NVML_LIBRARY)
+      target_include_directories(replay_benchmark.out PRIVATE ${RB_NVML_INCLUDE_DIR})
+      target_link_libraries(replay_benchmark.out ${RB_NVML_LIBRARY})
+      target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_NVML)
+    endif()
 
     # Standalone NVIDIA metric enumerator. Prints one metric name per line.
     # Build target: list_cuda_metrics. Not built unless MNN_CUDA is ON.

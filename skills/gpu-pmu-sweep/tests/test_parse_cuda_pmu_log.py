@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import csv
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import tempfile
@@ -40,23 +42,99 @@ class CudaPmuSweepTest(unittest.TestCase):
             with all_csv.open(newline="", encoding="utf-8") as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 4)
 
-    def test_discover_cuda_cases_uses_only_cuda_cases(self):
-        corpus_root = Path("replay_benchmark/kernel_corpus")
-        cases = SWEEP_MODULE.discover_cuda_cases(corpus_root)
-        self.assertEqual(len(cases), len(set(cases)))
-        self.assertIn("cuda_conv_dw_fp32_smoke", cases)
-        corpus = json.loads((corpus_root / "operator_cases.json").read_text(encoding="utf-8"))
-        cuda_entries = [entry for entry in corpus["cases"] if entry.get("backend") == "cuda"]
-        self.assertEqual(len(cases), len({entry["op_type"] for entry in cuda_entries}))
-        selected = [entry for entry in corpus["cases"] if entry.get("name") in cases]
-        self.assertEqual(len({entry["op_type"] for entry in selected}), len(cases))
-        self.assertEqual(len({(entry["op_type"], entry["variant"]) for entry in selected}), len(cases))
+    @staticmethod
+    def _case(name, op_type, *, dtype="float32", shapes=None, workload=None, params=None,
+              variant=None, tag="test"):
+        case = {
+            "name": name,
+            "backend": "cuda",
+            "op_type": op_type,
+            "variant": variant or name,
+            "tag": tag,
+            "int_params": params or {},
+        }
+        if dtype is not None:
+            case["dtype"] = dtype
+        if shapes is not None:
+            case["shapes"] = shapes
+        if workload is not None:
+            case["workload"] = workload
+        return case
 
-        all_cases = SWEEP_MODULE.discover_cuda_cases(
-            corpus_root, "all"
-        )
-        self.assertEqual(len(all_cases), len({entry["name"] for entry in cuda_entries}))
-        self.assertEqual(len(all_cases), len(set(all_cases)))
+    @staticmethod
+    def _write_manifest(path, cases):
+        path.mkdir(parents=True, exist_ok=True)
+        manifest = path / "operator_cases.json"
+        manifest.write_text(json.dumps({
+            "format": "mnn-kernel-operator-cases",
+            "version": 1,
+            "cases": cases,
+        }), encoding="utf-8")
+        return manifest
+
+    def test_condition_balanced_prefers_complete_metadata_and_ignores_manifest_order(self):
+        explicit = [
+            self._case(
+                "explicit_{}".format(index), "sample",
+                shapes={"input": [1, index + 1]},
+                workload={"output_elements": index + 1},
+                params={"size": index + 1},
+            )
+            for index in range(5)
+        ]
+        proxies = [
+            self._case("proxy_{}".format(index), "sample", params={"size": 100 + index})
+            for index in range(3)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self._write_manifest(root / "first", proxies + explicit)
+            second = self._write_manifest(root / "second", list(reversed(proxies + explicit)))
+            first_plan = SWEEP_MODULE.build_case_selection_plan(first, backend="cuda")
+            second_plan = SWEEP_MODULE.build_case_selection_plan(second, backend="cuda")
+
+        first_ids = [case.case_id for case in first_plan.selected_cases]
+        second_ids = [case.case_id for case in second_plan.selected_cases]
+        self.assertEqual(first_ids, second_ids)
+        self.assertEqual(len(first_ids), 5)
+        self.assertTrue(all(case.metadata_level == "explicit" for case in first_plan.selected_cases))
+        self.assertEqual(first_plan.groups["sample"].status, "satisfied")
+        self.assertNotEqual(first_plan.plan_id, second_plan.plan_id)
+
+    def test_condition_balanced_uses_proxy_only_for_fill_and_selects_all_when_insufficient(self):
+        mixed = [
+            self._case(
+                "mixed_explicit_{}".format(index), "mixed",
+                shapes={"input": [index + 1]},
+                workload={"output_elements": index + 1},
+                params={"size": index + 1},
+            )
+            for index in range(3)
+        ] + [
+            self._case("mixed_proxy_{}".format(index), "mixed", params={"size": 10 + index})
+            for index in range(3)
+        ]
+        insufficient = [
+            self._case(
+                "small_{}".format(index), "small", params={"size": index % 4},
+                variant="variant_{}".format(index), tag="v{}".format(index),
+            )
+            for index in range(6)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = self._write_manifest(Path(directory), mixed + insufficient)
+            plan = SWEEP_MODULE.build_case_selection_plan(manifest, backend="cuda")
+
+        mixed_cases = [case for case in plan.selected_cases if case.op_type == "mixed"]
+        self.assertEqual([case.metadata_level for case in mixed_cases[:3]], ["explicit"] * 3)
+        self.assertEqual([case.metadata_level for case in mixed_cases[3:]], ["params_proxy"] * 2)
+        self.assertEqual(plan.groups["mixed"].status, "satisfied_with_proxy")
+        self.assertTrue(any("mixed needed proxy" in issue for issue in plan.issues))
+
+        small_group = plan.groups["small"]
+        self.assertEqual(small_group.distinct_condition_count, 4)
+        self.assertEqual(small_group.selected_case_count, 6)
+        self.assertEqual(small_group.status, "insufficient_unique_conditions")
 
     def test_classify_fixed_report_preserves_zero_as_valid(self):
         report = {
@@ -140,12 +218,20 @@ class CudaPmuSweepTest(unittest.TestCase):
             ".", use_sudo=True, runner=fake_runner,
         )
         self.assertEqual(result["dram__bytes.avg"]["status"], "VALID")
+        self.assertTrue(result["dram__bytes.avg"]["collection_session_id"].startswith("cuda-pmc-"))
+        self.assertEqual(result["dram__bytes.avg"]["environment_status"], "not_collected")
+        self.assertEqual(result["dram__bytes.avg"]["gpu_clock_hz_before"], "")
+        self.assertEqual(result["dram__bytes.avg"]["temperature_c_after"], "")
         self.assertFalse(observed["output_path"].exists())
         self.assertFalse(observed["output_path"].parent.exists())
 
     def test_sweep_uses_valid_metrics_and_resume_ledger(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            corpus_root = root / "corpus"
+            manifest = self._write_manifest(corpus_root, [
+                self._case("case_a", "sample", params={"size": 16}),
+            ])
             valid_csv = root / "valid.csv"
             with valid_csv.open("w", newline="", encoding="utf-8") as stream:
                 writer = csv.DictWriter(stream, fieldnames=["metric", "value"])
@@ -155,35 +241,76 @@ class CudaPmuSweepTest(unittest.TestCase):
                     {"metric": "dram__bytes.sum", "value": "2"},
                 ])
             args = SimpleNamespace(
-                corpus_root="replay_benchmark/kernel_corpus", valid_csv=str(valid_csv),
-                binary="bench", workdir=".", lib_dir=None, sudo=False, runs=1, timeout=5,
+                corpus_root=str(corpus_root), valid_csv=str(valid_csv),
+                binary="bench", workdir=str(root), lib_dir=None, sudo=False, runs=1, timeout=5,
                 output_csv=str(root / "rows.csv"), output_json=str(root / "result.json"),
-                resume=False, max_cases=1, max_metrics=2, metrics_per_session=32, case_filter=None,
-                case_selection="op-type",
+                resume=False, max_metrics=2, metrics_per_session=32,
+                case_selection="condition-balanced", conditions_per_op_type=5,
+                target_op_type=None, selection_plan_input=None, selection_plan_output=None,
+                device_fingerprint="test-device",
             )
             calls = []
 
             def fake_executor(_binary, _corpus, case, metrics, _workdir, _lib_dir, _sudo, _runs, _timeout):
                 calls.append((case, tuple(metrics)))
                 return {metric: {"status": "VALID", "value": "7", "pmu_status": "sampled",
-                                 "num_passes": 2, "returncode": 0, "error": ""}
+                                 "num_passes": 2, "returncode": 0, "error": "",
+                                 "collection_session_id": "session-1",
+                                 "order_index": "", "gpu_clock_hz_before": "",
+                                 "gpu_clock_hz_after": "", "temperature_c_before": "",
+                                 "temperature_c_after": "", "environment_status": "not_collected",
+                                 "environment_source": ""}
                         for metric in metrics}
 
             payload = SWEEP_MODULE.run_sweep(args, executor=fake_executor)
-            self.assertEqual(calls, [("cuda_argmax_fp32_smoke", ("sm__cycles_elapsed.avg", "dram__bytes.sum"))])
+            self.assertEqual(calls, [("case_a", ("sm__cycles_elapsed.avg", "dram__bytes.sum"))])
             self.assertEqual(payload[calls[0][0]]["pmc"], {
                 "sm__cycles_elapsed.avg": 7, "dram__bytes.sum": 7,
             })
+            selection_path = Path("{}.selection.json".format(args.output_csv))
+            self.assertTrue(selection_path.is_file())
+            plan = SWEEP_MODULE.load_case_selection_plan(selection_path)
+            self.assertEqual(plan.groups["sample"].status, "insufficient_unique_conditions")
+            with Path(args.output_csv).open(newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(rows[0]["sweep_plan_id"], plan.plan_id)
+            self.assertEqual([row["order_index"] for row in rows], ["1", "2"])
+            self.assertEqual({row["collection_session_id"] for row in rows}, {"session-1"})
+            self.assertTrue(all(row["gpu_clock_hz_before"] == "" for row in rows))
+            self.assertTrue(all(row["temperature_c_after"] == "" for row in rows))
 
             args.resume = True
             SWEEP_MODULE.run_sweep(args, executor=lambda *unused: self.fail("resume reran a completed pair"))
 
-            with (root / "rows.csv").open("a", encoding="utf-8") as stream:
-                stream.write("old_case,old_metric,VALID,99,sampled,1,0,\n")
-            payload = SWEEP_MODULE.build_result_json_from_csv(
-                ["cuda_argmax_fp32_smoke"], root / "rows.csv"
-            )
-            self.assertNotIn("old_case", payload)
+            args.runs = 2
+            with self.assertRaisesRegex(ValueError, "different sweep configuration"):
+                SWEEP_MODULE.run_sweep(args, executor=lambda *unused: None)
+            args.runs = 1
+
+            original_manifest = manifest.read_text(encoding="utf-8")
+            manifest.write_text(original_manifest + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "manifest mismatch"):
+                SWEEP_MODULE.run_sweep(args, executor=lambda *unused: None)
+            manifest.write_text(original_manifest, encoding="utf-8")
+
+            with Path(args.output_csv).open("a", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=SWEEP_MODULE.ROW_COLUMNS)
+                writer.writerow(rows[-1])
+            with self.assertRaisesRegex(ValueError, "outside the current sweep plan"):
+                SWEEP_MODULE.run_sweep(args, executor=lambda *unused: None)
+
+    def test_cli_rejects_removed_op_type_alias(self):
+        argv = [
+            "--valid-csv", "valid.csv",
+            "--corpus-root", "corpus",
+            "--binary", "bench",
+            "--output-csv", "rows.csv",
+            "--output-json", "result.json",
+            "--case-selection", "op-type",
+        ]
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                SWEEP_MODULE.parse_args(argv)
 
 
 if __name__ == "__main__":
