@@ -187,8 +187,17 @@ if(MNN_CUDA)
     # CUPTI Activity records the actual launch geometry and per-kernel resource
     # usage for the independent PMU-disabled latency workload. This is separate
     # from the Range Profiler metric session and does not require metric replay.
-    find_library(RB_CUPTI_ACTIVITY_LIBRARY cupti
-        HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    # Prefer the CUPTI library already located by MNNPerfCounter (which may be a
+    # newer CUDA 12.5+ CUPTI that carries cuptiRangeProfiler*); only fall back
+    # to a system-wide find when MNNPerfCounter did not locate one. Linking an
+    # older system libcupti first would shadow the newer one and leave
+    # cuptiRangeProfiler* unresolved.
+    if(CUPTI_LIBRARY)
+      set(RB_CUPTI_ACTIVITY_LIBRARY ${CUPTI_LIBRARY})
+    else()
+      find_library(RB_CUPTI_ACTIVITY_LIBRARY cupti
+          HINTS ${CUDA_INCLUDE_DIRS}/../lib64 ${CUDA_INCLUDE_DIRS}/../lib)
+    endif()
     if(RB_CUPTI_ACTIVITY_LIBRARY)
       target_link_libraries(replay_benchmark.out ${RB_CUPTI_ACTIVITY_LIBRARY})
       target_compile_definitions(replay_benchmark.out PRIVATE MNN_REPLAY_HAS_CUPTI_ACTIVITY)
@@ -257,6 +266,28 @@ if(MNN_CUDA)
   else()
     message(WARNING "MNN_CUDA enabled but CUDA toolkit not found; CUDA corpus backend disabled")
   endif()
+endif()
+
+# OpenCL/Vulkan kernel latency + PMU availability tests. These targets are
+# independent of MNN_CUDA and are intended to run on ARM devices (Rhinopi
+# with Adreno, OrangePi with Mali) where the OpenCL or Vulkan backend is
+# available. They shell out to ./replay_benchmark.out which must be built
+# with MNN_OPENCL=ON or MNN_VULKAN=ON respectively, plus
+# MNN_REPLAY_ENABLE_PERFCOUNTER=ON for the PMU availability test.
+if(MNN_OPENCL OR MNN_VULKAN)
+  add_executable(replay_opencl_kernel_latency
+      ${CMAKE_CURRENT_LIST_DIR}/tests/test_opencl_kernel_latency.cpp)
+  target_include_directories(replay_opencl_kernel_latency PRIVATE
+      ${CMAKE_CURRENT_LIST_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party
+      ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/spdlog/include)
+
+  add_executable(replay_opencl_pmu_availability
+      ${CMAKE_CURRENT_LIST_DIR}/tests/test_opencl_pmu_availability.cpp)
+  target_include_directories(replay_opencl_pmu_availability PRIVATE
+      ${CMAKE_CURRENT_LIST_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party
+      ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/spdlog/include)
 endif()
 
 if(MSVC AND NOT MNN_BUILD_SHARED_LIBS)

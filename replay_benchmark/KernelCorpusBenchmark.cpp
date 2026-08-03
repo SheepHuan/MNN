@@ -3,7 +3,9 @@
 #include "kernel_corpus_bridge/Bridge.hpp"
 #include "kernel_corpus_bridge/OpAdapter.hpp"
 #include "kernel_corpus_bridge/mnn/MnnBridge.hpp"
+#if defined(MNN_REPLAY_HAS_CUDA)
 #include "kernel_corpus_bridge/cuda/CudaOps.hpp"
+#endif
 #include "kernel_corpus_bridge/ncnn/NcnnBridge.hpp"
 
 #include <algorithm>
@@ -508,7 +510,8 @@ static bool initOpenCL(OpenCLRuntimeHolder* holder, std::string* error) {
 }
 
 // Generic OpenCL runner: consumes AdaptedCase only.
-static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, int runs) {
+static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, int runs,
+                            const std::string& perfCounterEvents, bool measureLatency) {
     CaseReport report = buildReport(ac, "compile_failed");
     MNN::OpenCLRuntime* opencl = holder->opencl;
     cl::CommandQueue& queue = opencl->commandQueue();
@@ -612,7 +615,7 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     report.dispatchStatus = "dispatched";
 
     // workload + PMU
-    PmuScope pmu = beginPmu();
+    PmuScope pmu = beginPmu(perfCounterEvents);
     const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) {
         cl::NDRange g = ac.dims == 2
@@ -634,6 +637,11 @@ static CaseReport runOpenCL(OpenCLRuntimeHolder* holder, const AdaptedCase& ac, 
     report.workloadNs = pmu.workloadNs;
     report.runs = runs;
     report.numPasses = pmu.numPasses;
+    // Wall-clock latency (us) — populated when measureLatency requested. Unlike
+    // CUDA (which uses cudaEventElapsedTime on a separate non-PMU workload), the
+    // OpenCL path times the same workload the PMU sees; this is acceptable
+    // because OpenCL PMU on Adreno/Mali does not replay kernels like CUPTI.
+    if (measureLatency) report.latencyUs = static_cast<double>(pmu.workloadNs) / 1000.0;
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     appendPmuMetrics(pmu, &report);
 #endif
@@ -727,7 +735,8 @@ static bool compileGlslToSpirv(const std::string& source, std::vector<uint32_t>*
 }
 
 // Generic Vulkan runner: consumes AdaptedCase only.
-static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, int runs) {
+static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, int runs,
+                            const std::string& perfCounterEvents, bool measureLatency) {
     CaseReport report = buildReport(ac, "compile_failed");
     if (!holder->valid) { report.compileStatus = "unsupported"; report.error = holder->error; return report; }
 
@@ -884,7 +893,7 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
     }
 
     // workload + PMU
-    PmuScope pmu = beginPmu();
+    PmuScope pmu = beginPmu(perfCounterEvents);
     const auto wallStart = std::chrono::steady_clock::now();
     for (int r = 0; r < runs; ++r) {
         // For in-place buffers, re-write initial data before each dispatch so
@@ -917,6 +926,10 @@ static CaseReport runVulkan(VulkanRuntimeHolder* holder, const AdaptedCase& ac, 
     report.workloadNs = pmu.workloadNs;
     report.runs = runs;
     report.numPasses = pmu.numPasses;
+    // Wall-clock latency (us) — populated when measureLatency requested. The
+    // Vulkan path times the same workload the PMU sees; Adreno/Mali Vulkan PMU
+    // does not replay kernels like CUPTI so this is representative.
+    if (measureLatency) report.latencyUs = static_cast<double>(pmu.workloadNs) / 1000.0;
 #if defined(MNN_REPLAY_HAS_PERFCOUNTER)
     appendPmuMetrics(pmu, &report);
 #endif
@@ -1349,7 +1362,8 @@ bool runKernelCorpusBenchmark(const Options& options) {
                     }
                 }
                 if (openclReady) {
-                    report = runOpenCL(&openclHolder, ac, std::max(1, options.runs));
+                    report = runOpenCL(&openclHolder, ac, std::max(1, options.runs),
+                                       options.perfCounterEvents, options.measureLatency);
                 } else {
                     report = buildReport(ac, "unsupported", openclError);
                 }
@@ -1368,7 +1382,8 @@ bool runKernelCorpusBenchmark(const Options& options) {
                     }
                 }
                 if (vulkanReady) {
-                    report = runVulkan(&vulkanHolder, ac, std::max(1, options.runs));
+                    report = runVulkan(&vulkanHolder, ac, std::max(1, options.runs),
+                                       options.perfCounterEvents, options.measureLatency);
                 } else {
                     report = buildReport(ac, "unsupported", vulkanHolder.error);
                 }
