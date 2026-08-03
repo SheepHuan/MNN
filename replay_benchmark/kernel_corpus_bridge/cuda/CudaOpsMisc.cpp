@@ -725,8 +725,8 @@ void mnn_corpus_weight_pack_fill_fp32(const float*, float*, int, size_t, int, in
 // Transpose/raster variant shims (3.6.0)
 void mnn_corpus_transpose_fp32(const float*, float*, const void*, int, int, cudaStream_t);
 void mnn_corpus_transpose_local_fp32(const float*, float*, const void*, int, int, int, int, cudaStream_t);
-void mnn_corpus_packcommon_fp32(const float*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
-void mnn_corpus_unpackcommon_fp32(const float*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_packcommon_fp32(const float*, float*, int, int, int, int, int, int, int, cudaStream_t);
+void mnn_corpus_unpackcommon_fp32(const float*, float*, int, int, int, int, int, int, int, cudaStream_t);
 void mnn_corpus_blit_2_float_fp32(const float*, float*, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
 // Raster fuseblit shims (3.6.0)
 void mnn_corpus_fuseblit_fp32(const float*, float*, int, int, const int32_t*, int, int, int, int, int, int, int, int, int, int, int, cudaStream_t);
@@ -2692,9 +2692,15 @@ bool CudaTransposeFp32Kernel::validate(const AdaptedCase& ac, const std::vector<
 // ---- PACKCOMMON (pack C4: NHWC→C4NHW4) ----
 bool CudaPackCommonFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
+    // Map corpus case (batch, channel, area) → MNN PackInfo:
+    //   inside = area, axis = channel, outside = batch
+    //   insideStride = 1, axisStride = area  (input NHWC: index = b*(c*area) + c*area + a)
     const int batch = spec.intParam("batch", 1), channel = spec.intParam("c", 4), area = spec.intParam("area", 4);
-    const int inChannelPack = (channel + 3) / 4 * 4;
-    const int maxCount = batch * area * inChannelPack;
+    // MNN PACKCOMMON uses PACK_NUMBER=8 for axisAlign (MNNCUDADefine.hpp).
+    const int inChannelPack = (channel + 7) / 8 * 8;  // == axisAlign for PACK_NUMBER=8
+    const int inside = area, axis = channel, outside = batch;
+    const int insideStride = 1, axisStride = area;
+    const int maxCount = outside * inside * inChannelPack;  // axisAlign * inside * outside
     std::vector<float> input(batch * channel * area);
     for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
@@ -2702,12 +2708,11 @@ bool CudaPackCommonFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) cons
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
     ac.args.push_back(AdaptedArg::buffer(0));
     ac.args.push_back(AdaptedArg::buffer(1));
-    ac.args.push_back(AdaptedArg::scalarInt(maxCount));
-    ac.args.push_back(AdaptedArg::scalarInt(channel));
-    ac.args.push_back(AdaptedArg::scalarInt(area));
-    ac.args.push_back(AdaptedArg::scalarInt(inChannelPack));
-    ac.args.push_back(AdaptedArg::scalarInt(inChannelPack));  // d_oc
-    ac.args.push_back(AdaptedArg::scalarInt(area));           // d_area
+    ac.args.push_back(AdaptedArg::scalarInt(inside));
+    ac.args.push_back(AdaptedArg::scalarInt(axis));
+    ac.args.push_back(AdaptedArg::scalarInt(outside));
+    ac.args.push_back(AdaptedArg::scalarInt(insideStride));
+    ac.args.push_back(AdaptedArg::scalarInt(axisStride));
     ac.entry = "mnn_corpus_packcommon_fp32";
     ac.globalSize[0] = gridFor(maxCount); ac.localSize[0] = kBlock; ac.dims = 1;
     ac.validatorInputA = input; ac.elementCount = maxCount;
@@ -2715,10 +2720,10 @@ bool CudaPackCommonFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) cons
     return true;
 }
 cudaError_t CudaPackCommonFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
-    // intArgs: [0]=maxCount,[1]=channel,[2]=area,[3]=inChannelPack,[4]=d_oc,[5]=d_area
+    // intArgs: [0]=inside,[1]=axis,[2]=outside,[3]=insideStride,[4]=axisStride
     mnn_corpus_packcommon_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
                                ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-                               ctx.intArgs[4], ctx.intArgs[5], ctx.grid, ctx.block, ctx.stream);
+                               ctx.intArgs[4], ctx.grid, ctx.block, ctx.stream);
     return cudaGetLastError();
 }
 bool CudaPackCommonFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -2743,32 +2748,36 @@ bool CudaPackCommonFp32Kernel::validate(const AdaptedCase& ac, const std::vector
 // ---- UNPACKCOMMON (unpack C4: C4NHW4→NHWC) ----
 bool CudaUnpackCommonFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
+    // Map corpus case → MNN PackInfo:
+    //   inside = area, axis = channel, outside = batch
+    //   insideStride = 1, axisStride = area  (output NHWC: index = b*(c*area) + c*area + a)
     const int batch = spec.intParam("batch", 1), channel = spec.intParam("c", 4), area = spec.intParam("area", 4);
-    const int inChannelPack = (channel + 3) / 4 * 4;
-    const int maxCount = batch * area * channel;
+    const int inChannelPack = (channel + 7) / 8 * 8;  // MNN PACK_NUMBER=8
+    const int inside = area, axis = channel, outside = batch;
+    const int insideStride = 1, axisStride = area;
+    const int maxCount = outside * inside * inChannelPack;  // axisAlign * inside * outside (kernel iterates over packed total)
     std::vector<float> input(batch * area * inChannelPack);
     for (int i = 0; i < (int)input.size(); ++i) input[i] = 0.1f * (i % 7);
     AdaptedBuffer inBuf; inBuf.setFp32(input); inBuf.isOutput = false;
-    AdaptedBuffer outBuf; outBuf.sizeBytes = maxCount * sizeof(float); outBuf.isOutput = true;
+    AdaptedBuffer outBuf; outBuf.sizeBytes = batch * channel * area * sizeof(float); outBuf.isOutput = true;
     ac.buffers.push_back(inBuf); ac.buffers.push_back(outBuf);
     ac.args.push_back(AdaptedArg::buffer(0));
     ac.args.push_back(AdaptedArg::buffer(1));
-    ac.args.push_back(AdaptedArg::scalarInt(maxCount));
-    ac.args.push_back(AdaptedArg::scalarInt(channel));
-    ac.args.push_back(AdaptedArg::scalarInt(area));
-    ac.args.push_back(AdaptedArg::scalarInt(inChannelPack));
-    ac.args.push_back(AdaptedArg::scalarInt(channel));  // d_oc
-    ac.args.push_back(AdaptedArg::scalarInt(area));    // d_area
+    ac.args.push_back(AdaptedArg::scalarInt(inside));
+    ac.args.push_back(AdaptedArg::scalarInt(axis));
+    ac.args.push_back(AdaptedArg::scalarInt(outside));
+    ac.args.push_back(AdaptedArg::scalarInt(insideStride));
+    ac.args.push_back(AdaptedArg::scalarInt(axisStride));
     ac.entry = "mnn_corpus_unpackcommon_fp32";
     ac.globalSize[0] = gridFor(maxCount); ac.localSize[0] = kBlock; ac.dims = 1;
-    ac.validatorInputA = input; ac.elementCount = maxCount;
+    ac.validatorInputA = input; ac.elementCount = batch * channel * area;
     ac.m = batch; ac.n = channel; ac.k = area; ac.w = inChannelPack;
     return true;
 }
 cudaError_t CudaUnpackCommonFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
     mnn_corpus_unpackcommon_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
                                  ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ctx.intArgs[3],
-                                 ctx.intArgs[4], ctx.intArgs[5], ctx.grid, ctx.block, ctx.stream);
+                                 ctx.intArgs[4], ctx.grid, ctx.block, ctx.stream);
     return cudaGetLastError();
 }
 bool CudaUnpackCommonFp32Kernel::validate(const AdaptedCase& ac, const std::vector<float>& output) const {
@@ -3420,6 +3429,8 @@ bool CudaWeightPackFillImplicitFp32Kernel::validate(const AdaptedCase& ac, const
 }
 
 // ---- transpose_BDL_to_BLD ----
+// MNN LinearAttentionExecution.cu: dim3 block(TILE_DIM=32, BLOCK_ROWS=8),
+// dim3 grid((D+TILE_DIM-1)/TILE_DIM, (L+TILE_DIM-1)/TILE_DIM, B).
 bool CudaTransposeBdlToBldFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
     const int B = spec.intParam("batch", 2), D = spec.intParam("d", 4), L = spec.intParam("l", 4);
@@ -3442,6 +3453,9 @@ bool CudaTransposeBdlToBldFp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& a
     return true;
 }
 cudaError_t CudaTransposeBdlToBldFp32Kernel::launch(const AdaptedCase& ac, const CudaLaunchCtx& ctx) const {
+    // grid/block already encoded in ac.globalSize/localSize; the runner passes
+    // them via ctx.grid/ctx.block. Reconstruct 3D grid + 2D block from
+    // intArgs[3..] is not needed since the shim takes them directly.
     mnn_corpus_transpose_bdl_to_bld_fp32((const float*)ctx.devBufs[0], (float*)ctx.devBufs[1],
         ctx.intArgs[0], ctx.intArgs[1], ctx.intArgs[2], ac.p, ac.q, ac.m, ctx.stream);
     return cudaGetLastError();

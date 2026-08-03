@@ -3619,12 +3619,16 @@ bool CudaGroupNormNHWCScaleFp16Kernel::validate(const AdaptedCase& ac, const std
 // ---- SeqLen2Spatial fp32 / fp16 ----
 // output[i,c] = input[i,c] + bias[c] + residual[i,c].
 // IS_FP16=0 -> fp32 buffers; IS_FP16=1 -> half buffers.
+// Faithful to MNN: template kernel instantiated with (C, TPB=320); only C in
+// {320, 640, 1280} supported (matches MNN explicit instantiation). Launch:
+// grid=seq, block=TPB=320 (NOT C).
 #define SEQLEN2SPATIAL_ADAPTER(CLASS, SHIM, IS_FP16) \
 bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
     if (spec.tag != "3.6.0") return false; \
     ac.entry = "mnn_corpus_" #SHIM; \
     const int seq = spec.intParam("seq", 4); \
     const int C = spec.intParam("c", 320); \
+    if (C != 320 && C != 640 && C != 1280) return false; \
     const int total = seq * C; \
     std::vector<float> input(total), bias(C), residual(total); \
     for (int i = 0; i < total; ++i) input[i] = 0.1f * (i % 7); \
@@ -3648,7 +3652,7 @@ bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
     ac.args.push_back(AdaptedArg::buffer(3)); \
     ac.args.push_back(AdaptedArg::scalarInt(C)); \
     const int grid = seq; \
-    const int block = C; \
+    const int block = 320; /* TPB=320 matches MNN */ \
     ac.args.push_back(AdaptedArg::scalarInt(grid)); \
     ac.args.push_back(AdaptedArg::scalarInt(block)); \
     ac.globalSize[0] = grid; ac.localSize[0] = block; ac.dims = 1; \
@@ -3685,6 +3689,7 @@ bool CLASS::adapt(const CaseSpec& spec, AdaptedCase& ac) const { \
     ac.entry = "mnn_corpus_" #SHIM; \
     const int seq = spec.intParam("seq", 4); \
     const int HHS = spec.intParam("hhs", 1280); \
+    if (HHS != 1280 && HHS != 2560 && HHS != 5120) return false; /* MNN instantiates only these */ \
     const float fDiv = spec.floatParam("f_div", 1.702f); \
     const float fAdd = spec.floatParam("f_add", 0.0f); \
     const float fMul = spec.floatParam("f_mul", 0.5f); \
@@ -5894,13 +5899,13 @@ cudaError_t CudaGemvFpAInt4BV5Fp16Kernel::launch(const AdaptedCase&, const CudaL
     return cudaGetLastError();
 }
 
-// GEMV_FpAInt4B_V9 fp16 (OC_PER_BLK=4, 1D block).
+// GEMV_FpAInt4B_V9 fp16 (OC_PER_BLK=2, block=128). Matches MNN HEAD.
 WOQ_FP16_GEMV_SMOKE_BODY(CudaGemvFpAInt4BV9Fp16Kernel, mnn_corpus_gemv_fpaint4b_v9_fp16, const uint8_t*, true,
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
-    ac.args.push_back(AdaptedArg::scalarInt((oc + 3) / 4)); ac.args.push_back(AdaptedArg::scalarInt(batch));
-    ac.args.push_back(AdaptedArg::scalarInt(64));)
+    ac.args.push_back(AdaptedArg::scalarInt((oc + 1) / 2)); ac.args.push_back(AdaptedArg::scalarInt(batch));
+    ac.args.push_back(AdaptedArg::scalarInt(128));)
 cudaError_t CudaGemvFpAInt4BV9Fp16Kernel::launch(const AdaptedCase&, const CudaLaunchCtx& ctx) const {
     mnn_corpus_gemv_fpaint4b_v9_fp16(ctx.devBufs[0], (const uint8_t*)ctx.devBufs[1],
         ctx.devBufs[2], ctx.devBufs[3], ctx.devBufs[4], ctx.devBufs[5],

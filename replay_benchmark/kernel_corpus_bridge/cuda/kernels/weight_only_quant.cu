@@ -1490,7 +1490,7 @@ void mnn_corpus_gemv_fpaint4b_v5_fp16(const void* input, const uint8_t* kernel,
         batch, ic, ic_p, oc, oc_p, quanC);
 }
 
-// ---- GEMV_FpAInt4B_V9 (fp32, OC_PER_BLK=4) ----
+// ---- GEMV_FpAInt4B_V9 (fp32, OC_PER_BLK=2 — matches MNN HEAD) ----
 void mnn_corpus_gemv_fpaint4b_v9_fp32(const float* input, const uint8_t* kernel,
                                        const float* scale, const float* offset, const float* bias,
                                        float* output, float maxV, float minV,
@@ -1498,11 +1498,11 @@ void mnn_corpus_gemv_fpaint4b_v9_fp32(const float* input, const uint8_t* kernel,
                                        int gridX, int gridY, int blockX, cudaStream_t stream) {
     dim3 grid(gridX, gridY);
     dim3 block(blockX);
-    MNN::Corpus::GEMV_FpAInt4B_V9<float, 4><<<grid, block, 0, stream>>>(
+    MNN::Corpus::GEMV_FpAInt4B_V9<float, 2><<<grid, block, 0, stream>>>(
         input, kernel, scale, offset, bias, output, maxV, minV,
         batch, ic, ic_p, oc, oc_p, quanC);
 }
-// ---- GEMV_FpAInt4B_V9 (fp16, OC_PER_BLK=4) ----
+// ---- GEMV_FpAInt4B_V9 (fp16, OC_PER_BLK=2 — matches MNN HEAD) ----
 void mnn_corpus_gemv_fpaint4b_v9_fp16(const void* input, const uint8_t* kernel,
                                        const void* scale, const void* offset, const void* bias,
                                        void* output, float maxV, float minV,
@@ -1510,7 +1510,7 @@ void mnn_corpus_gemv_fpaint4b_v9_fp16(const void* input, const uint8_t* kernel,
                                        int gridX, int gridY, int blockX, cudaStream_t stream) {
     dim3 grid(gridX, gridY);
     dim3 block(blockX);
-    MNN::Corpus::GEMV_FpAInt4B_V9<__half, 4><<<grid, block, 0, stream>>>(
+    MNN::Corpus::GEMV_FpAInt4B_V9<__half, 2><<<grid, block, 0, stream>>>(
         (const __half*)input, kernel, (const __half*)scale, (const __half*)offset,
         (const __half*)bias, (__half*)output, maxV, minV,
         batch, ic, ic_p, oc, oc_p, quanC);

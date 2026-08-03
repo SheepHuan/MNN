@@ -183,49 +183,60 @@ __global__ void groupNormNHWCScaleKernel(GroupNormNHWCParams params)
 
 // ============================================================================
 // SeqLen2SpatialKernel: output = input + bias + residual (per channel).
-// [B*S, C] layout. Each block handles one (B*S) row, threads cover channels.
+// Faithful to MNN plugin/SeqLen2Spatial/seqLen2SpatialKernel.cu: template on
+// compile-time C and TPB with #pragma unroll loop.
 // ============================================================================
-template <typename T>
-__global__ void SeqLen2SpatialKernel(const T* input, const T* biasInput, const T* residualInput, T* output, int C) {
-    int baseOffset = blockIdx.x * C + threadIdx.x;
-    if (threadIdx.x < C) {
-        output[baseOffset] = (T)((float)input[baseOffset] + (float)biasInput[threadIdx.x] + (float)residualInput[baseOffset]);
+template <typename T, int32_t C, int32_t TPB>
+__global__ void SeqLen2SpatialKernel(T const* input, T const* biasInput, T const* residualInput, T* output)
+{
+    int32_t baseOffset = blockIdx.x * C + threadIdx.x;
+    int32_t biasOffset = threadIdx.x;
+#pragma unroll
+    for (int32_t i = 0; i < C / TPB; ++i)
+    {
+        output[baseOffset] = input[baseOffset] + biasInput[biasOffset] + residualInput[baseOffset];
+        baseOffset += TPB;
+        biasOffset += TPB;
     }
 }
 
 // ============================================================================
 // splitGeLUKernel: fused split + gelu. output[i] = gelu(R) * L.
-// Input layout: [gridSize, 2*HHS] (L|R interleaved by HHS). Output: [gridSize, HHS].
-// Original uses templated HHS in {1280,2560,5120} — corpus uses runtime HHS.
+// Faithful to MNN plugin/SplitGelu/splitGeLUKernel.cu: template on compile-time
+// tHHS / tTPB with #pragma unroll loop. MNN instantiates tHHS in {1280,2560,5120}
+// with tTPB=256.
 // ============================================================================
-template <typename T>
-__global__ void splitGeLUKernel(const T* input0, const T* input1, T* output,
-                                int HHS, float fDivRecip, float fAdd, float fMul) {
-    int indexInput = blockIdx.x * HHS * 2 + threadIdx.x;
-    int indexOutput = blockIdx.x * HHS + threadIdx.x;
-    for (int i = 0; i < (HHS + blockDim.x - 1) / blockDim.x; ++i) {
-        if (threadIdx.x + i * blockDim.x < HHS) {
-            float valueL, valueR;
-            if (input1 == nullptr) {
-                valueL = (float)input0[indexInput];
-                valueR = (float)input0[indexInput + HHS];
-            } else {
-                int indexInput1 = threadIdx.x + i * blockDim.x;
-                valueL = (float)input0[indexInput] + (float)input1[indexInput1];
-                valueR = (float)input0[indexInput + HHS] + (float)input1[indexInput1 + HHS];
-            }
-            float tmp = valueR;
-            tmp *= fDivRecip;
-            tmp = erff(tmp);
-            tmp += fAdd;
-            tmp *= valueR;
-            tmp *= fMul;
-            tmp *= valueL;
-            output[indexOutput] = (T)tmp;
+template <typename T, int32_t tHHS, int32_t tTPB>
+__global__ void splitGeLUKernel(T const* input0, T const* input1, T* output,
+                                float const fDivRecip, float const fAdd, float const fMul)
+{
+    int32_t indexInput = blockIdx.x * tHHS * 2 + threadIdx.x;
+    int32_t indexInput1 = threadIdx.x;
+    int32_t indexOutput = blockIdx.x * tHHS + threadIdx.x;
+    float valueL, valueR;
+#pragma unroll
+    for (int32_t i = 0; i < tHHS / tTPB; ++i)
+    {
+        if(input1 == nullptr) {
+            valueL = static_cast<float>(input0[indexInput]);
+            valueR = static_cast<float>(input0[indexInput + tHHS]);
+        } else {
+            valueL = static_cast<float>(input0[indexInput]) + static_cast<float>(input1[indexInput1]);
+            valueR = static_cast<float>(input0[indexInput + tHHS]) + static_cast<float>(input1[indexInput1 + tHHS]);
+            indexInput1 += tTPB;
         }
-        indexInput += blockDim.x;
-        indexOutput += blockDim.x;
+        float tmp = valueR;
+        tmp *= fDivRecip;
+        tmp = erff(tmp);
+        tmp += fAdd;
+        tmp *= valueR;
+        tmp *= fMul;
+        tmp *= valueL;
+        output[indexOutput] = static_cast<T>(tmp);
+        indexInput += tTPB;
+        indexOutput += tTPB;
     }
+    return;
 }
 
 // ============================================================================
@@ -325,33 +336,97 @@ void mnn_corpus_groupnorm_nhwc_scale_fp16(
 }
 
 // ---- SeqLen2Spatial fp32 ----
+// Dispatch on C: MNN instantiates template for C in {320, 640, 1280} with TPB=320.
+// For other C values, fall back to the largest instantiation that fits C/TPB iterations.
 void mnn_corpus_seqlen2spatial_fp32(const void* input, const void* biasInput, const void* residualInput,
                                      void* output, int C, int gridSize, int block, cudaStream_t stream) {
-    MNN::Corpus::SeqLen2SpatialKernel<float><<<gridSize, block, 0, stream>>>(
-        (const float*)input, (const float*)biasInput, (const float*)residualInput, (float*)output, C);
+    constexpr int32_t TPB = 320;
+    switch (C) {
+        case 320:
+            MNN::Corpus::SeqLen2SpatialKernel<float, 320, TPB><<<gridSize, TPB, 0, stream>>>(
+                (const float*)input, (const float*)biasInput, (const float*)residualInput, (float*)output);
+            break;
+        case 640:
+            MNN::Corpus::SeqLen2SpatialKernel<float, 640, TPB><<<gridSize, TPB, 0, stream>>>(
+                (const float*)input, (const float*)biasInput, (const float*)residualInput, (float*)output);
+            break;
+        case 1280:
+            MNN::Corpus::SeqLen2SpatialKernel<float, 1280, TPB><<<gridSize, TPB, 0, stream>>>(
+                (const float*)input, (const float*)biasInput, (const float*)residualInput, (float*)output);
+            break;
+        default:
+            // Unsupported C for the faithful template kernel; caller should pick a supported size.
+            break;
+    }
 }
 // ---- SeqLen2Spatial fp16 ----
 void mnn_corpus_seqlen2spatial_fp16(const void* input, const void* biasInput, const void* residualInput,
                                      void* output, int C, int gridSize, int block, cudaStream_t stream) {
-    MNN::Corpus::SeqLen2SpatialKernel<__half><<<gridSize, block, 0, stream>>>(
-        (const __half*)input, (const __half*)biasInput, (const __half*)residualInput, (__half*)output, C);
+    constexpr int32_t TPB = 320;
+    switch (C) {
+        case 320:
+            MNN::Corpus::SeqLen2SpatialKernel<__half, 320, TPB><<<gridSize, TPB, 0, stream>>>(
+                (const __half*)input, (const __half*)biasInput, (const __half*)residualInput, (__half*)output);
+            break;
+        case 640:
+            MNN::Corpus::SeqLen2SpatialKernel<__half, 640, TPB><<<gridSize, TPB, 0, stream>>>(
+                (const __half*)input, (const __half*)biasInput, (const __half*)residualInput, (__half*)output);
+            break;
+        case 1280:
+            MNN::Corpus::SeqLen2SpatialKernel<__half, 1280, TPB><<<gridSize, TPB, 0, stream>>>(
+                (const __half*)input, (const __half*)biasInput, (const __half*)residualInput, (__half*)output);
+            break;
+        default:
+            break;
+    }
 }
 
 // ---- splitGeLU fp32 (input1=nullptr supported) ----
+// Dispatch on HHS: MNN instantiates for HHS in {1280, 2560, 5120} with TPB=256.
 void mnn_corpus_splitgelu_fp32(const void* input0, const void* input1, void* output,
                                 int HHS, float fDiv, float fAdd, float fMul,
                                 int gridSize, int block, cudaStream_t stream) {
     float fDivRecip = 1.0f / fDiv;
-    MNN::Corpus::splitGeLUKernel<float><<<gridSize, block, 0, stream>>>(
-        (const float*)input0, (const float*)input1, (float*)output, HHS, fDivRecip, fAdd, fMul);
+    constexpr int32_t kTPB = 256;
+    switch (HHS) {
+        case 1280:
+            MNN::Corpus::splitGeLUKernel<float, 1280, kTPB><<<gridSize, kTPB, 0, stream>>>(
+                (const float*)input0, (const float*)input1, (float*)output, fDivRecip, fAdd, fMul);
+            break;
+        case 2560:
+            MNN::Corpus::splitGeLUKernel<float, 2560, kTPB><<<gridSize, kTPB, 0, stream>>>(
+                (const float*)input0, (const float*)input1, (float*)output, fDivRecip, fAdd, fMul);
+            break;
+        case 5120:
+            MNN::Corpus::splitGeLUKernel<float, 5120, kTPB><<<gridSize, kTPB, 0, stream>>>(
+                (const float*)input0, (const float*)input1, (float*)output, fDivRecip, fAdd, fMul);
+            break;
+        default:
+            break;
+    }
 }
 // ---- splitGeLU fp16 ----
 void mnn_corpus_splitgelu_fp16(const void* input0, const void* input1, void* output,
                                 int HHS, float fDiv, float fAdd, float fMul,
                                 int gridSize, int block, cudaStream_t stream) {
     float fDivRecip = 1.0f / fDiv;
-    MNN::Corpus::splitGeLUKernel<__half><<<gridSize, block, 0, stream>>>(
-        (const __half*)input0, (const __half*)input1, (__half*)output, HHS, fDivRecip, fAdd, fMul);
+    constexpr int32_t kTPB = 256;
+    switch (HHS) {
+        case 1280:
+            MNN::Corpus::splitGeLUKernel<__half, 1280, kTPB><<<gridSize, kTPB, 0, stream>>>(
+                (const __half*)input0, (const __half*)input1, (__half*)output, fDivRecip, fAdd, fMul);
+            break;
+        case 2560:
+            MNN::Corpus::splitGeLUKernel<__half, 2560, kTPB><<<gridSize, kTPB, 0, stream>>>(
+                (const __half*)input0, (const __half*)input1, (__half*)output, fDivRecip, fAdd, fMul);
+            break;
+        case 5120:
+            MNN::Corpus::splitGeLUKernel<__half, 5120, kTPB><<<gridSize, kTPB, 0, stream>>>(
+                (const __half*)input0, (const __half*)input1, (__half*)output, fDivRecip, fAdd, fMul);
+            break;
+        default:
+            break;
+    }
 }
 
 // ---- SPLIT_FusedQKV fp32 ----

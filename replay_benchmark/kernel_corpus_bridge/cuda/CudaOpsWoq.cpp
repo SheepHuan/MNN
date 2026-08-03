@@ -787,7 +787,8 @@ bool CudaGemvFpAInt4BV5Fp32Kernel::validate(const AdaptedCase& ac, const std::ve
     return woqValidateStd(ac, output);
 }
 
-// 14. CudaGemvFpAInt4BV9Fp32Kernel — GEMV_FpAInt4B_V9 (OC_PER_BLK=4, block=128).
+// 14. CudaGemvFpAInt4BV9Fp32Kernel — GEMV_FpAInt4B_V9 (OC_PER_BLK=2, block=128).
+// Matches MNN HEAD: constexpr int OC_PER_BLK = 2; dim3 v9_grid((oc+1)/2, batch).
 bool CudaGemvFpAInt4BV9Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) const {
     if (spec.tag != "3.6.0") return false;
     ac.entry = "mnn_corpus_gemv_fpaint4b_v9_fp32";
@@ -815,7 +816,7 @@ bool CudaGemvFpAInt4BV9Fp32Kernel::adapt(const CaseSpec& spec, AdaptedCase& ac) 
     ac.args.push_back(AdaptedArg::scalarInt(batch)); ac.args.push_back(AdaptedArg::scalarInt(ic));
     ac.args.push_back(AdaptedArg::scalarInt(ic_p)); ac.args.push_back(AdaptedArg::scalarInt(oc));
     ac.args.push_back(AdaptedArg::scalarInt(oc_p)); ac.args.push_back(AdaptedArg::scalarInt(quanC));
-    const int gridX = (oc + 3) / 4, gridY = batch, blockX = 128;
+    const int gridX = (oc + 1) / 2, gridY = batch, blockX = 128;
     ac.args.push_back(AdaptedArg::scalarInt(gridX)); ac.args.push_back(AdaptedArg::scalarInt(gridY));
     ac.args.push_back(AdaptedArg::scalarInt(blockX));
     ac.globalSize[0] = gridX; ac.globalSize[1] = gridY; ac.localSize[0] = blockX; ac.dims = 2;

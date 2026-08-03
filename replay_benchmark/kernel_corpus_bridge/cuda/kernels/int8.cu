@@ -7,7 +7,9 @@
 //   source/backend/cuda/execution/weight_only_quant/ConvFpAIntBExecution.cu (DequantizeInt8Weight/Int4Weight)
 //
 // Reimplemented without #ifdef ENABLE_CUDA_QUANT guard (corpus is standalone).
-// INT8_PACK_NUMBER=4 (packs 4 int8 per thread, matching MNN's INT8_PACK_NUMBER=4).
+// MNN's INT8_PACK_NUMBER=16 (MNNCUDADefine.hpp); the kernels below receive
+// channelsPackInt8 etc. as parameters from the shim, so this constant is not
+// redefined here. Adapters in CudaOpsFp16.cu use the matching value 16.
 #include "corpus_common.cuh"
 #include <cuda_fp16.h>
 
@@ -556,11 +558,10 @@ __global__ void WeightInt8PackFill(const int8_t* param, T* output, const int max
             output[index] = (T)param[hpIndex * l + lIndex];
         } else {
             int lpIndex, fxyIndex, icpIndex, hpIndex;
-            d_hp.divmod(index, lpIndex, hpIndex);
-            if (hpIndex >= h) { output[index] = (T)0; continue; }
-            d_lp.divmod(lpIndex, fxyIndex, icpIndex);
-            if (icpIndex >= ic) { output[index] = (T)0; continue; }
-            output[index] = (T)param[hpIndex * ic * l + fxyIndex * ic + icpIndex];
+            d_lp.divmod(index, hpIndex, lpIndex);
+            d_icp.divmod(lpIndex, fxyIndex, icpIndex);
+            if (icpIndex >= ic || hpIndex >= h) { output[index] = (T)0; continue; }
+            output[index] = (T)param[hpIndex * l + icpIndex * (l / ic) + fxyIndex];
         }
     }
 }

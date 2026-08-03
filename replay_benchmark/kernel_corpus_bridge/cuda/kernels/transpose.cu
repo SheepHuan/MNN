@@ -273,38 +273,48 @@ __global__ void NHWC8_2_C4NHW4(const T0* input, T1* output, const int maxCount, 
 }
 
 // ---- PACKCOMMON / UNPACKCOMMON ----
-// Faithful to MNN Transpose.cu PACKCOMMON/UNPACKCOMMON:
+// Faithful to MNN Transpose.cu PACKCOMMON/UNPACKCOMMON (3.6.0 HEAD):
 //   axisAlign = UP_DIV(axis, PACK_NUMBER) * PACK_NUMBER
 //   dstOffset = (z * inside + x) * axisAlign + y  (NC4HW4 layout)
 //   srcOffset = x * insideStride + y * axisStride + z * inside * axis
-// Corpus shim hardcodes insideStride=1, axisStride=area (NHWC src layout).
+// MNN launch: dim3 grid=cores, block=threadNumbers; arguments from PackInfo.
 template<typename T0, typename T1>
-__global__ void PACKCOMMON(const T0* input, T1* output, const int maxCount, const int channel, const int area,
-                           const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
-    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
-        int area_idx, temp, chnl_idx, batch_idx;
-        divArea.divmod(index, temp, area_idx);
-        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        int dst_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
-        int src_offset = area_idx + chnl_idx * area + batch_idx * area * channel;
-        if (chnl_idx < channel) {
-            output[dst_offset] = input[src_offset];
+__global__ void PACKCOMMON(const T0* input, T1* output,
+                           int inside, int axis, int outside,
+                           int insideStride, int axisStride) {
+    int axisAlign = UP_DIV(axis, PACK_NUMBER) * PACK_NUMBER;
+    int total = axisAlign * inside * outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int tmpI = i / axisAlign;
+        int y = i % axisAlign;
+        int x = tmpI % inside;
+        int z = tmpI / inside;
+
+        int dstOffset = (z * inside + x) * axisAlign + y;
+        int srcOffset = x * insideStride + y * axisStride + z * inside * axis;
+        if (y < axis) {
+            output[dstOffset] = input[srcOffset];
         } else {
-            output[dst_offset] = (T1)0.0;
+            output[dstOffset] = (T1)0.0;
         }
     }
 }
 template<typename T0, typename T1>
-__global__ void UNPACKCOMMON(const T0* input, T1* output, const int maxCount, const int channel, const int area,
-                             const int inChannelPack, DivModFast divOutChannelPack, DivModFast divArea) {
-    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (size_t)maxCount; index += blockDim.x * gridDim.x) {
-        int area_idx, temp, chnl_idx, batch_idx;
-        divArea.divmod(index, temp, area_idx);
-        divOutChannelPack.divmod(temp, batch_idx, chnl_idx);
-        if (chnl_idx < channel) {
-            int src_offset = (batch_idx * area + area_idx) * inChannelPack + chnl_idx;
-            int dst_offset = area_idx + chnl_idx * area + batch_idx * area * channel;
-            output[dst_offset] = input[src_offset];
+__global__ void UNPACKCOMMON(const T0* input, T1* output,
+                             int inside, int axis, int outside,
+                             int insideStride, int axisStride) {
+    int axisAlign = UP_DIV(axis, PACK_NUMBER) * PACK_NUMBER;
+    int total = axisAlign * inside * outside;
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int tmpI = i / axisAlign;
+        int y = i % axisAlign;
+        int x = tmpI % inside;
+        int z = tmpI / inside;
+
+        int srcOffset = (z * inside + x) * axisAlign + y;
+        int dstOffset = x * insideStride + y * axisStride + z * inside * axis;
+        if (y < axis) {
+            output[dstOffset] = input[srcOffset];
         }
     }
 }
@@ -533,15 +543,20 @@ void mnn_corpus_nhwc8_2_c4nhw4_fp32(const float* input, float* output, int maxCo
 }
 
 // ---- PACKCOMMON / UNPACKCOMMON (pack/unpack C4 channel) ----
-void mnn_corpus_packcommon_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
-                                int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
-    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
-    MNN::Corpus::PACKCOMMON<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+// Shim signature matches MNN PackInfo: inside/axis/outside + insideStride/axisStride.
+void mnn_corpus_packcommon_fp32(const float* input, float* output,
+                                int inside, int axis, int outside,
+                                int insideStride, int axisStride,
+                                int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::PACKCOMMON<float, float><<<grid, block, 0, stream>>>(
+        input, output, inside, axis, outside, insideStride, axisStride);
 }
-void mnn_corpus_unpackcommon_fp32(const float* input, float* output, int maxCount, int channel, int area, int inChannelPack,
-                                  int d_oc_val, int d_area_val, int grid, int block, cudaStream_t stream) {
-    MNN::Corpus::DivModFast d_oc(d_oc_val), d_area(d_area_val);
-    MNN::Corpus::UNPACKCOMMON<float, float><<<grid, block, 0, stream>>>(input, output, maxCount, channel, area, inChannelPack, d_oc, d_area);
+void mnn_corpus_unpackcommon_fp32(const float* input, float* output,
+                                  int inside, int axis, int outside,
+                                  int insideStride, int axisStride,
+                                  int grid, int block, cudaStream_t stream) {
+    MNN::Corpus::UNPACKCOMMON<float, float><<<grid, block, 0, stream>>>(
+        input, output, inside, axis, outside, insideStride, axisStride);
 }
 
 // ---- blit_2_float / blit_2_half (vec2 blit for raster) ----
@@ -586,10 +601,12 @@ void mnn_corpus_blit_2_half_fp32(const float* input, float* output, int count,
 }
 
 // ---- transpose_BDL_to_BLD (LinearAttention, 3.6.0) ----
+// Launch matches MNN LinearAttentionExecution.cu: dim3 block(TILE_DIM=32, BLOCK_ROWS=8),
+// dim3 grid((D+TILE_DIM-1)/TILE_DIM, (L+TILE_DIM-1)/TILE_DIM, B).
 void mnn_corpus_transpose_bdl_to_bld_fp32(const float* input, float* output,
-                                           int B, int D, int L,
-                                           int gridX, int gridY, int gridZ,
-                                           cudaStream_t stream) {
+                                            int B, int D, int L,
+                                            int gridX, int gridY, int gridZ,
+                                            cudaStream_t stream) {
     dim3 grid(gridX, gridY, gridZ);
     dim3 block(TILE_DIM, BLOCK_ROWS);
     MNN::Corpus::transpose_BDL_to_BLD<<<grid, block, 0, stream>>>(input, output, B, D, L);
