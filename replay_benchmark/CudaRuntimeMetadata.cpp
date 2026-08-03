@@ -83,7 +83,7 @@ struct CudaLaunchMetadataCollector::Impl {
                     activity->kind != CUPTI_ACTIVITY_KIND_KERNEL) {
                     continue;
                 }
-                const auto* kernel = reinterpret_cast<const CUpti_ActivityKernel11*>(activity);
+                const auto* kernel = reinterpret_cast<const CUpti_ActivityKernel9*>(activity);
                 CudaLaunchRecord record;
                 record.kernelName = kernel->name == nullptr ? "unknown" : kernel->name;
                 record.grid[0] = kernel->gridX;

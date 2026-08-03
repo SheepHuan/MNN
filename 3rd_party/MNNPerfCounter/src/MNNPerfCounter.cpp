@@ -540,6 +540,13 @@ bool Session::start() {
         // Lazy-build config/counterData images on first start() so create()
         // stays cheap when the session is only probed.
         if (mImpl->nvConfigImage.empty()) {
+            // Initialize CUPTI profiler BEFORE calling cuptiDeviceGetChipName;
+            // otherwise cuptiDeviceGetChipName returns CUPTI_ERROR_NOT_INITIALIZED.
+            CUpti_Profiler_Initialize_Params initParams = {CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
+            if (cuptiProfilerInitialize(&initParams) != CUPTI_SUCCESS) {
+                mImpl->error = "cuptiProfilerInitialize failed";
+                return false;
+            }
             // Resolve chipName via CUPTI.
             CUpti_Device_GetChipName_Params chipParams = {CUpti_Device_GetChipName_Params_STRUCT_SIZE};
             chipParams.deviceIndex = 0; // single-device assumption
@@ -548,11 +555,6 @@ bool Session::start() {
                 return false;
             }
             mImpl->nvChipName = chipParams.pChipName ? chipParams.pChipName : "";
-            CUpti_Profiler_Initialize_Params initParams = {CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
-            if (cuptiProfilerInitialize(&initParams) != CUPTI_SUCCESS) {
-                mImpl->error = "cuptiProfilerInitialize failed";
-                return false;
-            }
             size_t numPasses = 1;
             if (!nvBuildConfigImage(mImpl->nvChipName, mImpl->nvMetricNames, &mImpl->nvConfigImage, &numPasses, &mImpl->error)) {
                 return false;
@@ -572,8 +574,8 @@ bool Session::start() {
             CUpti_Profiler_CounterDataImageOptions opts = {CUpti_Profiler_CounterDataImageOptions_STRUCT_SIZE};
             opts.pCounterDataPrefix = prefix.data();
             opts.counterDataPrefixSize = prefix.size();
-            opts.maxNumRanges = 1; // caller-driven; one range per beginRange/endRange per session
-            opts.maxNumRangeTreeNodes = 1;
+            opts.maxNumRanges = 32; // allow up to 32 beginRange/endRange pairs per session
+            opts.maxNumRangeTreeNodes = 32;
             opts.maxRangeNameLength = 256;
 
             CUpti_Profiler_CounterDataImage_CalculateSize_Params sizeParams = {CUpti_Profiler_CounterDataImage_CalculateSize_Params_STRUCT_SIZE};

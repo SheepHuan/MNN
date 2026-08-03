@@ -13,6 +13,7 @@
 #include <cuda.h>
 #include <cupti.h>
 #include <cupti_target.h>
+#include <cupti_profiler_target.h>
 #include <nvperf_host.h>
 #include <nvperf_cuda_host.h>
 #include <nvperf_target.h>
@@ -61,6 +62,10 @@ static const char* submetricString(NVPW_Submetric s) {
 }
 
 static std::string getChipName(int deviceOrdinal) {
+    // cuptiDeviceGetChipName requires CUPTI profiler to be initialized first
+    // (otherwise returns CUPTI_ERROR_NOT_INITIALIZED=15).
+    CUpti_Profiler_Initialize_Params initParams = {CUpti_Profiler_Initialize_Params_STRUCT_SIZE};
+    if (cuptiProfilerInitialize(&initParams) != CUPTI_SUCCESS) return "";
     CUpti_Device_GetChipName_Params p = {CUpti_Device_GetChipName_Params_STRUCT_SIZE};
     p.deviceIndex = deviceOrdinal;
     if (cuptiDeviceGetChipName(&p) != CUPTI_SUCCESS) return "";
