@@ -1,0 +1,33 @@
+{
+  "collection_session_id": "67f7bc22-d162-4e73-b57f-a2f28c4125d6",
+  "device_fingerprint": "Mali-G610",
+  "errors": [],
+  "manifest_sha256": "2dd70b4f24d5a21f",
+  "schema_version": "mnn-opencl-pmc-source-validation/v1",
+  "stats": {
+    "backends": {
+      "opencl": 9982
+    },
+    "delta_mismatch": 0,
+    "failed_rows": 0,
+    "frameworks": {
+      "mnn": 9982
+    },
+    "not_found_rows": 1288,
+    "rows": 9982,
+    "status_not_found": 1288,
+    "status_timeout": 322,
+    "status_valid": 8372,
+    "tags": {
+      "1.2.0": 3220,
+      "3.6.0": 6762
+    },
+    "timeout_rows": 322,
+    "unique_case_tag_pairs": 62,
+    "unique_cases": 46,
+    "unique_metrics": 161,
+    "valid_rows": 8372
+  },
+  "valid": true,
+  "warnings": []
+}

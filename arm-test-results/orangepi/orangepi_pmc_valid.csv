@@ -1,0 +1,162 @@
+metric
+Varying unit instructions
+32-bit interpolation slots
+16-bit interpolation slots
+Tiler varying shading stall cycles
+Varying cache misses
+Varying cache hits
+Output internal read beats
+Tiler position shading stall cycles
+Tiler position FIFO full cycles
+Position cache miss requests
+Position cache hit requests
+Tiler active cycles
+Texture message write beats
+Texture filtering cycles
+Texture fetch stall cycles
+Tile unit write beats to L2 memory system
+Texture unit read beats from L2 cache
+Texture unit read beats from external memory
+Miscellaneous read beats from L2 cache
+Load/store unit write-back write beats to L2 memory system
+Load/store unit other write beats to L2 memory system
+Load/store unit read beats from L2 cache
+Load/store unit read beats from external memory
+Fragment front-end read beats from L2 cache
+Fragment front-end read beats from external memory
+Non-fragment warps
+Non-fragment core tasks
+Non-fragment active cycles
+MMU lookup requests
+MMU L3 table read requests
+MMU L3 lookup TLB hits
+MMU L2 table read requests
+MMU L2 lookup TLB hits
+Load/store unit partial write issues
+Load/store unit partial read issues
+Load/store unit full write issues
+Load/store unit full read issues
+Load/store unit atomic issues
+Input internal write stall cycles
+Write lookup requests
+Input internal write requests
+Input internal snoop stall cycles
+Input external snoop lookup requests
+Input internal snoop requests
+Input internal read stall cycles
+Read lookup requests
+Input internal read requests
+Any lookup requests
+Output internal write requests
+Output internal read stall cycles
+Output internal read requests
+Input external snoop stall cycles
+Input external snoop transactions
+L2 cache flush requests
+Z plane culled primitives
+Visible primitives
+Tiler varying shading requests
+Triangle primitives
+Sample test culled primitives
+Tiler position shading requests
+Point primitives
+Command stream 0 active cycles
+Output external ReadNoSnoop transactions
+Command execution unit active cycles
+Output external read latency 320-383 cycles
+Blend shader instructions
+Command stream 3 wait stall cycles
+Output external read latency 256-319 cycles
+Command stream 2 wait stall cycles
+Output external read latency 192-255 cycles
+Arithmetic SFU pipe instructions
+Command stream 1 wait stall cycles
+Output external read latency 128-191 cycles
+Instruction cache misses
+Command stream 0 wait stall cycles
+Output external read latency 0-127 cycles
+Arithmetic FMA pipe instructions
+Texture message read beats
+Diverged instructions
+Any workload active cycles
+Output external read beats
+Texture messages
+Output external read transactions
+Arithmetic CVT pipe instructions
+Execution engine starvation cycles
+Texture filtering cycles using full trilinear
+Output external outstanding reads 0-25%
+Command stream 1 active cycles
+Texture filtering stall cycles
+Attribute instructions
+Texture descriptor stall cycles
+Partial rasterized fine quads
+Output external outstanding reads 25-50%
+Command stream 2 active cycles
+Output external outstanding reads 50-75%
+Command stream 3 active cycles
+Command load/store unit active cycles
+Output external read stall cycles
+MCU active cycles
+Output external ReadUnique transactions
+Output external write transactions
+Output external write beats
+Compute queue endpoint stall cycles
+Compute queue endpoint drain stall cycles
+Output external WriteNoSnoopFull transactions
+Compute queue interrupt pending cycles
+Warps using more than 32 registers
+Output external WriteNoSnoopPartial transactions
+Compute jobs
+Compute work queued cycles
+Output external outstanding writes 50-75%
+Output external outstanding writes 0-25%
+Compute tasks
+Full warps
+Output external outstanding writes 25-50%
+Texture filtering cycles using full bilinear
+Execution core active cycles
+Fragment queue endpoint stall cycles
+Output external WriteSnoopFull transactions
+Fragment queue interrupt pending cycles
+Input internal clean unique requests
+Fragment active cycles
+Output external WriteSnoopPartial transactions
+Fragment work queued cycles
+Input internal evict requests
+Early ZS killed quads
+Output external write stall cycles
+Any queue active cycles
+L2 cache flush cycles
+GPU interrupts
+Vertex queue endpoint drain stall cycles
+Early ZS tested quads
+Vertex queue endpoint stall cycles
+Early ZS updated quads
+Vertex queue interrupt pending cycles
+Vertex jobs
+Fragment pre-pipe buffer active cycles
+Vertex tasks
+Vertex work queued cycles
+Late ZS killed quads
+Late ZS tested quads
+Occluding quads
+Fragment jobs
+Fragment tasks
+Rasterized primitives
+Rasterized fine quads
+Fragment primitives loaded
+Tiles
+Killed unchanged tiles
+Fragment warps
+GPU active cycles
+GPU interrupt pending cycles
+Visible back-facing primitives
+Facing or XY plane test culled primitives
+Visible front-facing primitives
+Line primitives
+gpu_active_cycles
+compute_active_cycles
+compute_tasks
+l2_any_lookup
+l2_ext_read

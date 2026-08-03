@@ -1,0 +1,3089 @@
+{
+    "absval_smoke": {
+        "latency_us": 887.72,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "absval",
+        "pmu_status": "disabled"
+    },
+    "absval_pack4_smoke": {
+        "latency_us": 795.796,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "absval_pack4",
+        "pmu_status": "disabled"
+    },
+    "absval_smoke": {
+        "latency_us": 801.474,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "absval",
+        "pmu_status": "disabled"
+    },
+    "absval_pack4_fp32_smoke": {
+        "latency_us": 831.993,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "absval_pack4_fp32",
+        "pmu_status": "disabled"
+    },
+    "batchnorm_smoke": {
+        "latency_us": 1039.171,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "batchnorm",
+        "pmu_status": "disabled"
+    },
+    "batchnorm_pack4_smoke": {
+        "latency_us": 1020.943,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "batchnorm_pack4",
+        "pmu_status": "disabled"
+    },
+    "batchnorm_smoke": {
+        "latency_us": 1029.328,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "batchnorm",
+        "pmu_status": "disabled"
+    },
+    "batchnorm_pack4_smoke": {
+        "latency_us": 993.652,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "batchnorm_pack4",
+        "pmu_status": "disabled"
+    },
+    "binaryop_smoke": {
+        "latency_us": 1080.316,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "binaryop",
+        "pmu_status": "disabled"
+    },
+    "binaryop_pack4_smoke": {
+        "latency_us": 1003.236,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "binaryop_pack4",
+        "pmu_status": "disabled"
+    },
+    "binaryop_smoke": {
+        "latency_us": 1078.597,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "binaryop",
+        "pmu_status": "disabled"
+    },
+    "binaryop_pack4_smoke": {
+        "latency_us": 1031.046,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "binaryop_pack4",
+        "pmu_status": "disabled"
+    },
+    "binaryop_broadcast_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "binaryop_broadcast",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "binaryop_broadcast_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "binaryop_broadcast_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "binaryop_broadcast_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "binaryop_broadcast_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "cast_fp16_to_fp32_smoke": {
+        "latency_us": 1061.254,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "cast_fp16_to_fp32",
+        "pmu_status": "disabled"
+    },
+    "cast_fp16_to_fp32_pack4_smoke": {
+        "latency_us": 1031.88,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "cast_fp16_to_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "cast_fp16_to_fp32_smoke": {
+        "latency_us": 1039.744,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "cast_fp16_to_fp32",
+        "pmu_status": "disabled"
+    },
+    "cast_fp16_to_fp32_pack4_smoke": {
+        "latency_us": 1001.465,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "cast_fp16_to_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "cast_fp32_to_fp16_smoke": {
+        "latency_us": 1033.963,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "cast_fp32_to_fp16",
+        "pmu_status": "disabled"
+    },
+    "cast_fp32_to_fp16_pack4_smoke": {
+        "latency_us": 1016.308,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "cast_fp32_to_fp16_pack4",
+        "pmu_status": "disabled"
+    },
+    "cast_fp32_to_fp16_smoke": {
+        "latency_us": 1054.691,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "cast_fp32_to_fp16",
+        "pmu_status": "disabled"
+    },
+    "cast_fp32_to_fp16_pack4_smoke": {
+        "latency_us": 1007.766,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "cast_fp32_to_fp16_pack4",
+        "pmu_status": "disabled"
+    },
+    "celu_smoke": {
+        "latency_us": 786.579,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "celu",
+        "pmu_status": "disabled"
+    },
+    "clip_smoke": {
+        "latency_us": 1031.151,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "clip",
+        "pmu_status": "disabled"
+    },
+    "clip_pack4_smoke": {
+        "latency_us": 1029.276,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "clip_pack4",
+        "pmu_status": "disabled"
+    },
+    "clip_smoke": {
+        "latency_us": 1081.096,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "clip",
+        "pmu_status": "disabled"
+    },
+    "concat_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "concat",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "concat_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "concat_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "concat_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "concat_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "concat_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "concat",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "concat_axis0_fp32_smoke": {
+        "latency_us": 867.044,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "concat_axis0_fp32",
+        "pmu_status": "disabled"
+    },
+    "concat_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "concat_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "concat_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "concat_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution1d_1x1s1d1_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution1d_1x1s1d1_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution1d_gemm_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution1d_gemm_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution1d_packed_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution1d_packed",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution1d_packed_1x1s1d1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution1d_packed_1x1s1d1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution1d_packed_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution1d_packed_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_1x1s1d1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_1x1s1d1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_1x1s1d1_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_1x1s1d1_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_3x3s1d1_winograd23_transform_input_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_3x3s1d1_winograd23_transform_input",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_3x3s1d1_winograd23_transform_output_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_3x3s1d1_winograd23_transform_output",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_3x3s1d1_winograd43_transform_input_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_3x3s1d1_winograd43_transform_input",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_3x3s1d1_winograd43_transform_output_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_3x3s1d1_winograd43_transform_output",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_3x3s1d1_winograd_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_3x3s1d1_winograd_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_gemm_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_gemm_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack1to4_3x3s1d1_winograd_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack1to4_3x3s1d1_winograd_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_1x1s1d1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4_1x1s1d1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_lds_8_8_2_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4_3x3s1d1_lds_8_8_2",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd23_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4_3x3s1d1_winograd23_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd23_transform_input_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4_3x3s1d1_winograd23_transform_input",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd23_transform_input_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack4_3x3s1d1_winograd23_transform_input",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd23_transform_output_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolution_pack4_3x3s1d1_winograd23_transform_output",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd23_transform_output_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack4_3x3s1d1_winograd23_transform_output",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd43_transform_input_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack4_3x3s1d1_winograd43_transform_input",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd43_transform_output_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack4_3x3s1d1_winograd43_transform_output",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4_3x3s1d1_winograd_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack4_3x3s1d1_winograd_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_pack4to1_3x3s1d1_winograd_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_pack4to1_3x3s1d1_winograd_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_packed_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_packed",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_packed_1x1s1d1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_packed_1x1s1d1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_packed_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_packed_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolution_winograd_gemm_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolution_winograd_gemm_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolutiondepthwise",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolutiondepthwise_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolutiondepthwise",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolutiondepthwise_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolutiondepthwise_group",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolutiondepthwise_group_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolutiondepthwise_group_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "convolutiondepthwise_group_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolutiondepthwise_group",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolutiondepthwise_group_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolutiondepthwise_group_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "convolutiondepthwise_group_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "convolutiondepthwise_group_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "crop_smoke": {
+        "latency_us": 1027.766,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "crop",
+        "pmu_status": "disabled"
+    },
+    "crop_pack4_smoke": {
+        "latency_us": 1030.786,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "crop_pack4",
+        "pmu_status": "disabled"
+    },
+    "crop_smoke": {
+        "latency_us": 1059.119,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "crop",
+        "pmu_status": "disabled"
+    },
+    "crop_pack1to4_smoke": {
+        "latency_us": 1061.931,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "crop_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "crop_pack4_smoke": {
+        "latency_us": 1096.096,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "crop_pack4",
+        "pmu_status": "disabled"
+    },
+    "crop_pack4to1_smoke": {
+        "latency_us": 977.404,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "crop_pack4to1",
+        "pmu_status": "disabled"
+    },
+    "deconvolution_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolution",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolution_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolution_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolution_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_col2im_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolution_col2im",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_gemm_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolution_gemm_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_gemm_packed_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolution_gemm_packed",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_pack4_col2im_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolution_pack4_col2im",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolution_packed_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolution_packed",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolutiondepthwise",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolutiondepthwise_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolutiondepthwise",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolutiondepthwise_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolutiondepthwise_group",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolutiondepthwise_group_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolutiondepthwise_group_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "deconvolutiondepthwise_group_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolutiondepthwise_group",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolutiondepthwise_group_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolutiondepthwise_group_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deconvolutiondepthwise_group_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deconvolutiondepthwise_group_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "deepcopy_smoke": {
+        "latency_us": 1044.431,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deepcopy",
+        "pmu_status": "disabled"
+    },
+    "deepcopy_pack4_smoke": {
+        "latency_us": 1022.193,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "deepcopy_pack4",
+        "pmu_status": "disabled"
+    },
+    "dequantize_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "dequantize",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "dequantize_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "dequantize_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "dropout_smoke": {
+        "latency_us": 1188.54,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "dropout",
+        "pmu_status": "disabled"
+    },
+    "dropout_pack4_smoke": {
+        "latency_us": 1007.558,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "dropout_pack4",
+        "pmu_status": "disabled"
+    },
+    "dropout_smoke": {
+        "latency_us": 1061.514,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "dropout",
+        "pmu_status": "disabled"
+    },
+    "eltwise_smoke": {
+        "latency_us": 1015.163,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "eltwise",
+        "pmu_status": "disabled"
+    },
+    "eltwise_pack4_smoke": {
+        "latency_us": 1061.254,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "eltwise_pack4",
+        "pmu_status": "disabled"
+    },
+    "eltwise_smoke": {
+        "latency_us": 1099.325,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "eltwise",
+        "pmu_status": "disabled"
+    },
+    "elu_smoke": {
+        "latency_us": 832.722,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "elu",
+        "pmu_status": "disabled"
+    },
+    "erf_smoke": {
+        "latency_us": 733.04,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "erf",
+        "pmu_status": "disabled"
+    },
+    "flatten_smoke": {
+        "latency_us": 1056.098,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "flatten",
+        "pmu_status": "disabled"
+    },
+    "flatten_pack1to4_smoke": {
+        "latency_us": 1018.86,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "flatten_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "flatten_pack4_smoke": {
+        "latency_us": 1041.672,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "flatten_pack4",
+        "pmu_status": "disabled"
+    },
+    "flatten_smoke": {
+        "latency_us": 1053.494,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "flatten",
+        "pmu_status": "disabled"
+    },
+    "flatten_pack1to4_smoke": {
+        "latency_us": 1042.87,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "flatten_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "flatten_pack4_smoke": {
+        "latency_us": 1053.91,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "flatten_pack4",
+        "pmu_status": "disabled"
+    },
+    "gelu_smoke": {
+        "latency_us": 805.067,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "gelu",
+        "pmu_status": "disabled"
+    },
+    "gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "gemm_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "gemm_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: shader toolchain/extension unsupported (compile_failed)"
+    },
+    "gemm_sg_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "gemm_sg",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "groupnorm_coeffs_smoke": {
+        "latency_us": 864.701,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_coeffs",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_coeffs_pack4_smoke": {
+        "latency_us": 831.108,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_coeffs_pack4",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_norm_smoke": {
+        "latency_us": 1044.64,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_norm",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_norm_pack4_smoke": {
+        "latency_us": 1014.537,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_norm_pack4",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_reduce_mean_smoke": {
+        "latency_us": 773.611,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_reduce_mean",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_reduce_mean_pack4_smoke": {
+        "latency_us": 832.827,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_reduce_mean_pack4",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_reduce_sum4_fp16_to_fp32_smoke": {
+        "latency_us": 811.421,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_reduce_sum4_fp16_to_fp32",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_reduce_sum4_fp16_to_fp32_pack4_smoke": {
+        "latency_us": 766.632,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_reduce_sum4_fp16_to_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_reduce_sum4_fp32_smoke": {
+        "latency_us": 768.246,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_reduce_sum4_fp32",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_reduce_sum4_fp32_pack4_smoke": {
+        "latency_us": 876.784,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_reduce_sum4_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_sub_mean_square_smoke": {
+        "latency_us": 1057.66,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_sub_mean_square",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_sub_mean_square_pack4_smoke": {
+        "latency_us": 989.59,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "groupnorm_sub_mean_square_pack4",
+        "pmu_status": "disabled"
+    },
+    "hardsigmoid_smoke": {
+        "latency_us": 821.525,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "hardsigmoid",
+        "pmu_status": "disabled"
+    },
+    "hardswish_smoke": {
+        "latency_us": 778.871,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "hardswish",
+        "pmu_status": "disabled"
+    },
+    "innerproduct_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "innerproduct",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "innerproduct_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "innerproduct_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "innerproduct_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_gemm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_gemm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_gemm_wp1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_gemm_wp1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_gemm_wp4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_gemm_wp4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_gemm_wp4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_gemm_wp4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_pack4_lds_64_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "innerproduct_pack4_lds_64",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_reduce_sum8_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_reduce_sum8",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_reduce_sum8_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_reduce_sum8_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_sum8_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_sum8",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_sum8_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_sum8_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_sum8_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_sum8_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "innerproduct_sum8_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "innerproduct_sum8_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "instancenorm_coeffs_smoke": {
+        "latency_us": 807.255,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_coeffs",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_coeffs_pack4_smoke": {
+        "latency_us": 774.34,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_coeffs_pack4",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_norm_smoke": {
+        "latency_us": 1056.306,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_norm",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_norm_pack4_smoke": {
+        "latency_us": 1021.62,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_norm_pack4",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_reduce_mean_smoke": {
+        "latency_us": 808.036,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_reduce_mean",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_reduce_mean_pack4_smoke": {
+        "latency_us": 807.567,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_reduce_mean_pack4",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_reduce_sum4_fp16_to_fp32_smoke": {
+        "latency_us": 895.115,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_reduce_sum4_fp16_to_fp32",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_reduce_sum4_fp16_to_fp32_pack4_smoke": {
+        "latency_us": 834.128,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_reduce_sum4_fp16_to_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_reduce_sum4_fp32_smoke": {
+        "latency_us": 815.692,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_reduce_sum4_fp32",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_reduce_sum4_fp32_pack4_smoke": {
+        "latency_us": 906.157,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_reduce_sum4_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "instancenorm_sub_mean_square_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_sub_mean_square",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "instancenorm_sub_mean_square_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "instancenorm_sub_mean_square_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "interp",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "interp_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "interp",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "interp_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_bicubic_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "interp_bicubic",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_bicubic_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "interp_bicubic_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_bicubic_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "interp_bicubic",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_bicubic_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "interp_bicubic_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_bicubic_coeffs_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "interp_bicubic_coeffs",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "interp_bicubic_coeffs_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "interp_bicubic_coeffs",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "layernorm_coeffs_smoke": {
+        "latency_us": 769.705,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_coeffs",
+        "pmu_status": "disabled"
+    },
+    "layernorm_coeffs_pack4_smoke": {
+        "latency_us": 852.722,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_coeffs_pack4",
+        "pmu_status": "disabled"
+    },
+    "layernorm_norm_smoke": {
+        "latency_us": 1068.39,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_norm",
+        "pmu_status": "disabled"
+    },
+    "layernorm_norm_pack4_smoke": {
+        "latency_us": 1086.357,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_norm_pack4",
+        "pmu_status": "disabled"
+    },
+    "layernorm_reduce_mean_smoke": {
+        "latency_us": 818.661,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_reduce_mean",
+        "pmu_status": "disabled"
+    },
+    "layernorm_reduce_mean_pack4_smoke": {
+        "latency_us": 840.014,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_reduce_mean_pack4",
+        "pmu_status": "disabled"
+    },
+    "layernorm_reduce_sum4_fp16_to_fp32_smoke": {
+        "latency_us": 1035.265,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_reduce_sum4_fp16_to_fp32",
+        "pmu_status": "disabled"
+    },
+    "layernorm_reduce_sum4_fp16_to_fp32_pack4_smoke": {
+        "latency_us": 1048.598,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_reduce_sum4_fp16_to_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "layernorm_reduce_sum4_fp32_smoke": {
+        "latency_us": 1017.558,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_reduce_sum4_fp32",
+        "pmu_status": "disabled"
+    },
+    "layernorm_reduce_sum4_fp32_pack4_smoke": {
+        "latency_us": 1034.901,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_reduce_sum4_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "layernorm_sub_mean_square_smoke": {
+        "latency_us": 1007.402,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_sub_mean_square",
+        "pmu_status": "disabled"
+    },
+    "layernorm_sub_mean_square_pack4_smoke": {
+        "latency_us": 1019.589,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "layernorm_sub_mean_square_pack4",
+        "pmu_status": "disabled"
+    },
+    "lrn_norm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "lrn_norm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_norm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "lrn_norm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_norm_across_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "lrn_norm_across_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_norm_across_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "lrn_norm_across_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_norm_within_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "lrn_norm_within_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_norm_within_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "lrn_norm_within_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_square_pad_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "lrn_square_pad",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_square_pad_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "lrn_square_pad",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_square_pad_across_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "lrn_square_pad_across_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_square_pad_across_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "lrn_square_pad_across_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_square_pad_within_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "lrn_square_pad_within_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "lrn_square_pad_within_channel_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "lrn_square_pad_within_channel_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "mish_smoke": {
+        "latency_us": 786.683,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "mish",
+        "pmu_status": "disabled"
+    },
+    "multiheadattention_qk_cross_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qk_cross",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qk_cross_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qk_cross_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qk_cross_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qk_cross_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qk_cross_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qk_cross_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qkv_cross_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qkv_cross",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qkv_cross_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qkv_cross_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qkv_cross_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qkv_cross_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "multiheadattention_qkv_cross_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "multiheadattention_qkv_cross_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "normalize_coeffs_smoke": {
+        "latency_us": 829.859,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_coeffs",
+        "pmu_status": "disabled"
+    },
+    "normalize_coeffs_pack4_smoke": {
+        "latency_us": 845.378,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_coeffs_pack4",
+        "pmu_status": "disabled"
+    },
+    "normalize_norm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_norm",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "normalize_norm_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_norm_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "normalize_reduce_sum4_fp16_to_fp32_smoke": {
+        "latency_us": 1007.246,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_reduce_sum4_fp16_to_fp32",
+        "pmu_status": "disabled"
+    },
+    "normalize_reduce_sum4_fp16_to_fp32_pack4_smoke": {
+        "latency_us": 1043.442,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_reduce_sum4_fp16_to_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "normalize_reduce_sum4_fp32_smoke": {
+        "latency_us": 979.174,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_reduce_sum4_fp32",
+        "pmu_status": "disabled"
+    },
+    "normalize_reduce_sum4_fp32_pack4_smoke": {
+        "latency_us": 1025.787,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "normalize_reduce_sum4_fp32_pack4",
+        "pmu_status": "disabled"
+    },
+    "packing_smoke": {
+        "latency_us": 883.553,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "packing",
+        "pmu_status": "disabled"
+    },
+    "packing_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "packing_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "packing_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "packing_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "packing_1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "packing_1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "packing_4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "packing_4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "packing_int8_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "packing_int8",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "packing_pack1to4_int8_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "packing_pack1to4_int8",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "packing_pack4to1_int8_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "packing_pack4to1_int8",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "padding_smoke": {
+        "latency_us": 1060.577,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "padding",
+        "pmu_status": "disabled"
+    },
+    "padding_pack4_smoke": {
+        "latency_us": 1105.419,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "padding_pack4",
+        "pmu_status": "disabled"
+    },
+    "padding_smoke": {
+        "latency_us": 1095.419,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "padding",
+        "pmu_status": "disabled"
+    },
+    "padding_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "padding_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "padding_pack4_smoke": {
+        "latency_us": 1048.442,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "padding_pack4",
+        "pmu_status": "disabled"
+    },
+    "padding_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "padding_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "padding_3d_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "padding_3d",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "padding_3d_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "padding_3d_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "permute_smoke": {
+        "latency_us": 1029.068,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "permute",
+        "pmu_status": "disabled"
+    },
+    "permute_order0_fp32_smoke": {
+        "latency_us": 864.857,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "permute_order0_fp32",
+        "pmu_status": "disabled"
+    },
+    "permute_pack4to1_smoke": {
+        "latency_us": 1062.712,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "permute_pack4to1",
+        "pmu_status": "disabled"
+    },
+    "permute_smoke": {
+        "latency_us": 1081.566,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "permute",
+        "pmu_status": "disabled"
+    },
+    "permute_pack1to4_smoke": {
+        "latency_us": 965.373,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "permute_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "permute_pack4_smoke": {
+        "latency_us": 989.747,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "permute_pack4",
+        "pmu_status": "disabled"
+    },
+    "permute_pack4to1_smoke": {
+        "latency_us": 964.54,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "permute_pack4to1",
+        "pmu_status": "disabled"
+    },
+    "pixelshuffle_smoke": {
+        "latency_us": 1041.203,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pixelshuffle",
+        "pmu_status": "disabled"
+    },
+    "pixelshuffle_pack4_smoke": {
+        "latency_us": 1064.587,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pixelshuffle_pack4",
+        "pmu_status": "disabled"
+    },
+    "pixelshuffle_pack4to1_smoke": {
+        "latency_us": 1014.849,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pixelshuffle_pack4to1",
+        "pmu_status": "disabled"
+    },
+    "pooling_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "pooling",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "pooling_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_adaptive_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_adaptive",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_adaptive_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_adaptive_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "pooling_global",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "pooling_global_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_max_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_max",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_max_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_max_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_max_first_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_max_first",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_max_first_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_max_first_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_max_last_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_max_last",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_max_last_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_max_last_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_sum_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_sum",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_sum_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_sum_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_sum_first_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_sum_first",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_sum_first_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_sum_first_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_sum_last_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_sum_last",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "pooling_global_reduce_sum_last_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "pooling_global_reduce_sum_last_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "prelu_smoke": {
+        "latency_us": 998.497,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "prelu",
+        "pmu_status": "disabled"
+    },
+    "prelu_pack4_smoke": {
+        "latency_us": 1037.193,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "prelu_pack4",
+        "pmu_status": "disabled"
+    },
+    "prelu_smoke": {
+        "latency_us": 1015.735,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "prelu",
+        "pmu_status": "disabled"
+    },
+    "prelu_pack4_smoke": {
+        "latency_us": 1040.525,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "prelu_pack4",
+        "pmu_status": "disabled"
+    },
+    "priorbox_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "priorbox",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "priorbox_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "priorbox",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "priorbox_mxnet_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "priorbox_mxnet",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "priorbox_mxnet_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "priorbox_mxnet",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "quantize_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "quantize",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "quantize_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "quantize_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "reduction_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reduction",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "relu_smoke": {
+        "latency_us": 819.39,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "relu",
+        "pmu_status": "disabled"
+    },
+    "relu_pack4_smoke": {
+        "latency_us": 830.483,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "relu_pack4",
+        "pmu_status": "disabled"
+    },
+    "relu_smoke": {
+        "latency_us": 765.955,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "relu",
+        "pmu_status": "disabled"
+    },
+    "relu_pack4_fp32_slope0_smoke": {
+        "latency_us": 809.286,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "relu_pack4_fp32_slope0",
+        "pmu_status": "disabled"
+    },
+    "reorg_smoke": {
+        "latency_us": 1073.545,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reorg",
+        "pmu_status": "disabled"
+    },
+    "reorg_pack1to4_smoke": {
+        "latency_us": 1059.535,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reorg_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "reorg_pack4_smoke": {
+        "latency_us": 1092.451,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reorg_pack4",
+        "pmu_status": "disabled"
+    },
+    "reorg_smoke": {
+        "latency_us": 1062.504,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reorg",
+        "pmu_status": "disabled"
+    },
+    "reorg_pack1to4_smoke": {
+        "latency_us": 1059.848,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reorg_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "reorg_pack4_smoke": {
+        "latency_us": 1115.991,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reorg_pack4",
+        "pmu_status": "disabled"
+    },
+    "requantize_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "requantize",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "requantize_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "requantize_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "reshape_smoke": {
+        "latency_us": 1072.4,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reshape",
+        "pmu_status": "disabled"
+    },
+    "reshape_pack1to4_smoke": {
+        "latency_us": 1073.181,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reshape_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "reshape_pack4_smoke": {
+        "latency_us": 1050.369,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reshape_pack4",
+        "pmu_status": "disabled"
+    },
+    "reshape_pack4to1_smoke": {
+        "latency_us": 983.341,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "reshape_pack4to1",
+        "pmu_status": "disabled"
+    },
+    "reshape_smoke": {
+        "latency_us": 1060.057,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reshape",
+        "pmu_status": "disabled"
+    },
+    "reshape_pack1to4_smoke": {
+        "latency_us": 1043.963,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reshape_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "reshape_pack4_smoke": {
+        "latency_us": 979.331,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reshape_pack4",
+        "pmu_status": "disabled"
+    },
+    "reshape_pack4to1_smoke": {
+        "latency_us": 1031.828,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "reshape_pack4to1",
+        "pmu_status": "disabled"
+    },
+    "rmsnorm_coeffs_smoke": {
+        "latency_us": 827.932,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rmsnorm_coeffs",
+        "pmu_status": "disabled"
+    },
+    "rmsnorm_coeffs_pack4_smoke": {
+        "latency_us": 774.705,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rmsnorm_coeffs_pack4",
+        "pmu_status": "disabled"
+    },
+    "rmsnorm_norm_smoke": {
+        "latency_us": 1032.141,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rmsnorm_norm",
+        "pmu_status": "disabled"
+    },
+    "rmsnorm_norm_pack4_smoke": {
+        "latency_us": 1073.702,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rmsnorm_norm_pack4",
+        "pmu_status": "disabled"
+    },
+    "rmsnorm_square_smoke": {
+        "latency_us": 993.549,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rmsnorm_square",
+        "pmu_status": "disabled"
+    },
+    "rmsnorm_square_pack4_smoke": {
+        "latency_us": 1016.725,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rmsnorm_square_pack4",
+        "pmu_status": "disabled"
+    },
+    "rotaryembed_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rotaryembed",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "rotaryembed_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "rotaryembed_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "scale_smoke": {
+        "latency_us": 1080.003,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "scale",
+        "pmu_status": "disabled"
+    },
+    "scale_pack4_smoke": {
+        "latency_us": 1023.392,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "scale_pack4",
+        "pmu_status": "disabled"
+    },
+    "scale_smoke": {
+        "latency_us": 1136.668,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "scale",
+        "pmu_status": "disabled"
+    },
+    "scale_pack4_smoke": {
+        "latency_us": 1057.401,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "scale_pack4",
+        "pmu_status": "disabled"
+    },
+    "sdpa_cross_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "sdpa_cross",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "sdpa_cross_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "sdpa_cross_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: shader toolchain/extension unsupported (compile_failed)"
+    },
+    "sdpa_fa_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "sdpa_fa",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "sdpa_fa_cm_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "sdpa_fa_cm",
+        "pmu_status": "disabled",
+        "error": "skipped: shader toolchain/extension unsupported (compile_failed)"
+    },
+    "selu_smoke": {
+        "latency_us": 861.888,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "selu",
+        "pmu_status": "disabled"
+    },
+    "shrink_smoke": {
+        "latency_us": 778.871,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "shrink",
+        "pmu_status": "disabled"
+    },
+    "shufflechannel_smoke": {
+        "latency_us": 1017.975,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "shufflechannel",
+        "pmu_status": "disabled"
+    },
+    "shufflechannel_pack4_smoke": {
+        "latency_us": 1051.671,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "shufflechannel_pack4",
+        "pmu_status": "disabled"
+    },
+    "shufflechannel_smoke": {
+        "latency_us": 1048.859,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "shufflechannel",
+        "pmu_status": "disabled"
+    },
+    "shufflechannel_pack4_smoke": {
+        "latency_us": 1030.579,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "shufflechannel_pack4",
+        "pmu_status": "disabled"
+    },
+    "sigmoid_smoke": {
+        "latency_us": 840.171,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "sigmoid",
+        "pmu_status": "disabled"
+    },
+    "sigmoid_fp32_smoke": {
+        "latency_us": 872.46,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "sigmoid_fp32",
+        "pmu_status": "disabled"
+    },
+    "sigmoid_pack4_smoke": {
+        "latency_us": 988.549,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "sigmoid_pack4",
+        "pmu_status": "disabled"
+    },
+    "sigmoid_smoke": {
+        "latency_us": 795.016,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "sigmoid",
+        "pmu_status": "disabled"
+    },
+    "sigmoid_pack4_fp32_smoke": {
+        "latency_us": 895.532,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "sigmoid_pack4_fp32",
+        "pmu_status": "disabled"
+    },
+    "slice_smoke": {
+        "latency_us": 1009.017,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "slice",
+        "pmu_status": "disabled"
+    },
+    "slice_pack1to4_smoke": {
+        "latency_us": 993.549,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "slice_pack1to4",
+        "pmu_status": "disabled"
+    },
+    "slice_pack4_smoke": {
+        "latency_us": 1082.763,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "slice_pack4",
+        "pmu_status": "disabled"
+    },
+    "softmax_div_sum_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_div_sum",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_div_sum_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_div_sum_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_div_sum_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_div_sum",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_div_sum_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_div_sum_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_exp_sub_max_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_exp_sub_max",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_exp_sub_max_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_exp_sub_max_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_exp_sub_max_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_exp_sub_max",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_exp_sub_max_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_exp_sub_max_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_max_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_reduce_max",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_max_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_reduce_max_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_max_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_reduce_max",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_max_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_reduce_max_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_sum_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_reduce_sum",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_sum_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "softmax_reduce_sum_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_sum_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_reduce_sum",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softmax_reduce_sum_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softmax_reduce_sum_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "softplus_smoke": {
+        "latency_us": 808.766,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "softplus",
+        "pmu_status": "disabled"
+    },
+    "swish_smoke": {
+        "latency_us": 790.901,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "swish",
+        "pmu_status": "disabled"
+    },
+    "tanh_smoke": {
+        "latency_us": 785.641,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "tanh",
+        "pmu_status": "disabled"
+    },
+    "tanh_fp32_smoke": {
+        "latency_us": 859.857,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "tanh_fp32",
+        "pmu_status": "disabled"
+    },
+    "tanh_pack4_smoke": {
+        "latency_us": 817.099,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "tanh_pack4",
+        "pmu_status": "disabled"
+    },
+    "tanh_smoke": {
+        "latency_us": 781.683,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "tanh",
+        "pmu_status": "disabled"
+    },
+    "tanh_pack4_fp32_smoke": {
+        "latency_us": 772.882,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "tanh_pack4_fp32",
+        "pmu_status": "disabled"
+    },
+    "unaryop_smoke": {
+        "latency_us": 1001.205,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "unaryop",
+        "pmu_status": "disabled"
+    },
+    "unaryop_pack4_smoke": {
+        "latency_us": 1029.173,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20190611",
+        "variant": "unaryop_pack4",
+        "pmu_status": "disabled"
+    },
+    "unaryop_smoke": {
+        "latency_us": 1051.203,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "unaryop",
+        "pmu_status": "disabled"
+    },
+    "unfold_im2col_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "unfold_im2col",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "unfold_im2col_pack1to4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "unfold_im2col_pack1to4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "unfold_im2col_pack4_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "unfold_im2col_pack4",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    },
+    "unfold_im2col_pack4to1_smoke": {
+        "latency_us": null,
+        "backend": "vulkan",
+        "framework": "ncnn",
+        "tag": "20260526",
+        "variant": "unfold_im2col_pack4to1",
+        "pmu_status": "disabled",
+        "error": "skipped: vulkan pipeline unsupported on this driver"
+    }
+}

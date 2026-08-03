@@ -1,0 +1,32 @@
+{
+  "collection_session_id": "d7388600-9792-451d-b5ba-2b5f1dbc044e",
+  "device_fingerprint": "Adreno A7xx",
+  "errors": [],
+  "manifest_sha256": "2dd70b4f24d5a21f",
+  "schema_version": "mnn-opencl-pmc-source-validation/v1",
+  "stats": {
+    "backends": {
+      "vulkan": 6498
+    },
+    "delta_mismatch": 0,
+    "failed_rows": 0,
+    "frameworks": {
+      "ncnn": 6498
+    },
+    "not_found_rows": 3582,
+    "rows": 6498,
+    "status_not_found": 3582,
+    "status_valid": 2916,
+    "tags": {
+      "20190611": 1980,
+      "20260526": 4518
+    },
+    "timeout_rows": 0,
+    "unique_case_tag_pairs": 361,
+    "unique_cases": 279,
+    "unique_metrics": 18,
+    "valid_rows": 2916
+  },
+  "valid": true,
+  "warnings": []
+}

@@ -1,0 +1,32 @@
+{
+  "collection_session_id": "6f7c1514-6cf6-470e-b311-c51f1120c503",
+  "device_fingerprint": "Mali-G610",
+  "errors": [],
+  "manifest_sha256": "2dd70b4f24d5a21f",
+  "schema_version": "mnn-opencl-pmc-source-validation/v1",
+  "stats": {
+    "backends": {
+      "vulkan": 58121
+    },
+    "delta_mismatch": 0,
+    "failed_rows": 0,
+    "frameworks": {
+      "ncnn": 58121
+    },
+    "not_found_rows": 483,
+    "rows": 58121,
+    "status_not_found": 483,
+    "status_valid": 57638,
+    "tags": {
+      "20190611": 17710,
+      "20260526": 40411
+    },
+    "timeout_rows": 0,
+    "unique_case_tag_pairs": 361,
+    "unique_cases": 279,
+    "unique_metrics": 161,
+    "valid_rows": 57638
+  },
+  "valid": true,
+  "warnings": []
+}

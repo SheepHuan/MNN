@@ -1,0 +1,508 @@
+{
+    "argmax_buf_fp32_smoke": {
+        "latency_us": 495.535,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "argmax_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "attention_buf_fp32_smoke": {
+        "latency_us": 426.119,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "attention_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "binary_buf_fp32_smoke": {
+        "latency_us": 269.496,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "binary_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "binary_buf_fp32_smoke": {
+        "latency_us": 265.704,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "binary_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "binary_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "binary_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    },
+    "buffer_convert_buf_fp32_smoke": {
+        "latency_us": 549.492,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "buffer_convert_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "buffer_convert_buf_fp32_smoke": {
+        "latency_us": 297.204,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "buffer_convert_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "buffer_convert_subgroup_buf_fp32_smoke": {
+        "latency_us": 497.868,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "buffer_convert_subgroup_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "cast_buf_fp32_smoke": {
+        "latency_us": 241.205,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "cast_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "conv_2d_buf_fp32_smoke": {
+        "latency_us": 718.073,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "conv_2d_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "conv_2d_buf_fp32_smoke": {
+        "latency_us": 431.077,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "conv_2d_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "conv_2d_c16_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "conv_2d_c16_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    },
+    "conv_2d_c1_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "conv_2d_c1_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    },
+    "conv_2d_int_buf_fp32_smoke": {
+        "latency_us": 534.617,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "conv_2d_int_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "depthwise_conv2d_buf_fp32_smoke": {
+        "latency_us": 465.494,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "depthwise_conv2d_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "depthwise_conv2d_buf_fp32_smoke": {
+        "latency_us": 760.072,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "depthwise_conv2d_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "depthwise_conv2d_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "depthwise_conv2d_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    },
+    "gemm_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "gemm_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel execution hung (timeout)"
+    },
+    "gemm_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "gemm_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel execution hung (timeout)"
+    },
+    "gemm_conv1x1_buf_fp32_smoke": {
+        "latency_us": 230.997,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "gemm_conv1x1_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "gemv_conv1x1_buf_fp32_smoke": {
+        "latency_us": 334.537,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "gemv_conv1x1_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "grid_sample_buf_fp32_smoke": {
+        "latency_us": 244.704,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "grid_sample_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "groupnorm_buf_fp32_smoke": {
+        "latency_us": 644.866,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "groupnorm_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "input_transe_buf_fp32_smoke": {
+        "latency_us": 349.703,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "input_transe_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "interp_buf_fp32_smoke": {
+        "latency_us": 587.408,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "interp_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "interp_buf_fp32_smoke": {
+        "latency_us": 422.036,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "interp_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "layernorm_buf_fp32_smoke": {
+        "latency_us": 959.279,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "layernorm_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "linear_attention_buf_fp32_smoke": {
+        "latency_us": 286.996,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "linear_attention_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "matmul_buf_fp32_smoke": {
+        "latency_us": 507.784,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "matmul_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "matmul_buf_nobias_fp32_smoke": {
+        "latency_us": 332.204,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "matmul_buf_nobias_fp32",
+        "pmu_status": "disabled"
+    },
+    "matmul_buf_fp32_smoke": {
+        "latency_us": 331.912,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "matmul_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "matmul_local_buf_fp32_smoke": {
+        "latency_us": 899.779,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "matmul_local_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "pooling_buf_fp32_smoke": {
+        "latency_us": 332.495,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "pooling_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "pooling_max_fp32_smoke": {
+        "latency_us": 334.829,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "pooling_max_fp32",
+        "pmu_status": "disabled"
+    },
+    "pooling_buf_fp32_smoke": {
+        "latency_us": 323.162,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "pooling_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "pooling_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "pooling_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    },
+    "range_buf_fp32_smoke": {
+        "latency_us": 442.16,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "range_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "buffer_set_zero_fp32_smoke": {
+        "latency_us": 265.996,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "buffer_set_zero_fp32",
+        "pmu_status": "disabled"
+    },
+    "raster_buf_fp32_smoke": {
+        "latency_us": 435.16,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "raster_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "buffer_set_zero_fp32_smoke": {
+        "latency_us": 429.619,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "buffer_set_zero_fp32",
+        "pmu_status": "disabled"
+    },
+    "raster_buf_fp32_smoke": {
+        "latency_us": 228.372,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "raster_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "reduct_buf_sum_fp32_smoke": {
+        "latency_us": 246.163,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "reduct_buf_sum_fp32",
+        "pmu_status": "disabled"
+    },
+    "reduction_buf_fp32_smoke": {
+        "latency_us": 284.079,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "reduction_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "reduction_buf_fp32_smoke": {
+        "latency_us": 242.371,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "reduction_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "scale_buf_fp32_smoke": {
+        "latency_us": 352.911,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "scale_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "scale_nobias_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "scale_nobias_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: corpus runner limitation (OpenCL arg setup failed (code -51))"
+    },
+    "scale_buf_fp32_smoke": {
+        "latency_us": 286.412,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "scale_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "select_buf_fp32_smoke": {
+        "latency_us": 314.703,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "select_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "self_attention_buf_fp32_smoke": {
+        "latency_us": 625.617,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "self_attention_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "softmax_buf_fp32_smoke": {
+        "latency_us": 332.787,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "softmax_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "softmax_buf_fp32_smoke": {
+        "latency_us": 429.328,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "softmax_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "splitgelu_buf_fp32_smoke": {
+        "latency_us": 296.621,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "splitgelu_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "strassen_binary_buf_fp32_smoke": {
+        "latency_us": 300.996,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "strassen_binary_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "topkv2_buf_fp32_smoke": {
+        "latency_us": 4295.315,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "topkv2_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "unary_buf_exp_fp32_smoke": {
+        "latency_us": 288.454,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "unary_buf_exp_fp32",
+        "pmu_status": "disabled"
+    },
+    "unary_buf_fp32_smoke": {
+        "latency_us": 279.121,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "unary_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "unary_buf_exp_fp32_smoke": {
+        "latency_us": 242.08,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "unary_buf_exp_fp32",
+        "pmu_status": "disabled"
+    },
+    "unary_buf_fp32_smoke": {
+        "latency_us": 407.744,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "unary_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "unary_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "unary_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    },
+    "winogradTransform_buf_fp32_smoke": {
+        "latency_us": 444.202,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "1.2.0",
+        "variant": "winogradTransform_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "winogradTransform_buf_fp32_smoke": {
+        "latency_us": 595.575,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "winogradTransform_buf_fp32",
+        "pmu_status": "disabled"
+    },
+    "winogradTransform_subgroup_buf_fp32_smoke": {
+        "latency_us": null,
+        "backend": "opencl",
+        "framework": "mnn",
+        "tag": "3.6.0",
+        "variant": "winogradTransform_subgroup_buf_fp32",
+        "pmu_status": "disabled",
+        "error": "skipped: kernel unsupported on this device"
+    }
+}

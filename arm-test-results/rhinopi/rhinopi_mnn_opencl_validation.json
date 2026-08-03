@@ -1,0 +1,32 @@
+{
+  "collection_session_id": "daf33037-5e87-4ae4-ab30-96dd1ec6ede8",
+  "device_fingerprint": "Adreno A7xx",
+  "errors": [],
+  "manifest_sha256": "2dd70b4f24d5a21f",
+  "schema_version": "mnn-opencl-pmc-source-validation/v1",
+  "stats": {
+    "backends": {
+      "opencl": 40176
+    },
+    "delta_mismatch": 0,
+    "failed_rows": 0,
+    "frameworks": {
+      "mnn": 40176
+    },
+    "not_found_rows": 5184,
+    "rows": 40176,
+    "status_not_found": 5184,
+    "status_valid": 34992,
+    "tags": {
+      "1.2.0": 12960,
+      "3.6.0": 27216
+    },
+    "timeout_rows": 0,
+    "unique_case_tag_pairs": 62,
+    "unique_cases": 46,
+    "unique_metrics": 648,
+    "valid_rows": 34992
+  },
+  "valid": true,
+  "warnings": []
+}

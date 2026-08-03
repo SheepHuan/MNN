@@ -272,6 +272,126 @@ host 端重算 expected 值，与 kernel output 用 `fabs` 对比。涵盖：
 - BF16 pool/float22bfloat16: sm75 空 kernel，无法验证值
 - SetZero: validator 检查全零 = 正确
 
+### 8.4 本轮审计（corpus-audit skill）新发现
+
+> 触发：corpus-audit skill 全量复核。环境：RTX 4080 / sm89 / CUDA 12.5。
+> 测试基线：`./replay_benchmark.out --kernel-corpus-bench --kernel-corpus-runs 1` → **473/473 pass**。
+> Validator 统计：real=141, smoke=64, trivial(BF16 空 kernel)=4。
+
+#### 8.4.1 忠实性违规（kernel body ≠ MNN）
+
+审计方法：用语义签名（literals + intrinsic calls + operators Counter）对比 corpus 与 MNN HEAD，得到 36 个语义差异；其中 31 个是 `0.0f`↔`0.0`、临时变量、多余 `return;` 等等价差异，**5 个为实质性违规**：
+
+| Kernel | 位置 | 违规内容 | 严重性 |
+|--------|------|---------|--------|
+| **PACKCOMMON / UNPACKCOMMON** | `kernels/transpose.cu:256` | corpus 自创签名 `(maxCount, channel, area, inChannelPack, divOutChannelPack, divArea)`，与 MNN 任何版本的 `(inside, axis, outside, insideStride, axisStride)` 都不同；用 `DivModFast` 替代直接 `%//`，函数体完全重写。注释却声称 "Faithful to MNN" | 🔴 高 |
+| **transpose_BDL_to_BLD** | `kernels/transpose.cu` | corpus 是 naive 元素级实现（无 shared memory）；MNN 用 `__shared__ float tile[TILE_DIM][TILE_DIM+1]` + `__syncthreads()` 的 tiled transpose。**PMU 数据完全失真**（缺 shared mem 访问 + sync） | 🔴 高 |
+| **WeightInt8PackFill** | `kernels/int8.cu` | `ocMajor=false` 分支索引公式与 MNN 完全不同：corpus 用 `d_hp.divmod → d_lp.divmod → param[hpIndex*ic*l + fxyIndex*ic + icpIndex]`；MNN 用 `d_lp.divmod → d_icp.divmod → param[hpIndex*l + icpIndex*(l/ic) + fxyIndex]`。**功能性 bug** | 🔴 高 |
+| **SeqLen2SpatialKernel** | `kernels/plugins.cu` | MNN 依赖编译期常量 `C`/`TPB`，含 `#pragma unroll for (i=0; i<C/TPB; ++i)` 循环；corpus 把 `C` 改成 runtime 参数，重写循环结构，无 `#pragma unroll` | 🔴 高 |
+| **splitGeLUKernel** | `kernels/plugins.cu` | MNN 用模板常量 `tHHS`/`tTPB`；corpus 改为 runtime `HHS` 参数 + 额外边界检查 `if (threadIdx.x + i*blockDim.x < HHS)`，循环结构改变 | 🟡 中 |
+
+#### 8.4.2 常量/宏一致性
+
+- `PACK_NUMBER=16` in `conv_base.cu` / `matmul.cu` / `pool.cu`：✅ 合理，1.2.7-era legacy kernel 特意保留（git 历史确认 MNN 1.2.7 的 `MNNCUDADefine.hpp` 就是 `PACK_NUMBER 16`）。
+- `INT8_PACK_NUMBER=16` in `CudaOpsFp16.cu`：✅ 与 MNN 一致（参见 §2 历史教训）。
+- **文档错误**：`kernels/int8.cu:10` 注释声称 `INT8_PACK_NUMBER=4 ... matching MNN's INT8_PACK_NUMBER=4`，但 MNN 一直是 16。kernel 本身没有使用该常量，无功能影响，但注释误导后续维护者。🟡 待修正注释。
+
+#### 8.4.3 Launch geometry 违规
+
+| Adapter | corpus | MNN | 严重性 |
+|---------|--------|-----|--------|
+| `CudaGemvFpAInt4BV9Fp32Kernel` | `gridX=(oc+3)/4, OC_PER_BLK=4`（kernel 模板参数） | `dim3 v9_grid((oc+OC_PER_BLK-1)/OC_PER_BLK, batch), OC_PER_BLK=2` | 🔴 每 block 处理 4 个 OC vs MNN 2 个，**PMU 数据失真** |
+
+V14 (`V14_OC=4`) 一致；V1/V2/V5/V14_MB 已审计一致。
+
+#### 8.4.4 Validator 质量分布（本轮重新统计）
+
+| 类型 | 数量 | 说明 |
+|------|------|------|
+| real | 141 | host 重算 + `fabs` 比较（含 `woqValidateStd`/`woqValidateV14`/`convdwExtraRefFp32`） |
+| smoke | 64 | 仅检查非零（含 flash_decode/attention/qkv/wino/im2col/col2im/binary_int8 等） |
+| trivial (`return true`) | 4 | BF16 convdw (sm75 空 kernel)，无法验证 |
+
+**发现的"smoke 掩盖 bug"活例**：
+- `CudaWeightInt8PackFillFp32Kernel::validate` 仅检查前 10 字节非零 → §8.4.1 中 `ocMajor=false` 分支的索引公式错误被完全掩盖。
+- 473 个 case 中 380 个 case 名带 `_smoke` 后缀（诚实标注），但 smoke 仍无法捕获值错误。
+
+#### 8.4.5 测试数据值域（§7）
+
+- ✅ `fillInputRand(-5, 5)` 已正确用于 cast/quantize 关键位置（`FLOAT_2_INT8`/`INT8_2_FLOAT`/`CASTMIDFLOAT`/`CAST`）。
+- ✅ INT8 DIV 输入 `1+(i%5)` 避免 y=0。
+- 🟡 仍有 ~20 个 adapter 用 `0.1f*(i%N)` 构造 input，但这些都是 RELU/CLAMP/SCALE 等输出本身非零的 kernel，不影响 validator 有效性。
+
+#### 8.4.6 多形状 case 覆盖（§8）
+
+- 总 473 个 cuda case，70 个 op_type。
+- **20 个 op 仅 1 个 case**（含 `scatternd`/`im2col`/`float2int8`/`conv_dw_int8`/`binary_int8_*`/`weight_int8_pack_fill` 等），覆盖度不足。
+- 高覆盖 op：`conv_fpa_intb`(50)/`reduction`(45)/`conv_dw`(28)/`cast`(27)/`transpose`(26)。
+
+#### 8.4.7 修复优先级
+
+| # | 问题 | 优先级 | 修复方向 |
+|---|------|--------|---------|
+| 1 | `WeightInt8PackFill` `ocMajor=false` 索引公式错误 | 🔴 P0 | 按 MNN `ConvInt8CutlassExecution.cu` 重写该分支；同时升级 validator 为 real（host 重算 weight pack 布局） |
+| 2 | `transpose_BDL_to_BLD` 缺 shared memory tiled 实现 | 🔴 P0 | 按 MNN `LinearAttentionExecution.cu` 补 `__shared__ tile[TILE_DIM][TILE_DIM+1]` + `__syncthreads()` |
+| 3 | `GEMV_FpAInt4B_V9` `OC_PER_BLK=4` vs MNN=2 | 🔴 P0 | 改 `mnn_corpus_gemv_fpaint4b_v9_*` 模板参数为 `<T, 2>`，adapter `gridX=(oc+1)/2` |
+| 4 | `PACKCOMMON`/`UNPACKCOMMON` 签名/函数体与 MNN 不符 | 🟡 P1 | 按 MNN `Transpose.cu` 重写为 `(inside, axis, outside, insideStride, axisStride)` 签名；或显式标注 "corpus 自创变体" 并从 HANDOFF 的"忠实"声明中移除 |
+| 5 | `SeqLen2SpatialKernel` 缺 `#pragma unroll` + 编译期 `C/TPB` | 🟡 P1 | 改回模板参数 `template<int C, int TPB>` + `#pragma unroll` |
+| 6 | `splitGeLUKernel` runtime HHS 替代模板 `tHHS` | 🟡 P1 | 改回模板参数 |
+| 7 | `int8.cu:10` 注释错误（INT8_PACK_NUMBER=4） | 🟢 P2 | 改注释为 "MNN's INT8_PACK_NUMBER=16" |
+| 8 | 20 个 op 仅 1 case | 🟡 P2 | 按 §8 补 2-3 种形状 case |
+| 9 | 64 个 smoke validator | 🟡 P2 | 优先升级 P0/P1 修复后的 kernel 对应 validator 为 real |
+
+#### 8.4.8 审计脚本
+
+语义签名对比脚本（可复用）：
+
+```python
+# /tmp/semantic_diff.py（本轮审计用）
+# 提取 __global__ kernel 函数体的 literals/intrinsic calls/operators Counter
+# 三者都一致 → SEMANTIC_MATCH；否则 → SEMANTIC_DIFF 并列出差异
+# 能过滤 0.0f↔0.0、临时变量、多余 return 等等价差异
+```
+
+`PACK_NUMBER` 一致性检查：
+
+```bash
+grep -rn "define PACK_NUMBER" source/backend/cuda/execution/MNNCUDADefine.hpp  # =8
+grep -rn "define PACK_NUMBER" replay_benchmark/kernel_corpus_bridge/cuda/kernels/*.cu
+# conv_base/matmul/pool = 16（1.2.7-era legacy，合理）
+```
+
+### 8.5 ncnn Vulkan shader corpus-audit (P5)
+
+> 触发：corpus-audit skill 扩展到 ncnn 框架。范围：`replay_benchmark/kernel_corpus/operators/vulkan/<op>/ncnn/<tag>/<file>.comp` vs 上游 `replay_benchmark/kernel_corpus/sources/ncnn/<tag>/src/layer/vulkan/shader/<file>.comp`。
+>
+> 方法：对每对（corpus baked, upstream）`.comp`，抽取 `void main()` 函数体（brace-matched）做语义对比（normalize 空白后字符串相等）。
+
+| 指标 | 数值 |
+|------|------|
+| ncnn .comp 文件（corpus operators/） | 361 |
+| 与上游 main() 完全一致 | **353 (97.8%)** |
+| main() 不一致 | 0 |
+| 上游缺对应文件 | 8 |
+
+#### 8 个上游缺失文件（corpus 自创变体）
+
+| corpus 文件 | 上游对应 | 性质 |
+|-------------|---------|------|
+| `absval/ncnn/20260526/absval_pack4_fp32.comp` | `absval_pack4.comp`（用 `afpvec4` 占位符） | corpus 把 `afpvec4` 直接展开为 `vec4`（fp32 显式实例化） |
+| `concat/ncnn/20260526/concat_axis0_fp32.comp` | 同模式 | 同上 |
+| `tanh/ncnn/20190611/tanh_fp32.comp` | 同模式 | 同上 |
+| `tanh/ncnn/20260526/tanh_pack4_fp32.comp` | 同模式 | 同上 |
+| `sigmoid/ncnn/20190611/sigmoid_fp32.comp` | 同模式 | 同上 |
+| `sigmoid/ncnn/20260526/sigmoid_pack4_fp32.comp` | 同模式 | 同上 |
+| `relu/ncnn/20260526/relu_pack4_fp32_slope0.comp` | 同模式（额外 slope=0 常量） | 同上 |
+| `permute/ncnn/20190611/permute_order0_fp32.comp` | 同模式（额外 order=0 常量） | 同上 |
+
+#### 结论
+
+- **353 个 .comp 与 ncnn upstream 完全一致**（main() 函数体逐字相同）。corpus 的 `bake_ncnn_shaders.py` 只在头部注入 `#define sfp float` 等宏展开，不改变 main() 函数体——**符合 corpus-audit 的忠实性要求**。
+- **8 个 `_fp32` / `_slope0` 后缀文件是 corpus 有意的"完全宏展开"变体**（不留 `sfp`/`afp` 占位符），与上游对应文件语义等价但命名不同。**建议在 corpus manifest 中标注这些变体为 "fully-baked fp32 instantiation"，避免后续审计误认为缺失上游**。
+
 ---
 
 ## 9. 覆盖率缺口（剩余）
